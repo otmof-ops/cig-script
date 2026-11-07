@@ -1238,6 +1238,43 @@ pub fn guard_setting() -> String {
 #[cfg(target_os = "linux")]
 const MAX_BINDS: usize = 64;
 
+/// A listening TCP socket on `127.0.0.1:port`, close-on-exec, or -1.
+///
+/// # Safety
+///
+/// Async-signal-safe (socket, setsockopt, bind, listen, close): it is
+/// called between fork and exec.
+#[cfg(target_os = "linux")]
+unsafe fn listen_loopback(port: u16) -> libc::c_int {
+    let s = libc::socket(libc::AF_INET, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0);
+    if s < 0 {
+        return -1;
+    }
+    let one: libc::c_int = 1;
+    libc::setsockopt(
+        s,
+        libc::SOL_SOCKET,
+        libc::SO_REUSEADDR,
+        &one as *const libc::c_int as *const libc::c_void,
+        std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+    );
+    let mut addr: libc::sockaddr_in = std::mem::zeroed();
+    addr.sin_family = libc::AF_INET as libc::sa_family_t;
+    addr.sin_port = port.to_be();
+    addr.sin_addr.s_addr = u32::from_be_bytes([127, 0, 0, 1]).to_be();
+    if libc::bind(
+        s,
+        &addr as *const libc::sockaddr_in as *const libc::sockaddr,
+        std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
+    ) != 0
+        || libc::listen(s, 128) != 0
+    {
+        libc::close(s);
+        return -1;
+    }
+    s
+}
+
 #[cfg(target_os = "linux")]
 impl Setup {
     pub fn new(plan: &Plan, cwd: &Path, spec: &BoxSpec) -> io::Result<Setup> {
@@ -1685,6 +1722,15 @@ impl Setup {
                 libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC,
                 std::ptr::null(),
             );
+            // The forwarder's listener, made before the hop exists: a hop
+            // that connects at once waits in its backlog, never refused
+            // because the forwarder (a fresh process; a compiled program
+            // reads its own payload first) has not bound the port yet. It
+            // reaches the forwarder as fd 3; the hop's exec closes it.
+            let listener = match &self.forward {
+                Some(_) => listen_loopback(PROXY_PORT),
+                None => -1,
+            };
             if let Some(f) = &self.forward {
                 let p = libc::fork();
                 if p == 0 {
@@ -1695,6 +1741,18 @@ impl Setup {
                         libc::dup2(null, 0);
                         libc::dup2(null, 1);
                         libc::dup2(null, 2);
+                    }
+                    // The program's descriptor off 3, then the listener on
+                    // it, kept across the exec.
+                    let exe_fd = if exe_fd == 3 {
+                        libc::fcntl(exe_fd, libc::F_DUPFD_CLOEXEC, 4)
+                    } else {
+                        exe_fd
+                    };
+                    if listener == 3 {
+                        libc::fcntl(3, libc::F_SETFD, 0);
+                    } else if listener >= 0 {
+                        libc::dup2(listener, 3);
                     }
                     let argv = [
                         f[0].as_ptr(),
