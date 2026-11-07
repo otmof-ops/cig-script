@@ -3,7 +3,9 @@
 All notable changes to CigScript. The format follows Keep a Changelog; the
 project follows semantic versioning.
 
-## Unreleased
+## 1.16.1 — 2026-11-07
+
+A fix for the box's registry network.
 
 - **A boxed hop that connects at once reaches the forwarder.** In the
   box's registry network the forwarder (a fresh process: a compiled
