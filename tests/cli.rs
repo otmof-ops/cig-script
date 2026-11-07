@@ -6081,7 +6081,10 @@ fn a_boxed_hop_that_connects_at_once_reaches_a_slow_forwarder() {
         "s.cig",
         "pack { \"./p\" }\nburn {\n  proc.run(\"bash\", [\"-c\", \"if exec 3<>/dev/tcp/127.0.0.1/38080; then echo connected; else echo refused; fi > got.txt\"], {cwd: \"p\", box: {network: \"registry\", allow_hosts: [\"registry.npmjs.org\"]}})\n}\n",
     );
-    let out = sb.cig_env(&["run", "s.cig"], &[("CIG_INTERNAL_FORWARD_DELAY_MS", "1500")]);
+    let out = sb.cig_env(
+        &["run", "s.cig"],
+        &[("CIG_INTERNAL_FORWARD_DELAY_MS", "1500")],
+    );
     let err = String::from_utf8_lossy(&out.stderr).to_string();
     if err.contains("E777") && !box_expected_here() {
         return;
