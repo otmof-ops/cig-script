@@ -6067,6 +6067,29 @@ fn a_contained_hops_network_works_with_cig_under_tmp() {
     assert_eq!(got, "200 hello from the registry", "{err}");
 }
 
+/// A hop that connects to the registry network at once is queued for the
+/// forwarder, never refused, however slowly the forwarder starts: the box
+/// makes the forwarder's listener before the hop exists. (A compiled
+/// program's forwarder reads its own payload first; cig-orchestrator's
+/// agent box lost that race now and then.)
+#[cfg(target_os = "linux")]
+#[test]
+fn a_boxed_hop_that_connects_at_once_reaches_a_slow_forwarder() {
+    let sb = Sandbox::new();
+    sb.write("p/keep.txt", "v1\n");
+    sb.write(
+        "s.cig",
+        "pack { \"./p\" }\nburn {\n  proc.run(\"bash\", [\"-c\", \"if exec 3<>/dev/tcp/127.0.0.1/38080; then echo connected; else echo refused; fi > got.txt\"], {cwd: \"p\", box: {network: \"registry\", allow_hosts: [\"registry.npmjs.org\"]}})\n}\n",
+    );
+    let out = sb.cig_env(&["run", "s.cig"], &[("CIG_INTERNAL_FORWARD_DELAY_MS", "1500")]);
+    let err = String::from_utf8_lossy(&out.stderr).to_string();
+    if err.contains("E777") && !box_expected_here() {
+        return;
+    }
+    assert!(out.status.success(), "{err}");
+    assert_eq!(sb.read("p/got.txt").trim(), "connected", "{err}");
+}
+
 /// A hop in a box with a network of its own sees cig's proxy alone: the
 /// outer environment's proxies and exceptions lead nowhere from inside (#112).
 #[cfg(target_os = "linux")]

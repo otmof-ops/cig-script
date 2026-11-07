@@ -19,9 +19,21 @@ pub fn forward(sock: &Path, port: u16) -> i32 {
     unsafe {
         libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0);
     }
-    let listener = match TcpListener::bind(("127.0.0.1", port)) {
-        Ok(l) => l,
-        Err(_) => return 1,
+    // Test hook: a forwarder slow to start, as a compiled program's is.
+    if let Some(ms) = std::env::var("CIG_INTERNAL_FORWARD_DELAY_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+    {
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+    }
+    // The listener the box made before the hop started, when it is there:
+    // a hop that connected already is in its backlog.
+    let listener = match inherited(port) {
+        Some(l) => l,
+        None => match TcpListener::bind(("127.0.0.1", port)) {
+            Ok(l) => l,
+            Err(_) => return 1,
+        },
     };
     for conn in listener.incoming() {
         let Ok(conn) = conn else { continue };
@@ -29,6 +41,48 @@ pub fn forward(sock: &Path, port: u16) -> i32 {
         std::thread::spawn(move || relay(conn, &sock));
     }
     0
+}
+
+/// Descriptor 3, when it is a socket listening on `127.0.0.1:port`: the
+/// listener the box made before the hop (src/burn/overlay.rs).
+#[cfg(target_os = "linux")]
+fn inherited(port: u16) -> Option<TcpListener> {
+    use std::os::unix::io::FromRawFd;
+    // SAFETY: getsockname and getsockopt only write into the buffers they
+    // are given; fd 3 is taken over only when it is that listener.
+    unsafe {
+        let mut addr: libc::sockaddr_in = std::mem::zeroed();
+        let mut len = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
+        if libc::getsockname(
+            3,
+            &mut addr as *mut libc::sockaddr_in as *mut libc::sockaddr,
+            &mut len,
+        ) != 0
+            || i32::from(addr.sin_family) != libc::AF_INET
+            || u16::from_be(addr.sin_port) != port
+        {
+            return None;
+        }
+        let mut listening: libc::c_int = 0;
+        let mut size = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+        if libc::getsockopt(
+            3,
+            libc::SOL_SOCKET,
+            libc::SO_ACCEPTCONN,
+            &mut listening as *mut libc::c_int as *mut libc::c_void,
+            &mut size,
+        ) != 0
+            || listening == 0
+        {
+            return None;
+        }
+        Some(TcpListener::from_raw_fd(3))
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn inherited(_port: u16) -> Option<TcpListener> {
+    None
 }
 
 #[cfg(unix)]

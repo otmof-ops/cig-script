@@ -3,6 +3,18 @@
 All notable changes to CigScript. The format follows Keep a Changelog; the
 project follows semantic versioning.
 
+## Unreleased
+
+- **A boxed hop that connects at once reaches the forwarder.** In the
+  box's registry network the forwarder (a fresh process: a compiled
+  program reads its own payload first) bound its port only once it had
+  started, and the hop was started beside it, so a hop that connected at
+  once could be refused (curl's exit 7). The box now makes the listener
+  before the hop exists and hands it to the forwarder, so an early
+  connection waits in its backlog. This, not the proxy's refusal order
+  fixed in 1.16.0, is what made cig-orchestrator's agent box go on now and
+  then in CI where it should have waited.
+
 ## 1.16.0 — 2026-11-07
 
 Retention and a wider self-check for the tin, a fix for the box's network,
