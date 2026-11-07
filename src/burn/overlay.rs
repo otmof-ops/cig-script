@@ -1238,13 +1238,13 @@ pub fn guard_setting() -> String {
 #[cfg(target_os = "linux")]
 const MAX_BINDS: usize = 64;
 
-#[cfg(target_os = "linux")]
 /// A listening TCP socket on `127.0.0.1:port`, close-on-exec, or -1.
 ///
 /// # Safety
 ///
 /// Async-signal-safe (socket, setsockopt, bind, listen, close): it is
 /// called between fork and exec.
+#[cfg(target_os = "linux")]
 unsafe fn listen_loopback(port: u16) -> libc::c_int {
     let s = libc::socket(libc::AF_INET, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0);
     if s < 0 {
@@ -1275,6 +1275,7 @@ unsafe fn listen_loopback(port: u16) -> libc::c_int {
     s
 }
 
+#[cfg(target_os = "linux")]
 impl Setup {
     pub fn new(plan: &Plan, cwd: &Path, spec: &BoxSpec) -> io::Result<Setup> {
         use std::os::unix::ffi::OsStrExt;
