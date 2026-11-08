@@ -804,11 +804,12 @@ fn import_inner(file: &Path, mapping: &Mapping, scratch: &Path) -> Result<Import
     // under this machine's key on the way in, so it opens later without
     // the carried key at hand.
     //
-    // Reading the local key through `seal::key()` already takes the
-    // process-level shared rekey lock (SEC-004 L4), so a `cig tin
-    // rekey` cannot slip between the key read and the writes below.
-    // Touch the key here so the lock is held before any object placement.
-    let _local_key_guard = super::seal::key().ok();
+    // The tin key's lock before any object is placed (SEC-004 L4, U1), so
+    // a `cig tin rekey` cannot slip between the reads and the writes
+    // below; where it cannot be had, the import refuses before it writes
+    // anything. The lock alone: a parcel with nothing sealed asks for no
+    // key (#129).
+    super::seal::hold_shared_rekey_lock()?;
     let tin_dir = super::tin::dir();
     for name in manifest.files.keys() {
         let src = scratch.join(name);

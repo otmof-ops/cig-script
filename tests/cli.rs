@@ -12812,3 +12812,31 @@ fn a_plain_run_refuses_before_it_burns_when_the_key_lock_cannot_be_had() {
     let doctor = String::from_utf8_lossy(&sb.cig(&["doctor"]).stdout).into_owned();
     assert!(doctor.contains("[E802]"), "{doctor}");
 }
+
+/// #105 (SEC-004 U1, U2): where the tin key's lock cannot be had, an import
+/// refuses before it places anything, and `cig runs --prune` refuses before
+/// a run goes, so no run lands or leaves without its ledger line.
+#[cfg(unix)]
+#[test]
+fn unparcel_and_prune_refuse_when_the_key_lock_cannot_be_had() {
+    let a = Sandbox::new();
+    let id = parcelled_run(&a);
+    a.run_ok(&["parcel", &id, "--out", "run.cigparcel"]);
+    let parcel = a.path().join("run.cigparcel");
+    let b = machine_b(&a);
+    fs::write(b.path().join(".cigscript-keys"), b"not a directory").unwrap();
+    let root = format!("p={}", b.path().join("p").display());
+    let out = b.cig(&["unparcel", parcel.to_str().unwrap(), "--root", &root]);
+    let err = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(!out.status.success(), "{err}");
+    assert!(err.contains("keys directory"), "{err}");
+    assert!(b.runs().is_empty(), "nothing placed: {:?}", b.runs());
+    // `--prune` on the machine that has runs, with its keys path blocked
+    // (its keys directory, which sealing made, taken away first).
+    let _ = fs::remove_dir_all(a.path().join(".cigscript-keys"));
+    fs::write(a.path().join(".cigscript-keys"), b"not a directory").unwrap();
+    let out = a.cig(&["runs", "--prune", "0"]);
+    let err = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(!out.status.success() && err.contains("E802"), "{err}");
+    assert_eq!(a.runs().len(), 1, "no run went");
+}
