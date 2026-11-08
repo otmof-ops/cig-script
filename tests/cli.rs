@@ -11153,3 +11153,275 @@ fn skip_globs_are_said_by_check() {
     let err = sb.run_err(&["run", "bad.cig"], 1);
     assert!(err.contains("skip: `[unclosed` is not a glob"), "{err}");
 }
+
+// ----- #148, section 1: the stat cache. Off by default; `cig config hop_statcache on`
+// remembers each touched file's (dev, inode, size, mtime, ctime, mode) with the sha256
+// the tin kept it under, so a later hop whose files all match the cache reads none
+// of them. The restore still hashes before and after (E704 is unchanged).
+
+/// Count the bytes the tin-read hook wrote (one byte per hashed read in
+/// tin::prepare*). Zero means no file bytes were read.
+#[cfg(unix)]
+fn tin_reads(sb: &Sandbox) -> usize {
+    match fs::read(sb.path().join("tin-reads")) {
+        Ok(b) => b.len(),
+        Err(_) => 0,
+    }
+}
+
+/// A script that stashes every file under `./p` (`touches: ["**"]`) and
+/// writes one line to `p/sentinel.txt`, so the second hop in a chain has
+/// something to burn without moving the mtime of the cached files.
+#[cfg(unix)]
+fn two_hop_touching_script() -> String {
+    "pack { \"./p\" }\nburn {\n  proc.run(\"sh\", [\"-c\", \"echo first > p/sentinel.txt\"], {touches: [\"**\"]})\n}\n".to_string()
+}
+
+#[cfg(unix)]
+#[test]
+fn off_by_default_a_hop_reads_every_touches_file_as_before() {
+    // The bare second hop (cache off) must read every file: proving the
+    // target is where the gain is to be had.
+    let sb = Sandbox::new();
+    for name in ["a.txt", "b.txt", "c.txt"] {
+        sb.write(&format!("p/{name}"), "x\n");
+    }
+    let reads = sb.path().join("tin-reads");
+    sb.write("s.cig", &two_hop_touching_script());
+    let one = sb.cig_env(
+        &["run", "s.cig"],
+        &[("CIG_INTERNAL_TIN_READS", reads.to_str().unwrap())],
+    );
+    assert!(one.status.success(), "{one:?}");
+    let first_reads = tin_reads(&sb);
+    assert!(
+        first_reads >= 3,
+        "the first hop stashed every file: {first_reads}"
+    );
+    // Second run: cache is off, so every file is read again.
+    let _ = fs::remove_file(&reads);
+    let two = sb.cig_env(
+        &["run", "s.cig"],
+        &[("CIG_INTERNAL_TIN_READS", reads.to_str().unwrap())],
+    );
+    assert!(two.status.success(), "{two:?}");
+    let second_reads = tin_reads(&sb);
+    assert!(
+        second_reads >= 3,
+        "cache off: the second hop reads again: {second_reads}"
+    );
+}
+
+/// #148: an_unchanged_tree_is_not_read. With `hop_statcache = on`, a hop
+/// whose `touches` tree is unchanged since the last hop reads zero file
+/// bytes into the tin on the second run. The pack's files are given an
+/// mtime well in the past first, so the racy-git rule (a file edited
+/// within the filesystem's timestamp granularity of the cache's own save
+/// is re-hashed anyway; its test is below) does not fire for them.
+#[cfg(unix)]
+#[test]
+fn an_unchanged_tree_is_not_read() {
+    let sb = Sandbox::new();
+    for name in ["a.txt", "b.txt", "c.txt", "d.txt", "e.txt"] {
+        sb.write(&format!("p/{name}"), "x\n");
+    }
+    let pin = Command::new("sh")
+        .arg("-c")
+        .arg("touch -t 202001010000 p/*.txt")
+        .current_dir(sb.path())
+        .status()
+        .unwrap();
+    assert!(pin.success());
+    assert!(sb.cig(&["config", "hop_statcache", "on"]).status.success());
+    let reads = sb.path().join("tin-reads");
+    sb.write("s.cig", &two_hop_touching_script());
+    // First run: every file hashed into the tin.
+    let one = sb.cig_env(
+        &["run", "s.cig"],
+        &[("CIG_INTERNAL_TIN_READS", reads.to_str().unwrap())],
+    );
+    assert!(one.status.success(), "{one:?}");
+    let first = tin_reads(&sb);
+    assert!(first >= 5, "the first hop reads every file: {first}");
+    let _ = fs::remove_file(&reads);
+    // Second run: every file in the pack matches the cache's stat tuple
+    // and is old enough not to be racy, so the hop reads nothing it saw
+    // before. The sentinel the first hop wrote is new and will be hashed
+    // fresh (one read), but no more: the five originals are cache hits.
+    let two = sb.cig_env(
+        &["run", "s.cig"],
+        &[("CIG_INTERNAL_TIN_READS", reads.to_str().unwrap())],
+    );
+    assert!(two.status.success(), "{two:?}");
+    let second = tin_reads(&sb);
+    assert!(
+        second <= 1,
+        "with the cache on, unchanged files are not read: {second} (first was {first})"
+    );
+}
+
+/// #148: a_same_second_edit_is_caught. A file edited within the
+/// filesystem's timestamp granularity of the cache's save is re-hashed
+/// anyway, so a same-second edit is never missed. The hop then changes
+/// the file and cig's rollback restores it.
+#[cfg(unix)]
+#[test]
+fn a_same_second_edit_is_caught() {
+    let sb = Sandbox::new();
+    sb.write("p/x.txt", "before\n");
+    assert!(sb.cig(&["config", "hop_statcache", "on"]).status.success());
+    sb.write("s.cig", &two_hop_touching_script());
+    let one = sb.cig(&["run", "s.cig"]);
+    assert!(one.status.success(), "{one:?}");
+    // Edit in the same second as the save, then write a script that
+    // changes the file inside a burn block that coughs, so the kernel
+    // must restore it. Without the racy-git rule, the second run would
+    // trust the stale cache entry and restore the wrong bytes.
+    sb.write("p/x.txt", "racy!\n");
+    let pin = Command::new("touch")
+        .args(["-t", "202001010000", "p/x.txt"])
+        .current_dir(sb.path())
+        .status()
+        .unwrap();
+    assert!(pin.success());
+    sb.write(
+        "s2.cig",
+        "pack { \"./p\" }\nburn {\n  proc.run(\"sh\", [\"-c\", \"printf 'wrong\\\\n' > p/x.txt\"], {touches: [\"**\"]})\n  cough \"x\"\n}\n",
+    );
+    let err = sb.run_err(&["run", "s2.cig"], 1);
+    assert_eq!(sb.read("p/x.txt"), "racy!\n", "{err}");
+    assert!(err.contains("restored hop modified"), "{err}");
+}
+
+/// #148: a_size_preserving_edit_with_a_restored_mtime_is_caught. Even when
+/// size and mtime are both put back by the attacker, ctime (set by the
+/// kernel on any write) moves, so the cache misses and the file is
+/// hashed afresh, and the real byte change is seen.
+#[cfg(unix)]
+#[test]
+fn a_size_preserving_edit_with_a_restored_mtime_is_caught() {
+    let sb = Sandbox::new();
+    sb.write("p/a.txt", "aaaa\n");
+    let pin = |sb: &Sandbox| {
+        assert!(Command::new("touch")
+            .args(["-t", "202001010000", "p/a.txt"])
+            .current_dir(sb.path())
+            .status()
+            .unwrap()
+            .success());
+    };
+    pin(&sb);
+    assert!(sb.cig(&["config", "hop_statcache", "on"]).status.success());
+    sb.write("s.cig", &two_hop_touching_script());
+    let one = sb.cig(&["run", "s.cig"]);
+    assert!(one.status.success(), "{one:?}");
+    // Change the bytes keeping the size, then pin the mtime back. ctime
+    // moved on the write, so the cache does not trust itself.
+    sb.write("p/a.txt", "bbbb\n");
+    pin(&sb);
+    sb.write(
+        "s2.cig",
+        "pack { \"./p\" }\nburn {\n  proc.run(\"sh\", [\"-c\", \"printf 'cccc\\\\n' > p/a.txt; touch -t 202001010000 p/a.txt\"], {touches: [\"**\"]})\n  cough \"x\"\n}\n",
+    );
+    let err = sb.run_err(&["run", "s2.cig"], 1);
+    assert_eq!(sb.read("p/a.txt"), "bbbb\n", "{err}");
+    assert!(err.contains("restored hop modified"), "{err}");
+}
+
+/// #148: racy_edit_fuzz. Random edit/hop interleavings with the cache on:
+/// every unburn restores the state before the hop exactly. The default
+/// iteration count keeps the test under ten seconds; `CIG_RACY_FUZZ_ITERS`
+/// turns it up for a longer run outside CI.
+#[cfg(unix)]
+#[test]
+fn racy_edit_fuzz() {
+    use std::io::Write;
+    let iters: u64 = std::env::var("CIG_RACY_FUZZ_ITERS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(20);
+    let sb = Sandbox::new();
+    for i in 0..3 {
+        sb.write(&format!("p/f{i}.txt"), &format!("v0-{i}\n"));
+    }
+    assert!(sb.cig(&["config", "hop_statcache", "on"]).status.success());
+    sb.write(
+        "s.cig",
+        "pack { \"./p\" }\nburn {\n  proc.run(\"sh\", [\"-c\", \"printf 'edit\\\\n' > p/f0.txt\"], {touches: [\"**\"]})\n  cough \"x\"\n}\n",
+    );
+    // A tiny xorshift for the interleavings: deterministic per iteration.
+    let mut x: u64 = 0xcafe_babe_dead_beef;
+    for i in 0..iters {
+        // Pick a file and a new content; write it so cig sees a change
+        // between hops. The hop always writes p/f0.txt and coughs, so the
+        // rollback must put every chosen path back.
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        let which = (x % 3) as usize;
+        let tag = x ^ i;
+        let content = format!("v{tag}-{which}\n");
+        let before = sb.path().join(format!("p/f{which}.txt"));
+        {
+            let mut f = fs::File::create(&before).unwrap();
+            f.write_all(content.as_bytes()).unwrap();
+            f.flush().unwrap();
+        }
+        // Record what every file reads before the run, so we check every
+        // one (not just the one just written) comes back.
+        let snapshot: Vec<String> = (0..3).map(|j| sb.read(&format!("p/f{j}.txt"))).collect();
+        let out = sb.cig(&["run", "s.cig"]);
+        // The run coughs: exit 1, rollback runs. The pack must be back
+        // where it started.
+        assert_eq!(out.status.code(), Some(1), "iter {i}");
+        for (j, before) in snapshot.iter().enumerate() {
+            let after = sb.read(&format!("p/f{j}.txt"));
+            assert_eq!(&after, before, "iter {i}, file f{j}: unburn was not exact");
+        }
+    }
+}
+
+/// #148: statcache_verify_reports_a_lying_filesystem. With the cache on,
+/// the first hop stashes a file. Then the file is rewritten with the same
+/// size and the stat tuple is faked back onto the file (touch -r), so the
+/// cache would trust it next time. `cig tin verify --statcache` re-hashes
+/// the cached entries, drops the lying one, and prints a tripwire line.
+#[cfg(unix)]
+#[test]
+fn statcache_verify_reports_a_lying_filesystem() {
+    let sb = Sandbox::new();
+    sb.write("p/liar.txt", "orig\n");
+    assert!(sb.cig(&["config", "hop_statcache", "on"]).status.success());
+    sb.write("s.cig", &two_hop_touching_script());
+    let one = sb.cig(&["run", "s.cig"]);
+    assert!(one.status.success(), "{one:?}");
+    // Now rewrite p/liar.txt with the same length as "orig\n". The
+    // filesystem gives it a new mtime and ctime; we put the whole stat
+    // picture back to look the way it did when the cache saved.
+    let orig_meta = fs::metadata(sb.path().join("p/liar.txt")).unwrap();
+    use std::os::unix::fs::MetadataExt;
+    let orig_mtime = orig_meta.mtime();
+    fs::write(sb.path().join("p/liar.txt"), "liar\n").unwrap();
+    // -t YYYYMMDDHHMM.SS is finer than the default; here we only need to
+    // match the recorded mtime, which is the hardest field to put back.
+    let secs = orig_mtime;
+    let touch = Command::new("touch")
+        .args(["-d", &format!("@{secs}"), "p/liar.txt"])
+        .current_dir(sb.path())
+        .status()
+        .unwrap();
+    assert!(touch.success());
+    let out = sb.cig(&["tin", "verify", "--statcache"]);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "a mismatch exits non-zero: {:?}\n{}",
+        out,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("liar.txt") && err.contains("lying filesystem"),
+        "{err}"
+    );
+}

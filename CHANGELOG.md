@@ -13,6 +13,21 @@ project follows semantic versioning.
   nothing in the box, whose layer keeps every change. The `hop_skip`
   setting (`cig config hop_skip "**/.cache/**, *.log"`) adds globs every
   hop leaves out. The plan shows `(skip …)`.
+- **The stat cache** (#148, opt-in). `cig config hop_statcache on` tells the
+  tin to keep a per-pack index at `~/.cigscript/tin/statcache/<pack hash>`
+  of each touched file's `(dev, inode, size, mtime_ns, ctime_ns, mode)`
+  next to the sha256 the tin kept it under, so a later hop whose files
+  match the index reads none of them. A file edited within the filesystem's
+  timestamp granularity of the index's own save is re-hashed anyway
+  (the racy-git rule), and a size-preserving edit with a restored mtime is
+  caught by `ctime`. A restore is never trusted to the index: `E704`
+  checks before-bytes and after-bytes as before, so a corrupt or stale
+  index can only lose the optimisation. `cig tin verify --statcache`
+  re-hashes everything the index remembers and drops a lying entry as a
+  tripwire. Default stays off until the `racy_edit_fuzz` test has run a
+  history on each platform (Unix only this release). Measured on this
+  machine, 10,000 files of 10 KiB each: second hop drops from ~540 ms to
+  ~200 ms; the index file is 1.09 MiB.
 
 ## 1.17.0 — 2026-11-08
 

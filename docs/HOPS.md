@@ -247,6 +247,45 @@ outside every glob. Several such files under one folder are one line, with
 the smallest directory that covers them, the glob for it and a few of them
 as examples; `cig runs <id>` lists every one.
 
+### The stat cache (opt-in, `hop_statcache`)
+
+A `touches` hop today stashes every file under its globs: it reads each
+file, hashes it, and gives the bytes a name in the tin (`tin/objects` or a
+chunked recipe). The dedup layer in the tin keeps storage small, but the
+reads happen every hop. A 1 ms command over 10,000 files costs about a
+second and a half in overhead, every time.
+
+With `cig config hop_statcache on`, the tin keeps a per-pack index at
+`~/.cigscript/tin/statcache/<pack hash>` of each touched file's
+`(dev, inode, size, mtime_ns, ctime_ns, mode)` next to the sha256 the tin
+kept it under. The next hop whose files all match the index reads none of
+them: their tin objects are referred to by hash. The index saves the time
+it was written at, so **a file whose mtime is within the filesystem's
+timestamp granularity of the index's write is re-hashed anyway** (the
+racy-git rule), and a same-second edit after the save is never missed.
+`ctime` moves on every write a kernel makes, so a size-preserving edit
+with a `touch -r` on the way out is still caught by the index's
+`ctime_ns`.
+
+**A restore is never trusted to the index.** `cig unburn` re-hashes the
+before-bytes and the after-bytes exactly as before, so `E704` holds. The
+index decides what needs reading, nothing else: a corrupt or stale index
+can only lose the optimisation, never let a wrong restore through. The
+index file is written temp-and-rename, so a crash in the middle keeps the
+index that was there before.
+
+`cig tin verify --statcache` re-hashes every file the index remembers and
+drops the entries whose bytes no longer hash to what the index said: a
+filesystem that lies about `mtime` is the tripwire the issue calls out, and
+each mismatch is reported through the usual pipeline.
+
+The setting is off by default. Turn it on when the `racy_edit_fuzz` test
+has run to a history on your platform (its home is `tests/cli.rs`). The
+index tracks only the files `touches` matched: sealed files keep the same
+random-id policy, so no secret ever reaches the index. The cache is
+Unix-only until Rust stabilises Windows's own file-identity accessors
+(rust-lang/rust#63010).
+
 ## Compensations
 
 `burn (s) { ... } unburn { ... }` is the undo for what no pack can reverse

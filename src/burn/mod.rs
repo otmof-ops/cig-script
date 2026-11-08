@@ -22,6 +22,7 @@ pub mod proxy;
 pub mod runs;
 pub mod scan;
 pub mod seal;
+pub mod statcache;
 pub mod tin;
 
 /// The one lock every test in this crate that sets `CIGSCRIPT_HOME` takes:
@@ -456,6 +457,16 @@ pub struct PackWatch {
     skip: Option<globset::GlobSet>,
     /// What could not be stashed, one line each, for the hop to report.
     pub warnings: Vec<String>,
+    /// The pre-hop stat tuple of every tinned path (cache hits and freshly
+    /// stashed alike), kept only when the stat cache is on. `pack_watch_end`
+    /// uses it to skip the same-size-with-mtime-restored hash check for a
+    /// path whose ctime did not move: an edit would have moved ctime, and
+    /// a file that was not touched by the hop is proved unchanged without
+    /// a read (#148).
+    pre_stat: Option<std::collections::HashMap<PathBuf, statcache::StatTuple>>,
+    /// When the watch began, as the stat cache counts time: the racy
+    /// margin around it decides whether an unchanged tuple may be trusted.
+    started_ns: u64,
 }
 
 /// Is a place a door out of the pack leads to worth watching? Not one that
@@ -1143,6 +1154,8 @@ impl Kernel {
         }
         // The before-bytes of what the hop may touch go to the tin first.
         let mut tinned = std::collections::BTreeMap::new();
+        let mut pre_stat: Option<std::collections::HashMap<PathBuf, statcache::StatTuple>> =
+            statcache::is_enabled().then(std::collections::HashMap::new);
         if !touches.is_empty() {
             match tin::globs(touches) {
                 Ok(set) => {
@@ -1303,6 +1316,68 @@ impl Kernel {
                         }
                         to_tin.sort();
                     }
+                    // #148: the stat cache. A file in `to_tin` whose stat
+                    // tuple matches the cache's, is not racy against the
+                    // cache's own write, and still has a tin object with
+                    // its name, is known unchanged: no read, no hash, no
+                    // copy. Those paths go straight into `tinned` with the
+                    // object already in place. The sealed list is never
+                    // cached: a sealed object is named by a random id and
+                    // the cache keys on content hash.
+                    let cache_on = statcache::is_enabled();
+                    let (mut cache, pack_cache_key) = if cache_on {
+                        let key = statcache::pack_hash(roots);
+                        (statcache::load(&key), key)
+                    } else {
+                        (statcache::Cache::default(), String::new())
+                    };
+                    let mut uncached: Vec<PathBuf> = Vec::new();
+                    let mut cache_hits: Vec<(PathBuf, tin::Stashed)> = Vec::new();
+                    for path in to_tin.drain(..) {
+                        if !cache_on {
+                            uncached.push(path);
+                            continue;
+                        }
+                        let key = statcache::encode_abs(&path);
+                        let (Some(entry), Some(now_stat)) =
+                            (cache.entries.get(&key), statcache::stat_of(&path))
+                        else {
+                            uncached.push(path);
+                            continue;
+                        };
+                        if entry.stat != now_stat
+                            || statcache::is_racy(entry.stat.mtime_ns, cache.written_at_ns)
+                        {
+                            uncached.push(path);
+                            continue;
+                        }
+                        let Some(object) = tin::object_for(&entry.sha256) else {
+                            // The cache remembers a hash the tin no longer
+                            // holds: a gc took it after the last run. The
+                            // file is stashed again; the fresh entry
+                            // replaces the stale one.
+                            uncached.push(path);
+                            continue;
+                        };
+                        let stashed = tin::Stashed {
+                            object,
+                            sha256: entry.sha256.clone(),
+                            bytes: now_stat.size,
+                            mode: if cfg!(unix) {
+                                Some(now_stat.mode)
+                            } else {
+                                None
+                            },
+                            mtime_ns: Some(now_stat.mtime_ns),
+                            link: None,
+                            git: None,
+                        };
+                        if let Some(map) = pre_stat.as_mut() {
+                            map.insert(path.clone(), now_stat);
+                        }
+                        cache_hits.push((path, stashed));
+                    }
+                    let to_tin = uncached;
                     let mut staged: Vec<(PathBuf, tin::Staged)> = Vec::new();
                     for (path, r) in to_tin.iter().zip(tin::prepare_all(&to_tin, false)) {
                         match r {
@@ -1325,13 +1400,22 @@ impl Kernel {
                     // The run writes down which objects it is about to
                     // depend on before any exists under its name, so a
                     // `cig tin gc` during the hop keeps them (the journal
-                    // refers to them only once the hop is over).
+                    // refers to them only once the hop is over). A cache
+                    // hit's objects are already pressed but still vulnerable
+                    // to a gc that races this hop, so they appear in the
+                    // list too.
                     if let Some(dir) = self.journal.run_dir() {
-                        let list: String = staged
-                            .iter()
-                            .flat_map(|(_, st)| st.pending_paths())
-                            .map(|o| format!("{}\n", o.display()))
-                            .collect();
+                        let mut list = String::new();
+                        for (_, st) in &staged {
+                            for o in st.pending_paths() {
+                                list.push_str(&format!("{}\n", o.display()));
+                            }
+                        }
+                        for (_, st) in &cache_hits {
+                            for o in tin::pending_for_hash(&st.sha256) {
+                                list.push_str(&format!("{}\n", o.display()));
+                            }
+                        }
                         if !list.is_empty() {
                             let pending = dir.join(tin::PENDING);
                             if let Err(e) = std::fs::write(&pending, &list)
@@ -1343,6 +1427,9 @@ impl Kernel {
                             }
                         }
                     }
+                    for (path, st) in cache_hits {
+                        tinned.insert(path, st);
+                    }
                     for (path, st) in staged {
                         match st.commit() {
                             Ok(st) => {
@@ -1352,6 +1439,44 @@ impl Kernel {
                                 "{} could not be kept in the tin ({e}); a change to it stays irreversible",
                                 path.display()
                             )),
+                        }
+                    }
+                    // Update and persist the stat cache: every non-sealed,
+                    // non-git-pinned, non-link tinned entry gets its fresh
+                    // stat tuple remembered against its hash. The write is
+                    // atomic (temp + rename): a crash in the middle keeps
+                    // the index that was there before, and nothing in the
+                    // cache is ever trusted on a restore. The same stat
+                    // tuple is remembered on the kernel side in `pre_stat`,
+                    // so `pack_watch_end` can skip the hash check for any
+                    // path whose ctime did not move while the hop ran.
+                    if cache_on {
+                        for (path, st) in &tinned {
+                            if st.link.is_some() || st.git.is_some() || st.sha256.is_empty() {
+                                continue;
+                            }
+                            let Some(now_stat) = statcache::stat_of(path) else {
+                                continue;
+                            };
+                            if let Some(map) = pre_stat.as_mut() {
+                                map.entry(path.clone()).or_insert(now_stat);
+                            }
+                            let chunked =
+                                tin::object_for(&st.sha256).is_some_and(|p| tin::is_recipe(&p));
+                            cache.entries.insert(
+                                statcache::encode_abs(path),
+                                statcache::Entry {
+                                    stat: now_stat,
+                                    sha256: st.sha256.clone(),
+                                    chunked,
+                                },
+                            );
+                        }
+                        cache.written_at_ns = statcache::now_ns();
+                        if let Err(e) = statcache::save(&pack_cache_key, &cache) {
+                            warnings.push(format!(
+                                "the stat cache for this pack could not be saved ({e}); the next hop will stash the pack again"
+                            ));
                         }
                     }
                 }
@@ -1375,6 +1500,8 @@ impl Kernel {
             touches: touches.to_vec(),
             skip: skip_set,
             warnings,
+            pre_stat,
+            started_ns: statcache::now_ns(),
         })
     }
 
@@ -1538,7 +1665,10 @@ impl Kernel {
         }
         // A tinned file whose time, size and mode all read as before is
         // told by its hash: an edit that keeps the size and puts the time
-        // back is seen all the same.
+        // back is seen all the same. With the stat cache on (#148), a
+        // file whose ctime did not move while the hop ran was not written
+        // to at all, so no hash is taken for it: `pre_stat` remembers the
+        // before-tuple, and `stat_of(p)` reads the after-tuple cheaply.
         {
             let flagged: std::collections::HashSet<&PathBuf> = writes
                 .modified
@@ -1547,13 +1677,26 @@ impl Kernel {
                 .collect();
             let mut by_hash: Vec<PathBuf> = Vec::new();
             for (p, st) in &watch.tinned {
-                if st.link.is_none()
-                    && !flagged.contains(p)
-                    && std::fs::symlink_metadata(p)
-                        .map(|m| m.is_file())
-                        .unwrap_or(false)
-                    && journal::sha256_file(p).ok().as_deref() != Some(st.sha256.as_str())
-                {
+                if st.link.is_some() || flagged.contains(p) {
+                    continue;
+                }
+                let is_file = std::fs::symlink_metadata(p)
+                    .map(|m| m.is_file())
+                    .unwrap_or(false);
+                if !is_file {
+                    continue;
+                }
+                // The stat cache's shortcut: ctime moved on every write,
+                // and `pre_stat` knows what it was. An unchanged tuple
+                // proves the file was never written to.
+                if let Some(map) = &watch.pre_stat {
+                    if let (Some(before), Some(now)) = (map.get(p), statcache::stat_of(p)) {
+                        if statcache::unchanged_through(before, &now, watch.started_ns) {
+                            continue;
+                        }
+                    }
+                }
+                if journal::sha256_file(p).ok().as_deref() != Some(st.sha256.as_str()) {
                     by_hash.push(p.clone());
                 }
             }

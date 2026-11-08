@@ -115,6 +115,28 @@ pub fn object_for(sha256: &str) -> Option<PathBuf> {
     r.is_file().then_some(r)
 }
 
+/// Every path in the tin the journal will end up referring to for this
+/// sha256: the object alone when it is a whole file in the tin, the
+/// recipe and every chunk when it is a chunked one. The stat cache needs
+/// this to add a hit's objects to the run's `tin.pending` list, so a
+/// `cig tin gc` during the hop keeps them.
+pub fn pending_for_hash(sha256: &str) -> Vec<PathBuf> {
+    let Some(p) = object_for(sha256) else {
+        return Vec::new();
+    };
+    if is_recipe(&p) {
+        let mut out = vec![p.clone()];
+        if let Ok(r) = read_recipe(&p) {
+            for c in r.chunks {
+                out.push(object_path(&c.sha256));
+            }
+        }
+        out
+    } else {
+        vec![p]
+    }
+}
+
 /// Is this snapshot path a recipe in the tin (a chunked file)?
 pub fn is_recipe(path: &Path) -> bool {
     path.starts_with(recipes_dir())
@@ -216,11 +238,34 @@ fn temp_name_in(dir: &Path, tag: &str) -> PathBuf {
     ))
 }
 
+/// A test-only counter: cig notes every time it reads a pack file's bytes
+/// into the tin, so the "an unchanged tree is not read" test can prove a
+/// hop with the stat cache on stashes no bytes a second time. The counter
+/// is a count of appended `.` bytes in the file at `CIG_INTERNAL_TIN_READS`
+/// (one byte per read-open), so two cig processes in a chain both count.
+/// Unset outside tests: the call is a cheap no-op.
+pub(crate) fn note_file_read() {
+    let Some(path) = std::env::var_os("CIG_INTERNAL_TIN_READS") else {
+        return;
+    };
+    if path.is_empty() {
+        return;
+    }
+    if let Ok(mut f) = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(std::path::Path::new(&path))
+    {
+        let _ = f.write_all(b".");
+    }
+}
+
 /// Copy `from` to `to`, hashing the bytes as they are written: the hash
 /// names what was copied, not what the file held a moment earlier. A file
 /// that changes while it is read gives a copy that is a moment newer than
 /// the scan, and an object that still matches its name.
 fn copy_hashing(from: &Path, to: &Path) -> io::Result<(String, u64)> {
+    note_file_read();
     let mut src = fs::File::open(from)?;
     let mut dst = fs::File::create(to)?;
     let mut hasher = Sha256::new();
@@ -353,6 +398,7 @@ pub fn prepare(path: &Path) -> io::Result<Staged> {
 /// nothing; the rest wait under temporary names. The recipe is written
 /// when the tin has none for this exact content.
 fn prepare_chunked(path: &Path, meta: &fs::Metadata) -> io::Result<Staged> {
+    note_file_read();
     fs::create_dir_all(recipes_dir())?;
     let file = fs::File::open(path)?;
     let mut whole = Sha256::new();

@@ -57,6 +57,11 @@ pub const KEYS: &[(&str, &str, &str)] = &[
         "globs every watched hop leaves out of the tin, comma-separated and relative to a pack root (`**/.cache/**, *.log`), on top of each hop's own `skip`: their changes are not kept, so a hop cannot undo them (E310)",
     ),
     (
+        "hop_statcache",
+        "off",
+        "the stat cache (#148): off keeps every hop reading and hashing the tree anyway; on remembers each touched file's (dev, inode, size, mtime, ctime, mode) with the tin object it was stashed under, so a later hop whose files all match the cache reads none of them (restores still re-hash: E704 is unchanged). `cig tin verify --statcache` re-checks it",
+    ),
+    (
         "seal",
         "secrets",
         "which files the tin keeps sealed (encrypted at rest): secrets (secret-shaped names, a pack root's .cigseal, a hop's touches_sealed), all, or never",
@@ -218,6 +223,10 @@ impl Config {
                         return Err(format!("hop_skip: `{g}` is not a glob: {e}"));
                     }
                 }
+            }
+            ("hop_statcache", "on" | "off") => {}
+            ("hop_statcache", other) => {
+                return Err(format!("hop_statcache must be on or off, not `{other}`"))
             }
             ("watch_cap", v) if v.parse::<usize>().is_ok_and(|n| n > 0) => {}
             ("watch_cap", other) => {
