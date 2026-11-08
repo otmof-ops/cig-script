@@ -11124,7 +11124,11 @@ fn doctor_reports_history_and_suggests_a_budget_when_off() {
     let text = String::from_utf8_lossy(&sb.cig(&["doctor"]).stdout).to_string();
     assert!(text.contains("history"), "{text}");
     assert!(text.contains("budget off"), "{text}");
-    assert!(text.contains("cig doctor suggests"), "no tip: {text}");
+    // The tip comes with a suggestion, where free space can be measured
+    // (not on Windows today).
+    if json["history_budget_suggested"].is_number() {
+        assert!(text.contains("cig doctor suggests"), "no tip: {text}");
+    }
     // The suggestion changes nothing on disk.
     let v: serde_json::Value = serde_json::from_str(&sb.run_ok(&["--json", "config"])).unwrap();
     assert_eq!(v["config"]["history_budget"]["value"], "off");
