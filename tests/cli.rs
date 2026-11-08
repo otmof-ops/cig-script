@@ -11398,19 +11398,17 @@ fn statcache_verify_reports_a_lying_filesystem() {
     // Now rewrite p/liar.txt with the same length as "orig\n". The
     // filesystem gives it a new mtime and ctime; we put the whole stat
     // picture back to look the way it did when the cache saved.
-    let orig_meta = fs::metadata(sb.path().join("p/liar.txt")).unwrap();
-    use std::os::unix::fs::MetadataExt;
-    let orig_mtime = orig_meta.mtime();
-    fs::write(sb.path().join("p/liar.txt"), "liar\n").unwrap();
-    // -t YYYYMMDDHHMM.SS is finer than the default; here we only need to
-    // match the recorded mtime, which is the hardest field to put back.
-    let secs = orig_mtime;
-    let touch = Command::new("touch")
-        .args(["-d", &format!("@{secs}"), "p/liar.txt"])
-        .current_dir(sb.path())
-        .status()
+    let liar = sb.path().join("p/liar.txt");
+    let orig_modified = fs::metadata(&liar).unwrap().modified().unwrap();
+    fs::write(&liar, "liar\n").unwrap();
+    // The mtime put back to the nanosecond, portably (BSD and macOS touch
+    // take no `-d @seconds`); ctime still moves, as no program can stop it.
+    fs::File::options()
+        .write(true)
+        .open(&liar)
+        .unwrap()
+        .set_modified(orig_modified)
         .unwrap();
-    assert!(touch.success());
     let out = sb.cig(&["tin", "verify", "--statcache"]);
     assert_eq!(
         out.status.code(),
