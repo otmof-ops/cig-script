@@ -11014,3 +11014,43 @@ fn doctor_lists_the_box_primitives() {
         assert!(said.contains("the box is Linux's"), "{said}");
     }
 }
+
+/// #149: `cig runs --pruned` says which runs went on purpose, from the
+/// ledger: newest first, when, how, and what each was.
+#[test]
+fn pruned_runs_are_listed_from_the_ledger() {
+    let sb = Sandbox::new();
+    let none = sb.cig(&["runs", "--pruned"]);
+    assert!(String::from_utf8_lossy(&none.stderr).contains("no run has been pruned"));
+    let ids = four_runs(&sb);
+    sb.run_ok(&["runs", "--prune", "1"]);
+    sb.run_ok(&["runs", "--forget", "20200101T000000-abcdef"]);
+    let listed = sb.run_ok(&["runs", "--pruned"]);
+    for id in &ids[..3] {
+        assert!(
+            listed.lines().any(|l| l.starts_with(id.as_str())
+                && l.contains("pruned")
+                && l.trim_end().ends_with("ok")),
+            "{id}: {listed}"
+        );
+    }
+    assert!(
+        !listed.contains(&ids[3]),
+        "the kept run is listed: {listed}"
+    );
+    let json: serde_json::Value =
+        serde_json::from_str(&sb.run_ok(&["--json", "runs", "--pruned"])).unwrap();
+    let rows = json.as_array().unwrap();
+    assert_eq!(rows[0]["how"], "forgotten", "newest first: {json}");
+    assert_eq!(rows[0]["was"], "-", "{json}");
+    assert_eq!(
+        rows.iter().filter(|r| r["how"] == "pruned").count(),
+        3,
+        "{json}"
+    );
+    assert!(
+        rows.iter()
+            .all(|r| r["at"].as_str().is_some_and(|t| t.starts_with("20"))),
+        "{json}"
+    );
+}

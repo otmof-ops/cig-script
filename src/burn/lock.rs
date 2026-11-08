@@ -224,7 +224,21 @@ mod tests {
             other => panic!("an inner root overlaps: {other:?}"),
         }
         drop(first);
-        acquire(&[root.join("sub")], "four").expect("free after the holder let go");
+        // A child another test forks at this moment holds a copy of the
+        // lock's descriptor until it execs (O_CLOEXEC closes it then), and
+        // flock lasts while any copy is open: the lock is free within
+        // moments of the holder letting go, not always at once.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let four = loop {
+            match acquire(&[root.join("sub")], "four") {
+                Ok(l) => break l,
+                Err(Busy::Held { .. }) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(20))
+                }
+                Err(e) => panic!("free after the holder let go: {e:?}"),
+            }
+        };
+        drop(four);
         match old {
             Some(v) => std::env::set_var("CIGSCRIPT_HOME", v),
             None => std::env::remove_var("CIGSCRIPT_HOME"),

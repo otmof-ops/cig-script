@@ -36,12 +36,13 @@ Leading flags are the run's. The first word that is not a flag, or everything af
 | `--light <chain>` | runs the program, then lights a chain it declares |
 | `--chains` | lists the chains the program declares |
 | `--unburn <run>` | puts back a past run of this program |
+| `--unburn-last N`, `--unburn-since AGE`, `--unburn-to <run>` | puts back a stretch of this program's own runs, newest first, as `cig unburn --last`, `--since` and `--to` do for any: one plan, then run by run, stopping at the first refusal (`cig unburn --continue` carries on) |
 | `--seal-key-fd N` | reads the tin's key from open descriptor `N` (Unix): the key in no file and no environment variable |
 | `--explain <code>` | what an error code means |
 | `--cig-program` | what the program is and what it was compiled from |
 | `--help`, `-h` | the program's usage |
 
-`--max-steps`, `--unburn`, `--explain`, `--light` and `--seal-key-fd` also take `--flag=value`. Exit codes are those of `cig run`: `0` ok, `1` script error, `2` syntax error, `3` usage.
+`--max-steps`, `--unburn`, `--unburn-last`, `--unburn-since`, `--unburn-to`, `--explain`, `--light` and `--seal-key-fd` also take `--flag=value`. Exit codes are those of `cig run`: `0` ok, `1` script error, `2` syntax error, `3` usage.
 
 ## Same as `cig run`, and what differs
 

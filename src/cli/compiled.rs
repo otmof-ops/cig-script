@@ -22,6 +22,9 @@ struct Opts {
     explain: Option<String>,
     light: Option<String>,
     seal_key_fd: Option<i32>,
+    unburn_last: Option<usize>,
+    unburn_since: Option<String>,
+    unburn_to: Option<String>,
     chains: bool,
     info: bool,
     help: bool,
@@ -51,7 +54,8 @@ fn parse(argv: &[String]) -> Result<Opts, (String, String)> {
             "--cig-program" => o.info = true,
             "--chains" => o.chains = true,
             "--help" | "-h" => o.help = true,
-            "--max-steps" | "--unburn" | "--explain" | "--light" | "--seal-key-fd" => {
+            "--max-steps" | "--unburn" | "--explain" | "--light" | "--seal-key-fd"
+            | "--unburn-last" | "--unburn-since" | "--unburn-to" => {
                 let Some(v) = argv.get(i + 1) else {
                     return Err((
                         format!("`{a}` needs a value"),
@@ -65,7 +69,14 @@ fn parse(argv: &[String]) -> Result<Opts, (String, String)> {
                 let (flag, v) = a.split_once('=').expect("has =");
                 if !matches!(
                     flag,
-                    "--max-steps" | "--unburn" | "--explain" | "--light" | "--seal-key-fd"
+                    "--max-steps"
+                        | "--unburn"
+                        | "--explain"
+                        | "--light"
+                        | "--seal-key-fd"
+                        | "--unburn-last"
+                        | "--unburn-since"
+                        | "--unburn-to"
                 ) {
                     return Err((
                         format!("`{flag}` is not one of this program's run flags"),
@@ -93,6 +104,17 @@ fn take(o: &mut Opts, flag: &str, v: &str) -> Result<(), (String, String)> {
         "--max-steps" => o.max_steps = Some(steps(v)?),
         "--unburn" => o.unburn = Some(v.to_string()),
         "--explain" => o.explain = Some(v.to_string()),
+        "--unburn-last" => {
+            o.unburn_last = Some(v.parse::<usize>().map_err(|_| {
+                (
+                    format!("`--unburn-last {v}` is not a number of runs"),
+                    "give how many of this program's newest runs to put back: --unburn-last 3"
+                        .to_string(),
+                )
+            })?)
+        }
+        "--unburn-since" => o.unburn_since = Some(v.to_string()),
+        "--unburn-to" => o.unburn_to = Some(v.to_string()),
         "--seal-key-fd" => {
             o.seal_key_fd = Some(v.parse::<i32>().map_err(|_| {
                 (
@@ -133,6 +155,9 @@ run flags (before the program's own arguments):
   --light <chain>    run the program, then light the chain it declares (cig light)
   --chains           list the chains the program declares (cig chains)
   --unburn <run>     put a past run of this program back (cig unburn)
+  --unburn-last N    put back this program's newest N runs, newest first
+  --unburn-since AGE put back its runs started within AGE (90s, 30m, 2h, 3d, 1w)
+  --unburn-to <run>  put back its runs after that one, newest first
   --seal-key-fd N    read the tin's key from open descriptor N (Unix; CI)
   --explain <code>   what an error code means and what to do (cig explain)
   --cig-program      what this program is, and what it was compiled from
@@ -207,6 +232,37 @@ pub fn main(p: Program) -> i32 {
         if let Some(code) = super::take_key_fd(&ctx, fd) {
             return code;
         }
+    }
+    // A stretch of the program's own runs (#149), as cig unburn --last,
+    // --since and --to do for any.
+    let stretch = match (o.unburn_last, &o.unburn_since, &o.unburn_to) {
+        (Some(n), _, _) => Some(super::runs::Stretch::Last(n)),
+        (None, Some(age), _) => match super::runs::parse_age(age) {
+            Some(d) => Some(super::runs::Stretch::Since(d)),
+            None => {
+                let d = crate::diagnostics::usage(format!("`--unburn-since {age}` is not an age"))
+                    .code("E1052")
+                    .with_hint("a number and a unit: 90s, 30m, 2h, 3d or 1w");
+                run::report(&ctx, &d, None, None);
+                return exit::USAGE;
+            }
+        },
+        (None, None, Some(id)) => Some(super::runs::Stretch::To(id.clone())),
+        _ => None,
+    };
+    if let Some(how) = stretch {
+        return super::runs::unburn_stretch(
+            &ctx,
+            how,
+            None,
+            super::runs::StretchOpts {
+                dry_run: o.dry_run,
+                force: false,
+                accept_unsigned: false,
+                yes: false,
+                only_program: Some(p.sha256.clone()),
+            },
+        );
     }
     if let Some(id) = &o.unburn {
         // A program puts back its own runs only; `cig unburn` does any.
