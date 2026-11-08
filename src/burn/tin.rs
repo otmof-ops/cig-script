@@ -437,6 +437,52 @@ fn prepare_chunked(path: &Path, meta: &fs::Metadata) -> io::Result<Staged> {
 /// Seal `path` into the tin: encrypted under a fresh random id, never
 /// shared with another file, so two equal secrets stay two objects that
 /// tell nothing about each other. A link is kept as a link, as ever.
+/// `prepare` (or `prepare_sealed`) for every path, on up to eight threads,
+/// the results in the paths' order (#148): a hop that touched many files
+/// copies and hashes them on every core, not one at a time. Each staged
+/// object has a name of its own (the pid and a counter), and nothing else is
+/// shared but the key, which is found once.
+pub fn prepare_all(paths: &[PathBuf], sealed: bool) -> Vec<io::Result<Staged>> {
+    let one = |p: &Path| {
+        if sealed {
+            prepare_sealed(p)
+        } else {
+            prepare(p)
+        }
+    };
+    let workers = std::thread::available_parallelism()
+        .map_or(1, |n| n.get())
+        .min(8)
+        .min(paths.len());
+    if workers <= 1 || paths.len() < 4 {
+        return paths.iter().map(|p| one(p)).collect();
+    }
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let mut done: Vec<(usize, io::Result<Staged>)> = std::thread::scope(|s| {
+        let running: Vec<_> = (0..workers)
+            .map(|_| {
+                s.spawn(|| {
+                    let mut mine = Vec::new();
+                    loop {
+                        let i = next.fetch_add(1, Ordering::Relaxed);
+                        let Some(p) = paths.get(i) else {
+                            break;
+                        };
+                        mine.push((i, one(p)));
+                    }
+                    mine
+                })
+            })
+            .collect();
+        running
+            .into_iter()
+            .flat_map(|w| w.join().expect("a tin worker panicked"))
+            .collect()
+    });
+    done.sort_by_key(|(i, _)| *i);
+    done.into_iter().map(|(_, r)| r).collect()
+}
+
 pub fn prepare_sealed(path: &Path) -> io::Result<Staged> {
     let meta = fs::symlink_metadata(path)?;
     if meta.file_type().is_symlink() {
@@ -1197,6 +1243,65 @@ pub fn ignore_set(root: &Path) -> Option<GlobSet> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #148: staging on every core gives what staging one file at a time
+    /// gives, in the paths' order: small files, chunked ones, links and a
+    /// path that is not there (its error in its place).
+    #[test]
+    fn parallel_prepare_equals_serial_prepare() {
+        with_home(|root| {
+            let dir = root.join("files");
+            fs::create_dir_all(&dir).unwrap();
+            let mut paths = Vec::new();
+            for i in 0..40u32 {
+                let p = dir.join(format!("f{i}"));
+                let len = if i % 7 == 0 {
+                    CHUNK_FILE_MIN as usize + 4096 * i as usize
+                } else {
+                    37 * i as usize
+                };
+                let body: Vec<u8> = (0..len).map(|k| (k as u32 * 31 + i) as u8).collect();
+                fs::write(&p, body).unwrap();
+                paths.push(p);
+            }
+            paths.insert(17, dir.join("not-there"));
+            #[cfg(unix)]
+            {
+                let link = dir.join("link");
+                std::os::unix::fs::symlink("f3", &link).unwrap();
+                paths.push(link);
+            }
+            let serial: Vec<io::Result<Staged>> = paths.iter().map(|p| prepare(p)).collect();
+            let parallel = prepare_all(&paths, false);
+            assert_eq!(serial.len(), parallel.len());
+            for (i, (a, b)) in serial.iter().zip(&parallel).enumerate() {
+                match (a, b) {
+                    (Ok(a), Ok(b)) => {
+                        assert_eq!(
+                            (&a.sha256, a.bytes, a.chunked, &a.link, a.mode),
+                            (&b.sha256, b.bytes, b.chunked, &b.link, b.mode),
+                            "{}",
+                            paths[i].display()
+                        );
+                        assert_eq!(a.chunks.len(), b.chunks.len());
+                    }
+                    (Err(a), Err(b)) => assert_eq!(a.kind(), b.kind()),
+                    _ => panic!(
+                        "{}: one way failed and the other did not",
+                        paths[i].display()
+                    ),
+                }
+            }
+            assert!(
+                parallel[17].is_err(),
+                "the missing path's error is not in its place"
+            );
+            // Both sets commit, and the objects are the files' bytes.
+            for st in parallel.into_iter().chain(serial).flatten() {
+                st.commit().unwrap();
+            }
+        });
+    }
 
     #[test]
     fn touches_globs_match_relative_paths() {
