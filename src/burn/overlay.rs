@@ -1036,6 +1036,13 @@ pub fn hop_filter() -> Result<Vec<libc::sock_filter>, String> {
 /// empty tmpfs goes over the key folder. A guard that cannot be made is
 /// noted in `why`, and the hop runs boxed without it (`tin_guard = on`
 /// refuses instead).
+///
+/// From 1.19.0 the guard also hides `tin/` and `runs/` entirely: an empty
+/// tmpfs goes over each, and this hop's own burn-protocol journal is bound
+/// back into the fresh `runs/` tmpfs so a hop that speaks the protocol can
+/// still record what it changed. The child run's inbox is outside `runs/`,
+/// so it is still reached unchanged; a cig started inside the hop keeps
+/// the inbox as its own state root.
 #[cfg(target_os = "linux")]
 pub struct Guard {
     pub home: std::ffi::CString,
@@ -1059,6 +1066,19 @@ pub struct Guard {
     pub covers: Vec<std::ffi::CString>,
     /// The session bus is cut: the hop's environment does not name it.
     pub bus_cut: bool,
+    /// `tin/` and `runs/` hidden by two empty tmpfs mounts, with this hop's
+    /// own journal bound back through so the burn protocol keeps working.
+    pub tin_dir: std::ffi::CString,
+    pub runs_dir: std::ffi::CString,
+    pub hop_journal: std::ffi::CString,
+    /// The proxy's socket folder, when `network: registry` named one (the
+    /// run's `proxy/` lives under `runs/`, so the fresh tmpfs would cover
+    /// it; the real folder is bound back through at the same path, and the
+    /// netns block that follows binds it read-only as it always did).
+    pub hide_proxy_dir: Option<std::ffi::CString>,
+    /// The directories to create inside the fresh `runs/` tmpfs so the
+    /// journal and the proxy folder have a path, outermost first.
+    pub hide_mkdirs: Vec<std::ffi::CString>,
 }
 
 /// What confines a hop: the box (an overlay over each pack root, with the
@@ -1094,6 +1114,48 @@ impl Plan<'_> {
 
     pub fn run_id(&self) -> String {
         dir_name(&self.run_dir())
+    }
+
+    /// The hop's sequence number in the run, carried in the layer directory
+    /// for a boxed hop and explicit for an unboxed one under `tin_guard = on`.
+    pub fn seq(&self) -> u64 {
+        match self {
+            Plan::Boxed(l) => seq_of(l),
+            Plan::GuardOnly { seq, .. } => *seq,
+        }
+    }
+}
+
+/// What the guard hides from a boxed or guarded hop and what it keeps
+/// writable: the two folders covered with an empty tmpfs (`tin/` and
+/// `runs/`), the directories to create inside the fresh `runs/` tmpfs so
+/// the hop's burn-protocol journal has a path again (outermost first), and
+/// the one file under `runs/` that stays writable (that journal, the file
+/// `CIG_JOURNAL` names).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HidePlan {
+    pub tin_dir: PathBuf,
+    pub runs_dir: PathBuf,
+    pub mkdirs: Vec<PathBuf>,
+    pub hop_journal: PathBuf,
+}
+
+/// Plan what a hop sees when the guard hides the tin: an empty `tin/`, an
+/// empty `runs/` holding only the path to this hop's own journal, and the
+/// file bound back through the tmpfs for the burn protocol to write. The
+/// child run's inbox lives outside `runs/`, so it is not touched here and
+/// the guard binds it writable as before.
+pub fn hide_plan(home: &Path, run_dir: &Path, seq: u64) -> HidePlan {
+    let tin_dir = home.join("tin");
+    let runs_dir = home.join("runs");
+    let run = runs_dir.join(dir_name(run_dir));
+    let hops = run.join("hops");
+    let hop_journal = hops.join(format!("{seq}.jsonl"));
+    HidePlan {
+        tin_dir,
+        runs_dir,
+        mkdirs: vec![run, hops],
+        hop_journal,
     }
 }
 
@@ -1354,6 +1416,21 @@ impl Setup {
         let base = plan.base();
         fs::create_dir_all(&base)?;
         let run_dir = plan.run_dir();
+        // The proxy socket's folder when `network: registry` asks for one,
+        // worked out before the guard so the hide step can plan a path for
+        // it inside the fresh `runs/` tmpfs it mounts (`sock_dir` below is
+        // computed from the same conditions and binds the folder read-only
+        // in the netns block, after the hide).
+        let boxed_flag = layers.is_some();
+        let netns_flag = boxed_flag && spec.network != Network::On;
+        let proxy_dir = if netns_flag && spec.network == Network::Registry {
+            let seq = layers.map(seq_of).unwrap_or(0);
+            proxy_sock_path(&run_dir, seq)
+                .parent()
+                .map(Path::to_path_buf)
+        } else {
+            None
+        };
         let guard = if guard_setting() == "off" || contained {
             None
         } else {
@@ -1376,6 +1453,7 @@ impl Setup {
                 writable.push(cstr(&l.dir)?);
             }
             // The inbox: a cig inside the hop has it as its own state root.
+            // Outside `runs/`, so the hide step below never covers it.
             let inbox = prepare_inbox(&run_dir)?;
             writable.push(cstr(&inbox)?);
             let bus_cut = bus_cut();
@@ -1383,6 +1461,46 @@ impl Setup {
             for p in key_routes(&keys, bus_cut) {
                 covers.push(cstr(&p)?);
             }
+            // What the hide step covers, and the one file under `runs/`
+            // that stays writable through it: this hop's own burn-protocol
+            // journal, pre-touched so the bind has something to land on.
+            // The tin folder is made (0700) if a run has yet to write
+            // there, so the tmpfs always has a mountpoint to cover. When
+            // the registry proxy is on, its folder under `runs/` is
+            // pre-planned too so the fresh tmpfs has a mountpoint for the
+            // real socket folder the netns block binds read-only next.
+            let hide = hide_plan(&home, &run_dir, plan.seq());
+            fs::create_dir_all(&hide.tin_dir)?;
+            fs::create_dir_all(&hide.runs_dir)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = fs::set_permissions(&hide.tin_dir, fs::Permissions::from_mode(0o700));
+            }
+            if let Some(parent) = hide.hop_journal.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&hide.hop_journal)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = fs::set_permissions(&hide.hop_journal, fs::Permissions::from_mode(0o600));
+            }
+            let mut mkdirs = hide.mkdirs.clone();
+            let hide_proxy_dir = if let Some(p) = &proxy_dir {
+                fs::create_dir_all(p)?;
+                mkdirs.push(p.clone());
+                Some(cstr(p)?)
+            } else {
+                None
+            };
+            let hide_mkdirs = mkdirs
+                .iter()
+                .map(|p| cstr(p))
+                .collect::<io::Result<Vec<_>>>()?;
             Some(Guard {
                 home_flags: locked_flags(&home),
                 home: cstr(&home)?,
@@ -1394,11 +1512,16 @@ impl Setup {
                 pretend_unavailable: std::env::var_os("CIG_INTERNAL_NO_GUARD").is_some(),
                 covers,
                 bus_cut,
+                tin_dir: cstr(&hide.tin_dir)?,
+                runs_dir: cstr(&hide.runs_dir)?,
+                hop_journal: cstr(&hide.hop_journal)?,
+                hide_proxy_dir,
+                hide_mkdirs,
             })
         };
         // The namespaces beyond the mounts: only with the box itself.
-        let boxed = layers.is_some();
-        let netns = boxed && spec.network != Network::On;
+        let boxed = boxed_flag;
+        let netns = netns_flag;
         let mut forward = None;
         let mut forward_env = None;
         let mut sock_dir = None;
@@ -1649,6 +1772,14 @@ impl Setup {
                     }
                 }
             }
+        }
+        // Hide `tin/` and `runs/` from the hop entirely, with the hop's own
+        // burn-protocol journal bound back through so the protocol keeps
+        // working. Done last so every setup `self.note`/`self.fail` before
+        // this reaches the real `why` file, and any failure here is noted
+        // through a descriptor opened before the tmpfs covers the path.
+        if let Some(g) = &self.guard {
+            self.hide_tin_and_runs(g)?;
         }
         // Into the working directory again, through the overlay this time.
         if libc::chdir(self.cwd.as_ptr()) != 0 {
@@ -2030,6 +2161,171 @@ impl Setup {
         Ok(())
     }
 
+    /// Hide `tin/` and `runs/` with two empty tmpfs mounts, then rebind
+    /// this hop's own burn-protocol journal through the fresh `runs/` so
+    /// the protocol keeps working. A descriptor on `why` is opened before
+    /// any tmpfs covers the path, so a failure here is still noted on the
+    /// real file; `tin_guard = on` refuses the hop on a failure, `auto`
+    /// falls back to the tin read-only (where the state root remount and
+    /// the overlay already put it).
+    ///
+    /// # Safety
+    ///
+    /// Only async-signal-safe calls (open, close, mkdir, mount, write): it
+    /// runs in the pre-exec child.
+    unsafe fn hide_tin_and_runs(&self, g: &Guard) -> io::Result<()> {
+        // A descriptor on the why file first, since the hide covers the
+        // path a few mounts from now: any later note writes through this,
+        // not through `self.note` which would open the hidden tmpfs.
+        let why_fd = libc::open(
+            g.why.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_APPEND | libc::O_CLOEXEC,
+            0o644,
+        );
+        // Descriptors on the real hop journal file and, if the registry
+        // proxy named one, its socket folder: the binds that follow land
+        // the real inodes on the paths inside the fresh tmpfs.
+        let journal_fd = libc::open(g.hop_journal.as_ptr(), libc::O_PATH | libc::O_CLOEXEC);
+        if journal_fd < 0 {
+            note_fd(why_fd, b"holding the hop journal refused");
+            if why_fd >= 0 {
+                libc::close(why_fd);
+            }
+            if g.required {
+                return Err(io::Error::from_raw_os_error(libc::ENOTSUP));
+            }
+            return Ok(());
+        }
+        let proxy_fd = match &g.hide_proxy_dir {
+            Some(p) => libc::open(
+                p.as_ptr(),
+                libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC,
+            ),
+            None => -1,
+        };
+        if g.hide_proxy_dir.is_some() && proxy_fd < 0 {
+            note_fd(why_fd, b"holding the proxy folder refused");
+            libc::close(journal_fd);
+            if why_fd >= 0 {
+                libc::close(why_fd);
+            }
+            if g.required {
+                return Err(io::Error::from_raw_os_error(libc::ENOTSUP));
+            }
+            return Ok(());
+        }
+        let mut failed: Option<&[u8]> = None;
+        // What was mounted, so a failure part way undoes it: a half-hidden
+        // runs/ without the hop's journal bound back would swallow the
+        // protocol's writes; undone, the hop sees the tin read-only as
+        // before. Flags, not a list: this runs between fork and exec, where
+        // nothing may allocate.
+        let (mut tin_hidden, mut runs_hidden, mut journal_bound) = (false, false, false);
+        if libc::mount(
+            c"tmpfs".as_ptr(),
+            g.tin_dir.as_ptr(),
+            c"tmpfs".as_ptr(),
+            libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC,
+            c"mode=0700,size=4k".as_ptr() as *const libc::c_void,
+        ) != 0
+        {
+            failed = Some(b"hiding the tin refused");
+        } else {
+            tin_hidden = true;
+        }
+        if failed.is_none()
+            && libc::mount(
+                c"tmpfs".as_ptr(),
+                g.runs_dir.as_ptr(),
+                c"tmpfs".as_ptr(),
+                libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC,
+                c"mode=0700,size=16k".as_ptr() as *const libc::c_void,
+            ) != 0
+        {
+            failed = Some(b"hiding runs refused");
+        } else if failed.is_none() {
+            runs_hidden = true;
+        }
+        if failed.is_none() {
+            for p in &g.hide_mkdirs {
+                if libc::mkdir(p.as_ptr(), 0o700) != 0 && *libc::__errno_location() != libc::EEXIST
+                {
+                    failed = Some(b"making a path inside the hidden runs refused");
+                    break;
+                }
+            }
+        }
+        if failed.is_none() {
+            let fd = libc::open(
+                g.hop_journal.as_ptr(),
+                libc::O_WRONLY | libc::O_CREAT | libc::O_CLOEXEC,
+                0o600,
+            );
+            if fd < 0 {
+                failed = Some(b"touching the hop journal in the hidden runs refused");
+            } else {
+                libc::close(fd);
+            }
+        }
+        if failed.is_none() {
+            let from = fd_path(journal_fd);
+            if libc::mount(
+                from.as_ptr() as *const libc::c_char,
+                g.hop_journal.as_ptr(),
+                std::ptr::null(),
+                libc::MS_BIND,
+                std::ptr::null(),
+            ) != 0
+            {
+                failed = Some(b"binding the hop journal through the hidden runs refused");
+            } else {
+                journal_bound = true;
+            }
+        }
+        if failed.is_none() {
+            if let Some(p) = &g.hide_proxy_dir {
+                let from = fd_path(proxy_fd);
+                if libc::mount(
+                    from.as_ptr() as *const libc::c_char,
+                    p.as_ptr(),
+                    std::ptr::null(),
+                    libc::MS_BIND,
+                    std::ptr::null(),
+                ) != 0
+                {
+                    failed = Some(b"binding the proxy folder through the hidden runs refused");
+                }
+            }
+        }
+        libc::close(journal_fd);
+        if proxy_fd >= 0 {
+            libc::close(proxy_fd);
+        }
+        if let Some(what) = failed {
+            note_fd(why_fd, what);
+            if journal_bound {
+                libc::umount2(g.hop_journal.as_ptr(), libc::MNT_DETACH);
+            }
+            if runs_hidden {
+                libc::umount2(g.runs_dir.as_ptr(), libc::MNT_DETACH);
+            }
+            if tin_hidden {
+                libc::umount2(g.tin_dir.as_ptr(), libc::MNT_DETACH);
+            }
+            if why_fd >= 0 {
+                libc::close(why_fd);
+            }
+            if g.required {
+                return Err(io::Error::from_raw_os_error(libc::ENOTSUP));
+            }
+            return Ok(());
+        }
+        if why_fd >= 0 {
+            libc::close(why_fd);
+        }
+        Ok(())
+    }
+
     /// Write a reason with the errno to `at`; the exec goes on.
     unsafe fn note(&self, at: &std::ffi::CString, what: &[u8]) {
         let errno = *libc::__errno_location();
@@ -2085,6 +2381,26 @@ unsafe fn close_from_3() {
             libc::close(fd);
         }
     }
+}
+
+/// Write a reason with the errno to an open descriptor; used after a
+/// tmpfs has covered the path `self.note` would open.
+///
+/// # Safety
+///
+/// Async-signal-safe (`write` only on a descriptor opened before this).
+#[cfg(target_os = "linux")]
+unsafe fn note_fd(fd: libc::c_int, what: &[u8]) {
+    if fd < 0 {
+        return;
+    }
+    let errno = *libc::__errno_location();
+    let _ = libc::write(fd, what.as_ptr() as *const libc::c_void, what.len());
+    let mut buf = [0u8; 32];
+    let n = itoa(errno, &mut buf);
+    let _ = libc::write(fd, b" (errno ".as_ptr() as *const libc::c_void, 8);
+    let _ = libc::write(fd, buf.as_ptr() as *const libc::c_void, n);
+    let _ = libc::write(fd, b")\n".as_ptr() as *const libc::c_void, 2);
 }
 
 /// `/proc/self/fd/<fd>`, NUL-terminated, built without allocating.
@@ -2856,6 +3172,41 @@ mod tests {
             }
         }
         assert!(f.len() < 255);
+    }
+
+    #[test]
+    fn the_guard_hides_the_tin_and_the_runs_and_keeps_the_hop_journal() {
+        let home = PathBuf::from("/home/u/.cigscript");
+        let run_dir = home.join("runs/20261108T120000-abcdef");
+        let h = hide_plan(&home, &run_dir, 3);
+        // `tin/` and `runs/` go under empty tmpfs mounts.
+        assert_eq!(h.tin_dir, PathBuf::from("/home/u/.cigscript/tin"));
+        assert_eq!(h.runs_dir, PathBuf::from("/home/u/.cigscript/runs"));
+        // The one file still writable under them is the burn-protocol
+        // journal cig is about to point the hop at (`CIG_JOURNAL`), and
+        // its parent directories are made in the fresh tmpfs outermost
+        // first so a bind of the real file has a path to land on.
+        assert_eq!(
+            h.hop_journal,
+            PathBuf::from("/home/u/.cigscript/runs/20261108T120000-abcdef/hops/3.jsonl")
+        );
+        assert_eq!(
+            h.mkdirs,
+            vec![
+                PathBuf::from("/home/u/.cigscript/runs/20261108T120000-abcdef"),
+                PathBuf::from("/home/u/.cigscript/runs/20261108T120000-abcdef/hops"),
+            ]
+        );
+        // The inbox lives outside `runs/`, so the hide step never covers
+        // it: a cig started inside the hop keeps the inbox as its own
+        // state root. The guard binds the inbox writable, separately.
+        let inbox = inbox_dir(&run_dir);
+        assert!(
+            !inbox.starts_with(&h.runs_dir) && !inbox.starts_with(&h.tin_dir),
+            "the inbox {} would be hidden by the tmpfs over {}",
+            inbox.display(),
+            h.runs_dir.display(),
+        );
     }
 
     #[test]
