@@ -11102,9 +11102,9 @@ fn history_budget_spares_pinned_runs() {
 fn doctor_reports_history_and_suggests_a_budget_when_off() {
     let sb = Sandbox::new();
     let _ids = four_runs(&sb);
-    let json: serde_json::Value = serde_json::from_str(
-        &String::from_utf8_lossy(&sb.cig(&["--json", "doctor"]).stdout).to_string(),
-    )
+    let json: serde_json::Value = serde_json::from_str(&String::from_utf8_lossy(
+        &sb.cig(&["--json", "doctor"]).stdout,
+    ))
     .unwrap();
     assert_eq!(json["history_budget"], "off");
     // A number of bytes between 1 GB and 20 GB, or null where free space
@@ -11131,9 +11131,9 @@ fn doctor_reports_history_and_suggests_a_budget_when_off() {
     assert_eq!(v["config"]["history_budget"]["explicit"], false);
     // With a budget set, doctor no longer suggests one.
     sb.run_ok(&["config", "history_budget", "2GB"]);
-    let json: serde_json::Value = serde_json::from_str(
-        &String::from_utf8_lossy(&sb.cig(&["--json", "doctor"]).stdout).to_string(),
-    )
+    let json: serde_json::Value = serde_json::from_str(&String::from_utf8_lossy(
+        &sb.cig(&["--json", "doctor"]).stdout,
+    ))
     .unwrap();
     assert_eq!(json["history_budget"], "2GB");
     assert!(
@@ -11183,9 +11183,9 @@ fn history_budget_counts_the_tin_and_collects_it() {
         .map(|r| r["id"].as_str().unwrap().to_string())
         .collect();
     ids.reverse();
-    let json: serde_json::Value = serde_json::from_str(
-        &String::from_utf8_lossy(&sb.cig(&["--json", "doctor"]).stdout).to_string(),
-    )
+    let json: serde_json::Value = serde_json::from_str(&String::from_utf8_lossy(
+        &sb.cig(&["--json", "doctor"]).stdout,
+    ))
     .unwrap();
     let history = json["history_bytes"].as_u64().unwrap();
     assert!(history >= 4 * size as u64, "the tin is counted: {json}");
@@ -11195,9 +11195,9 @@ fn history_budget_counts_the_tin_and_collects_it() {
     // The age floor holds by default: every run is seconds old.
     sb.run_ok(&["runs", "--prune", "100"]);
     assert_eq!(sb.runs().len(), 4, "history_keep spares young runs");
-    let json: serde_json::Value = serde_json::from_str(
-        &String::from_utf8_lossy(&sb.cig(&["--json", "doctor"]).stdout).to_string(),
-    )
+    let json: serde_json::Value = serde_json::from_str(&String::from_utf8_lossy(
+        &sb.cig(&["--json", "doctor"]).stdout,
+    ))
     .unwrap();
     assert_eq!(json["history_over_budget"], true, "{json}");
     assert!(
