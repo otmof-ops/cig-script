@@ -97,16 +97,31 @@ try {
     $assetPath = Join-Path $work $asset
     $sumPath = "$assetPath.sha256"
 
-    try {
-        Invoke-WebRequest -UseBasicParsing -Uri "$base/$asset" -OutFile $assetPath
-    } catch {
-        Fail "no binary for windows-$arch in $tag"
+    # A download is tried three times. Only a 404 is the release's answer;
+    # anything else (a 504, no network) says nothing about the release and
+    # is never reported as if it did.
+    function Get-Asset([string]$uri, [string]$out) {
+        $last = $null
+        for ($i = 1; $i -le 3; $i++) {
+            try {
+                Invoke-WebRequest -UseBasicParsing -Uri $uri -OutFile $out
+                return $null
+            } catch {
+                $last = $_
+                $status = $null
+                if ($_.Exception.Response) { $status = [int]$_.Exception.Response.StatusCode }
+                if ($status -eq 404) { return 404 }
+                Start-Sleep -Seconds (2 * $i)
+            }
+        }
+        return $last.Exception.Message
     }
-    try {
-        Invoke-WebRequest -UseBasicParsing -Uri "$base/$asset.sha256" -OutFile $sumPath
-    } catch {
-        Fail "release ships no checksum for $asset; refusing to install"
-    }
+    $why = Get-Asset "$base/$asset" $assetPath
+    if ($why -eq 404) { Fail "no binary for windows-$arch in $tag" }
+    elseif ($why) { Fail "could not download ${asset}: $why; the release may well have it, so try again" }
+    $why = Get-Asset "$base/$asset.sha256" $sumPath
+    if ($why -eq 404) { Fail "release ships no checksum for $asset; refusing to install" }
+    elseif ($why) { Fail "could not download ${asset}.sha256: $why; refusing to install without it, so try again" }
 
     # The sha256 file is `<hex>  <name>`; take the first field.
     $expected = ((Get-Content -Raw $sumPath).Trim() -split '\s+')[0].ToLowerInvariant()
