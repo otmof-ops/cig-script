@@ -12,6 +12,16 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+/// The cig under test: this build's, or `CIG_TEST_BIN` when that names
+/// another. cig-compile runs these tests with a cig that builds each script
+/// and runs the program (its `ci/cig-compiled.sh`), so a compiled program's
+/// burns are held to the same tests (otmof-ops/cig-compile#6).
+fn cig_bin() -> std::path::PathBuf {
+    std::env::var_os("CIG_TEST_BIN")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(env!("CARGO_BIN_EXE_cig")))
+}
+
 struct Sandbox {
     dir: tempfile::TempDir,
 }
@@ -46,7 +56,7 @@ impl Sandbox {
         self.path().join(name).exists()
     }
     fn cig(&self, args: &[&str]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_cig"))
+        Command::new(cig_bin())
             .args(args)
             .current_dir(self.path())
             .env("CIGSCRIPT_HOME", self.path().join("home"))
