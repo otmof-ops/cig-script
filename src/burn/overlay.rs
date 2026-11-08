@@ -217,6 +217,39 @@ impl Default for BoxSpec {
     }
 }
 
+impl BoxSpec {
+    /// The box's terms in a few words, for the plan and the record (#106):
+    /// the network always, the rest where it is not the default.
+    pub fn terms(&self) -> Vec<String> {
+        let mut t = vec![format!(
+            "network {}",
+            match self.network {
+                Network::On => "on",
+                Network::Off => "off",
+                Network::Registry => "registry",
+            }
+        )];
+        if !self.allow_hosts.is_empty() {
+            t.push(format!("allow {}", self.allow_hosts.join(" ")));
+        }
+        if self.contain {
+            t.push("contain".to_string());
+        }
+        match self.apply {
+            Apply::OnSuccess => {}
+            Apply::Ask => t.push("apply ask".to_string()),
+            Apply::Never => t.push("apply never".to_string()),
+        }
+        if !self.pidns {
+            t.push("pid shared".to_string());
+        }
+        if !self.expect.is_empty() {
+            t.push(format!("expect {}", self.expect.join(" ")));
+        }
+        t
+    }
+}
+
 /// The network a boxed hop gets: the machine's (`on`), none (`off`: a
 /// namespace with only `lo`), or the registry alone (`registry`: the same
 /// namespace, with one way out through cig's CONNECT proxy, which allows

@@ -549,8 +549,11 @@ then the directory itself (empty, when the hop left it so) and the entries
 that follow, a new directory a mkdir, a link a write; each is journaled with
 its before-state
 exactly as `fs.write_text` and `fs.rm` are, so the run is unburnable like
-any other and the record reads as native ops. The plan says `(boxed)`, and
-says before the run when the box cannot be made here. It cannot where
+any other and the record reads as native ops. The plan says what the box
+was asked for, `(boxed: network registry, allow registry.npmjs.org,
+contain)`: the network always, the rest where it is not the default; the
+run's record keeps it, and `cig runs <id>` says it (1.17.0). It says before
+the run when the box cannot be made here. It cannot where
 unprivileged user namespaces are off (Ubuntu's AppArmor restricts them
 since 23.10: `sysctl kernel.apparmor_restrict_unprivileged_userns=0`), on
 a kernel before 5.11, on a filesystem overlayfs cannot layer over, where the

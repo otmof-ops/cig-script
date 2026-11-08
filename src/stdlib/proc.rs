@@ -2013,6 +2013,11 @@ fn hop(
         touches: o.touches.clone(),
         touches_sealed: o.touches_sealed.clone(),
         boxed: o.boxed,
+        box_terms: if o.boxed {
+            o.box_spec.terms()
+        } else {
+            Vec::new()
+        },
     };
     if !o.touches.is_empty() && i.kernel.pack().is_none() {
         return Err(cigscript_burn(format!(
@@ -2927,6 +2932,11 @@ fn pipe(i: &mut Interp, a: &[Value], s: Span) -> Result<Value, Diagnostic> {
         touches: o.touches.clone(),
         touches_sealed: o.touches_sealed.clone(),
         boxed: o.boxed,
+        box_terms: if o.boxed {
+            o.box_spec.terms()
+        } else {
+            Vec::new()
+        },
     };
     let mark = i.kernel.mark();
     if i.effect("proc.pipe", op, s)? == Decision::Simulate {
