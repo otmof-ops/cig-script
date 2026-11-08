@@ -585,8 +585,21 @@ out of reach of what cig runs.
   remounted read-only after the hop's own layers and the inbox were bound
   writable underneath, and an empty tmpfs goes over the key folder. A hop
   that overwrites or deletes a tin object or a journal gets `EROFS`; one
-  that looks for the key finds nothing. The inbox (`inbox/<run>/` under the
-  state directory) is the one place a hop may write: a cig started inside
+  that looks for the key finds nothing.
+  From 1.19.0 the guard also hides `tin/` and `runs/` from a boxed hop
+  **entirely**, not just makes them read-only: an empty tmpfs goes over
+  each, and the one file under them that the hop legitimately writes to
+  (its burn-protocol journal, the file `CIG_JOURNAL` names) is bound back
+  through the fresh `runs/` tmpfs so the protocol keeps working. A hop
+  that lists `~/.cigscript/tin` or `~/.cigscript/runs` sees nothing, other
+  runs' records and the tin's objects are out of its sight, and its own
+  report still lands. When the registry proxy is on, its socket folder
+  under `runs/` is bound back the same way, so `network: registry` hops
+  reach the proxy as they always did. A guarded unboxed hop under
+  `tin_guard = on` gets the same hiding.
+  The inbox (`inbox/<run>/` under the
+  state directory, **outside** `runs/` and so untouched by the hide) is
+  the one place a hop may write: a cig started inside
   the hop has it as its own state root (`CIGSCRIPT_HOME`, `CIG_KEYS_DIR`,
   a key file of its own, the parent's settings copied in), runs as it would
   anywhere, and when the hop ends its runs are taken in as **children** of

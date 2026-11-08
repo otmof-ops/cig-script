@@ -4781,6 +4781,104 @@ fn a_boxed_hop_sees_the_tin_read_only_and_no_key() {
     );
 }
 
+/// A boxed hop sees `tin/` and `runs/` as empty folders: the guard mounts
+/// an empty tmpfs over each, and only this hop's own burn-protocol journal
+/// is bound back in through the fresh `runs/` tmpfs so a hop that reports
+/// what it changed still lands its report. Other runs, the tin's objects
+/// and anything else under those folders are gone from the hop's view.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_boxed_hop_cannot_see_the_tin_or_runs_and_its_report_still_lands() {
+    let sb = Sandbox::new();
+    sb.write("p/keep.txt", "v1\n");
+    // A first run so `runs/` already holds a record the next hop should
+    // not see through the guard's tmpfs. The write replaces an existing
+    // file so the tin keeps its before-bytes as a snapshot.
+    sb.write("p/one.txt", "0\n");
+    sb.write(
+        "first.cig",
+        "pack { \"./p\" }\nburn { fs.write_text(\"p/one.txt\", \"1\\n\") }\n",
+    );
+    sb.run_ok(&["run", "first.cig"]);
+    assert_eq!(sb.read("p/one.txt"), "1\n");
+    let first_id = sb.runs()[0]["id"].as_str().unwrap().to_string();
+    // The second run's hop lists the state root, the tin and runs, and
+    // appends a line to its burn-protocol journal (which cig writes to
+    // its own journal too through the proxy). The guard makes the first
+    // two listings empty and the third landing still work.
+    let home = sb.home().display().to_string();
+    sb.write(
+        "p/probe.sh",
+        &format!(
+            "ls -A {home} | sort > home.txt\nls -A {home}/tin > tin.txt\nls -A {home}/runs > runs.txt\n[ -n \"${{CIG_JOURNAL:-}}\" ] && printf '%s\\n' '{{\"kind\":\"note\",\"text\":\"from the hop\"}}' >> \"$CIG_JOURNAL\" && echo wrote > wrote.txt || echo no-journal > wrote.txt\n",
+        ),
+    );
+    sb.write(
+        "s.cig",
+        "pack { \"./p\" }\nburn {\n  proc.run(\"sh\", [\"probe.sh\"], {cwd: \"p\", box: true})\n}\n",
+    );
+    let out = sb.cig(&["run", "s.cig"]);
+    let err = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(out.status.success(), "{err}");
+    if fell_back(&err) {
+        allow_fallback(&err);
+        return;
+    }
+    assert!(
+        !err.contains("E712"),
+        "the guard fell back where the box did not: {err}"
+    );
+    // The hop sees the state root with the usual top-level names, but the
+    // tin and runs underneath are empty. `inbox` is still listed (the
+    // guard binds it writable so a cig inside the hop can record there).
+    let home_ls = sb.read("p/home.txt");
+    assert!(
+        home_ls.contains("tin") && home_ls.contains("runs"),
+        "the state root was not visible to the hop: {home_ls}"
+    );
+    let tin_ls = sb.read("p/tin.txt");
+    assert!(
+        tin_ls.trim().is_empty(),
+        "the tin was visible to the hop: {tin_ls}\n{err}"
+    );
+    let runs_ls = sb.read("p/runs.txt");
+    // The only name the hop may see under `runs/` is the one directory
+    // the guard made in the fresh tmpfs to hold its own journal path:
+    // the current run's id. The first run, sitting on real disk, is gone.
+    assert!(
+        !runs_ls.contains(&first_id),
+        "the earlier run was visible to the hop: {runs_ls}\n{err}"
+    );
+    let outer = sb
+        .runs()
+        .into_iter()
+        .find(|r| r["script"].as_str().is_some_and(|s| s.ends_with("s.cig")))
+        .expect("the second run was recorded");
+    let outer_id = outer["id"].as_str().unwrap().to_string();
+    assert_eq!(
+        runs_ls.trim(),
+        outer_id,
+        "`runs/` showed more than this hop's own run: {runs_ls}\n{err}"
+    );
+    // The hop's own report landed: cig took it into the journal.
+    assert_eq!(sb.read("p/wrote.txt").trim(), "wrote", "{err}");
+    let hops_dir = sb.home().join("runs").join(&outer_id).join("hops");
+    let journal: Vec<_> = fs::read_dir(&hops_dir)
+        .unwrap()
+        .flatten()
+        .filter_map(|e| {
+            let p = e.path();
+            fs::read_to_string(&p).ok().map(|t| (p, t))
+        })
+        .collect();
+    assert!(
+        journal
+            .iter()
+            .any(|(_, t)| t.contains("\"text\":\"from the hop\"")),
+        "the hop's own report did not land: {journal:?}"
+    );
+}
+
 /// A key file named outright (`CIG_SEAL_KEY_FILE`, the CI setup) lies
 /// outside the key folder the guard hides: the hop is not told where it is,
 /// and reading it there gives nothing.
