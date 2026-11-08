@@ -10,6 +10,7 @@
 //! for that to mean something), so it stats the files and reads no
 //! directory that cannot have changed.
 
+use globset::GlobSet;
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -308,6 +309,18 @@ fn look(
 /// taken from the reference and each is stat'ed, which is what finds a
 /// file changed in place.
 pub(crate) fn scan(root: &Path, max_depth: usize, cap: usize, reference: Option<&Scan>) -> Scan {
+    scan_skipping(root, max_depth, cap, reference, None)
+}
+
+/// `scan`, leaving out what `skip` matches (a hop's `skip` globs and the
+/// `hop_skip` setting, #148) the way a `.cigignore` line is left out.
+pub(crate) fn scan_skipping(
+    root: &Path,
+    max_depth: usize,
+    cap: usize,
+    reference: Option<&Scan>,
+    skip: Option<&GlobSet>,
+) -> Scan {
     let started = SystemTime::now();
     let root_mtime = fs::symlink_metadata(root)
         .map(|m| mtime_of(&m))
@@ -399,6 +412,11 @@ pub(crate) fn scan(root: &Path, max_depth: usize, cap: usize, reference: Option<
                         #[cfg(not(unix))]
                         rel.extend_from_slice(n.as_bytes());
                         if let Some(set) = &ignore {
+                            if set.is_match(rel_path(&rel).as_ref()) {
+                                return;
+                            }
+                        }
+                        if let Some(set) = skip {
                             if set.is_match(rel_path(&rel).as_ref()) {
                                 return;
                             }

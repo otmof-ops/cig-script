@@ -619,7 +619,7 @@ impl Mapping {
             serde_json::Value::Array(items) => {
                 if matches!(
                     key,
-                    Some("touches" | "touches_sealed" | "globs" | "produces" | "inputs")
+                    Some("touches" | "touches_sealed" | "skip" | "globs" | "produces" | "inputs")
                 ) {
                     for it in items.iter_mut() {
                         if let serde_json::Value::String(s) = it {
@@ -811,6 +811,7 @@ pub fn build(
                 cwd,
                 touches,
                 touches_sealed,
+                skip,
                 boxed,
                 ..
             } => {
@@ -859,6 +860,10 @@ pub fn build(
                         .map(|g| quote(&m.map_glob(g)))
                         .collect();
                     opts.push(format!("touches_sealed: [{}]", globs.join(", ")));
+                }
+                if !skip.is_empty() {
+                    let globs: Vec<String> = skip.iter().map(|g| quote(&m.map_glob(g))).collect();
+                    opts.push(format!("skip: [{}]", globs.join(", ")));
                 }
                 if *boxed {
                     opts.push("box: true".to_string());

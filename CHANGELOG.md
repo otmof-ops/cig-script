@@ -3,6 +3,17 @@
 All notable changes to CigScript. The format follows Keep a Changelog; the
 project follows semantic versioning.
 
+## Unreleased
+
+- **A hop skips what it rebuilds anyway** (#148). `skip: ["build/**",
+  ".cache/"]` on a hop leaves those paths out of the tin, the way a
+  `.cigignore` line does: what the hop changes there is neither kept nor
+  journaled, so it cannot be undone, and the hop does not pay to keep a
+  cache. `cig check` says so on the hop's line (`E310`), or that `skip` does
+  nothing in the box, whose layer keeps every change. The `hop_skip`
+  setting (`cig config hop_skip "**/.cache/**, *.log"`) adds globs every
+  hop leaves out. The plan shows `(skip …)`.
+
 ## 1.17.0 — 2026-11-08
 
 Stretches of history, a faster interpreter, and more of the tin's guard.

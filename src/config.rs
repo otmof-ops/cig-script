@@ -52,6 +52,11 @@ pub const KEYS: &[(&str, &str, &str)] = &[
         "the memory guard on hop watching: how many entries of a pack it reads before it stops (about 60 bytes each); past it, what a hop creates is irreversible and the hop says so",
     ),
     (
+        "hop_skip",
+        "",
+        "globs every watched hop leaves out of the tin, comma-separated and relative to a pack root (`**/.cache/**, *.log`), on top of each hop's own `skip`: their changes are not kept, so a hop cannot undo them (E310)",
+    ),
+    (
         "seal",
         "secrets",
         "which files the tin keeps sealed (encrypted at rest): secrets (secret-shaped names, a pack root's .cigseal, a hop's touches_sealed), all, or never",
@@ -206,6 +211,13 @@ impl Config {
             ("seal_key", "keyring" | "file") => {}
             ("seal_key", other) => {
                 return Err(format!("seal_key must be keyring or file, not `{other}`"))
+            }
+            ("hop_skip", v) => {
+                for g in crate::burn::tin::skip_setting_globs(v) {
+                    if let Err(e) = globset::Glob::new(g.trim_start_matches("./")) {
+                        return Err(format!("hop_skip: `{g}` is not a glob: {e}"));
+                    }
+                }
             }
             ("watch_cap", v) if v.parse::<usize>().is_ok_and(|n| n > 0) => {}
             ("watch_cap", other) => {

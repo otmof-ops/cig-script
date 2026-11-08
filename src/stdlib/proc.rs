@@ -87,6 +87,9 @@ struct Options {
     touches: Vec<String>,
     /// Globs among them whose files are secrets, kept sealed.
     touches_sealed: Vec<String>,
+    /// Globs the hop leaves out of the tin (#148): a cache it rebuilds
+    /// anyway. Its changes there are not kept, so it cannot undo them.
+    skip: Vec<String>,
     /// Run in the box: a copy-on-write layer over the pack, applied only
     /// when the hop succeeds.
     boxed: bool,
@@ -122,6 +125,7 @@ impl Options {
             sep: ',',
             touches: Vec::new(),
             touches_sealed: Vec::new(),
+            skip: Vec::new(),
             boxed: false,
             box_spec: crate::burn::overlay::BoxSpec::default(),
             stream: false,
@@ -165,6 +169,21 @@ impl Options {
                             other => {
                                 return Err(type_error(format!(
                                     "{name}: `touches_sealed` holds a {}; want globs as strings",
+                                    other.type_name()
+                                ))
+                                .at(s))
+                            }
+                        }
+                    }
+                }
+                ("skip", Value::Str(g)) => o.skip = vec![g.to_string()],
+                ("skip", Value::List(l)) => {
+                    for item in l.borrow().iter() {
+                        match item {
+                            Value::Str(g) => o.skip.push(g.to_string()),
+                            other => {
+                                return Err(type_error(format!(
+                                    "{name}: `skip` holds a {}; want globs as strings",
                                     other.type_name()
                                 ))
                                 .at(s))
@@ -235,7 +254,7 @@ impl Options {
                         }
                     }
                 }
-                ("cwd" | "env" | "timeout_ms" | "grace_ms" | "stdin" | "ok" | "encoding" | "sep" | "touches" | "touches_sealed", other) => {
+                ("cwd" | "env" | "timeout_ms" | "grace_ms" | "stdin" | "ok" | "encoding" | "sep" | "touches" | "touches_sealed" | "skip", other) => {
                     return Err(type_error(format!(
                         "{name}: option `{k}` has the wrong type ({})",
                         other.type_name()
@@ -245,7 +264,7 @@ impl Options {
                 (other, _) => {
                     return Err(runtime(format!("{name}: unknown option `{other}`"))
                         .at(s)
-                        .with_hint("use one of cwd, env, clean_env, timeout_ms, grace_ms, stdin, check, ok, encoding, header, sep, touches, touches_sealed, box"))
+                        .with_hint("use one of cwd, env, clean_env, timeout_ms, grace_ms, stdin, check, ok, encoding, header, sep, touches, touches_sealed, skip, box"))
                 }
             }
         }
@@ -254,6 +273,11 @@ impl Options {
             (None, Some(true)) => o.ok = Some(vec![0]),
             (None, Some(false)) => o.ok = None,
             (None, None) => {}
+        }
+        // A `skip` glob that does not parse is the script's mistake, said
+        // here rather than skipping nothing when the hop runs.
+        if let Err(e) = crate::burn::tin::globs(&o.skip) {
+            return Err(type_error(format!("{name}: {}", e.replacen("touches", "skip", 1))).at(s));
         }
         // A sealed glob is a touches glob too: its files are kept, sealed.
         for g in &o.touches_sealed {
@@ -2012,6 +2036,7 @@ fn hop(
         cwd: o.cwd.clone(),
         touches: o.touches.clone(),
         touches_sealed: o.touches_sealed.clone(),
+        skip: o.skip.clone(),
         boxed: o.boxed,
         box_terms: if o.boxed {
             o.box_spec.terms()
@@ -2375,7 +2400,7 @@ fn hop(
     };
     let watch = i
         .kernel
-        .pack_watch_begin(o.cwd.as_deref(), &o.touches, &o.touches_sealed);
+        .pack_watch_begin(o.cwd.as_deref(), &o.touches, &o.touches_sealed, &o.skip);
     let ran = run_child(name, cmd, args, o, s, report.as_deref(), guard.as_ref());
     finish_watch(
         i,
@@ -2931,6 +2956,7 @@ fn pipe(i: &mut Interp, a: &[Value], s: Span) -> Result<Value, Diagnostic> {
         cwd: o.cwd.clone(),
         touches: o.touches.clone(),
         touches_sealed: o.touches_sealed.clone(),
+        skip: o.skip.clone(),
         boxed: o.boxed,
         box_terms: if o.boxed {
             o.box_spec.terms()
@@ -2948,7 +2974,7 @@ fn pipe(i: &mut Interp, a: &[Value], s: Span) -> Result<Value, Diagnostic> {
     let report = i.kernel.hop_journal();
     let watch = i
         .kernel
-        .pack_watch_begin(o.cwd.as_deref(), &o.touches, &o.touches_sealed);
+        .pack_watch_begin(o.cwd.as_deref(), &o.touches, &o.touches_sealed, &o.skip);
     let pipeline_label = stages
         .iter()
         .map(|(c, a)| hop_label(c, a))

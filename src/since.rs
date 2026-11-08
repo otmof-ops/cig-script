@@ -32,6 +32,7 @@ const FEATURES: &[(&str, Version)] = &[
     ("touches_sealed", Version(1, 5, 0)),
     ("fs.write_text(path, text, {sensitive})", Version(1, 5, 0)),
     ("box: true", Version(1, 6, 0)),
+    ("skip", Version(1, 18, 0)),
 ];
 
 pub const FIRST: Version = Version(1, 0, 0);
@@ -204,6 +205,7 @@ fn newer_arguments(qualified: &str, args: &[Expr], span: Span, out: &mut Vec<Use
                         note(out, "touches_sealed", feature("touches_sealed"), span)
                     }
                     "box" => note(out, "box: true", feature("box: true"), span),
+                    "skip" => note(out, "skip", feature("skip"), span),
                     _ => {}
                 }
             }
