@@ -1035,6 +1035,55 @@ pub fn pin(ctx: &Ctx, id: &str, on: bool) -> i32 {
     exit::OK
 }
 
+/// `cig runs --pruned` (#149): the runs whose folders went on purpose, from
+/// the ledger, newest first: when, how (`pruned` by --prune or the
+/// retention settings, `forgotten` by --forget), and the status the ledger
+/// last recorded for each. A missing run is explained, not mysterious.
+pub fn pruned(ctx: &Ctx) -> i32 {
+    let ledger = match crate::burn::ledger::load() {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("{} the ledger cannot be read here: {e}", ctx.red("error:"));
+            return exit::SCRIPT_ERROR;
+        }
+    };
+    let lines: Vec<&crate::burn::ledger::Line> = ledger.of_this_tin().collect();
+    let gone: Vec<&crate::burn::ledger::Line> = lines
+        .iter()
+        .rev()
+        .filter(|l| l.kind == "pruned" || l.kind == "forgotten")
+        .copied()
+        .collect();
+    // What each run was, as the ledger last recorded it before it went.
+    let was = |run: &str| {
+        lines
+            .iter()
+            .rev()
+            .find(|l| l.run == run && (l.kind == "run" || l.kind == "unburn"))
+            .map(|l| l.status.clone())
+            .unwrap_or_else(|| "-".to_string())
+    };
+    if ctx.json {
+        let v: Vec<serde_json::Value> = gone
+            .iter()
+            .map(
+                |l| serde_json::json!({"run": l.run, "at": l.t, "how": l.kind, "was": was(&l.run)}),
+            )
+            .collect();
+        outln!("{}", serde_json::to_string(&v).unwrap_or_default());
+        return exit::OK;
+    }
+    if gone.is_empty() {
+        eprintln!("no run has been pruned or forgotten");
+        return exit::OK;
+    }
+    outln!("{:<24} {:<26} {:<10} {}", "run", "at", "how", "was");
+    for l in gone {
+        outln!("{:<24} {:<26} {:<10} {}", l.run, l.t, l.kind, was(&l.run));
+    }
+    exit::OK
+}
+
 // ----- a stretch of history (#149) -------------------------------------------------
 
 /// Which runs `cig unburn` puts back when it is not given one.

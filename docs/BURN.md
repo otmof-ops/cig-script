@@ -436,7 +436,10 @@ keeps every run. Neither drops a run with work left: one still running, one
 interrupted, or one whose unburn failed. Neither they nor `cig runs --prune`
 drop a pinned run: `cig runs --pin <id>` keeps the run before a migration or
 a release whatever they say (`cig runs` marks it `(pinned)`), and
-`cig runs --unpin <id>` lets it go.
+`cig runs --unpin <id>` lets it go. `cig runs --pruned` lists the runs that
+went on purpose, from the ledger, newest first: when, how (`pruned`, or
+`forgotten` by `--forget`) and the status each last had, so a missing run is
+explained.
 
 ## Keeping the tin private
 
