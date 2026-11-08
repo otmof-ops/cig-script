@@ -11,6 +11,16 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+/// The cig under test: this build's, or `CIG_TEST_BIN` when that names
+/// another. cig-compile runs these tests with a cig that builds each script
+/// and runs the program (its `ci/cig-compiled.sh`), so a compiled program's
+/// burns are held to the same tests (otmof-ops/cig-compile#6).
+fn cig_bin() -> std::path::PathBuf {
+    std::env::var_os("CIG_TEST_BIN")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(env!("CARGO_BIN_EXE_cig")))
+}
+
 struct Sandbox {
     dir: tempfile::TempDir,
 }
@@ -33,7 +43,7 @@ impl Sandbox {
         p
     }
     fn cig_env(&self, args: &[&str], envs: &[(&str, &str)]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_cig"))
+        Command::new(cig_bin())
             .args(args)
             .current_dir(self.path())
             .env("CIGSCRIPT_HOME", self.path().join("home"))
@@ -500,7 +510,7 @@ fn a_signal_to_cig_reaches_the_child_process_group() {
         "s.cig",
         &burn(&format!("  proc.run(\"sh\", [\"-c\", \"{marker}\"])")),
     );
-    let mut child = Command::new(env!("CARGO_BIN_EXE_cig"))
+    let mut child = Command::new(cig_bin())
         .args(["run", "s.cig"])
         .current_dir(sb.path())
         .env("CIGSCRIPT_HOME", sb.path().join("home"))
@@ -672,7 +682,7 @@ fn stream_shows_a_hops_output_as_it_arrives_and_still_captures_it_whole() {
         "live.cig",
         &burn("  proc.run(\"sh\", [\"-c\", \"echo early; sleep 3; echo late\"], {stream: true})"),
     );
-    let mut child = Command::new(env!("CARGO_BIN_EXE_cig"))
+    let mut child = Command::new(cig_bin())
         .args(["run", "live.cig"])
         .current_dir(sb.path())
         .env("CIGSCRIPT_HOME", sb.path().join("home"))
