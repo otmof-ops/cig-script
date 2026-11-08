@@ -11,6 +11,17 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+/// The cig under test: this build's, or `CIG_TEST_BIN` when that names
+/// another. cig-compile runs the tin and box tests with a cig that builds
+/// each script and runs the program (its `ci/cig-compiled.sh`), so a
+/// compiled program's burns are held to the same tests
+/// (otmof-ops/cig-compile#6).
+fn cig_bin() -> PathBuf {
+    std::env::var_os("CIG_TEST_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_cig")))
+}
+
 struct Sandbox {
     dir: tempfile::TempDir,
 }
@@ -83,7 +94,7 @@ impl Sandbox {
     }
 
     fn cig(&self, args: &[&str]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_cig"))
+        Command::new(cig_bin())
             .args(args)
             .current_dir(self.path())
             .env("CIGSCRIPT_HOME", self.home())
@@ -129,7 +140,7 @@ impl Sandbox {
     /// `cig`, started in a folder under the sandbox, the sandbox as home.
     #[cfg(unix)]
     fn cig_in(&self, sub: &str, args: &[&str], envs: &[(&str, &str)]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_cig"))
+        Command::new(cig_bin())
             .args(args)
             .current_dir(self.path().join(sub))
             .env("CIGSCRIPT_HOME", self.home())
@@ -147,7 +158,7 @@ impl Sandbox {
     }
 
     fn cig_env(&self, args: &[&str], envs: &[(&str, &str)]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_cig"))
+        Command::new(cig_bin())
             .args(args)
             .current_dir(self.path())
             .env("CIGSCRIPT_HOME", self.home())
@@ -171,7 +182,7 @@ impl Sandbox {
     /// `cig`, started and left running (for a test that kills it).
     #[cfg(target_os = "linux")]
     fn cig_spawn(&self, args: &[&str]) -> std::process::Child {
-        Command::new(env!("CARGO_BIN_EXE_cig"))
+        Command::new(cig_bin())
             .args(args)
             .current_dir(self.path())
             .env("CIGSCRIPT_HOME", self.home())
@@ -630,7 +641,7 @@ fn config_reads_validates_and_persists() {
 fn a_panic_writes_a_redacted_crash_report_and_never_sends_without_consent() {
     let sb = Sandbox::new();
     sb.write("s.cig", "exhale 1\n");
-    let out = Command::new(env!("CARGO_BIN_EXE_cig"))
+    let out = Command::new(cig_bin())
         .args(["run", "s.cig", "--token=supersecret"])
         .current_dir(sb.path())
         .env("CIGSCRIPT_HOME", sb.home())
@@ -665,7 +676,7 @@ fn a_panic_writes_a_redacted_crash_report_and_never_sends_without_consent() {
     assert!(shown.contains("\"fingerprint\""));
     // never mode: no prompt, no send, report stays local.
     sb.run_ok(&["config", "crash_reports", "never"]);
-    let out = Command::new(env!("CARGO_BIN_EXE_cig"))
+    let out = Command::new(cig_bin())
         .args(["run", "s.cig"])
         .current_dir(sb.path())
         .env("CIGSCRIPT_HOME", sb.home())
@@ -2418,7 +2429,7 @@ fn a_named_pipe_is_refused_not_hung() {
         .expect("mkfifo")
         .success());
     sb.write("s.cig", "burn {\n  fs.rm(\"fifo\")\n}\n");
-    let mut child = Command::new(env!("CARGO_BIN_EXE_cig"))
+    let mut child = Command::new(cig_bin())
         .args(["run", "s.cig"])
         .current_dir(sb.path())
         .env("CIGSCRIPT_HOME", sb.home())
@@ -6667,7 +6678,7 @@ fn a_second_run_on_the_same_pack_is_refused_while_the_first_runs() {
         "other.cig",
         "pack { \"./p/sub\" }\nburn {\n  fs.write_text(\"p/sub/x.txt\", \"1\")\n}\n",
     );
-    let mut slow = Command::new(env!("CARGO_BIN_EXE_cig"))
+    let mut slow = Command::new(cig_bin())
         .args(["run", "slow.cig"])
         .current_dir(sb.path())
         .env("CIGSCRIPT_HOME", sb.home())
@@ -8685,7 +8696,7 @@ fn when_the_box_cannot_be_made_the_hop_falls_back_to_the_tin_and_says_so() {
     );
     let plan = String::from_utf8_lossy(&dry.stderr);
     assert!(
-        plan.contains("(boxed)") && plan.contains("the box cannot be made here"),
+        plan.contains("(boxed: network on)") && plan.contains("the box cannot be made here"),
         "{plan}"
     );
     let out = sb.cig_env(&["run", "s.cig"], &[("CIG_INTERNAL_NO_BOX", "1")]);
@@ -8742,7 +8753,7 @@ fn a_chatty_undo_neither_hangs_the_rollback_nor_floods_the_report() {
         "s.cig",
         "pack { \"./p\" }\nburn {\n  proc.run(\"sh\", [\"chatty.sh\"], {touches: [\"**\"]})\n  cough \"boom\"\n}\n",
     );
-    let mut child = Command::new(env!("CARGO_BIN_EXE_cig"))
+    let mut child = Command::new(cig_bin())
         .args(["run", "s.cig"])
         .current_dir(sb.path())
         .env("CIGSCRIPT_HOME", sb.home())
@@ -10036,7 +10047,7 @@ fn a_send_waits_for_the_sender_that_holds_the_ashtray() {
     fs::create_dir_all(sb.home().join("ashtray")).unwrap();
     let held = sb.home().join("ashtray").join(".flush.lock");
     fs::write(&held, format!("{}\n", std::process::id())).unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_cig"))
+    let mut child = Command::new(cig_bin())
         .args([
             "crash",
             "submit",
@@ -10498,7 +10509,7 @@ fn a_run_starts_without_reading_other_runs_journals() {
     let fifo = other.join("journal.jsonl");
     let made = Command::new("mkfifo").arg(&fifo).status().expect("mkfifo");
     assert!(made.success());
-    let mut child = Command::new(env!("CARGO_BIN_EXE_cig"))
+    let mut child = Command::new(cig_bin())
         .args(["run", "s.cig"])
         .current_dir(sb.path())
         .env("CIGSCRIPT_HOME", sb.home())
@@ -10802,6 +10813,40 @@ fn pinned_runs_survive_prune_and_keep_runs() {
     sb.run_ok(&["runs", "--unpin", &ids[0]]);
     sb.run_ok(&["runs", "--prune", "1"]);
     assert!(!sb.runs().iter().any(|r| r["id"] == ids[0].as_str()));
+}
+
+/// #106: a boxed hop's plan line and its record say what the box was asked
+/// for (the network, and whatever is not the default), not only that there
+/// was one.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_boxed_hop_says_its_box_in_the_plan_and_the_record() {
+    let sb = Sandbox::new();
+    sb.write("p/keep.txt", "k");
+    sb.write(
+        "plan.cig",
+        "pack { \"./p\" }\nburn {\n  proc.run(\"true\", [], {box: {network: \"registry\", allow_hosts: [\"registry.npmjs.org\"], contain: true, apply: \"never\"}})\n  proc.run(\"true\", [], {box: true})\n}\n",
+    );
+    let out = sb.cig(&["run", "--dry-run", "plan.cig"]);
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        said.contains("(boxed: network registry, allow registry.npmjs.org, contain, apply never)"),
+        "{said}"
+    );
+    assert!(said.contains("(boxed: network on)"), "{said}");
+    // A real run records the terms with the hop, and cig runs says them.
+    sb.write(
+        "run.cig",
+        "pack { \"./p\" }\nburn {\n  proc.run(\"true\", [], {box: {expect: [\"**\"]}})\n}\n",
+    );
+    sb.run_ok(&["run", "run.cig"]);
+    let id = sb.runs()[0]["id"].as_str().unwrap().to_string();
+    let shown = sb.run_ok(&["runs", &id]);
+    assert!(shown.contains("(boxed: network on, expect **)"), "{shown}");
 }
 
 /// #105, L6: a journal the ledger says was cut short is a tripwire as well

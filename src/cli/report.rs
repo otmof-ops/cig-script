@@ -185,6 +185,9 @@ fn op_shape(op: &Op, m: &mut Mapping) -> String {
             touches,
             touches_sealed,
             boxed,
+            // The box's hosts and globs could name someone: a report says
+            // only that the hop was boxed.
+            box_terms: _,
         } => {
             let mut s = format!(
                 "run {} ({} argument{})",
