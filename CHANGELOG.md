@@ -3,6 +3,22 @@
 All notable changes to CigScript. The format follows Keep a Changelog; the
 project follows semantic versioning.
 
+## Unreleased
+
+- **A disk budget for the history, off by default** (#149). `history_budget`
+  (a size like `500MB` or `2GB`, base 1024; `off`, the default, so nothing
+  is pruned on upgrade) caps the history as it grows: the run records and
+  the tin. Past it, after a run and on `cig runs --prune`, the oldest runs
+  go and the tin is collected; a tin object counts as freed only when the
+  last run that refers to it goes, so no more is pruned than must be.
+  Never pruned: a pinned run, a run with work left (running, interrupted,
+  an unburn that failed), a run holding a box layer that waits for
+  approval, a run younger than `history_keep` (30 days by default), and the
+  newest run; the budget can be exceeded for them, and `cig doctor` says
+  so. Each prune is listed by `cig runs --pruned` as `budget`. `cig doctor`
+  shows the history's size and, with the budget off, suggests one (about
+  5% of the free space, from 1 GB to 20 GB) without changing anything.
+
 ## 1.17.0 — 2026-11-08
 
 Stretches of history, a faster interpreter, and more of the tin's guard.

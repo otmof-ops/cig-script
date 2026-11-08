@@ -11025,3 +11025,183 @@ fn pruned_runs_are_listed_from_the_ledger() {
         "{json}"
     );
 }
+
+/// #149: `history_budget` is off by default, so nothing is pruned on
+/// upgrade; with a size set, the oldest unpinned finished runs are pruned
+/// after a burn until the history fits, each in the ledger as `budget` so
+/// `cig runs --pruned` says why.
+#[test]
+fn history_budget_is_off_by_default_and_prunes_oldest_first_when_set() {
+    // Off: four runs stay, as they did before 1.17.
+    let sb = Sandbox::new();
+    let ids = four_runs(&sb);
+    assert_eq!(sb.runs().len(), 4, "off is the default");
+    // A tiny budget, and no age floor (these runs are seconds old): the
+    // next burn makes the history too big, so the oldest runs are pruned
+    // first and the newest one stays.
+    sb.run_ok(&["config", "history_keep", "0"]);
+    sb.run_ok(&["config", "history_budget", "1024"]);
+    sb.write("s5.cig", "burn {\n  fs.write_text(\"g5.txt\", \"g\")\n}\n");
+    sb.run_ok(&["run", "s5.cig"]);
+    let left: Vec<String> = sb
+        .runs()
+        .iter()
+        .map(|r| r["id"].as_str().unwrap().to_string())
+        .collect();
+    assert!(
+        left.len() < 5,
+        "the budget pruned nothing: {} runs left",
+        left.len()
+    );
+    assert!(
+        !left.contains(&ids[0]),
+        "oldest should go first; {ids:?} left {left:?}"
+    );
+    // The last run (the one that tripped the budget) stays.
+    let newest = sb.runs()[0]["id"].as_str().unwrap().to_string();
+    assert!(left.contains(&newest), "newest run lost: {left:?}");
+    // The pruned ledger shows them with how = budget.
+    let listed = sb.run_ok(&["runs", "--pruned"]);
+    assert!(
+        listed.lines().any(|l| l.contains("budget")),
+        "no budget line: {listed}"
+    );
+    let json: serde_json::Value =
+        serde_json::from_str(&sb.run_ok(&["--json", "runs", "--pruned"])).unwrap();
+    assert!(
+        json.as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["how"] == "budget"),
+        "no budget entry: {json}"
+    );
+}
+
+/// #149: a pinned run is spared by the disk budget, even when it is the
+/// oldest; the budget can be exceeded for it.
+#[test]
+fn history_budget_spares_pinned_runs() {
+    let sb = Sandbox::new();
+    let ids = four_runs(&sb);
+    sb.run_ok(&["runs", "--pin", &ids[0]]);
+    sb.run_ok(&["config", "history_keep", "0"]);
+    sb.run_ok(&["config", "history_budget", "1024"]);
+    sb.write("s5.cig", "burn {\n  fs.write_text(\"g5.txt\", \"g\")\n}\n");
+    sb.run_ok(&["run", "s5.cig"]);
+    assert!(
+        sb.runs().iter().any(|r| r["id"] == ids[0].as_str()),
+        "the pinned run was pruned: {:?}",
+        sb.runs()
+    );
+}
+
+/// #149: `cig doctor` reads the history's size and, when
+/// `history_budget` is off, suggests a value (5% of free space, from 1 GB
+/// to 20 GB), without changing anything.
+#[test]
+fn doctor_reports_history_and_suggests_a_budget_when_off() {
+    let sb = Sandbox::new();
+    let _ids = four_runs(&sb);
+    let json: serde_json::Value = serde_json::from_str(&sb.run_ok(&["--json", "doctor"])).unwrap();
+    assert_eq!(json["history_budget"], "off");
+    // A number of bytes between 1 GB and 20 GB, or null where free space
+    // cannot be measured here.
+    match &json["history_budget_suggested"] {
+        serde_json::Value::Number(n) => {
+            let bytes = n.as_u64().unwrap();
+            assert!(
+                (1 << 30..=20u64 * (1 << 30)).contains(&bytes),
+                "suggestion out of range: {bytes}"
+            );
+        }
+        serde_json::Value::Null => {}
+        other => panic!("unexpected suggestion: {other}"),
+    }
+    // The text output names the budget and, when off, the suggestion.
+    let text = sb.run_ok(&["doctor"]);
+    assert!(text.contains("history"), "{text}");
+    assert!(text.contains("budget off"), "{text}");
+    assert!(text.contains("cig doctor suggests"), "no tip: {text}");
+    // The suggestion changes nothing on disk.
+    let v: serde_json::Value = serde_json::from_str(&sb.run_ok(&["--json", "config"])).unwrap();
+    assert_eq!(v["config"]["history_budget"]["value"], "off");
+    assert_eq!(v["config"]["history_budget"]["explicit"], false);
+    // With a budget set, doctor no longer suggests one.
+    sb.run_ok(&["config", "history_budget", "2GB"]);
+    let json: serde_json::Value = serde_json::from_str(&sb.run_ok(&["--json", "doctor"])).unwrap();
+    assert_eq!(json["history_budget"], "2GB");
+    assert!(
+        json["history_budget_suggested"].is_null(),
+        "still suggesting: {json}"
+    );
+    let text = sb.run_ok(&["doctor"]);
+    assert!(
+        !text.contains("cig doctor suggests"),
+        "still tipping: {text}"
+    );
+}
+
+/// #149: the budget measures the history as it grows, the run records and
+/// the tin, and a prune frees a tin object only when the last run that
+/// refers to it goes: here each run's hop kept a distinct 60 KB file (one
+/// object, under the chunking size), so one prune is enough to fit, the
+/// oldest run goes, and the collector takes its object. By default runs
+/// younger than `history_keep` (30 days) are never pruned, and `cig
+/// doctor` says the budget is exceeded for them.
+#[cfg(unix)]
+#[test]
+fn history_budget_counts_the_tin_and_collects_it() {
+    let sb = Sandbox::new();
+    let size = 60 * 1024;
+    sb.write("p/big.bin", &"0".repeat(size));
+    for k in 1..=4 {
+        sb.write(&format!("src{k}.bin"), &k.to_string().repeat(size));
+        sb.write(
+            &format!("s{k}.cig"),
+            &format!("pack {{ \"./p\" }}\nburn {{\n  proc.run(\"cp\", [\"src{k}.bin\", \"p/big.bin\"], {{touches: [\"big.bin\"]}})\n}}\n"),
+        );
+        sb.run_ok(&["run", &format!("s{k}.cig")]);
+    }
+    let objects = |sb: &Sandbox| -> usize {
+        walkdir::WalkDir::new(sb.home().join("tin"))
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_file() && e.path().to_string_lossy().contains("/objects/"))
+            .count()
+    };
+    let before = objects(&sb);
+    assert_eq!(before, 4, "each run's hop kept the file it overwrote");
+    let mut ids: Vec<String> = sb
+        .runs()
+        .iter()
+        .map(|r| r["id"].as_str().unwrap().to_string())
+        .collect();
+    ids.reverse();
+    let json: serde_json::Value = serde_json::from_str(&sb.run_ok(&["--json", "doctor"])).unwrap();
+    let history = json["history_bytes"].as_u64().unwrap();
+    assert!(history >= 4 * size as u64, "the tin is counted: {json}");
+    // A budget that one prune meets: the history less half an object.
+    let budget = history - (size as u64) / 2;
+    sb.run_ok(&["config", "history_budget", &budget.to_string()]);
+    // The age floor holds by default: every run is seconds old.
+    sb.run_ok(&["runs", "--prune", "100"]);
+    assert_eq!(sb.runs().len(), 4, "history_keep spares young runs");
+    let json: serde_json::Value = serde_json::from_str(&sb.run_ok(&["--json", "doctor"])).unwrap();
+    assert_eq!(json["history_over_budget"], true, "{json}");
+    assert!(sb.run_ok(&["doctor"]).contains("over it"), "doctor says so");
+    // No floor: one prune, the oldest, and its object collected.
+    sb.run_ok(&["config", "history_keep", "0"]);
+    sb.run_ok(&["runs", "--prune", "100"]);
+    let left: Vec<String> = sb
+        .runs()
+        .iter()
+        .map(|r| r["id"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(left.len(), 3, "one prune was enough: {left:?}");
+    assert!(!left.contains(&ids[0]), "the oldest went: {left:?}");
+    assert_eq!(objects(&sb), before - 1, "its object was collected");
+    // What is left still unburns, byte for byte: the three runs' objects
+    // are all there.
+    sb.run_ok(&["unburn", "--last", "3", "--yes"]);
+    assert_eq!(sb.read("p/big.bin"), "1".repeat(size));
+}

@@ -106,6 +106,22 @@ pub fn doctor(ctx: &Ctx, fix: bool) -> i32 {
             run_bytes >> 20
         ));
     }
+    // The disk budget (#149): off is the default. When it is off, doctor
+    // suggests a value (5% of the state directory's free space, from 1 GB
+    // to 20 GB) so the history does not grow forever; nothing is changed,
+    // and the suggestion is a tip, never counted as a problem.
+    let budget = crate::config::parse_bytes(&cfg.get("history_budget")).flatten();
+    let suggestion = if budget.is_none() {
+        suggested_budget(&home)
+    } else {
+        None
+    };
+    // The history as the budget measures it: the runs and the tin.
+    let history = super::runs::history_bytes();
+    // Over the budget after a run means what is left may not be pruned
+    // (pinned, held for approval, younger than history_keep): said, since
+    // the budget is exceeded on purpose then.
+    let over = budget.is_some_and(|b| history > b);
 
     for id in &interrupted {
         problems.push(format!(
@@ -122,6 +138,10 @@ pub fn doctor(ctx: &Ctx, fix: bool) -> i32 {
             "state_dir_writable": writable.is_ok(),
             "runs": run_count,
             "runs_bytes": run_bytes,
+            "history_bytes": history,
+            "history_budget": cfg.get("history_budget"),
+            "history_over_budget": over,
+            "history_budget_suggested": suggestion,
             "interrupted_runs": interrupted,
             "crash_reports": crashes.len(),
             "crash_reports_unsent": unsent,
@@ -152,12 +172,27 @@ pub fn doctor(ctx: &Ctx, fix: bool) -> i32 {
     );
     outln!("  writable      {}", yes_no(ctx, writable.is_ok()));
     outln!(
-        "  runs          {run_count} recorded, {} KB{}",
-        run_bytes >> 10,
+        "  runs          {run_count} recorded, {}{}",
+        human_bytes(run_bytes),
         if interrupted.is_empty() {
             String::new()
         } else {
             ctx.red(&format!("  {} interrupted", interrupted.len()))
+        }
+    );
+    outln!(
+        "  history       {} (runs and the tin), budget {}{}",
+        human_bytes(history),
+        cfg.get("history_budget"),
+        match (&suggestion, over) {
+            (Some(bytes), _) => ctx.dim(&format!(
+                "  (off: cig doctor suggests {})",
+                human_bytes(*bytes)
+            )),
+            (None, true) => ctx.dim(
+                "  (over it: what is left is pinned, held for approval, or younger than history_keep)"
+            ),
+            (None, false) => String::new(),
         }
     );
     outln!(
@@ -548,6 +583,68 @@ fn dir_size(dir: &Path) -> u64 {
         .filter(|m| m.is_file())
         .map(|m| m.len())
         .sum()
+}
+
+/// A short size in the units `history_budget` accepts, rounded for the eye.
+fn human_bytes(n: u64) -> String {
+    const K: u64 = 1 << 10;
+    const M: u64 = 1 << 20;
+    const G: u64 = 1 << 30;
+    const T: u64 = 1 << 40;
+    if n >= T {
+        format!("{}TB", n / T)
+    } else if n >= G {
+        format!("{}GB", n / G)
+    } else if n >= M {
+        format!("{}MB", n / M)
+    } else if n >= K {
+        format!("{}KB", n / K)
+    } else {
+        format!("{n}B")
+    }
+}
+
+/// A value `history_budget` could reasonably hold: about 5% of the state
+/// directory's free space, rounded to a GB where there is room, from 1 GB
+/// to 20 GB. `None` where the free space cannot be measured here (a
+/// platform without a statvfs, say).
+#[cfg(unix)]
+fn suggested_budget(home: &Path) -> Option<u64> {
+    use std::os::unix::ffi::OsStrExt;
+    // The home may not exist yet: step up to the first parent that does,
+    // whose filesystem is the one the state will land on.
+    let mut probe: PathBuf = home.to_path_buf();
+    while !probe.exists() {
+        probe = probe.parent()?.to_path_buf();
+        if probe.as_os_str().is_empty() {
+            return None;
+        }
+    }
+    let c = std::ffi::CString::new(probe.as_os_str().as_bytes()).ok()?;
+    let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statvfs(c.as_ptr(), &mut st) } != 0 {
+        return None;
+    }
+    let free = (st.f_bavail as u64).checked_mul(st.f_frsize as u64)?;
+    if free == 0 {
+        return None;
+    }
+    let five_pct = free / 20;
+    let min: u64 = 1 << 30; // 1 GB
+    let max: u64 = 20 * (1 << 30); // 20 GB
+    let picked = five_pct.clamp(min, max);
+    // Round down to the nearest GB when it will fit.
+    let rounded = if picked >= 1 << 30 {
+        (picked >> 30) << 30
+    } else {
+        picked
+    };
+    Some(rounded)
+}
+
+#[cfg(not(unix))]
+fn suggested_budget(_home: &Path) -> Option<u64> {
+    None
 }
 
 // ----- automatic diagnosis: rendering and re-diagnosis -----------------------

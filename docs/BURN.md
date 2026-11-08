@@ -438,8 +438,23 @@ drop a pinned run: `cig runs --pin <id>` keeps the run before a migration or
 a release whatever they say (`cig runs` marks it `(pinned)`), and
 `cig runs --unpin <id>` lets it go. `cig runs --pruned` lists the runs that
 went on purpose, from the ledger, newest first: when, how (`pruned`, or
-`forgotten` by `--forget`) and the status each last had, so a missing run is
-explained.
+`forgotten` by `--forget`, or `budget` when `history_budget` made the
+choice) and the status each last had, so a missing run is explained.
+
+`history_budget` caps the history as it grows, the run records and the
+tin. It is off by default so nothing is pruned on upgrade; `cig doctor`
+shows the history's size and suggests a value (about 5% of the free space,
+from 1 GB to 20 GB), and you pick your own. Set to a size (a number of
+bytes, or `500MB`, `2GB`, base 1024), it is checked after each run and on
+`cig runs --prune`: the oldest runs go until the history fits, then the tin
+is collected. A tin object counts as freed only when the last run that
+refers to it goes, so no more is pruned than must be. Never pruned: a
+pinned run, a run with work left (running, interrupted, an unburn that
+failed), a run holding a box layer that waits for approval, a run younger
+than `history_keep` (30 days by default; `90s`, `30m`, `2h`, `3d`, `1w`, or
+`off`), and the newest run. The budget can be exceeded for those, and `cig
+doctor` says so. Each prune is a ledger line with `status = budget`, so
+`cig runs --pruned` says `how = budget` for it.
 
 ## Keeping the tin private
 
