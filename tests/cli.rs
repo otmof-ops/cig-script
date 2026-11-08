@@ -10648,3 +10648,158 @@ fn walk(dir: &Path) -> Vec<PathBuf> {
     }
     out
 }
+
+/// #149: four runs, each rewriting f.txt and leaving a g<k>.txt.
+fn four_runs(sb: &Sandbox) -> Vec<String> {
+    for k in 1..=4 {
+        sb.write(
+            &format!("s{k}.cig"),
+            &format!("burn {{\n  fs.write_text(\"f.txt\", \"{k}\")\n  fs.write_text(\"g{k}.txt\", \"g\")\n}}\n"),
+        );
+        sb.run_ok(&["run", &format!("s{k}.cig")]);
+    }
+    // Oldest first.
+    let mut ids: Vec<String> = sb
+        .runs()
+        .iter()
+        .map(|r| r["id"].as_str().unwrap().to_string())
+        .collect();
+    ids.reverse();
+    ids
+}
+
+/// #149: `--last`, `--since` and `--to` put back what unburning the same
+/// runs one by one, newest first, would: the plan first, and a dry run
+/// changes nothing.
+#[test]
+fn a_stretch_puts_back_what_one_by_one_would() {
+    let sb = Sandbox::new();
+    let ids = four_runs(&sb);
+    let plan = sb.cig(&["unburn", "--to", &ids[0], "--dry-run"]);
+    let said = String::from_utf8_lossy(&plan.stderr).to_string();
+    assert!(
+        plan.status.success() && said.contains("undo 3 runs"),
+        "{said}"
+    );
+    assert_eq!(sb.read("f.txt"), "4", "a dry run changed something");
+    let out = sb.cig(&["unburn", "--last", "2"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(sb.read("f.txt"), "2");
+    assert!(!sb.exists("g4.txt") && !sb.exists("g3.txt") && sb.exists("g2.txt"));
+    // The same as one at a time, in another sandbox.
+    let other = Sandbox::new();
+    let theirs = four_runs(&other);
+    other.run_ok(&["unburn", &theirs[3]]);
+    other.run_ok(&["unburn", &theirs[2]]);
+    for f in ["f.txt", "g1.txt", "g2.txt"] {
+        assert_eq!(sb.read(f), other.read(f), "{f}");
+    }
+    // --to keeps the run it names; the ones back already are not done twice.
+    let out = sb.cig(&["unburn", "--to", &ids[0]]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(sb.read("f.txt"), "1");
+    assert!(sb.exists("g1.txt") && !sb.exists("g2.txt"));
+    let runs = sb.runs();
+    let status = |id: &str| {
+        runs.iter()
+            .find(|r| r["id"] == id)
+            .map(|r| r["status"].as_str().unwrap().to_string())
+            .unwrap()
+    };
+    assert_eq!(status(&ids[0]), "ok");
+    for id in &ids[1..] {
+        assert_eq!(status(id), "unburned", "{id}");
+    }
+    // --since takes what is left.
+    sb.run_ok(&["unburn", "--since", "1h", "-y"]);
+    assert!(!sb.exists("f.txt") && !sb.exists("g1.txt"));
+    let none = sb.cig(&["unburn", "--last", "5"]);
+    assert!(none.status.success());
+    assert!(String::from_utf8_lossy(&none.stderr).contains("nothing to undo"));
+}
+
+/// #149: a run refused in the middle of a stretch stops it there: the runs
+/// after it stay undone, it and the ones before it untouched, and
+/// `--continue` finishes the same stretch once the refusal is resolved.
+#[test]
+fn a_refused_run_stops_the_stretch_cleanly() {
+    let sb = Sandbox::new();
+    let ids = four_runs(&sb);
+    // Run 3's file is changed by hand after it.
+    sb.write("g3.txt", "edited");
+    let out = sb.cig(&["unburn", "--to", &ids[0]]);
+    let said = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(!out.status.success(), "{said}");
+    assert!(
+        said.contains("E704") && said.contains(&format!("the stretch stopped at {}", ids[2])),
+        "{said}"
+    );
+    assert!(!sb.exists("g4.txt"), "the run after it was not undone");
+    assert_eq!(sb.read("f.txt"), "3");
+    assert_eq!(sb.read("g3.txt"), "edited");
+    assert!(sb.exists("g2.txt") && sb.exists("g1.txt"));
+    // Resolved, the same stretch carries on, and nothing is undone twice.
+    sb.write("g3.txt", "g");
+    let out = sb.cig(&["unburn", "--continue"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let said = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(said.contains("undo 2 runs"), "{said}");
+    assert_eq!(sb.read("f.txt"), "1");
+    assert!(!sb.exists("g3.txt") && !sb.exists("g2.txt") && sb.exists("g1.txt"));
+    let again = sb.cig(&["unburn", "--continue"]);
+    assert_eq!(again.status.code(), Some(3));
+    assert!(String::from_utf8_lossy(&again.stderr).contains("no stretch to continue"));
+}
+
+/// #149: a pinned run is kept by --prune and by keep_runs, listed as
+/// pinned, and goes like any other once it is unpinned.
+#[test]
+fn pinned_runs_survive_prune_and_keep_runs() {
+    let sb = Sandbox::new();
+    let ids = four_runs(&sb);
+    sb.run_ok(&["runs", "--pin", &ids[0]]);
+    let listed = sb.run_ok(&["runs"]);
+    assert!(
+        listed
+            .lines()
+            .any(|l| l.contains(&ids[0]) && l.contains("(pinned)")),
+        "{listed}"
+    );
+    let json = sb.runs();
+    assert_eq!(
+        json.iter().find(|r| r["id"] == ids[0].as_str()).unwrap()["pinned"],
+        true
+    );
+    let out = sb.cig(&["runs", "--prune", "1"]);
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("removed 2 run records, kept 2 (1 pinned)"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let left: Vec<String> = sb
+        .runs()
+        .iter()
+        .map(|r| r["id"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(left, vec![ids[3].clone(), ids[0].clone()]);
+    // keep_runs keeps it too.
+    sb.run_ok(&["config", "keep_runs", "1"]);
+    sb.run_ok(&["run", "s1.cig"]);
+    assert!(sb.runs().iter().any(|r| r["id"] == ids[0].as_str()));
+    // Unpinned, it goes.
+    sb.run_ok(&["runs", "--unpin", &ids[0]]);
+    sb.run_ok(&["runs", "--prune", "1"]);
+    assert!(!sb.runs().iter().any(|r| r["id"] == ids[0].as_str()));
+}

@@ -112,11 +112,18 @@ pub enum Command {
         /// Stop noting that this run (listed in the ledger) is missing from runs/: it was removed on purpose.
         #[arg(long, value_name = "ID")]
         forget: Option<String>,
+        /// Keep this run whatever keep_runs, keep_days and --prune say (the run before a migration or a release).
+        #[arg(long, value_name = "ID")]
+        pin: Option<String>,
+        /// Let a pinned run go again.
+        #[arg(long, value_name = "ID")]
+        unpin: Option<String>,
     },
     /// Put the world back the way it was, newest op first (rollback).
     Unburn {
         /// Run id or unique prefix.
-        id: String,
+        #[arg(required_unless_present_any = ["last", "since", "to", "resume"])]
+        id: Option<String>,
         /// Show what would be restored without touching anything.
         #[arg(long)]
         dry_run: bool,
@@ -129,6 +136,24 @@ pub enum Command {
         /// Restore from a journal signed by another key (another machine's, or one since replaced); its objects are still checked by hash.
         #[arg(long)]
         accept_unsigned: bool,
+        /// Undo the newest N runs that changed something, newest first: one plan, then run by run.
+        #[arg(long, value_name = "N", conflicts_with_all = ["id", "since", "to", "resume", "give_back"])]
+        last: Option<usize>,
+        /// Undo every run started within this long (90s, 30m, 2h, 3d, 1w), newest first.
+        #[arg(long, value_name = "AGE", conflicts_with_all = ["id", "to", "resume", "give_back"])]
+        since: Option<String>,
+        /// Undo every run after this one, newest first; this one stays.
+        #[arg(long, value_name = "ID", conflicts_with_all = ["id", "resume", "give_back"])]
+        to: Option<String>,
+        /// With --last, --since or --to: only the runs whose pack is this folder, or inside it, or holds it.
+        #[arg(long, value_name = "DIR")]
+        pack: Option<std::path::PathBuf>,
+        /// Carry on with the stretch that stopped, once what stopped it is resolved.
+        #[arg(long = "continue", conflicts_with_all = ["id", "give_back"])]
+        resume: bool,
+        /// Do not ask before a stretch, even at a terminal.
+        #[arg(long, short = 'y')]
+        yes: bool,
     },
     /// Look the install over, or diagnose a past run again; asks before it fixes anything (diagnostics).
     Doctor {
@@ -460,19 +485,54 @@ fn dispatch(ctx: Ctx, command: Command) -> i32 {
             prune,
             verify,
             forget,
-        } => runs::runs(&ctx, id, prune, verify, forget),
+            pin,
+            unpin,
+        } => match (pin, unpin) {
+            (Some(id), _) => runs::pin(&ctx, &id, true),
+            (None, Some(id)) => runs::pin(&ctx, &id, false),
+            _ => runs::runs(&ctx, id, prune, verify, forget),
+        },
         Command::Unburn {
             id,
             dry_run,
             force,
             give_back,
             accept_unsigned,
+            last,
+            since,
+            to,
+            pack,
+            resume,
+            yes,
         } => {
-            if give_back {
-                runs::give_back(&ctx, &id, dry_run, force)
-            } else {
-                runs::unburn(&ctx, &id, dry_run, force, accept_unsigned)
-            }
+            let how = match (id, last, since, to, resume) {
+                (Some(id), ..) if give_back => return runs::give_back(&ctx, &id, dry_run, force),
+                (Some(id), ..) => return runs::unburn(&ctx, &id, dry_run, force, accept_unsigned),
+                (None, Some(n), ..) => runs::Stretch::Last(n),
+                (None, None, Some(age), ..) => match runs::parse_age(&age) {
+                    Some(d) => runs::Stretch::Since(d),
+                    None => {
+                        let d = crate::diagnostics::usage(format!("`--since {age}` is not an age"))
+                            .code("E800")
+                            .with_hint("a number and a unit: 90s, 30m, 2h, 3d or 1w");
+                        run::report(&ctx, &d, None, None);
+                        return exit::USAGE;
+                    }
+                },
+                (None, None, None, Some(to), _) => runs::Stretch::To(to),
+                _ => runs::Stretch::Continue,
+            };
+            runs::unburn_stretch(
+                &ctx,
+                how,
+                pack.as_deref(),
+                runs::StretchOpts {
+                    dry_run,
+                    force,
+                    accept_unsigned,
+                    yes,
+                },
+            )
         }
         Command::Doctor { fix, run } => match run {
             Some(id) => doctor::rediagnose(&ctx, &id),
