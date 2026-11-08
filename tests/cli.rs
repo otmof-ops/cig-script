@@ -10985,3 +10985,32 @@ fn the_state_directory_is_kept_out_of_spotlight() {
     sb.run_ok(&["run", "s.cig"]);
     assert!(sb.home().join(".metadata_never_index").exists());
 }
+
+/// #106: `cig doctor` says what the box is made of here, each part tried on
+/// its own, so a box that cannot be made says which part is missing.
+#[test]
+fn doctor_lists_the_box_primitives() {
+    let sb = Sandbox::new();
+    let out = sb.cig(&["doctor"]);
+    let said = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(said.contains("\n  box\n"), "{said}");
+    if cfg!(target_os = "linux") {
+        for part in ["user ns", "mount ns", "network ns", "pid ns", "overlayfs"] {
+            assert!(
+                said.lines().any(|l| l.trim_start().starts_with(part)),
+                "{part}: {said}"
+            );
+        }
+        // The box's own refusal reaches the overlayfs line, with its reason.
+        let no = sb.cig_env(&["doctor"], &[("CIG_INTERNAL_NO_BOX", "1")]);
+        let said = String::from_utf8_lossy(&no.stdout).to_string();
+        assert!(
+            said.lines().any(|l| l.trim_start().starts_with("overlayfs")
+                && l.contains("no")
+                && l.contains("CIG_INTERNAL_NO_BOX")),
+            "{said}"
+        );
+    } else {
+        assert!(said.contains("the box is Linux's"), "{said}");
+    }
+}

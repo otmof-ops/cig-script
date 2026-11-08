@@ -268,6 +268,12 @@ pub fn doctor(ctx: &Ctx, fix: bool) -> i32 {
             );
         }
     }
+    // The box's primitives (#106), each tried on its own, so a box that
+    // cannot be made says which part is missing.
+    outln!("  box");
+    for (name, ok, says) in box_primitives() {
+        outln!("    {:<13} {}  {}", name, yes_no(ctx, ok), ctx.dim(&says));
+    }
     if problems.is_empty() {
         outln!("{}", ctx.green("no problems found"));
         return exit::OK;
@@ -384,6 +390,86 @@ fn path_line(dir: &Path) -> Option<(PathBuf, String)> {
 
 /// Can the tin guard be made here: user and mount namespaces for this
 /// user, tried rather than guessed (`true` run inside them).
+/// What the box is made of here: a user namespace, a mount namespace, a
+/// network namespace (`network: "off"` and `"registry"`), a PID namespace
+/// (`pidns`) and overlayfs (the layer). Each namespace is tried in a child
+/// that unshares it and execs `true`; overlayfs is the box's own check.
+fn box_primitives() -> Vec<(&'static str, bool, String)> {
+    #[cfg(target_os = "linux")]
+    {
+        let unshares = |flags: libc::c_int| -> bool {
+            use std::os::unix::process::CommandExt;
+            let mut c = std::process::Command::new("true");
+            c.stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            // SAFETY: unshare alone, between fork and exec.
+            unsafe {
+                c.pre_exec(move || {
+                    if libc::unshare(flags) == 0 {
+                        Ok(())
+                    } else {
+                        Err(std::io::Error::last_os_error())
+                    }
+                });
+            }
+            c.status().is_ok_and(|st| st.success())
+        };
+        let user = unshares(libc::CLONE_NEWUSER);
+        let restricted =
+            std::fs::read_to_string("/proc/sys/kernel/apparmor_restrict_unprivileged_userns")
+                .is_ok_and(|v| v.trim() == "1");
+        let mut out = vec![(
+            "user ns",
+            user,
+            if user {
+                "a hop runs as root in a namespace of its own, nobody outside".to_string()
+            } else if restricted {
+                "refused: AppArmor restricts unprivileged user namespaces (sysctl kernel.apparmor_restrict_unprivileged_userns=0 allows them)".to_string()
+            } else {
+                "refused: unprivileged user namespaces are off here (kernel.unprivileged_userns_clone, or a container's seccomp)".to_string()
+            },
+        )];
+        let in_user = |flag: libc::c_int| user && unshares(libc::CLONE_NEWUSER | flag);
+        let mnt = in_user(libc::CLONE_NEWNS);
+        out.push((
+            "mount ns",
+            mnt,
+            "the hop's own view of the files: the layer over the pack, the tin read-only"
+                .to_string(),
+        ));
+        let net = in_user(libc::CLONE_NEWNET);
+        out.push((
+            "network ns",
+            net,
+            "network: \"off\" and \"registry\" (lo alone, the proxy the only way out)".to_string(),
+        ));
+        let pid = in_user(libc::CLONE_NEWPID);
+        out.push((
+            "pid ns",
+            pid,
+            "pidns: the hop sees its own processes alone".to_string(),
+        ));
+        match crate::burn::overlay::possible() {
+            Ok(()) => out.push((
+                "overlayfs",
+                true,
+                "the layer a hop writes into, applied after".to_string(),
+            )),
+            Err(e) => out.push(("overlayfs", false, e)),
+        }
+        out
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        vec![(
+            "box",
+            false,
+            "the box is Linux's (user namespaces and overlayfs): here a boxed hop is refused (E777) or falls back to the tin (E763)".to_string(),
+        )]
+    }
+}
+
 fn guard_status() -> (bool, String) {
     let setting = crate::burn::overlay::guard_setting();
     if setting == "off" {
