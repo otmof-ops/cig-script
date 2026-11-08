@@ -11102,7 +11102,10 @@ fn history_budget_spares_pinned_runs() {
 fn doctor_reports_history_and_suggests_a_budget_when_off() {
     let sb = Sandbox::new();
     let _ids = four_runs(&sb);
-    let json: serde_json::Value = serde_json::from_str(&sb.run_ok(&["--json", "doctor"])).unwrap();
+    let json: serde_json::Value = serde_json::from_str(
+        &String::from_utf8_lossy(&sb.cig(&["--json", "doctor"]).stdout).to_string(),
+    )
+    .unwrap();
     assert_eq!(json["history_budget"], "off");
     // A number of bytes between 1 GB and 20 GB, or null where free space
     // cannot be measured here.
@@ -11118,7 +11121,7 @@ fn doctor_reports_history_and_suggests_a_budget_when_off() {
         other => panic!("unexpected suggestion: {other}"),
     }
     // The text output names the budget and, when off, the suggestion.
-    let text = sb.run_ok(&["doctor"]);
+    let text = String::from_utf8_lossy(&sb.cig(&["doctor"]).stdout).to_string();
     assert!(text.contains("history"), "{text}");
     assert!(text.contains("budget off"), "{text}");
     assert!(text.contains("cig doctor suggests"), "no tip: {text}");
@@ -11128,13 +11131,16 @@ fn doctor_reports_history_and_suggests_a_budget_when_off() {
     assert_eq!(v["config"]["history_budget"]["explicit"], false);
     // With a budget set, doctor no longer suggests one.
     sb.run_ok(&["config", "history_budget", "2GB"]);
-    let json: serde_json::Value = serde_json::from_str(&sb.run_ok(&["--json", "doctor"])).unwrap();
+    let json: serde_json::Value = serde_json::from_str(
+        &String::from_utf8_lossy(&sb.cig(&["--json", "doctor"]).stdout).to_string(),
+    )
+    .unwrap();
     assert_eq!(json["history_budget"], "2GB");
     assert!(
         json["history_budget_suggested"].is_null(),
         "still suggesting: {json}"
     );
-    let text = sb.run_ok(&["doctor"]);
+    let text = String::from_utf8_lossy(&sb.cig(&["doctor"]).stdout).to_string();
     assert!(
         !text.contains("cig doctor suggests"),
         "still tipping: {text}"
@@ -11177,7 +11183,10 @@ fn history_budget_counts_the_tin_and_collects_it() {
         .map(|r| r["id"].as_str().unwrap().to_string())
         .collect();
     ids.reverse();
-    let json: serde_json::Value = serde_json::from_str(&sb.run_ok(&["--json", "doctor"])).unwrap();
+    let json: serde_json::Value = serde_json::from_str(
+        &String::from_utf8_lossy(&sb.cig(&["--json", "doctor"]).stdout).to_string(),
+    )
+    .unwrap();
     let history = json["history_bytes"].as_u64().unwrap();
     assert!(history >= 4 * size as u64, "the tin is counted: {json}");
     // A budget that one prune meets: the history less half an object.
@@ -11186,9 +11195,17 @@ fn history_budget_counts_the_tin_and_collects_it() {
     // The age floor holds by default: every run is seconds old.
     sb.run_ok(&["runs", "--prune", "100"]);
     assert_eq!(sb.runs().len(), 4, "history_keep spares young runs");
-    let json: serde_json::Value = serde_json::from_str(&sb.run_ok(&["--json", "doctor"])).unwrap();
+    let json: serde_json::Value = serde_json::from_str(
+        &String::from_utf8_lossy(&sb.cig(&["--json", "doctor"]).stdout).to_string(),
+    )
+    .unwrap();
     assert_eq!(json["history_over_budget"], true, "{json}");
-    assert!(sb.run_ok(&["doctor"]).contains("over it"), "doctor says so");
+    assert!(
+        String::from_utf8_lossy(&sb.cig(&["doctor"]).stdout)
+            .to_string()
+            .contains("over it"),
+        "doctor says so"
+    );
     // No floor: one prune, the oldest, and its object collected.
     sb.run_ok(&["config", "history_keep", "0"]);
     sb.run_ok(&["runs", "--prune", "100"]);
