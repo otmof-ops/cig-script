@@ -10836,6 +10836,7 @@ fn a_boxed_hop_says_its_box_in_the_plan_and_the_record() {
     let id = sb.runs()[0]["id"].as_str().unwrap().to_string();
     let shown = sb.run_ok(&["runs", &id]);
     assert!(shown.contains("(boxed: network on, expect **)"), "{shown}");
+}
 
 /// #105, L6: a journal the ledger says was cut short is a tripwire as well
 /// as an E709 refusal: reported like any other, under `reports`, and with
