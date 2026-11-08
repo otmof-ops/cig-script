@@ -1872,7 +1872,7 @@ fix = "put the current key back (cig tin key import), or store it where a rekey 
 no = "depends"
 arises = ["run"]
 tags = ["kernel"]
-since = "1.18.0"
+since = "1.19.0"
 related = ["E703", "E707", "E708", "E709"]
 [[code.cause]]
 why = "the current tin key is not available (no keyring entry, no key file, nothing on --seal-key-fd)"

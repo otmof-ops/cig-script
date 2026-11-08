@@ -1847,7 +1847,7 @@ E715 debugging is allowed  (burn, kernel family, since 1.8.0)
   arises in: run, any  ·  related: E707  ·  tags: kernel
 
 ======== E720 ========
-E720 a rekey cannot be done  (burn, kernel family, since 1.18.0)
+E720 a rekey cannot be done  (burn, kernel family, since 1.19.0)
 
   kind of no: one of the four; the message says which  (read the operating-system reason in the message; ENOENT, EACCES, ENOSPC and friends, each mapped in the causes below)
 

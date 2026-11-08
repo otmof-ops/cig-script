@@ -5,29 +5,6 @@ project follows semantic versioning.
 
 ## Unreleased
 
-- **A hop skips what it rebuilds anyway** (#148). `skip: ["build/**",
-  ".cache/"]` on a hop leaves those paths out of the tin, the way a
-  `.cigignore` line does: what the hop changes there is neither kept nor
-  journaled, so it cannot be undone, and the hop does not pay to keep a
-  cache. `cig check` says so on the hop's line (`E310`), or that `skip` does
-  nothing in the box, whose layer keeps every change. The `hop_skip`
-  setting (`cig config hop_skip "**/.cache/**, *.log"`) adds globs every
-  hop leaves out. The plan shows `(skip …)`.
-More of #105 for the tin's seal key: the key wipes itself, the key can be
-rotated, and a sealed parcel can carry its own key. Hardened after two
-independent security reviews: a rekey waits for no one and refuses while
-a run is in progress; the stashes are honoured only when they prove the
-keeper's primary key, so a planted marker + stash cannot forge a
-journal, ledger line or sealed object; a resume refuses when the stashes
-do not match the keeper (an attacker cannot plant a pair and have the
-rekey adopt it); a journal signed by another key or one that cannot be
-verified under this tin's keys refuses the rekey, so an imported but
-unadopted chain is never laundered; the ledger's next line signs under
-the subkey that verified the chain on disk, so a mid-rotation append
-never breaks the chain; and raw sealing keys are stripped from `--json`
-output, with a fingerprint derived from the carried key bytes shown on
-both refusal and accept.
-
 - **A key type that wipes itself** (#105). The 32-byte master key (and the
   HKDF subkeys derived from it) live in a type that is not `Copy`, so a
   move leaves no stack copy behind, and whose `Drop` zeros the bytes
@@ -121,6 +98,57 @@ both refusal and accept.
   "the keeper would not carry the new key", with the fix as one
   command.
 
+## 1.18.0 — 2026-11-08
+
+What a box was asked for and is made of, the runs that went and a
+budget for the rest, a program's own stretch, hops that skip their
+caches, and the burn tests for compiled programs.
+
+- **A boxed hop says its box** (#106). The plan and `cig runs <id>` said
+  `(boxed)`; they now say what the box was asked for,
+  `(boxed: network registry, allow registry.npmjs.org, contain)`: the
+  network always, the rest where it is not the default. The terms are
+  recorded with the hop and left out when empty, so older cigs read the
+  journal as before; a bug report still says only `(boxed)`.
+- **`cig doctor` says what the box is made of** (#106). A `box` block
+  lists the user, mount, network and PID namespaces and overlayfs, each
+  tried on its own, so a box that cannot be made says which part is
+  missing; a refused user namespace names the likely cause (AppArmor's
+  `kernel.apparmor_restrict_unprivileged_userns` on Ubuntu, or a
+  container's seccomp). Off Linux it says the box is Linux's.
+- **A hop skips what it rebuilds anyway** (#148). `skip: ["build/**",
+  ".cache/"]` on a hop leaves those paths out of the tin, the way a
+  `.cigignore` line does: what the hop changes there is neither kept nor
+  journaled, so it cannot be undone, and the hop does not pay to keep a
+  cache. `cig check` says so on the hop's line (`E310`), or that `skip` does
+  nothing in the box, whose layer keeps every change. The `hop_skip`
+  setting (`cig config hop_skip "**/.cache/**, *.log"`) adds globs every
+  hop leaves out. The plan shows `(skip …)`.
+- **`cig runs --pruned`** (#149) lists the runs that went on purpose, from
+  the ledger, newest first: when, how (`pruned`, `forgotten` by
+  `--forget`, or `budget`), and the status each last had, so a missing run
+  is explained.
+- **A disk budget for the history, off by default** (#149). `history_budget`
+  (a size like `500MB` or `2GB`, base 1024; `off`, the default, so nothing
+  is pruned on upgrade) caps the history as it grows: the run records and
+  the tin. Past it, after a run and on `cig runs --prune`, the oldest runs
+  go and the tin is collected; a tin object counts as freed only when the
+  last run that refers to it goes, so no more is pruned than must be.
+  Never pruned: a pinned run, a run with work left (running, interrupted,
+  an unburn that failed), a run holding a box layer that waits for
+  approval, a run younger than `history_keep` (30 days by default), and the
+  newest run; the budget can be exceeded for them, and `cig doctor` says
+  so. Each prune is listed by `cig runs --pruned` as `budget`. `cig doctor`
+  shows the history's size and, with the budget off, suggests one (about
+  5% of the free space, from 1 GB to 20 GB) without changing anything.
+- **Programs put back a stretch of their own runs** (#149). A compiled
+  program takes `--unburn-last N`, `--unburn-since AGE` and
+  `--unburn-to <run>`, as `cig unburn` does for any run, and keeps to its
+  own runs: another program's, and `cig run`'s, are left alone.
+- **The burn tests run against another cig** (otmof-ops/cig-compile#6). The
+  pack, hop, wall and CLI suites start cig through `CIG_TEST_BIN` when it
+  is set: cig-compile runs them with a cig that builds each script and runs
+  the program, so a compiled program's burns are held to the same tests.
 
 ## 1.17.0 — 2026-11-08
 

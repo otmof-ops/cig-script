@@ -276,9 +276,11 @@ fn run_source(
 ) -> i32 {
     let dry_run = args.dry_run;
     let code = run_source_inner(ctx, args, chain, source, compiled);
-    // The retention settings, once the run is recorded (#105).
+    // The retention settings, once the run is recorded (#105); then the
+    // disk budget (#149), which is off by default.
     if !dry_run {
         crate::cli::runs::keep_by_config();
+        crate::cli::runs::budget_by_config();
     }
     code
 }

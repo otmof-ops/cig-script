@@ -1634,7 +1634,7 @@ Related: `E707`.
 
 ### E720 a rekey cannot be done
 
-*burn · since 1.18.0 · arises in run*
+*burn · since 1.19.0 · arises in run*
 
 **Kind of no:** one of the four; the message says which (read the operating-system reason in the message; ENOENT, EACCES, ENOSPC and friends, each mapped in the causes below).
 
