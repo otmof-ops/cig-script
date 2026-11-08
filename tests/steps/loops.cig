@@ -1,0 +1,73 @@
+# SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
+# SPDX-License-Identifier: Apache-2.0
+# Every kind of loop the interpreter runs, for the step-budget test.
+roll total = 0
+for i in 0..6 {
+  if i == 1 {
+    continue
+  }
+  if i == 4 {
+    break
+  }
+  total += i * i
+}
+exhale total
+roll lo = 2
+roll hi = 5
+for j in lo..hi {
+  total += j
+}
+for k in 3..3 {
+  total += 100
+}
+for k in 5..2 {
+  total += 1000
+}
+roll fs = []
+for n in 0..3 {
+  fs.push(pack() => n * 10)
+}
+for f in fs {
+  total += f()
+}
+pull fib(n) {
+  if n < 2 {
+    snuff n
+  }
+  snuff fib(n - 1) + fib(n - 2)
+}
+total += fib(6)
+roll w = 0
+while w < 4 {
+  w += 1
+  for x in [w, w + 1] {
+    total += x
+  }
+}
+roll m = {a: 1, b: 2}
+for key in m {
+  total += m[key]
+}
+for outer in 0..3 {
+  for inner in outer..3 {
+    if inner == 2 {
+      break
+    }
+    total += outer * inner
+  }
+}
+try {
+  for bad in 0..true {
+    total += 1
+  }
+} ashtray e {
+  exhale e.message
+}
+try {
+  for big in 0..20000000 {
+    total += 1
+  }
+} ashtray e {
+  exhale e.message
+}
+exhale total

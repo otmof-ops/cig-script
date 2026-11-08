@@ -1,0 +1,52 @@
+# SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
+# SPDX-License-Identifier: Apache-2.0
+# finally runs whatever happened; its own signal wins.
+try {
+  exhale "body"
+} finally {
+  exhale "finally after ok"
+}
+try {
+  cough "caught"
+} ashtray e {
+  exhale "ashtray: ${e.message}"
+} finally {
+  exhale "finally after ashtray"
+}
+pull early() {
+  try {
+    snuff "returned"
+  } finally {
+    exhale "finally after snuff"
+  }
+}
+exhale early()
+for i in 1..4 {
+  try {
+    if i == 2 { continue }
+    if i == 3 { break }
+    exhale "loop ${i}"
+  } finally {
+    exhale "finally in loop ${i}"
+  }
+}
+try {
+  try {
+    cough "inner"
+  } finally {
+    exhale "finally before the outer ashtray"
+  }
+} ashtray e {
+  exhale "outer ashtray: ${e.message}"
+}
+try {
+  try {
+    cough "lost"
+  } finally {
+    cough "finally wins"
+  }
+} ashtray e {
+  exhale "ashtray: ${e.message}"
+}
+stick m = {finally: 1}
+exhale m.finally
