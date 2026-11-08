@@ -3,6 +3,17 @@
 All notable changes to CigScript. The format follows Keep a Changelog; the
 project follows semantic versioning.
 
+## Unreleased
+
+- **The tin's key on a descriptor** (#105). `cig --seal-key-fd N` reads
+  the key (the 64 hex characters a key file holds) from open descriptor
+  `N` at start-up, closes it, and holds it in memory only: in CI the key
+  sits in no file and no environment variable, no key file is made, and
+  nothing cig starts inherits the descriptor (`0` is read and then pointed
+  at `/dev/null`). Programs take the same flag. `cig doctor` names the
+  keeper and skips the backup reminder, since the key is kept elsewhere.
+  Unix only; on Windows `CIG_SEAL_KEY_FILE` stays the headless way.
+
 ## 1.16.1 — 2026-11-07
 
 A fix for the box's registry network.

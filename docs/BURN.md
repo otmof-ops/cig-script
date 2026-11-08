@@ -466,7 +466,15 @@ out of reach of what cig runs.
   rather than protected, and `cig doctor` says which.
   From 1.11.2 the guard also closes the other ways to the key. A key file
   named outright (`CIG_SEAL_KEY_FILE`, the CI setup) is covered with
-  `/dev/null` and the variable is not passed on. While the key may be in
+  `/dev/null` and the variable is not passed on. From 1.17.0 CI can keep
+  the key out of files and the environment altogether: `cig
+  --seal-key-fd 3 run s.cig 3<key.hex` (or `--seal-key-fd 0` with the key
+  piped in) reads the 64 hex characters a key file holds from that
+  descriptor at start-up, closes it (stdin becomes `/dev/null`), and holds
+  the key in memory only: no key file is made, and no hop, child or
+  nested cig inherits it. A nested cig a hop starts finds its own key, as
+  before. Programs take the same flag. Unix only; Windows names a key
+  file. While the key may be in
   the OS keyring (`seal_key` is not `file`), a guarded hop gets no session
   bus: `DBUS_SESSION_BUS_ADDRESS` is not passed on, and the bus and
   systemd's private socket (named by the variable, by `XDG_RUNTIME_DIR` or
