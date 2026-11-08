@@ -347,7 +347,97 @@ one) the first use makes the key. A key file found when the setting asks
 for the keyring is used, never shadowed by a fresh keyring key. `cig tin gc
 --sealed-orphans` clears the sealed objects the key does not open (a parcel
 imported with `--allow-sealed-missing` leaves such), and refuses to guess
-while the key itself is missing.
+while the key itself is missing. In memory the key lives in a type that
+is not `Copy` and whose `Drop` writes zeros over the bytes through a
+volatile store, so a move leaves no stack copy behind and the allocator
+cannot hand the bytes out again (a compile-time assertion refuses a `Copy`
+impl on it).
+
+**Rekeying.** `cig tin rekey` makes a fresh master key and walks every
+sealed object the tin holds and every sealed snapshot a run keeps,
+re-sealing each under the new key; afterwards the keeper (the keyring or
+the key file, whichever `seal_key` says) carries the new key. A rekey
+waits for no one and refuses while a run is in progress: every cig
+process that will seal or sign takes the `rekey.lock` file's shared
+lock at its first key read and keeps it for the lifetime of the
+process; `cig tin rekey` then tries that lock in exclusive
+non-blocking mode and refuses with `E720` as soon as any live run
+holds it, saying so. A run started while a rekey holds the exclusive
+lock blocks on the same key read (with one note on stderr) until the
+rekey finishes, and then uses the new key: nothing is ever signed or
+sealed under a key the rekey is about to retire. A second
+`cig tin rekey` while one is held is refused with the same code,
+saying "another rekey". Each object is re-sealed with the plaintext
+kept in memory, never beside the file; the result is written to a
+`.rekey` temp beside the original, decrypted with the new key to
+verify, then renamed onto it. The walk is crash-safe: while it runs,
+the old key sits at `seal.key.old` and the new one at `seal.key.new`
+beside the keeper's primary file, with a `rekey.in-progress` marker
+next to them; so any sealed object is readable under one of the
+stashes no matter when a crash lands, and `cig tin verify` is quiet.
+A second `cig tin rekey` after a crash picks up where the walk left
+off and finishes without starting over. On resume, the keeper's
+current key must equal one of the stash keys (a constant-time
+compare): legitimate mid-rekey state always satisfies it; a planted
+`seal.key.old`/`seal.key.new` pair from someone who does not know the
+primary key cannot, so a planted pair never makes the rekey adopt an
+attacker's key. The stashes are honoured as fallback keys only under
+the same constant-time match (and only while the marker is on disk
+and each stash is a private 0600 regular file), so a planted marker +
+stash cannot make a journal, ledger line or sealed object signed under
+an attacker's key verify or open either. Before anything is re-signed,
+every format-3 journal and the ledger are verified under the current
+key: a chain that does not fit, a journal signed by another key or one
+that cannot be verified under any key this tin has refuses the rekey
+with `E720` naming the run, and nothing on disk is changed (so
+`cig tin verify` after keeps reporting the same break — nothing is
+laundered). Unsigned (format-2) journals are left as they are, never
+quietly upgraded to signed. The signed journals and the ledger are
+re-signed under the new master's subkeys in the same pass; the ledger
+rewrites `head` only on the last record for each run, not every line
+(an older line keeps its historical head). Note: a ledger `head` kept
+somewhere else stops matching after a rekey, since the subkey
+changed, and `cig tin verify --head` needs the value from
+`cig tin head` taken after the rekey. The keeper swap goes last and
+is read back to prove it carries the new key: when it does not, both
+stashes stay on disk, every sealed object is still readable, and a
+later `cig tin rekey` finishes the job. The stashes are wiped and
+unlinked on a clean finish, the fsyncs along the way are checked
+(nothing is swallowed), and a leftover is reported, never ignored.
+Refuses when the current key is not available (`E720`) or when the
+key was handed over on a descriptor for the run only (same code:
+there is no keeper to swap). Carrying the key to another machine by
+hand: `cig tin key export` and `cig tin key import`, or `cig parcel
+--with-key` below.
+
+**Carrying a sealed run.** A parcel copies the sealed objects a run's
+journal refers to as-is: they open on the other machine only when it has
+the sealing machine's key. `cig parcel --with-key` is the shortcut: the
+parcel's manifest also carries the 32-byte master key in hex. The parcel
+file lands at mode 0600 — it is a secret, and the on-disk permissions
+say so. `cig unparcel` reads the carried key, validates every sealed
+object in the archive against it (not just a sample: one sealed object
+not under the carried key refuses the whole parcel), re-seals every
+sealed object and snapshot under the local machine's key in the staged
+directory before placing the run, so either the whole import lands or
+nothing does. The trade is that the parcel is a secret and the key
+rides inside it: accepting one takes an explicit opt-in. `cig unparcel`
+refuses a `--with-key` parcel unless `--accept-key` is passed, naming
+the fingerprint computed from the carried key bytes (not the
+manifest's own claim), so a malicious parcel cannot slip its own key
+onto the machine silently and the operator sees what they are
+accepting; the same fingerprint is printed when the key is accepted,
+so a sender's expected fingerprint can be checked against it. The
+raw key never leaves this process: `--json` output of both
+`cig parcel` and `cig unparcel --show` strips the `sealing_key` field
+from the manifest and carries `sealing_key_fingerprint` in its place.
+`cig parcel` prints a warning when it writes a `--with-key` parcel;
+`cig unparcel --show` says `key inside the parcel` when one is there.
+A parcel without the key, on a machine with no matching key, is
+refused as before unless `--allow-sealed-missing` is passed. `cig
+parcel --with-key` with no readable key refuses outright and writes
+nothing — rather than quietly write a parcel that nobody could have
+opened.
 
 **Git blob reuse.** Most files a hop touches in a git project are tracked
 and unchanged since the last commit, and git already holds their bytes in

@@ -222,6 +222,9 @@ pub enum Command {
         /// Write here instead of ./<run>.cigparcel.
         #[arg(long)]
         out: Option<PathBuf>,
+        /// Carry the tin's seal key inside the parcel too, so a sealed run restores on a machine with no key of its own. The parcel is then a secret: anyone with the file can read its sealed objects.
+        #[arg(long)]
+        with_key: bool,
     },
     /// Import a parcel: every file checked against its manifest, the pack's roots mapped to where they are here.
     Unparcel {
@@ -236,6 +239,9 @@ pub enum Command {
         /// Import even the sealed objects this machine's key cannot open.
         #[arg(long)]
         allow_sealed_missing: bool,
+        /// A parcel written with --with-key carries its own sealing key: accept it and re-seal under this machine's key on the way in. Without this flag, such a parcel is refused.
+        #[arg(long)]
+        accept_key: bool,
         /// Only list what the parcel holds and the roots to map.
         #[arg(long)]
         show: bool,
@@ -559,14 +565,23 @@ fn dispatch(ctx: Ctx, command: Command) -> i32 {
         Command::Box { command } => boxcmd::box_cmd(&ctx, command),
         Command::InternalForward { sock, port } => forward::forward(&sock, port),
         Command::Tin { command } => tin::tin_cmd(&ctx, command),
-        Command::Parcel { id, out } => parcel::parcel(&ctx, &id, out),
+        Command::Parcel { id, out, with_key } => parcel::parcel(&ctx, &id, out, with_key),
         Command::Unparcel {
             file,
             root,
             cwd,
             allow_sealed_missing,
+            accept_key,
             show,
-        } => parcel::unparcel(&ctx, &file, root, cwd, allow_sealed_missing, show),
+        } => parcel::unparcel(
+            &ctx,
+            &file,
+            root,
+            cwd,
+            allow_sealed_missing,
+            accept_key,
+            show,
+        ),
     }
 }
 

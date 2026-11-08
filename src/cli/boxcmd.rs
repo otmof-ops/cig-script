@@ -113,6 +113,11 @@ fn apply(ctx: &Ctx, k: &Kept) -> i32 {
         eprintln!("{} {e}", ctx.red("error[E707 burn]:"));
         return exit::SCRIPT_ERROR;
     }
+    // As `cig run`: the key's lock before the first op (#105).
+    if let Err(e) = crate::burn::seal::hold_shared_rekey_lock() {
+        eprintln!("{} {e}", ctx.red("error[E802 usage]:"));
+        return exit::SCRIPT_ERROR;
+    }
     let script = format!("box apply {}/{}", k.run, k.seq);
     let mut record = RunRecord::begin(Path::new(&script), &script, &[], "run");
     if let Err(e) = record.save() {

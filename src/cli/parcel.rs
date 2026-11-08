@@ -10,7 +10,7 @@ use crate::burn::parcel;
 use crate::burn::runs;
 use std::path::{Path, PathBuf};
 
-pub fn parcel(ctx: &Ctx, id: &str, out: Option<PathBuf>) -> i32 {
+pub fn parcel(ctx: &Ctx, id: &str, out: Option<PathBuf>, with_key: bool) -> i32 {
     let rec = match runs::find(id) {
         Ok(Some(r)) => r,
         Ok(None) => {
@@ -38,10 +38,18 @@ pub fn parcel(ctx: &Ctx, id: &str, out: Option<PathBuf>) -> i32 {
         }
     };
     let out = out.unwrap_or_else(|| PathBuf::from(format!("{}.{}", rec.id, parcel::EXT)));
-    match parcel::write(&rec, &journal, &out) {
+    let opts = parcel::WriteOpts { with_key };
+    match parcel::write_with(&rec, &journal, &out, &opts) {
         Ok(w) => {
             if ctx.json {
-                outln!("{}", serde_json::to_string(&w).unwrap_or_default());
+                // --json strips the raw sealing key from the embedded
+                // manifest and prints its fingerprint instead
+                // (SEC-004 M1); the parcel on disk still carries the
+                // real key when --with-key was asked for.
+                outln!(
+                    "{}",
+                    serde_json::to_string(&parcel::written_for_display(&w)).unwrap_or_default()
+                );
             } else {
                 outln!("{}", w.path.display());
                 let roots: Vec<String> = w
@@ -50,6 +58,12 @@ pub fn parcel(ctx: &Ctx, id: &str, out: Option<PathBuf>) -> i32 {
                     .iter()
                     .map(|r| format!("{}={}", r.name, r.path.display()))
                     .collect();
+                if w.manifest.sealing_key.is_some() {
+                    eprintln!(
+                        "{} this parcel carries the tin's seal key: anyone with the file can open its sealed objects. Guard it.",
+                        ctx.red("warning:")
+                    );
+                }
                 eprintln!(
                     "{} run {} parcelled: {} file{}, {} bytes{}{}; on the other machine: cig unparcel {} {}",
                     ctx.green("parcel:"),
@@ -109,13 +123,20 @@ pub fn unparcel(
     roots: Vec<String>,
     cwd: Option<PathBuf>,
     allow_sealed_missing: bool,
+    accept_key: bool,
     show: bool,
 ) -> i32 {
     if show {
         return match parcel::read_manifest(file) {
             Ok(m) => {
                 if ctx.json {
-                    outln!("{}", serde_json::to_string(&m).unwrap_or_default());
+                    // --json strips the raw sealing key and prints its
+                    // fingerprint instead (SEC-004 M1).
+                    outln!(
+                        "{}",
+                        serde_json::to_string(&parcel::manifest_for_display(&m))
+                            .unwrap_or_default()
+                    );
                 } else {
                     outln!("run       {}", m.run);
                     outln!("written   {} by cig {}", m.created, m.cig);
@@ -155,6 +176,13 @@ pub fn unparcel(
                             String::new()
                         }
                     );
+                    if m.sealing_key.is_some() {
+                        outln!(
+                            "key       inside the parcel (--with-key): opens the {} sealed object{} without a key on this machine; parcel is a secret",
+                            m.sealed.objects,
+                            if m.sealed.objects == 1 { "" } else { "s" }
+                        );
+                    }
                 }
                 exit::OK
             }
@@ -169,6 +197,7 @@ pub fn unparcel(
         roots: Vec::new(),
         cwd,
         allow_sealed_missing,
+        accept_key,
     };
     for r in roots {
         match parse_root(&r) {
@@ -199,6 +228,16 @@ pub fn unparcel(
                         ""
                     }
                 );
+                if let Some(fp) = &done.accepted_key_fingerprint {
+                    // The fingerprint is computed from the CARRIED key
+                    // bytes, not the manifest's own claim, so the
+                    // operator can check it against what the sender
+                    // expected (SEC-004 M2).
+                    eprintln!(
+                        "{} accepted carried sealing key (fingerprint {fp})",
+                        ctx.green("unparcel:")
+                    );
+                }
             }
             exit::OK
         }

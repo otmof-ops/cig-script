@@ -70,6 +70,11 @@ pub fn doctor(ctx: &Ctx, fix: bool) -> i32 {
     let newer = update::cached_newer();
 
     let mut problems: Vec<String> = Vec::new();
+    // The tin key's lock (#105): where it cannot be had, a run refuses
+    // before it burns (E802), and this is where that is found out.
+    if let Err(e) = crate::burn::seal::hold_shared_rekey_lock() {
+        problems.push(format!("{e} [E802]"));
+    }
     if let Err(e) = &writable {
         problems.push(format!(
             "state directory {} is not writable: {e}",

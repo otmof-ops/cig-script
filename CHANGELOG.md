@@ -13,6 +13,114 @@ project follows semantic versioning.
   nothing in the box, whose layer keeps every change. The `hop_skip`
   setting (`cig config hop_skip "**/.cache/**, *.log"`) adds globs every
   hop leaves out. The plan shows `(skip …)`.
+More of #105 for the tin's seal key: the key wipes itself, the key can be
+rotated, and a sealed parcel can carry its own key. Hardened after two
+independent security reviews: a rekey waits for no one and refuses while
+a run is in progress; the stashes are honoured only when they prove the
+keeper's primary key, so a planted marker + stash cannot forge a
+journal, ledger line or sealed object; a resume refuses when the stashes
+do not match the keeper (an attacker cannot plant a pair and have the
+rekey adopt it); a journal signed by another key or one that cannot be
+verified under this tin's keys refuses the rekey, so an imported but
+unadopted chain is never laundered; the ledger's next line signs under
+the subkey that verified the chain on disk, so a mid-rotation append
+never breaks the chain; and raw sealing keys are stripped from `--json`
+output, with a fingerprint derived from the carried key bytes shown on
+both refusal and accept.
+
+- **A key type that wipes itself** (#105). The 32-byte master key (and the
+  HKDF subkeys derived from it) live in a type that is not `Copy`, so a
+  move leaves no stack copy behind, and whose `Drop` zeros the bytes
+  through a volatile store, so the allocator cannot hand them out again.
+  A compile-time assertion refuses a `Copy` impl on it, so a later change
+  that would quietly undo the protection stops the build instead. The
+  wipe function is also used on the hex-text buffers the key readers
+  (file, keyring, descriptor, Argon2 output on export/import) hold for a
+  moment, so those too never sit cold in freed memory. Key equality is
+  constant-time: the rekey's keeper read-back compares the fresh read
+  with the value just written without leaking a mismatch position.
+- **`cig tin rekey`** (#105). Makes a fresh master key and re-seals every
+  sealed object the tin holds and every sealed snapshot each run keeps;
+  the keeper (keyring or key file) then carries the new key. A rekey
+  waits for no one and refuses while a run is in progress: every cig
+  process that will seal or sign takes `rekey.lock`'s shared lock at
+  its first key read and holds it for life, and `cig tin rekey` tries
+  the exclusive lock non-blocking and refuses with `E720` — "a run is
+  in progress" when the shared lock is held, "another rekey" when the
+  rekey marker is on disk. A run started while a rekey holds the
+  exclusive lock blocks on the same key read (with one note on
+  stderr) until the rekey finishes, then uses the new key. Each
+  object's plaintext stays in memory the whole time (no
+  `.reseal-plain` beside it); the new sealed copy is written to a
+  `.rekey` temp, decrypted with the new key to verify, then renamed
+  onto the original. Before any re-signing, every format-3 journal
+  and the ledger must verify under the current key — a chain that
+  does not fit, a journal signed by another key, or one that cannot
+  be verified under any key this tin has refuses the rekey with
+  `E720` naming the run, and nothing on disk is changed, so no
+  untrusted chain is laundered into a new signature. Unsigned
+  (format-2) journals are left as they were, never quietly upgraded
+  to signed. The signed journals and the ledger are re-signed under
+  the new master's subkeys in the same pass, the ledger rewriting
+  `head` only on the last record for each run (an older ledger line
+  keeps its historical head). Note: a ledger `head` kept somewhere
+  else stops matching after a rekey; take the value from
+  `cig tin head` again, then `cig tin verify --head` keeps its
+  check. The keeper swap goes last and is read back and compared in
+  constant time; only then are both stashes wiped (bytes zeroed
+  before unlink) and removed, every fsync along the way is checked
+  (nothing swallowed), and the `rekey.in-progress` marker deleted. A
+  failed keeper swap leaves both stashes behind with a clear error;
+  every sealed object is still readable, and a later
+  `cig tin rekey` finishes the job. On resume (a crashed earlier
+  rekey) the keeper's current key must equal one of the stash keys
+  by a constant-time compare: a planted `seal.key.old` /
+  `seal.key.new` pair from someone who does not know the primary key
+  cannot satisfy it, and the rekey refuses. The same constant-time
+  check protects the fallback keys: `secondary_keys` returns the
+  stashes only when the marker is on disk AND each stash is mode
+  0600 owned by the current user AND the primary equals one of the
+  stashes, so a planted marker + stash cannot make a journal, ledger
+  line or sealed object signed under an attacker's key verify or
+  open. During the mid-transition window between the walk and the
+  keeper swap, `Journal::load` and `ledger::load` try each candidate
+  subkey (current and stash-derived) and keep the one whose chain
+  verifies; `ledger::append` signs the next line under the subkey
+  that verified, not an independently-derived one, so a mid-rotation
+  append never breaks the chain. Refuses with `E720` when the
+  current key is not available, when the key came in on
+  `--seal-key-fd`, or when a journal does not verify.
+- **`cig parcel --with-key` / `cig unparcel --accept-key`** (#105).
+  `cig parcel --with-key` embeds the 32-byte master key in the parcel's
+  manifest. The parcel file lands at mode 0600 — a `--with-key` parcel
+  is a secret, and the on-disk permissions say so, with the `.tmp` the
+  parcel writes through opened `create_new` on 0600 so a leftover from
+  an earlier crash never leaks its mode. If the key cannot be read
+  when `--with-key` is asked, the parcel is not written and the
+  command errors — never a quiet parcel that could not have been
+  opened. `cig unparcel` refuses a `--with-key` parcel unless
+  `--accept-key` is passed, naming the fingerprint computed from the
+  CARRIED key bytes (not the manifest's own claim, so a tampered
+  manifest cannot lie about its fingerprint); the same fingerprint is
+  printed when the key is accepted. The raw key never leaves this
+  process: `--json` output of `cig parcel` and `cig unparcel --show`
+  strips `sealing_key` from the embedded manifest and carries a
+  `sealing_key_fingerprint` field in its place, and the in-memory hex
+  strings, `hex::decode` scratch Vec and the scratch
+  `manifest.json` are wiped before they are let go. When accepted,
+  every sealed object and snapshot in the archive is validated
+  against the carried key before anything is written (one that does
+  not open under it refuses the whole parcel), and the sealed
+  snapshots the run keeps are re-sealed under the local key in the
+  staged directory BEFORE the run is renamed into place — a failed
+  import leaves no half-converted run behind.
+- **New error code.** `E720` (burn, kernel): a rekey cannot be done.
+  Covers "the current key is not available", "the keeper is a
+  descriptor for this run only", "another rekey holds the lock", "a
+  journal or the ledger does not verify under the current key" and
+  "the keeper would not carry the new key", with the fix as one
+  command.
+
 
 ## 1.17.0 — 2026-11-08
 

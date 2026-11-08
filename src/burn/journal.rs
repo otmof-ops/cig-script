@@ -224,19 +224,55 @@ fn hmac_hex(key: &[u8; 32], bytes: &[u8]) -> String {
     hex::encode(m.finalize().into_bytes())
 }
 
-/// One link of the chain: keyed (format 3) or plain (format 2).
-fn link(key: Option<&[u8; 32]>, bytes: &[u8]) -> String {
+/// One link of the chain: keyed (format 3) or plain (format 2). A `Key`
+/// here is the format-3 journal MAC subkey.
+fn link(key: Option<&super::seal::Key>, bytes: &[u8]) -> String {
     match key {
-        Some(k) => hmac_hex(k, bytes),
+        Some(k) => hmac_hex(k.as_bytes(), bytes),
         None => sha256_hex(bytes),
     }
 }
 
-/// The journal MAC subkey, when the master key can be had.
-fn journal_key() -> Option<[u8; 32]> {
+/// The journal MAC subkey, when the master key can be had. The key wipes
+/// itself when it is let go.
+fn journal_key() -> Option<super::seal::Key> {
     super::seal::key()
         .ok()
         .map(|(m, _)| super::seal::derive(&m, super::seal::LABEL_JOURNAL_MAC))
+}
+
+/// Every candidate journal MAC subkey: the current one, plus one derived
+/// from each stash key a rekey left on disk. A rekey that has re-signed a
+/// journal under the NEW master but not yet swapped the keeper leaves the
+/// journal under NEW while `seal::key()` still gives OLD; the stash's
+/// derivation covers that gap (and the reverse one). The stashes are
+/// honoured only when they prove the primary (SEC-004 H2).
+fn candidate_journal_keys() -> Vec<super::seal::Key> {
+    let mut keys = Vec::new();
+    let Ok((master, _)) = super::seal::key() else {
+        return keys;
+    };
+    keys.push(super::seal::derive(&master, super::seal::LABEL_JOURNAL_MAC));
+    for sk in super::seal::secondary_keys(&master) {
+        keys.push(super::seal::derive(&sk, super::seal::LABEL_JOURNAL_MAC));
+    }
+    keys
+}
+
+/// Pick the journal MAC subkey this journal was signed with, by trying
+/// each candidate against the header line's `prev`. The header's `prev`
+/// is `link(mac_key, id_bytes)`, so the key whose derivation matches is
+/// the one that signed the chain. Returns `None` when no candidate is
+/// available (no primary and no stashes), or when no candidate matches.
+fn pick_journal_mac_key(header: &serde_json::Value) -> Option<super::seal::Key> {
+    let id = header.get("run").and_then(|r| r.as_str())?;
+    let header_prev = header.get("prev").and_then(|p| p.as_str())?;
+    // No candidate match: the journal is from another machine, or the
+    // key is simply not available here. Returning None leaves the
+    // chain-check path to mark the journal `other_key`, same as before.
+    candidate_journal_keys()
+        .into_iter()
+        .find(|k| link(Some(k), id.as_bytes()) == header_prev)
 }
 
 /// Does the setting ask for signed journals? (`journal_sign`, on by default.)
@@ -249,7 +285,7 @@ fn signing_wanted() -> bool {
 /// when `to_key` is `None`. Every line's `prev` is recomputed from the
 /// header's seed; the header's `format` is set to match; nothing else in a
 /// line changes. Returns the new text and the new head.
-pub fn rechain(text: &str, to_key: Option<&[u8; 32]>) -> (String, String) {
+pub fn rechain(text: &str, to_key: Option<&super::seal::Key>) -> (String, String) {
     let mut out = String::new();
     let mut prev: Option<String> = None;
     for raw in text.lines().filter(|l| !l.trim().is_empty()) {
@@ -284,9 +320,25 @@ pub fn resign_in_place(run_dir: &Path) -> io::Result<Option<String>> {
     let Some(key) = journal_key() else {
         return Ok(None);
     };
+    resign_in_place_under(run_dir, &key)
+}
+
+/// `resign_in_place` with the MAC subkey given explicitly. `cig tin rekey`
+/// calls this with the new journal-mac subkey, because the in-process
+/// cached master is still the old one (the `OnceLock` for `seal::key()`
+/// was filled before the swap); working from a cached stale key would
+/// write an old MAC over the new one.
+pub fn resign_in_place_under(
+    run_dir: &Path,
+    mac_key: &super::seal::Key,
+) -> io::Result<Option<String>> {
     let path = run_dir.join("journal.jsonl");
-    let text = fs::read_to_string(&path)?;
-    let (new_text, head) = rechain(&text, Some(&key));
+    let text = match fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    let (new_text, head) = rechain(&text, Some(mac_key));
     let tmp = run_dir.join("journal.jsonl.resign");
     fs::write(&tmp, new_text.as_bytes())?;
     let f = fs::File::open(&tmp)?;
@@ -295,6 +347,34 @@ pub fn resign_in_place(run_dir: &Path) -> io::Result<Option<String>> {
     fs::rename(&tmp, &path)?;
     sync_dir(run_dir)?;
     Ok(Some(head))
+}
+
+/// Only re-sign a journal that was signed to begin with. A format-2
+/// journal (no MAC key, plain-SHA chain) is left as-is: the master key
+/// never signed it, so there is no signature of ours to rotate, and
+/// quietly upgrading it to signed would make a run that was never
+/// vouched for look like one that was (finding 3). Returns the new head
+/// when the journal was signed and re-signed, `None` otherwise.
+pub fn resign_signed_in_place_under(
+    run_dir: &Path,
+    mac_key: &super::seal::Key,
+) -> io::Result<Option<String>> {
+    let path = run_dir.join("journal.jsonl");
+    let text = match fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    // Peek at the first intact line's declared format.
+    let first_format: Option<u32> = text
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .and_then(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .and_then(|v| v.get("format").and_then(|f| f.as_u64()).map(|n| n as u32));
+    match first_format {
+        Some(f) if f >= 3 => resign_in_place_under(run_dir, mac_key),
+        _ => Ok(None),
+    }
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -332,8 +412,8 @@ pub struct Journal {
     /// What the chain check found when the journal was loaded.
     chain: Chain,
     /// The MAC key a signed journal (format 3) links with; `None` for an
-    /// unsigned one, or when the key could not be had.
-    mac_key: Option<[u8; 32]>,
+    /// unsigned one, or when the key could not be had. Wiped on drop.
+    mac_key: Option<super::seal::Key>,
     /// The first line is not written yet. It is written, and the key asked
     /// for, with the first entry, so a run that burns nothing never touches
     /// the keyring (#129).
@@ -371,7 +451,7 @@ impl Journal {
         let mut head = String::new();
         let mut chain = Chain::default();
         let mut format = JOURNAL_FORMAT;
-        let mut mac_key: Option<[u8; 32]> = None;
+        let mut mac_key: Option<super::seal::Key> = None;
         let mut pending = false;
         let file = match &run_dir {
             Some(dir) => {
@@ -457,6 +537,16 @@ impl Journal {
 
     /// Load a finished run's journal for `cig unburn`.
     pub fn load(run_dir: &Path) -> Result<Self, io::Error> {
+        // Take the process's shared rekey lock BEFORE reading the
+        // journal text (SEC-004 N2): a `cig tin rekey` that holds the
+        // exclusive lock cannot then rewrite the file out from under
+        // us. Without this order, an unburn that enters mid-rekey
+        // reads the pre-rekey chain, the `seal::key()` call under
+        // `journal_key()` blocks on the same lock, and when the rekey
+        // finishes the appended compensation markers chain to a stale
+        // head. Shared lock, held once per process; a verify-only
+        // call pays the cost once and later `key()` calls skip it.
+        super::seal::hold_shared_rekey_lock().map_err(io::Error::other)?;
         let text = fs::read_to_string(run_dir.join("journal.jsonl"))?;
         // A run that came in a parcel reads through its path map: the
         // lines stay as written (the chain holds), the paths are ours.
@@ -471,7 +561,7 @@ impl Journal {
         let mut expect = chain_seed(&dir_id(run_dir));
         // Set when the header says format 3: the key, or none (then nothing
         // is checked and the chain reads as another key's).
-        let mut mac_key: Option<[u8; 32]> = None;
+        let mut mac_key: Option<super::seal::Key> = None;
         let mut unverifiable = false;
         let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
         for (i, line) in lines.iter().enumerate() {
@@ -503,7 +593,13 @@ impl Journal {
                     format = f as u32;
                     chain.format = format;
                     if format >= 3 {
-                        mac_key = journal_key();
+                        // During a rekey mid-transition a signed journal
+                        // may be under either the current or a stash's
+                        // derivation. Pick the one whose link matches
+                        // this header's own `prev`; if none does, the
+                        // key is simply not available and the chain is
+                        // left `unverified` as before.
+                        mac_key = pick_journal_mac_key(&v).or_else(journal_key);
                         if mac_key.is_none() {
                             unverifiable = true;
                             chain.unverified = true;
@@ -689,6 +785,11 @@ impl Journal {
     /// Append one line to the journal on disk, chained to the one before it
     /// and made durable. A journal loaded for `unburn` has no file open: it
     /// is opened to append. An in-memory journal writes nothing.
+    ///
+    /// The process-level shared rekey lock is taken the first time this
+    /// process asks for the key (`seal::key()`), so a `cig tin rekey`
+    /// holding the exclusive lock cannot sign anything out from under a
+    /// run that lives (SEC-004 H1). This method itself is lock-free.
     fn append_line(&mut self, mut v: serde_json::Value) -> io::Result<()> {
         if self.file.is_none() {
             if let Some(dir) = &self.run_dir {
