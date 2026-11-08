@@ -8997,6 +8997,115 @@ fn a_missing_seal_key_is_refused_rather_than_replaced() {
     assert_eq!(sb.read("p/cfg/.env"), "K=v\n");
 }
 
+/// #105: `--seal-key-fd N` hands the tin's key over on a descriptor. A run
+/// that seals burns and unburns with it, no key file is ever made, a hop
+/// cannot read the descriptor (cig closed it), the key on stdin works too,
+/// and a descriptor with nothing open, or no key on it, is a usage error.
+#[cfg(unix)]
+#[test]
+fn a_key_handed_over_on_a_descriptor_seals_and_is_never_written() {
+    let sb = Sandbox::new();
+    let hexkey = "5a".repeat(32);
+    sb.write("key.hex", &format!("{hexkey}\n"));
+    sb.write("not-a-key", "hello\n");
+    sb.write(".env", "SECRET=one\n");
+    sb.write(
+        "s.cig",
+        "pack { \".\" }\nburn {\n  fs.write_text(\".env\", \"SECRET=two\")\n  stick r = proc.run(\"sh\", [\"-c\", \"cat <&3 && echo LEAKED || echo closed\"])\n  exhale r.out\n}\n",
+    );
+    // cig with a redirection the shell makes before exec, as CI would.
+    let cig_fd = |redirect: &str, args: &[&str]| -> Output {
+        Command::new("sh")
+            .arg("-c")
+            .arg(format!("exec \"$0\" \"$@\" {redirect}"))
+            .arg(env!("CARGO_BIN_EXE_cig"))
+            .args(args)
+            .current_dir(sb.path())
+            .env("CIGSCRIPT_HOME", sb.home())
+            .env("NO_COLOR", "1")
+            .env("CIG_SEAL_KEY", "file")
+            .env("CIG_INTERNAL_TRACKER_DIR", sb.path().join("tracker"))
+            .env("CIG_UPDATE_MANIFEST", sb.path().join("no-releases.json"))
+            .env_remove("CI")
+            .output()
+            .expect("run cig")
+    };
+    let text = |o: &Output| {
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&o.stdout),
+            String::from_utf8_lossy(&o.stderr)
+        )
+    };
+    let key_file = sb.path().join(".cigscript-keys").join("seal.key");
+    let out = cig_fd("3<key.hex", &["--seal-key-fd", "3", "run", "s.cig"]);
+    assert!(out.status.success(), "{}", text(&out));
+    let said = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        said.contains("closed") && !said.contains("LEAKED") && !said.contains(&hexkey),
+        "a hop read the key's descriptor: {said}"
+    );
+    assert_eq!(sb.read(".env"), "SECRET=two");
+    assert!(
+        !key_file.exists(),
+        "a key file was made: {}",
+        key_file.display()
+    );
+    fn sealed_under(dir: &Path) -> bool {
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(d) = stack.pop() {
+            for e in fs::read_dir(&d).into_iter().flatten().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else if p.to_string_lossy().ends_with(".cig-sealed") {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+    assert!(sealed_under(&sb.home()), "nothing was sealed");
+    let id = sb.runs()[0]["id"].as_str().unwrap().to_string();
+    // Without the key nothing opens, and no key is made in its place.
+    let out = sb.cig(&["unburn", &id]);
+    assert!(!out.status.success(), "{}", text(&out));
+    assert!(
+        !key_file.exists(),
+        "a key file was made: {}",
+        key_file.display()
+    );
+    assert_eq!(sb.read(".env"), "SECRET=two");
+    // Doctor names the keeper.
+    let out = cig_fd("3<key.hex", &["doctor", "--seal-key-fd", "3"]);
+    assert!(
+        text(&out).contains("handed over on a descriptor"),
+        "{}",
+        text(&out)
+    );
+    // The key on stdin puts the run back.
+    let out = cig_fd("0<key.hex", &["--seal-key-fd", "0", "unburn", &id]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert_eq!(sb.read(".env"), "SECRET=one\n");
+    assert!(
+        !key_file.exists(),
+        "a key file was made: {}",
+        key_file.display()
+    );
+    // Nothing open, no key on it, or cig's own stream: usage errors.
+    for (redirect, fd, says) in [
+        ("", "9", "nothing is open on descriptor 9"),
+        ("3<not-a-key", "3", "did not hold a tin key"),
+        ("", "1", "cig's own output"),
+        ("", "x", "invalid value"),
+    ] {
+        let out = cig_fd(redirect, &["--seal-key-fd", fd, "run", "s.cig"]);
+        assert_eq!(out.status.code(), Some(3), "{}", text(&out));
+        assert!(text(&out).contains(says), "{says}: {}", text(&out));
+    }
+    assert_eq!(sb.read(".env"), "SECRET=one\n");
+}
+
 #[test]
 fn a_script_pinned_below_the_box_or_sealed_touches_is_caught() {
     let sb = Sandbox::new();

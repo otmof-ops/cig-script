@@ -317,6 +317,92 @@ fn legacy_key_path() -> PathBuf {
 pub enum Keeper {
     Keyring,
     File,
+    /// `--seal-key-fd N`: handed over on a descriptor and held in memory
+    /// only, never written down.
+    Descriptor,
+}
+
+/// The key `--seal-key-fd` handed over, read once at start-up.
+static GIVEN: OnceLock<Key> = OnceLock::new();
+
+/// The most a key descriptor is read for: a key is 64 hex characters, and
+/// a descriptor that streams on must not fill memory.
+#[cfg(unix)]
+const GIVEN_KEY_LIMIT: u64 = 4096;
+
+/// `--seal-key-fd N`: read the tin's key from descriptor N (the 64 hex
+/// characters a key file holds), then close it, so the key sits in no
+/// file and no environment variable, and nothing cig starts inherits it.
+/// Descriptor 0 is read and then pointed at /dev/null instead of closed.
+/// Called once, before anything asks for the key.
+#[cfg(unix)]
+pub fn take_key_from_fd(fd: i32) -> Result<(), String> {
+    use std::io::Read as _;
+    use std::os::fd::FromRawFd as _;
+    match fd {
+        1 => return Err("descriptor 1 is cig's own output; open the key on 3 or above (3<key.hex), or on 0".to_string()),
+        2 => return Err("descriptor 2 is cig's own error stream; open the key on 3 or above (3<key.hex), or on 0".to_string()),
+        _ => {}
+    }
+    // SAFETY: F_GETFD only asks whether the descriptor is open.
+    if fd < 0 || unsafe { libc::fcntl(fd, libc::F_GETFD) } == -1 {
+        return Err(format!(
+            "nothing is open on descriptor {fd}; open the key there, for example {fd}<key.hex"
+        ));
+    }
+    harden_process_memory();
+    let mut text = Vec::with_capacity(128);
+    let read = if fd == 0 {
+        std::io::stdin()
+            .lock()
+            .take(GIVEN_KEY_LIMIT)
+            .read_to_end(&mut text)
+    } else {
+        // SAFETY: the descriptor is open (asked above) and was handed to cig
+        // for this alone; the File owns it from here and closes it on drop.
+        let file = unsafe { fs::File::from_raw_fd(fd) };
+        file.take(GIVEN_KEY_LIMIT).read_to_end(&mut text)
+    };
+    if fd == 0 {
+        // A file redirected onto stdin could be rewound by a child and read
+        // again: stdin becomes /dev/null.
+        if let Ok(null) = fs::File::open("/dev/null") {
+            use std::os::fd::AsRawFd as _;
+            // SAFETY: dup2 onto 0 replaces stdin with an open descriptor.
+            unsafe { libc::dup2(null.as_raw_fd(), 0) };
+        }
+    }
+    let decoded = match read {
+        Ok(_) => std::str::from_utf8(&text)
+            .map_err(|_| "it is not text".to_string())
+            .and_then(|t| decode_key(t.trim())),
+        Err(e) => Err(e.to_string()),
+    };
+    // The hex is a copy of the key: wiped before it is let go.
+    for b in text.iter_mut() {
+        // SAFETY: a plain write through a valid &mut u8, kept by volatile.
+        unsafe { std::ptr::write_volatile(b, 0) };
+    }
+    let key = decoded.map_err(|e| {
+        format!(
+            "descriptor {fd} did not hold a tin key, the 64 hex characters a key file holds ({e})"
+        )
+    })?;
+    let _ = GIVEN.set(key);
+    Ok(())
+}
+
+/// Was the key handed over with `--seal-key-fd`? Its keeper holds it
+/// elsewhere already, so no backup reminder is due.
+pub fn key_was_given() -> bool {
+    GIVEN.get().is_some()
+}
+
+/// `--seal-key-fd` needs Unix descriptors; on Windows the key file is the
+/// headless way (`CIG_SEAL_KEY_FILE`).
+#[cfg(not(unix))]
+pub fn take_key_from_fd(_fd: i32) -> Result<(), String> {
+    Err("--seal-key-fd works on Linux, macOS and the BSDs; on Windows name a key file with CIG_SEAL_KEY_FILE".to_string())
 }
 
 /// The key, found once per process: the OS keyring when the setting asks
@@ -329,6 +415,9 @@ pub fn key() -> Result<(Key, Keeper), String> {
 
 fn key_uncached() -> Result<(Key, Keeper), String> {
     harden_process_memory();
+    if let Some(k) = GIVEN.get() {
+        return Ok((*k, Keeper::Descriptor));
+    }
     let cfg = crate::config::Config::load();
     if cfg.get("seal_key") != "file" {
         match keyring_key() {
@@ -683,6 +772,9 @@ fn store_in_keyring(k: &Key) {
 /// entry, else the key file when it exists, else nowhere yet. For doctor,
 /// which must not create a key as a side effect of looking.
 pub fn peek_keeper() -> Option<Keeper> {
+    if GIVEN.get().is_some() {
+        return Some(Keeper::Descriptor);
+    }
     if crate::config::Config::load().get("seal_key") != "file" && keyring_has_entry() {
         return Some(Keeper::Keyring);
     }

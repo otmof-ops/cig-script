@@ -21,6 +21,7 @@ struct Opts {
     unburn: Option<String>,
     explain: Option<String>,
     light: Option<String>,
+    seal_key_fd: Option<i32>,
     chains: bool,
     info: bool,
     help: bool,
@@ -50,7 +51,7 @@ fn parse(argv: &[String]) -> Result<Opts, (String, String)> {
             "--cig-program" => o.info = true,
             "--chains" => o.chains = true,
             "--help" | "-h" => o.help = true,
-            "--max-steps" | "--unburn" | "--explain" | "--light" => {
+            "--max-steps" | "--unburn" | "--explain" | "--light" | "--seal-key-fd" => {
                 let Some(v) = argv.get(i + 1) else {
                     return Err((
                         format!("`{a}` needs a value"),
@@ -62,7 +63,10 @@ fn parse(argv: &[String]) -> Result<Opts, (String, String)> {
             }
             _ if a.starts_with("--") && a.contains('=') => {
                 let (flag, v) = a.split_once('=').expect("has =");
-                if !matches!(flag, "--max-steps" | "--unburn" | "--explain" | "--light") {
+                if !matches!(
+                    flag,
+                    "--max-steps" | "--unburn" | "--explain" | "--light" | "--seal-key-fd"
+                ) {
                     return Err((
                         format!("`{flag}` is not one of this program's run flags"),
                         format!("the program's own arguments go after `--`: -- {a}"),
@@ -89,6 +93,15 @@ fn take(o: &mut Opts, flag: &str, v: &str) -> Result<(), (String, String)> {
         "--max-steps" => o.max_steps = Some(steps(v)?),
         "--unburn" => o.unburn = Some(v.to_string()),
         "--explain" => o.explain = Some(v.to_string()),
+        "--seal-key-fd" => {
+            o.seal_key_fd = Some(v.parse::<i32>().map_err(|_| {
+                (
+                    format!("`--seal-key-fd {v}` is not a descriptor number"),
+                    "give the number the key is open on: --seal-key-fd 3, with 3<key.hex"
+                        .to_string(),
+                )
+            })?)
+        }
         _ => o.light = Some(v.to_string()),
     }
     Ok(())
@@ -120,6 +133,7 @@ run flags (before the program's own arguments):
   --light <chain>    run the program, then light the chain it declares (cig light)
   --chains           list the chains the program declares (cig chains)
   --unburn <run>     put a past run of this program back (cig unburn)
+  --seal-key-fd N    read the tin's key from open descriptor N (Unix; CI)
   --explain <code>   what an error code means and what to do (cig explain)
   --cig-program      what this program is, and what it was compiled from
   --                 everything after this is the program's own",
@@ -188,6 +202,11 @@ pub fn main(p: Program) -> i32 {
             outln!("  runs on        cig {} (this binary)", crate::VERSION);
         }
         return exit::OK;
+    }
+    if let Some(fd) = o.seal_key_fd {
+        if let Some(code) = super::take_key_fd(&ctx, fd) {
+            return code;
+        }
     }
     if let Some(id) = &o.unburn {
         // A program puts back its own runs only; `cig unburn` does any.
@@ -307,6 +326,18 @@ mod tests {
                 .as_deref(),
             Some("20261107T010203-abcdef")
         );
+        assert_eq!(
+            parse(&words(&["--seal-key-fd", "3", "a"]))
+                .unwrap()
+                .seal_key_fd,
+            Some(3)
+        );
+        assert_eq!(
+            parse(&words(&["--seal-key-fd=0"])).unwrap().seal_key_fd,
+            Some(0)
+        );
+        assert!(parse(&words(&["--seal-key-fd", "three"])).is_err());
+        assert!(parse(&words(&["--seal-key-fd"])).is_err());
     }
 
     #[test]

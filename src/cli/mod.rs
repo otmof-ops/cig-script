@@ -66,6 +66,9 @@ pub struct Cli {
     /// Same codes, spans, hints and facts, without the catchphrases (also: CIG_PLAIN=1).
     #[arg(long, global = true)]
     pub plain: bool,
+    /// Read the tin's key from this open descriptor, the 64 hex characters a key file holds (Unix; for CI: the key in no file and no environment variable).
+    #[arg(long, global = true, value_name = "N")]
+    pub seal_key_fd: Option<i32>,
     #[command(subcommand)]
     pub command: Command,
 }
@@ -397,6 +400,13 @@ pub fn main() -> i32 {
             return code;
         }
     }
+    // After a pinned script went to its own cig, which reads the
+    // descriptor itself; before anything asks for the key.
+    if let Some(fd) = cli.seal_key_fd {
+        if let Some(code) = take_key_fd(&ctx, fd) {
+            return code;
+        }
+    }
     // Not after the commands that just tried a send themselves: a second
     // try in the same breath would only spend a retry.
     let flush_after = !matches!(
@@ -410,6 +420,15 @@ pub fn main() -> i32 {
         crate::ashtray::spawn_flush(&crate::config::Config::load());
     }
     code
+}
+
+/// `--seal-key-fd N`: the key read from the descriptor, or a usage error.
+fn take_key_fd(ctx: &Ctx, fd: i32) -> Option<i32> {
+    let e = crate::burn::seal::take_key_from_fd(fd).err()?;
+    let d = crate::diagnostics::usage(format!("--seal-key-fd {fd}: {e}"))
+        .with_hint("hand the key over as cig --seal-key-fd 3 run s.cig 3<key.hex, or name a key file with CIG_SEAL_KEY_FILE");
+    run::report(ctx, &d, None, None);
+    Some(exit::USAGE)
 }
 
 fn dispatch(ctx: Ctx, command: Command) -> i32 {

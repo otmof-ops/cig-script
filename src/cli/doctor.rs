@@ -223,6 +223,10 @@ pub fn doctor(ctx: &Ctx, fix: bool) -> i32 {
                 "a key file".to_string(),
                 crate::crash::tilde(&seal::key_path()),
             ),
+            Some(seal::Keeper::Descriptor) => (
+                "handed over on a descriptor".to_string(),
+                "--seal-key-fd: held in memory, never written".to_string(),
+            ),
             None => (
                 "not made yet".to_string(),
                 "made on the first sealed object".to_string(),
@@ -255,6 +259,7 @@ pub fn doctor(ctx: &Ctx, fix: bool) -> i32 {
         );
         if seal::has_sealed()
             && !seal::was_exported()
+            && !seal::key_was_given()
             && crate::config::Config::load().get("key_reminder") != "off"
         {
             outln!(
