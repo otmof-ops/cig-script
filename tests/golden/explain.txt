@@ -46,6 +46,7 @@ E300-E399  static check (`cig check`): a mistake found before anything runs
   E307  unknown module member              check
   E308  shell through proc.run             check
   E309  newer than the pin                 check
+  E310  skipped by a hop                   check
 
 E400-E499  types and arity: a value of the wrong shape reached an operation
   E400  type error                         type
@@ -657,6 +658,25 @@ E309 newer than the pin  (check, check family, since 1.2.0)
      remedy: cig pin <file> rewrites the pin from what the script uses
 
   arises in: check, run  ·  related: E807  ·  tags: ci-likely
+
+======== E310 ========
+E310 skipped by a hop  (check, check family, since 1.18.0)
+
+  kind of no: not one of the four  (a mistake in the text, in the arithmetic, or in CigScript; syntax, type or logic error; an internal error)
+
+  A hop's `skip` globs leave paths out of the tin: the hop's changes under them are not kept, so it cannot undo them. That is the point for a cache the hop rebuilds anyway, and it is said so nobody skips something they needed. In the box, `skip` does nothing: the box's layer keeps every change.
+
+  what to type next: skip only what the hop rebuilds anyway (a cache); drop `skip` to keep those files undoable
+
+  known causes, ranked; doctor checks them in this order
+  1. the hop names `skip` globs on purpose, for a cache it rebuilds anyway
+     probe: source-line (the source line under the caret)
+     remedy: nothing to do when the skipped paths are caches; otherwise drop them from `skip`
+  2. the hop is boxed, and the box keeps every change whatever `skip` says
+     probe: source-line (the source line under the caret)
+     remedy: drop `skip`, or drop `box` if the hop should leave those paths out
+
+  arises in: check  ·  related: E757  ·  tags: ci-likely
 
 ======== E400 ========
 E400 type error  (type, type family, since 1.0.0)
