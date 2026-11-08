@@ -389,6 +389,9 @@ pub fn take_key_from_fd(fd: i32) -> Result<(), String> {
         )
     })?;
     let _ = GIVEN.set(key);
+    if let Some(k) = GIVEN.get() {
+        keep_out_of_swap(k);
+    }
     Ok(())
 }
 
@@ -410,7 +413,36 @@ pub fn take_key_from_fd(_fd: i32) -> Result<(), String> {
 /// the reason none could be had, and nothing is sealed or unsealed then.
 pub fn key() -> Result<(Key, Keeper), String> {
     static K: OnceLock<Result<(Key, Keeper), String>> = OnceLock::new();
-    K.get_or_init(key_uncached).clone()
+    let k = K.get_or_init(key_uncached);
+    keep_out_of_swap(k);
+    k.clone()
+}
+
+/// The page that holds the key, kept out of swap where the platform allows
+/// it (#105, L5): once, best effort (a small `RLIMIT_MEMLOCK` may say no,
+/// and then it is as before).
+fn keep_out_of_swap<T>(v: &T) {
+    static DONE: OnceLock<()> = OnceLock::new();
+    DONE.get_or_init(|| {
+        #[cfg(unix)]
+        // SAFETY: mlock only pins the pages under a live static.
+        unsafe {
+            libc::mlock((v as *const T).cast(), std::mem::size_of::<T>());
+        }
+        #[cfg(not(unix))]
+        let _ = v;
+    });
+}
+
+/// Text that held a key (its hex, a keyring's answer), wiped before it is
+/// let go (#105, L5): the bytes are zeroed where they are, not left for the
+/// allocator to hand out again.
+fn wipe(s: String) {
+    let mut b = s.into_bytes();
+    for x in b.iter_mut() {
+        // SAFETY: a plain write through a valid &mut u8, kept by volatile.
+        unsafe { std::ptr::write_volatile(x, 0) };
+    }
 }
 
 fn key_uncached() -> Result<(Key, Keeper), String> {
@@ -448,7 +480,11 @@ fn keyring_key() -> Result<Key, String> {
         let r = (|| -> Result<Key, String> {
             let entry = keyring::Entry::new(SERVICE, USER).map_err(|e| e.to_string())?;
             match entry.get_password() {
-                Ok(hex_key) => decode_key(hex_key.trim()),
+                Ok(hex_key) => {
+                    let k = decode_key(hex_key.trim());
+                    wipe(hex_key);
+                    k
+                }
                 Err(keyring::Error::NoEntry) => {
                     if sealed_in_use() {
                         return Err(format!(
@@ -456,9 +492,10 @@ fn keyring_key() -> Result<Key, String> {
                         ));
                     }
                     let k = random_key()?;
-                    entry
-                        .set_password(&hex::encode(k))
-                        .map_err(|e| e.to_string())?;
+                    let text = hex::encode(k);
+                    let stored = entry.set_password(&text).map_err(|e| e.to_string());
+                    wipe(text);
+                    stored?;
                     Ok(k)
                 }
                 Err(e) => Err(e.to_string()),
@@ -508,7 +545,11 @@ fn file_key() -> Result<Key, String> {
     let path = key_path();
     migrate_legacy_key(&path);
     match fs::read_to_string(&path) {
-        Ok(text) => decode_key(text.trim()),
+        Ok(text) => {
+            let k = decode_key(text.trim());
+            wipe(text);
+            k
+        }
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
             if sealed_in_use() {
                 return Err(format!(
