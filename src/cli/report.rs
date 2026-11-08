@@ -184,6 +184,7 @@ fn op_shape(op: &Op, m: &mut Mapping) -> String {
             cwd,
             touches,
             touches_sealed,
+            skip,
             boxed,
             // The box's hosts and globs could name someone: a report says
             // only that the hop was boxed.
@@ -208,6 +209,10 @@ fn op_shape(op: &Op, m: &mut Mapping) -> String {
             if !touches_sealed.is_empty() {
                 let globs: Vec<String> = touches_sealed.iter().map(|g| m.map_glob(g)).collect();
                 s.push_str(&format!("  (touches_sealed {})", globs.join(", ")));
+            }
+            if !skip.is_empty() {
+                let globs: Vec<String> = skip.iter().map(|g| m.map_glob(g)).collect();
+                s.push_str(&format!("  (skip {})", globs.join(", ")));
             }
             s
         }

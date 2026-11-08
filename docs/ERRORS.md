@@ -307,6 +307,7 @@ static check (`cig check`): a mistake found before anything runs.
 | [`E307`](#e307-unknown-module-member) | unknown module member | can't see any ciggies bro | use the member the hint suggests; `cig language` lists every one |
 | [`E308`](#e308-shell-through-proc.run) | shell through proc.run | not one of the four | call the program directly with its arguments as a list; proc.pipe for a pipeline; proc.shell if you mean the shell and the string is yours |
 | [`E309`](#e309-newer-than-the-pin) | newer than the pin | not one of the four | raise the pin to the version the feature arrived in (cig pin <file> infers it), or drop the feature |
+| [`E310`](#e310-skipped-by-a-hop) | skipped by a hop | not one of the four | skip only what the hop rebuilds anyway (a cache); drop `skip` to keep those files undoable |
 
 ### E300 check error
 
@@ -470,6 +471,24 @@ The script is pinned to a cig older than something it uses: the pinned version w
 1. the pin was written before the script started using the feature (probe `source-line`). **Remedy:** cig pin <file> rewrites the pin from what the script uses
 
 Related: `E807`.
+
+
+### E310 skipped by a hop
+
+*check · since 1.18.0 · arises in check*
+
+**Kind of no:** not one of the four (a mistake in the text, in the arithmetic, or in CigScript; syntax, type or logic error; an internal error).
+
+A hop's `skip` globs leave paths out of the tin: the hop's changes under them are not kept, so it cannot undo them. That is the point for a cache the hop rebuilds anyway, and it is said so nobody skips something they needed. In the box, `skip` does nothing: the box's layer keeps every change.
+
+**What to type next:** skip only what the hop rebuilds anyway (a cache); drop `skip` to keep those files undoable
+
+**Known causes**, ranked; doctor checks them in this order:
+
+1. the hop names `skip` globs on purpose, for a cache it rebuilds anyway (probe `source-line`). **Remedy:** nothing to do when the skipped paths are caches; otherwise drop them from `skip`
+2. the hop is boxed, and the box keeps every change whatever `skip` says (probe `source-line`). **Remedy:** drop `skip`, or drop `box` if the hop should leave those paths out
+
+Related: `E757`.
 
 
 ## type (`E400`–`E499`)

@@ -5,6 +5,14 @@ project follows semantic versioning.
 
 ## Unreleased
 
+- **A hop skips what it rebuilds anyway** (#148). `skip: ["build/**",
+  ".cache/"]` on a hop leaves those paths out of the tin, the way a
+  `.cigignore` line does: what the hop changes there is neither kept nor
+  journaled, so it cannot be undone, and the hop does not pay to keep a
+  cache. `cig check` says so on the hop's line (`E310`), or that `skip` does
+  nothing in the box, whose layer keeps every change. The `hop_skip`
+  setting (`cig config hop_skip "**/.cache/**, *.log"`) adds globs every
+  hop leaves out. The plan shows `(skip …)`.
 - **A disk budget for the history, off by default** (#149). `history_budget`
   (a size like `500MB` or `2GB`, base 1024; `off`, the default, so nothing
   is pruned on upgrade) caps the history as it grows: the run records and
@@ -18,6 +26,7 @@ project follows semantic versioning.
   so. Each prune is listed by `cig runs --pruned` as `budget`. `cig doctor`
   shows the history's size and, with the budget off, suggests one (about
   5% of the free space, from 1 GB to 20 GB) without changing anything.
+
 
 ## 1.17.0 — 2026-11-08
 

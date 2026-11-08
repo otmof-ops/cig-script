@@ -387,7 +387,10 @@ a `gc` during the hop keeps them.
 A `.cigignore` at a pack root (one glob per line, `#` comments) lists what
 hop watching and the tin never look into; `.git`, `node_modules`, `target`,
 `.venv`, `venv`, `__pycache__`, `.gradle`, `.terraform` and `.cigscript` are
-skipped everywhere. Those trees are rebuilt, not restored.
+skipped everywhere. Those trees are rebuilt, not restored. A hop's own
+`skip` globs, and the `hop_skip` setting for every hop, leave more out the
+same way (`HOPS.md`): what the hop changes there cannot be undone, and
+`cig check` says so (`E310`).
 
 Every record says what shape it is in: `run.json` carries `"format": 1`,
 `after.json` `"format": 2`, and the first line of `journal.jsonl` is

@@ -10986,6 +10986,35 @@ fn the_state_directory_is_kept_out_of_spotlight() {
     assert!(sb.home().join(".metadata_never_index").exists());
 }
 
+/// #106: `cig doctor` says what the box is made of here, each part tried on
+/// its own, so a box that cannot be made says which part is missing.
+#[test]
+fn doctor_lists_the_box_primitives() {
+    let sb = Sandbox::new();
+    let out = sb.cig(&["doctor"]);
+    let said = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(said.contains("\n  box\n"), "{said}");
+    if cfg!(target_os = "linux") {
+        for part in ["user ns", "mount ns", "network ns", "pid ns", "overlayfs"] {
+            assert!(
+                said.lines().any(|l| l.trim_start().starts_with(part)),
+                "{part}: {said}"
+            );
+        }
+        // The box's own refusal reaches the overlayfs line, with its reason.
+        let no = sb.cig_env(&["doctor"], &[("CIG_INTERNAL_NO_BOX", "1")]);
+        let said = String::from_utf8_lossy(&no.stdout).to_string();
+        assert!(
+            said.lines().any(|l| l.trim_start().starts_with("overlayfs")
+                && l.contains("no")
+                && l.contains("CIG_INTERNAL_NO_BOX")),
+            "{said}"
+        );
+    } else {
+        assert!(said.contains("the box is Linux's"), "{said}");
+    }
+}
+
 /// #149: `cig runs --pruned` says which runs went on purpose, from the
 /// ledger: newest first, when, how, and what each was.
 #[test]
@@ -11225,4 +11254,103 @@ fn history_budget_counts_the_tin_and_collects_it() {
     // are all there.
     sb.run_ok(&["unburn", "--last", "3", "--yes"]);
     assert_eq!(sb.read("p/big.bin"), "1".repeat(size));
+}
+
+/// #148: a hop's `skip` globs and the `hop_skip` setting leave paths out of
+/// the tin. What the hop changes there is neither kept nor journaled, so the
+/// rollback leaves it as the hop left it, while the rest of the hop comes
+/// back; the plan says what is skipped.
+#[cfg(unix)]
+#[test]
+fn a_hop_leaves_what_it_skips_out_of_the_tin() {
+    let sb = Sandbox::new();
+    sb.write("p/keep.txt", "v1\n");
+    sb.write("p/cache/c.bin", "old\n");
+    sb.write("p/logs/a.log", "old\n");
+    let hop = "echo v2 > p/keep.txt; echo new > p/cache/c.bin; echo n > p/cache/n.bin; echo new > p/logs/a.log; echo t > p/t.txt";
+    sb.write(
+        "s.cig",
+        &format!("pack {{ \"./p\" }}\nburn {{\n  proc.run(\"sh\", [\"-c\", \"{hop}\"], {{touches: [\"**\"], skip: [\"cache/\"]}})\n  cough \"x\"\n}}\n"),
+    );
+    // The dry run stops at the `cough` too; the plan is what is checked.
+    let dry = sb.cig(&["run", "--dry-run", "s.cig"]);
+    let plan = String::from_utf8_lossy(&dry.stderr);
+    assert!(
+        plan.contains("(touches **: 2 files)  (skip cache/)"),
+        "{plan}"
+    );
+    let err = sb.run_err(&["run", "s.cig"], 1);
+    assert_eq!(sb.read("p/keep.txt"), "v1\n", "{err}");
+    assert_eq!(sb.read("p/logs/a.log"), "old\n", "{err}");
+    assert!(!sb.exists("p/t.txt"), "{err}");
+    assert_eq!(sb.read("p/cache/c.bin"), "new\n", "a skipped change stays");
+    assert!(sb.exists("p/cache/n.bin"), "a skipped creation stays");
+    let id = sb.runs()[0]["id"].as_str().unwrap().to_string();
+    let shown = sb.run_ok(&["runs", &id]);
+    assert!(
+        !shown
+            .lines()
+            .any(|l| l.contains("  hop ") && l.contains("/cache/")),
+        "nothing under a skipped glob is journaled: {shown}"
+    );
+
+    // The setting skips for every hop, on top of the hop's own `skip`.
+    sb.write("p/keep.txt", "v1\n");
+    sb.write("p/logs/a.log", "old\n");
+    sb.run_ok(&["config", "hop_skip", "logs/**, *.tmp"]);
+    sb.write(
+        "t.cig",
+        "pack { \"./p\" }\nburn {\n  proc.run(\"sh\", [\"-c\", \"echo v3 > p/keep.txt; echo newer > p/logs/a.log\"], {touches: [\"**\"]})\n  cough \"x\"\n}\n",
+    );
+    let err = sb.run_err(&["run", "t.cig"], 1);
+    assert_eq!(sb.read("p/keep.txt"), "v1\n", "{err}");
+    assert_eq!(sb.read("p/logs/a.log"), "newer\n", "{err}");
+    sb.run_err(&["config", "hop_skip", "[unclosed"], 3);
+}
+
+/// #148: `cig check` says a hop's `skip` on the hop's line, since what it
+/// covers cannot be undone, and says instead that it does nothing in the
+/// box. E310 is a warning: the script still checks.
+#[test]
+fn skip_globs_are_said_by_check() {
+    let sb = Sandbox::new();
+    sb.write(
+        "s.cig",
+        "pack { \".\" }\nburn {\n  proc.run(\"make\", [], {touches: [\"**\"], skip: [\"build/**\", \".cache/\"]})\n  proc.run(\"npm\", [\"ci\"], {box: true, skip: \"node_modules/.cache/**\"})\n}\n",
+    );
+    let out = sb.cig(&["--json", "check", "s.cig"]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{text}");
+    let e310: Vec<serde_json::Value> = text
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .flat_map(|v| {
+            v["warnings"]
+                .as_array()
+                .cloned()
+                .unwrap_or_else(|| vec![v.clone()])
+        })
+        .filter(|w| w["code"] == "E310")
+        .collect();
+    assert_eq!(e310.len(), 2, "{text}");
+    assert_eq!(e310[0]["line"], 3, "{text}");
+    let first = e310[0]["message"].as_str().unwrap();
+    assert!(
+        first.contains("`build/**`, `.cache/`") && first.contains("cannot be undone"),
+        "{first}"
+    );
+    assert_eq!(e310[1]["line"], 4, "{text}");
+    assert!(
+        e310[1]["message"]
+            .as_str()
+            .unwrap()
+            .contains("does nothing in the box"),
+        "{text}"
+    );
+    sb.write(
+        "bad.cig",
+        "pack { \".\" }\nburn {\n  proc.run(\"true\", [], {skip: [\"[unclosed\"]})\n}\n",
+    );
+    let err = sb.run_err(&["run", "bad.cig"], 1);
+    assert!(err.contains("skip: `[unclosed` is not a glob"), "{err}");
 }
