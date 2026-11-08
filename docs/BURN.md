@@ -482,6 +482,15 @@ skipped everywhere. Those trees are rebuilt, not restored. A hop's own
 same way (`HOPS.md`): what the hop changes there cannot be undone, and
 `cig check` says so (`E310`).
 
+**The stat cache** (`hop_statcache`, off by default; `HOPS.md`). The tin
+can optionally keep an index of each touched file's
+`(dev, inode, size, mtime_ns, ctime_ns, mode)` under
+`tin/statcache/<pack hash>`, so a later hop whose files all match the index
+reads none of them: their tin objects are known by hash. A restore never
+trusts the index (`E704`'s before and after hashes still run), and
+`cig tin verify --statcache` re-hashes everything the index remembers and
+drops a lying entry as a tripwire report.
+
 Every record says what shape it is in: `run.json` carries `"format": 1`,
 `after.json` `"format": 2`, and the first line of `journal.jsonl` is
 `{"format":2,"prev":"…"}` (a marker, so a cig from before formats reads

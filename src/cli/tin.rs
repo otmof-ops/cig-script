@@ -5,8 +5,46 @@
 //! no run still needs.
 
 use super::{exit, Ctx};
-use crate::burn::{rekey, seal, tin};
+use crate::burn::{rekey, seal, statcache, tin};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
+
+/// Re-hash every file the stat cache remembers and report the mismatches,
+/// dropping the stale entries. A mismatch is the tripwire #148 describes:
+/// the filesystem lied about mtime between when the cache was saved and
+/// now. Returns one line per mismatch, in the shape `cig tin verify` uses.
+fn statcache_verify_and_drop() -> Vec<String> {
+    let mismatches = statcache::verify_all();
+    if mismatches.is_empty() {
+        return Vec::new();
+    }
+    let mut problems = Vec::with_capacity(mismatches.len());
+    let mut by_pack: BTreeMap<String, Vec<Vec<u8>>> = BTreeMap::new();
+    for m in mismatches {
+        let display = String::from_utf8_lossy(&m.path).into_owned();
+        if m.actual.is_empty() {
+            problems.push(format!(
+                "the stat cache remembers {display} (sha256 {}), which is no longer on disk; the entry is dropped",
+                &m.remembered[..12.min(m.remembered.len())]
+            ));
+        } else {
+            problems.push(format!(
+                "the stat cache remembers {display} as sha256 {} but the file hashes to {}; the entry is dropped and the next hop reads it again (tripwire: a lying filesystem)",
+                &m.remembered[..12.min(m.remembered.len())],
+                &m.actual[..12.min(m.actual.len())]
+            ));
+        }
+        by_pack.entry(m.pack_hash).or_default().push(m.path);
+    }
+    for (pack, paths) in by_pack {
+        if let Err(e) = statcache::drop_entries(&pack, &paths) {
+            problems.push(format!(
+                "could not drop the stale entries for pack {pack}: {e}"
+            ));
+        }
+    }
+    problems
+}
 
 #[derive(clap::Subcommand)]
 pub enum TinCommand {
@@ -20,6 +58,9 @@ pub enum TinCommand {
         /// Also check the ledger's head against a value `cig tin head` printed earlier (kept elsewhere).
         #[arg(long, value_name = "HEAD")]
         head: Option<String>,
+        /// Re-hash every file the stat cache remembers and drop the ones whose bytes no longer hash to what the cache said: a tripwire for a filesystem that lied about mtime.
+        #[arg(long)]
+        statcache: bool,
     },
     /// The ledger's head: one line to keep anywhere else, for `cig tin verify --head`.
     Head,
@@ -319,8 +360,15 @@ pub fn tin_cmd(ctx: &Ctx, cmd: Option<TinCommand>) -> i32 {
                 exit::SCRIPT_ERROR
             }
         },
-        TinCommand::Verify { quick, head } => {
+        TinCommand::Verify {
+            quick,
+            head,
+            statcache,
+        } => {
             let mut problems = tin::verify(quick);
+            if statcache {
+                problems.extend(statcache_verify_and_drop());
+            }
             match crate::burn::ledger::load() {
                 Ok(l) => {
                     if let Some(at) = l.broken_at {
