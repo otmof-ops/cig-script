@@ -39,13 +39,14 @@ pub const LABEL_SEAL: &[u8] = b"tin-seal";
 pub const LABEL_JOURNAL_MAC: &[u8] = b"journal-mac";
 pub const LABEL_LEDGER_MAC: &[u8] = b"ledger-mac";
 
-/// A 32-byte subkey of the master, for one purpose, by HKDF-SHA256.
+/// A 32-byte subkey of the master, for one purpose, by HKDF-SHA256. The
+/// returned subkey is a `Key`, so it wipes itself on drop.
 pub fn derive(master: &Key, label: &[u8]) -> Key {
-    let hk = Hkdf::<Sha256>::new(None, master);
+    let hk = Hkdf::<Sha256>::new(None, master.as_bytes());
     let mut out = [0u8; 32];
     hk.expand(label, &mut out)
         .expect("32 bytes is a valid HKDF-SHA256 output length");
-    out
+    Key::new(out)
 }
 /// Plaintext bytes per segment.
 const SEGMENT: usize = 1 << 20;
@@ -243,7 +244,104 @@ pub fn is_sealed_path(path: &Path) -> bool {
 
 // ----- the key -------------------------------------------------------------------
 
-pub type Key = [u8; 32];
+/// A 32-byte secret: the master, or a subkey derived from it. Not `Copy`
+/// (so a stack copy is never left behind when the value is moved), and its
+/// `Drop` writes zeroes over the bytes through a volatile store, so the
+/// backing memory is wiped rather than left for the allocator to hand out
+/// again (#105, L5). `Clone` is kept but explicit, so a copy is a deliberate
+/// act.
+pub struct Key([u8; 32]);
+
+/// A compile-time refusal: if someone adds `Copy` to `Key`, this const's
+/// body stops type-checking. The trick is a blanket impl keyed on `Copy`:
+/// with the plain impl it is unambiguous, with the `Copy` one it is a
+/// conflict (static_assertions-style, with no new dependency).
+const _: fn() = || {
+    struct Check<T: ?Sized>(core::marker::PhantomData<T>);
+    trait AmbiguousIfImpl<A> {
+        fn resolve() {}
+    }
+    impl<T: ?Sized> AmbiguousIfImpl<()> for Check<T> {}
+    #[allow(dead_code)]
+    impl<T: Copy> AmbiguousIfImpl<u8> for Check<T> {}
+    let _ = <Check<Key> as AmbiguousIfImpl<_>>::resolve;
+};
+
+impl Key {
+    /// Build a key from 32 bytes. The caller's own copy is still on the
+    /// stack: wiping it is the caller's job (`wipe_bytes` does it).
+    pub fn new(bytes: [u8; 32]) -> Self {
+        Key(bytes)
+    }
+
+    /// Borrow the 32 bytes, for a cipher or HMAC that wants a slice. A
+    /// borrow never escapes a `Key`, so a copy is a deliberate act.
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+impl Clone for Key {
+    fn clone(&self) -> Self {
+        Key(self.0)
+    }
+}
+
+impl PartialEq for Key {
+    fn eq(&self, other: &Self) -> bool {
+        // Constant-time: the rekey's keeper read-back compares a fresh
+        // `Key` with the key just written, and a short-circuiting compare
+        // would leak the mismatch position to a local observer. Cheap
+        // (32 bytes) and the usual-case callers (two values that match)
+        // pay nothing on top.
+        ct_eq_bytes(&self.0, &other.0)
+    }
+}
+impl Eq for Key {}
+
+/// Constant-time byte-slice equality. Lengths that differ are not equal and
+/// return at once; equal-length slices compare every byte.
+fn ct_eq_bytes(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+impl std::fmt::Debug for Key {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("Key").field(&"<32 bytes>").finish()
+    }
+}
+
+impl TryFrom<&[u8]> for Key {
+    type Error = ();
+    fn try_from(bytes: &[u8]) -> Result<Self, Self::Error> {
+        let arr: [u8; 32] = bytes.try_into().map_err(|_| ())?;
+        Ok(Key(arr))
+    }
+}
+
+impl Drop for Key {
+    fn drop(&mut self) {
+        wipe_bytes(&mut self.0);
+    }
+}
+
+/// Zero a buffer through volatile writes, so the compiler cannot elide
+/// them. A compiler fence after is defence in depth (nothing may reorder
+/// past it).
+pub fn wipe_bytes(buf: &mut [u8]) {
+    for b in buf.iter_mut() {
+        // SAFETY: a plain write through a valid &mut u8, kept by volatile.
+        unsafe { std::ptr::write_volatile(b, 0u8) };
+    }
+    std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
+}
 
 /// Where the master key is kept when the keyring has none: apart from the
 /// tin it seals, so a copy of the tin never takes the key with it.
@@ -379,10 +477,7 @@ pub fn take_key_from_fd(fd: i32) -> Result<(), String> {
         Err(e) => Err(e.to_string()),
     };
     // The hex is a copy of the key: wiped before it is let go.
-    for b in text.iter_mut() {
-        // SAFETY: a plain write through a valid &mut u8, kept by volatile.
-        unsafe { std::ptr::write_volatile(b, 0) };
-    }
+    wipe_bytes(&mut text);
     let key = decoded.map_err(|e| {
         format!(
             "descriptor {fd} did not hold a tin key, the 64 hex characters a key file holds ({e})"
@@ -411,11 +506,71 @@ pub fn take_key_from_fd(_fd: i32) -> Result<(), String> {
 /// The key, found once per process: the OS keyring when the setting asks
 /// for it and it answers, else the key file (made on first use). `Err` is
 /// the reason none could be had, and nothing is sealed or unsealed then.
+///
+/// At the first call in this process the rekey lock is taken in shared
+/// mode and kept for the lifetime of the process (SEC-004 H1): a
+/// `cig tin rekey` cannot sign anything out from under a long-lived run,
+/// and a run that starts while a rekey holds the exclusive lock waits
+/// until it finishes (one notice on stderr) and reads the new key. A
+/// rekey is its own lock-holder, so it opts out of the shared lock
+/// before calling `key()` (see `rekey::enter_rekey`).
 pub fn key() -> Result<(Key, Keeper), String> {
+    static K: OnceLock<Result<(Key, Keeper), String>> = OnceLock::new();
+    // Fail closed: a lock that cannot be had leaves every seal/sign call
+    // refused with the reason, rather than proceeding unprotected under a
+    // rekey a concurrent `cig tin rekey` is about to retire (SEC-004 N3).
+    hold_shared_rekey_lock()?;
+    let k = K.get_or_init(key_uncached);
+    keep_out_of_swap(k);
+    k.clone()
+}
+
+/// The same as `key()` but without taking the shared rekey lock. For the
+/// rekey itself: it holds the exclusive lock and asks for the key under
+/// it. Everyone else goes through `key()`.
+pub(crate) fn key_no_rekey_lock() -> Result<(Key, Keeper), String> {
     static K: OnceLock<Result<(Key, Keeper), String>> = OnceLock::new();
     let k = K.get_or_init(key_uncached);
     keep_out_of_swap(k);
     k.clone()
+}
+
+thread_local! {
+    /// Set on the rekey's own thread: `key()` skips the shared lock when it
+    /// is set, so the rekey (which holds the exclusive lock) does not
+    /// deadlock against itself.
+    static REKEY_OWNS_LOCK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Mark this thread as the rekey's: subsequent `key()` calls skip the
+/// shared lock. Called by `rekey::rekey` after it takes the exclusive
+/// lock and cleared again at the end of that scope.
+pub(crate) fn mark_rekey_thread(on: bool) {
+    REKEY_OWNS_LOCK.with(|c| c.set(on));
+}
+
+/// Take the process-wide shared lock on the rekey lock file once, and keep
+/// it for the rest of the process. A `cig tin rekey` cannot then take the
+/// exclusive lock while this process lives, so nothing is signed or
+/// sealed under a key the rekey is about to retire. A run started while
+/// a rekey holds the exclusive lock blocks here (with one line on stderr
+/// the first time) until the rekey finishes.
+///
+/// Fail closed (SEC-004 N3): when the lock cannot be had (the keys
+/// directory cannot be made, the lock file cannot be opened, or `flock`
+/// refuses for a reason other than contention), the first call caches
+/// the error on `HELD` and every later call returns it too. Callers
+/// (`seal::key` and the ledger/journal pre-write path) propagate the
+/// error rather than carry on unprotected.
+pub(crate) fn hold_shared_rekey_lock() -> Result<(), String> {
+    if REKEY_OWNS_LOCK.with(|c| c.get()) {
+        return Ok(());
+    }
+    static HELD: OnceLock<Result<fs::File, String>> = OnceLock::new();
+    match HELD.get_or_init(super::rekey::take_process_shared_lock) {
+        Ok(_) => Ok(()),
+        Err(e) => Err(e.clone()),
+    }
 }
 
 /// The page that holds the key, kept out of swap where the platform allows
@@ -439,16 +594,13 @@ fn keep_out_of_swap<T>(v: &T) {
 /// allocator to hand out again.
 fn wipe(s: String) {
     let mut b = s.into_bytes();
-    for x in b.iter_mut() {
-        // SAFETY: a plain write through a valid &mut u8, kept by volatile.
-        unsafe { std::ptr::write_volatile(x, 0) };
-    }
+    wipe_bytes(&mut b);
 }
 
 fn key_uncached() -> Result<(Key, Keeper), String> {
     harden_process_memory();
     if let Some(k) = GIVEN.get() {
-        return Ok((*k, Keeper::Descriptor));
+        return Ok((k.clone(), Keeper::Descriptor));
     }
     let cfg = crate::config::Config::load();
     if cfg.get("seal_key") != "file" {
@@ -492,7 +644,7 @@ fn keyring_key() -> Result<Key, String> {
                         ));
                     }
                     let k = random_key()?;
-                    let text = hex::encode(k);
+                    let text = hex::encode(k.as_bytes());
                     let stored = entry.set_password(&text).map_err(|e| e.to_string());
                     wipe(text);
                     stored?;
@@ -574,7 +726,7 @@ fn file_key() -> Result<Key, String> {
             let mut f = opts
                 .open(&path)
                 .map_err(|e| format!("cannot create the key file {}: {e}", path.display()))?;
-            f.write_all(hex::encode(k).as_bytes())
+            f.write_all(hex::encode(k.as_bytes()).as_bytes())
                 .and_then(|()| f.write_all(b"\n"))
                 .and_then(|()| f.sync_all())
                 .map_err(|e| e.to_string())?;
@@ -711,8 +863,10 @@ pub fn export_key(dest: &Path, passphrase: &str) -> Result<(), String> {
         .map_err(|e| format!("deriving the wrapping key failed: {e}"))?;
     let cipher = XChaCha20Poly1305::new((&wrap).into());
     let ct = cipher
-        .encrypt((&nonce).into(), master.as_slice())
+        .encrypt((&nonce).into(), master.as_bytes().as_slice())
         .map_err(|_| "wrapping the key failed".to_string())?;
+    // Wipe the derived wrapping key: Argon2 is costly, its output is secret.
+    wipe_bytes(&mut wrap);
     let mut out = Vec::with_capacity(8 + 16 + 24 + ct.len());
     out.extend_from_slice(KEY_EXPORT_MAGIC);
     out.extend_from_slice(&salt);
@@ -748,13 +902,14 @@ pub fn import_key(src: &Path, passphrase: &str) -> Result<(), String> {
         .hash_password_into(passphrase.as_bytes(), salt, &mut wrap)
         .map_err(|e| format!("deriving the wrapping key failed: {e}"))?;
     let cipher = XChaCha20Poly1305::new((&wrap).into());
-    let pt = cipher
+    let mut pt = cipher
         .decrypt(nonce.into(), ct)
         .map_err(|_| "wrong passphrase, or the export was changed".to_string())?;
-    let master: Key = pt
-        .as_slice()
-        .try_into()
+    wipe_bytes(&mut wrap);
+    let master: Key = Key::try_from(pt.as_slice())
         .map_err(|_| "the export does not hold a 32-byte key".to_string())?;
+    // The plaintext buffer still holds the key bytes: wipe before letting go.
+    wipe_bytes(&mut pt);
     let path = key_path();
     // A different key already in place, with sealed objects that only it
     // opens: importing over it would lock them out. Refused, with the way
@@ -781,32 +936,67 @@ pub fn import_key(src: &Path, passphrase: &str) -> Result<(), String> {
         opts.mode(0o600);
     }
     let mut f = opts.open(&path).map_err(|e| e.to_string())?;
-    f.write_all(hex::encode(master).as_bytes())
+    f.write_all(hex::encode(master.as_bytes()).as_bytes())
         .and_then(|()| f.write_all(b"\n"))
         .and_then(|()| f.sync_all())
         .map_err(|e| e.to_string())?;
     // Where the keyring is the keeper, the imported key goes there as well,
     // so the next run finds it there and never makes a fresh one instead.
-    store_in_keyring(&master);
+    // Best-effort: the primary key file above is already in place, so a
+    // keyring that is not around now is not a reason to refuse the import.
+    let _ = store_in_keyring(&master);
     Ok(())
 }
 
-/// Put a key into the OS keyring, best effort, on a thread with a deadline
-/// (a hanging D-Bus activation must not hang the command). Skipped when
-/// the setting says the key lives in a file.
-fn store_in_keyring(k: &Key) {
+/// Put a key into the OS keyring and prove the keyring now carries it: the
+/// value is written, then read back, and the two compared in constant time.
+/// Runs on a thread with a deadline, so a hanging D-Bus activation cannot
+/// hang the command. `Ok` only when the read-back equalled the value
+/// written; any other outcome is `Err`, and the caller holds the stashes.
+///
+/// `seal_key = file` leaves the keyring alone and returns `Ok`.
+pub fn store_in_keyring(k: &Key) -> Result<(), String> {
     if crate::config::Config::load().get("seal_key") == "file" {
-        return;
+        return Ok(());
     }
-    let k = *k;
+    // The hex copy is let go after the compare: both the one sent to the
+    // thread and the one the thread receives from the keyring are wiped.
+    let want = k.clone();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let ok = keyring::Entry::new(SERVICE, USER)
-            .and_then(|e| e.set_password(&hex::encode(k)))
-            .is_ok();
-        let _ = tx.send(ok);
+        let mut hex_key = hex::encode(want.as_bytes());
+        let outcome = (|| -> Result<(), String> {
+            let entry = keyring::Entry::new(SERVICE, USER).map_err(|e| e.to_string())?;
+            entry.set_password(&hex_key).map_err(|e| e.to_string())?;
+            match entry.get_password() {
+                Ok(got) => {
+                    let parsed = decode_key(got.trim());
+                    wipe(got);
+                    let round_tripped = parsed?;
+                    if round_tripped == want {
+                        Ok(())
+                    } else {
+                        Err(
+                            "the keyring accepted the write but gave back other bytes on the read-back"
+                                .to_string(),
+                        )
+                    }
+                }
+                Err(e) => Err(format!("read-back from the keyring failed: {e}")),
+            }
+        })();
+        // The hex Vec<u8> held the key for a moment: wipe before it is let go.
+        // SAFETY: wipe_bytes takes a &mut [u8] from the String's bytes.
+        // SAFETY: using the String buffer directly would need unsafe; the
+        // simpler path is to build a Vec from the String, wipe, drop.
+        super::seal::wipe_bytes(unsafe { hex_key.as_bytes_mut() });
+        drop(hex_key);
+        let _ = tx.send(outcome);
     });
-    let _ = rx.recv_timeout(std::time::Duration::from_secs(5));
+    match rx.recv_timeout(std::time::Duration::from_secs(5)) {
+        Ok(r) => r,
+        Err(_) => Err("the keyring did not answer within 5 seconds".to_string()),
+    }
 }
 
 /// Where the key is kept, without making one: the keyring when it holds an
@@ -838,21 +1028,29 @@ fn keyring_has_entry() -> bool {
 }
 
 fn decode_key(text: &str) -> Result<Key, String> {
-    let bytes = hex::decode(text).map_err(|_| "the stored key is not hex".to_string())?;
-    bytes
+    let mut bytes = hex::decode(text).map_err(|_| "the stored key is not hex".to_string())?;
+    let arr: [u8; 32] = bytes
+        .as_slice()
         .try_into()
-        .map_err(|_| "the stored key is not 32 bytes".to_string())
+        .map_err(|_| "the stored key is not 32 bytes".to_string())?;
+    // The intermediate hex-decoded Vec held the key for a moment: wipe it.
+    wipe_bytes(&mut bytes);
+    Ok(Key::new(arr))
 }
 
-fn random_key() -> Result<Key, String> {
+/// A fresh 32-byte random master key, wipe-on-drop.
+pub fn random_key() -> Result<Key, String> {
     let mut k = [0u8; 32];
     getrandom::getrandom(&mut k).map_err(|e| format!("no randomness: {e}"))?;
-    Ok(k)
+    let out = Key::new(k);
+    // The local stack copy held the key for a moment: wipe it.
+    wipe_bytes(&mut k);
+    Ok(out)
 }
 
 /// A short, public fingerprint of a key, for messages and manifests.
 pub fn fingerprint(key: &Key) -> String {
-    hex::encode(Sha256::digest(key))[..16].to_string()
+    hex::encode(Sha256::digest(key.as_bytes()))[..16].to_string()
 }
 
 /// A fresh random id for a sealed object: 16 bytes, hex.
@@ -887,6 +1085,12 @@ fn key_or_refuse() -> io::Result<Key> {
 /// `aad` binds the file to its name. Returns the plaintext's SHA-256 and
 /// size, which the journal records so the bytes are checked on the way
 /// back whatever the ciphertext says.
+///
+/// `seal_inner` reaches `key()` first, which takes the rekey's shared
+/// lock for the whole life of the process (SEC-004 H1): a `cig tin
+/// rekey` cannot sign anything out from under a run that lives, and a
+/// run started during a rekey waits on the key call and then seals
+/// under the new key.
 pub fn seal_file(src: &Path, dest: &Path, aad: &[u8]) -> io::Result<(String, u64)> {
     let result = seal_inner(src, dest, aad);
     if result.is_err() {
@@ -899,7 +1103,7 @@ fn seal_inner(src: &Path, dest: &Path, aad: &[u8]) -> io::Result<(String, u64)> 
     let key = derive(&key_or_refuse()?, LABEL_SEAL);
     let mut nonce = [0u8; NONCE];
     getrandom::getrandom(&mut nonce).map_err(|e| io::Error::other(e.to_string()))?;
-    let cipher = XChaCha20Poly1305::new((&key).into());
+    let cipher = XChaCha20Poly1305::new(key.as_bytes().into());
     let mut enc = EncryptorBE32::from_aead(cipher, (&nonce).into());
     let mut input = fs::File::open(src)?;
     let mut out = io::BufWriter::new(fs::File::create(dest)?);
@@ -948,40 +1152,285 @@ pub fn unseal_to(
             "the key that sealed it is not available ({e}); nothing was written"
         ))
     })?;
-    unseal_to_with(&master, src, aad, expect_sha256, dst)
+    // A rekey in progress keeps the old key (and the new key, before the
+    // keeper is swapped) on disk, so a crash leaves every object readable
+    // under one of them. Pick the right key by trial-decrypting one segment
+    // before streaming the whole file into `dst` (`dst` cannot be rewound).
+    // The stashes are honoured only when they prove the primary (H2).
+    let secondaries = secondary_keys(&master);
+    let picked = if secondaries.is_empty() || probe_key(src, aad, &master).is_ok() {
+        master
+    } else if let Some(k) = secondaries
+        .into_iter()
+        .find(|k| probe_key(src, aad, k).is_ok())
+    {
+        k
+    } else {
+        // Neither master nor any stash opens: fall through with master so
+        // `unseal_to_with` reports the real tag failure to the caller.
+        master
+    };
+    unseal_to_with(&picked, src, aad, expect_sha256, dst)
 }
 
-/// The key kept in a file (hex), when it reads as one.
+/// The fallback keys a rekey leaves on disk while it works: `seal.key.old`
+/// (the key that sealed everything before the rekey) and `seal.key.new`
+/// (the key the keeper will carry once the walk is through). Either is
+/// present only while a rekey is in flight; after it finishes, both are
+/// removed. Empty on a steady tin.
+///
+/// Honoured only when every one of the following holds (SEC-004 H2):
+///
+/// - the rekey marker `rekey.in-progress` is on disk, and
+/// - each stash file is a regular file, mode 0600, owned by this user, and
+/// - the keeper's primary key equals one of the stash keys, by a
+///   constant-time compare. Every legitimate mid-rekey state satisfies
+///   this (the primary is still `seal.key.old` before the keeper swap and
+///   `seal.key.new` after it). A planted marker + planted stash made by
+///   someone who does not know the primary key cannot satisfy it, so a
+///   signed journal or sealed object produced under a planted key will
+///   not verify or open.
+///
+/// Returns the stashes that are NOT equal to the primary, so a caller
+/// never tries the primary key twice.
+pub fn secondary_keys(primary: &Key) -> Vec<Key> {
+    let dir = keys_dir();
+    if !dir.join(super::rekey::REKEY_MARKER).exists() {
+        return Vec::new();
+    }
+    // Read both stashes, honouring only private 0600 regular files.
+    let read = |name: &str| -> Option<Key> {
+        let p = dir.join(name);
+        if !is_private_regular_file(&p) {
+            return None;
+        }
+        key_in_file(&p)
+    };
+    let stashed_new = read("seal.key.new");
+    let stashed_old = read("seal.key.old");
+    // The primary MUST equal at least one of the stashes (constant-time).
+    // This is what forgery cannot satisfy: a planter who does not know
+    // the primary key cannot write a `seal.key.old`/`seal.key.new` that
+    // equals it.
+    let primary_matches = stashed_new.as_ref().map(|k| k == primary).unwrap_or(false)
+        || stashed_old.as_ref().map(|k| k == primary).unwrap_or(false);
+    if !primary_matches {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    // Order: new first, since after a successful swap the active keeper
+    // still carries old until the next process starts.
+    for s in [stashed_new, stashed_old].into_iter().flatten() {
+        if &s != primary {
+            out.push(s);
+        }
+    }
+    out
+}
+
+/// A key stash is trusted only when it is a regular file, mode 0600, owned
+/// by this effective user. A world-readable or someone-else's file at the
+/// path is ignored, not an error: the probe falls back on the primary key.
+#[cfg(unix)]
+fn is_private_regular_file(path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(md) = fs::symlink_metadata(path) else {
+        return false;
+    };
+    if !md.file_type().is_file() {
+        return false;
+    }
+    if (md.mode() & 0o777) != 0o600 {
+        return false;
+    }
+    // SAFETY: geteuid() has no preconditions and returns a uid.
+    let euid = unsafe { libc::geteuid() };
+    md.uid() == euid
+}
+
+#[cfg(not(unix))]
+fn is_private_regular_file(path: &Path) -> bool {
+    // Where POSIX mode and uid do not apply, rely on the keys-dir ACL
+    // (0700-equivalent on Windows under %APPDATA%\CigScript\keys): a stash
+    // in there is a user-owned file, and the directory's ACL kept others
+    // out already.
+    fs::metadata(path).is_ok_and(|m| m.is_file())
+}
+
+/// Does this key open the first segment of `src`? One cheap trial read,
+/// so a streaming `unseal_to` can pick the right key before writing bytes
+/// to a `dst` that cannot be rewound.
+fn probe_key(src: &Path, aad: &[u8], master: &Key) -> io::Result<()> {
+    let mut input = io::BufReader::new(fs::File::open(src)?);
+    let mut head = [0u8; MAGIC.len() + NONCE];
+    let n = read_full(&mut input, &mut head)?;
+    if n != head.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "not a sealed object",
+        ));
+    }
+    let magic = &head[..MAGIC.len()];
+    let key = if magic == MAGIC {
+        derive(master, LABEL_SEAL)
+    } else if magic == MAGIC_V1 {
+        master.clone()
+    } else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "not a sealed object",
+        ));
+    };
+    let nonce: [u8; NONCE] = head[MAGIC.len()..].try_into().expect("nonce length");
+    let cipher = XChaCha20Poly1305::new(key.as_bytes().into());
+    let mut dec = DecryptorBE32::from_aead(cipher, (&nonce).into());
+    let mut buf = vec![0u8; SEGMENT + TAG];
+    let n = read_full(&mut input, &mut buf)?;
+    let payload = Payload {
+        msg: &buf[..n],
+        aad,
+    };
+    if n == SEGMENT + TAG {
+        dec.decrypt_next(payload)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "wrong key"))?;
+    } else {
+        if n < TAG {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "truncated"));
+        }
+        dec.decrypt_last(payload)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "wrong key"))?;
+    }
+    Ok(())
+}
+
+/// The key kept in a file (hex), when it reads as one. The text the file
+/// held is wiped before being let go.
 pub fn key_in_file(path: &Path) -> Option<Key> {
-    fs::read_to_string(path)
-        .ok()
-        .and_then(|t| decode_key(t.trim()).ok())
+    let text = fs::read_to_string(path).ok()?;
+    let decoded = decode_key(text.trim()).ok();
+    wipe(text);
+    decoded
 }
 
 /// Re-seal `src`, sealed under `from`, into `dest` under this machine's
-/// key, bound to the same name. `dest` may be `src`: the plaintext passes
-/// through a private file beside it and is removed.
+/// key, bound to the same name. `dest` may be `src`. The plaintext stays
+/// in memory the whole time; nothing lands beside the file in the clear,
+/// so a hard crash cannot leave the secret on disk.
 pub fn reseal(src: &Path, dest: &Path, aad: &[u8], from: &Key) -> io::Result<()> {
-    let plain = dest.with_extension("reseal-plain");
+    let to = key_or_refuse()?;
+    reseal_with(src, dest, aad, from, &to)
+}
+
+/// Shared body of `reseal` and `reseal_under`: decrypt into a Vec, seal
+/// from that Vec into a sealed temp, verify by decrypting the new copy,
+/// rename onto `dest`. The plaintext buffer wipes itself on drop, and
+/// the Vec is pre-sized to the plaintext's rough length so a `push` or
+/// `extend_from_slice` does not reallocate and leave the earlier copy
+/// in unwiped memory (SEC-004 L3).
+fn reseal_with(src: &Path, dest: &Path, aad: &[u8], from: &Key, to: &Key) -> io::Result<()> {
+    // The sealed file is a magic + nonce + segments where each segment is
+    // plaintext + tag; the plaintext never exceeds the sealed file's
+    // size, which is a cheap stat.
+    let budget = fs::metadata(src).map(|m| m.len() as usize).unwrap_or(0);
+    let mut plaintext = ZeroingBuf::with_capacity(budget);
+    unseal_to_with(from, src, aad, "", &mut plaintext)?;
     let sealed = dest.with_extension("reseal-sealed");
+    let _ = fs::remove_file(&sealed);
     let result = (|| -> io::Result<()> {
-        let mut opts = fs::OpenOptions::new();
-        opts.write(true).create(true).truncate(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            opts.mode(0o600);
-        }
-        let mut out = io::BufWriter::new(opts.open(&plain)?);
-        unseal_to_with(from, src, aad, "", &mut out)?;
-        out.flush()?;
-        drop(out);
-        seal_file(&plain, &sealed, aad)?;
+        seal_bytes(plaintext.as_slice(), &sealed, aad, to)?;
+        // Prove the sealed temp opens with the target key before the
+        // rename overwrites `dest`: a cosmic-ray-flipped output byte is
+        // caught here, not at the next `cig unburn`.
+        opens_with(&sealed, aad, to)?;
         fs::rename(&sealed, dest)
     })();
-    let _ = fs::remove_file(&plain);
-    let _ = fs::remove_file(&sealed);
+    if result.is_err() {
+        let _ = fs::remove_file(&sealed);
+    }
     result
+}
+
+/// A `Write`-shaped buffer that zeroes its bytes on drop, so a reseal
+/// plaintext never sits cold in memory (#105, L5). Grows by reserving
+/// up front so a later push does not reallocate: a reallocated Vec
+/// leaves the old capacity in freed memory, where `wipe_bytes` on drop
+/// never reaches it (SEC-004 L3).
+struct ZeroingBuf(Vec<u8>);
+impl ZeroingBuf {
+    fn with_capacity(n: usize) -> Self {
+        Self(Vec::with_capacity(n))
+    }
+    fn as_slice(&self) -> &[u8] {
+        &self.0
+    }
+}
+impl io::Write for ZeroingBuf {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        // If we would have to grow the backing Vec, build a fresh one at
+        // the needed size, copy the old bytes in, and wipe the OLD Vec
+        // before dropping it. `Vec::reserve` on its own would hand the
+        // old allocation back to the allocator with the plaintext in it,
+        // where `wipe_bytes` on Drop never reaches it (SEC-004 L3).
+        if self.0.capacity() < self.0.len() + buf.len() {
+            let want = (self.0.len() + buf.len()).max(self.0.capacity().saturating_mul(2));
+            let mut new = Vec::with_capacity(want);
+            new.extend_from_slice(&self.0);
+            wipe_bytes(&mut self.0);
+            self.0 = new;
+        }
+        self.0.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+impl Drop for ZeroingBuf {
+    fn drop(&mut self) {
+        wipe_bytes(&mut self.0);
+    }
+}
+
+/// Seal `bytes` (in memory) into `dest` under `to`, with `aad`. The on-disk
+/// format matches `seal_file`.
+fn seal_bytes(bytes: &[u8], dest: &Path, aad: &[u8], to: &Key) -> io::Result<()> {
+    let seal_sub = derive(to, LABEL_SEAL);
+    let mut nonce = [0u8; NONCE];
+    getrandom::getrandom(&mut nonce).map_err(|e| io::Error::other(e.to_string()))?;
+    let cipher = XChaCha20Poly1305::new(seal_sub.as_bytes().into());
+    let mut enc = EncryptorBE32::from_aead(cipher, (&nonce).into());
+    let mut opts = fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut out = io::BufWriter::new(opts.open(dest)?);
+    out.write_all(MAGIC)?;
+    out.write_all(&nonce)?;
+    let mut i = 0;
+    while i < bytes.len() || (bytes.is_empty() && i == 0) {
+        let end = (i + SEGMENT).min(bytes.len());
+        let msg = &bytes[i..end];
+        let payload = Payload { msg, aad };
+        if end == bytes.len() {
+            let ct = enc
+                .encrypt_last(payload)
+                .map_err(|_| io::Error::other("sealing failed"))?;
+            out.write_all(&ct)?;
+            break;
+        } else {
+            let ct = enc
+                .encrypt_next(payload)
+                .map_err(|_| io::Error::other("sealing failed"))?;
+            out.write_all(&ct)?;
+        }
+        i = end;
+    }
+    out.flush()?;
+    out.get_ref().sync_all()?;
+    Ok(())
 }
 
 /// `unseal_to` under the master key given: this machine's, or another's
@@ -993,15 +1442,14 @@ pub fn unseal_to_with(
     expect_sha256: &str,
     dst: &mut dyn Write,
 ) -> io::Result<u64> {
-    let master = *master;
     let mut input = io::BufReader::new(fs::File::open(src)?);
     let mut head = [0u8; MAGIC.len() + NONCE];
     let n = read_full(&mut input, &mut head)?;
     let magic = &head[..MAGIC.len()];
     let key = if magic == MAGIC {
-        derive(&master, LABEL_SEAL)
+        derive(master, LABEL_SEAL)
     } else if magic == MAGIC_V1 {
-        master
+        master.clone()
     } else {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -1015,7 +1463,7 @@ pub fn unseal_to_with(
         ));
     }
     let nonce: [u8; NONCE] = head[MAGIC.len()..].try_into().expect("nonce length");
-    let cipher = XChaCha20Poly1305::new((&key).into());
+    let cipher = XChaCha20Poly1305::new(key.as_bytes().into());
     let mut dec = DecryptorBE32::from_aead(cipher, (&nonce).into());
     let mut buf = vec![0u8; SEGMENT + TAG];
     let mut hasher = Sha256::new();
@@ -1083,6 +1531,22 @@ pub fn unseal_file(src: &Path, aad: &[u8], expect_sha256: &str, dest: &Path) -> 
 /// Does the sealed file open with the tin's key, whole? Nothing is written.
 pub fn opens(src: &Path, aad: &[u8]) -> io::Result<u64> {
     unseal_to(src, aad, "", &mut io::sink())
+}
+
+/// Does the sealed file open with the given master key, whole? Nothing is
+/// written. Used by `cig tin rekey` to tell new-sealed from old-sealed and
+/// by the parcel import to confirm a carried key opens its sealed objects.
+pub fn opens_with(src: &Path, aad: &[u8], master: &Key) -> io::Result<u64> {
+    unseal_to_with(master, src, aad, "", &mut io::sink())
+}
+
+/// Re-seal `src` (sealed under `from`) into `dest` under `to`. `dest` may
+/// equal `src`. The plaintext stays in memory the whole way through: no
+/// `.reseal-plain` file lands on disk, so a hard crash during a reseal
+/// cannot leave the secret in the clear. Used by the rekey walk, where
+/// `to` is this tin's new key.
+pub fn reseal_under(src: &Path, dest: &Path, aad: &[u8], from: &Key, to: &Key) -> io::Result<()> {
+    reseal_with(src, dest, aad, from, to)
 }
 
 /// The name a sealed file is bound to: its own file name.
@@ -1166,5 +1630,46 @@ mod tests {
             );
             assert!(secret_name(Path::new("deploy.pem")) && !secret_name(Path::new("main.rs")));
         });
+    }
+
+    /// `wipe_bytes` writes zeroes over its buffer through a volatile store,
+    /// so the compiler cannot elide the write. A `Key` runs this on drop:
+    /// the task's own rule bans reading freed memory through a raw pointer
+    /// to prove that end of it, so this test exercises the wipe function
+    /// directly instead, which is what `Drop` calls.
+    #[test]
+    fn wipe_bytes_zeroes_through_a_volatile_store() {
+        let mut buf = [0xabu8; 32];
+        wipe_bytes(&mut buf);
+        assert_eq!(buf, [0u8; 32]);
+
+        // The same on a Vec<u8>, which the key readers hand us (hex text,
+        // the keyring's answer).
+        let mut v = vec![0x5a; 128];
+        wipe_bytes(&mut v);
+        assert!(v.iter().all(|b| *b == 0));
+
+        // And on a buffer not aligned to a convenient size.
+        let mut odd = vec![0xffu8; 17];
+        wipe_bytes(&mut odd);
+        assert_eq!(odd, vec![0u8; 17]);
+    }
+
+    /// A `Key` is `Clone` but not `Copy`: cloning is an explicit act, and a
+    /// move leaves no stack copy behind that `Drop` would miss. The
+    /// compile-time assertion at the top of this module (the ambiguity
+    /// trick) refuses a `Copy` impl on `Key`; this test confirms that
+    /// `Clone` still works and behaves as it should.
+    #[test]
+    fn key_is_clone_and_the_clone_carries_the_same_bytes() {
+        let a = Key::new([0x11u8; 32]);
+        let b = a.clone();
+        assert_eq!(a, b);
+        assert_eq!(a.as_bytes(), &[0x11u8; 32]);
+        // Each key has its own backing memory: dropping one does not
+        // touch the other. (We can see the surviving one's bytes: wiping
+        // happens on the dropped `a`, not `b`.)
+        drop(a);
+        assert_eq!(b.as_bytes(), &[0x11u8; 32]);
     }
 }

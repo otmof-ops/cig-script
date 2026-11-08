@@ -880,6 +880,12 @@ pub fn give_back(ctx: &Ctx, id: &str, dry_run: bool, force: bool) -> i32 {
 /// history_budget made the choice (#149), so `cig runs --pruned` can say
 /// why each went.
 fn remove_run(r: &runs::RunRecord, how: &str) -> bool {
+    // The tin key's lock before anything goes: the ledger line that says
+    // why this run went is written under it, so a run is never removed
+    // without its line (#105, SEC-004 U2).
+    if crate::burn::seal::hold_shared_rekey_lock().is_err() {
+        return false;
+    }
     if let Ok(text) = std::fs::read_to_string(r.dir().join(crate::burn::git::PINS)) {
         for wt in text.lines().filter(|l| !l.trim().is_empty()) {
             crate::burn::git::unpin(std::path::Path::new(wt.trim()), &r.id);
@@ -1079,6 +1085,11 @@ pub fn budget_by_config() {
 }
 
 fn prune_runs(ctx: &Ctx, keep: usize) -> i32 {
+    if let Err(e) = crate::burn::seal::hold_shared_rekey_lock() {
+        eprintln!("{} {e}", ctx.red("error[E802 usage]:"));
+        eprintln!("  = explain: cig explain E802");
+        return exit::SCRIPT_ERROR;
+    }
     let all = match runs::list() {
         Ok(r) => r,
         Err(e) => {
