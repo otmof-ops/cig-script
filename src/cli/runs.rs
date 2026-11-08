@@ -1450,6 +1450,24 @@ pub fn unburn(ctx: &Ctx, id: &str, dry_run: bool, force: bool, accept_unsigned: 
     // The ledger recorded where this run's journal ended: a journal cut
     // short, or an older copy swapped in, is caught here.
     if let Some(reason) = ledger_disagrees(&rec, &journal) {
+        // A journal the ledger says was cut short or swapped is a tripwire
+        // too (#105, L6): reported like any other, under the person's
+        // `reports`, with no path in it. A dry run reports nothing.
+        if !dry_run {
+            super::run::settle_trips(
+                ctx,
+                vec![crate::tripwire::Trip {
+                    check: "ledger",
+                    what: format!("the ledger disagrees with a run's journal: {reason}"),
+                    details: serde_json::json!({
+                        "journal_lines": journal.chain().lines,
+                        "said": reason,
+                    }),
+                }],
+                &rec,
+                &journal,
+            );
+        }
         if !force && !dry_run {
             eprintln!("{} {reason}", ctx.red("error[E709 burn]:"));
             eprintln!("  = hint: the record was changed since it was written; --force restores from it as it is");

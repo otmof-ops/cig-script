@@ -570,6 +570,21 @@ pub(crate) fn case_variants(a: &Path, b: &Path) -> bool {
 /// does; `off` skips the check.
 pub fn ensure_private() -> Result<(), String> {
     let home = runs::home_dir();
+    let r = ensure_private_at(&home);
+    // Spotlight leaves the state directory out (#105, L2): the tin holds
+    // copies of the person's files, sealed ones among them.
+    #[cfg(target_os = "macos")]
+    if r.is_ok() {
+        let marker = home.join(".metadata_never_index");
+        if !marker.exists() {
+            let _ = fs::write(&marker, b"");
+        }
+    }
+    r
+}
+
+fn ensure_private_at(home: &Path) -> Result<(), String> {
+    let home = home.to_path_buf();
     let mode = crate::config::Config::load().get("tin_perms");
     if mode == "off" {
         if fs::metadata(&home).is_err() {

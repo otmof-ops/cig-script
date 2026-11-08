@@ -10836,4 +10836,140 @@ fn a_boxed_hop_says_its_box_in_the_plan_and_the_record() {
     let id = sb.runs()[0]["id"].as_str().unwrap().to_string();
     let shown = sb.run_ok(&["runs", &id]);
     assert!(shown.contains("(boxed: network on, expect **)"), "{shown}");
+
+/// #105, L6: a journal the ledger says was cut short is a tripwire as well
+/// as an E709 refusal: reported like any other, under `reports`, and with
+/// no path of the person's in it. A dry run reports nothing.
+#[cfg(unix)]
+#[test]
+fn a_journal_cut_short_is_reported_as_a_ledger_tripwire() {
+    let sb = Sandbox::new();
+    let id = two_op_run(&sb);
+    sb.run_ok(&["config", "reports", "always"]);
+    let path = journal_path(&sb, &id);
+    let text = fs::read_to_string(&path).unwrap();
+    let kept: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+    fs::write(&path, format!("{}\n", kept[..kept.len() - 1].join("\n"))).unwrap();
+    forget_head(&sb, &id);
+    let dry = sb.cig(&["unburn", &id, "--dry-run"]);
+    assert!(!String::from_utf8_lossy(&dry.stderr).contains("tripwire:"));
+    assert_eq!(sb.run_ok(&["--json", "crash", "list"]).trim(), "[]");
+    let err = sb.run_err(&["unburn", &id], 1);
+    assert!(err.contains("error[E709 burn]:"), "{err}");
+    assert!(err.contains("tripwire: cig noticed"), "{err}");
+    let listed = sb.run_ok(&["--json", "crash", "list"]);
+    let reports: serde_json::Value = serde_json::from_str(&listed).unwrap();
+    let r = &reports[0];
+    assert_eq!(r["kind"], "tripwire", "{r}");
+    assert!(
+        r["title"]
+            .as_str()
+            .unwrap()
+            .contains("the ledger disagrees"),
+        "{r}"
+    );
+    assert_eq!(r["details"]["check"], "ledger", "{r}");
+    assert!(
+        !listed.contains(&*sb.path().to_string_lossy()),
+        "a path of the person's is in the report: {listed}"
+    );
+}
+
+/// #105, L5: the tin's key is in no record, report or log cig writes, and
+/// in nothing it prints: after a sealed burn, a failing run, an unburn, a
+/// verify, doctor, a crash report and a tripwire report, every file under
+/// the sandbox but the key file itself is read for the key's hex (either
+/// case) and its raw bytes.
+#[cfg(unix)]
+#[test]
+fn the_key_is_in_no_record_report_or_log() {
+    let sb = Sandbox::new();
+    let hexkey = "c19a5e7d0b3f4e21a7c6d8e9f0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3";
+    let key_file = sb.path().join("key.hex");
+    fs::write(&key_file, format!("{hexkey}\n")).unwrap();
+    let k = key_file.to_string_lossy().to_string();
+    let env = [("CIG_SEAL_KEY_FILE", k.as_str())];
+    sb.run_ok(&["config", "reports", "always"]);
+    let mut said = String::new();
+    let mut run = |args: &[&str], extra: &[(&str, &str)]| {
+        let mut all: Vec<(&str, &str)> = env.to_vec();
+        all.extend_from_slice(extra);
+        let out = sb.cig_env(args, &all);
+        said.push_str(&String::from_utf8_lossy(&out.stdout));
+        said.push_str(&String::from_utf8_lossy(&out.stderr));
+        out
+    };
+    sb.write(".env", "SECRET=one\n");
+    sb.write(
+        "s.cig",
+        "pack { \".\" }\nburn {\n  fs.write_text(\".env\", \"SECRET=two\")\n  fs.write_text(\"other.txt\", \"x\")\n}\n",
+    );
+    sb.write(
+        "bad.cig",
+        "burn {\n  fs.write_text(\".env\", \"x\")\n  cough \"boom\"\n}\n",
+    );
+    run(&["run", "s.cig"], &[]);
+    run(&["run", "bad.cig"], &[]);
+    let ids: Vec<String> = sb
+        .runs()
+        .iter()
+        .map(|r| r["id"].as_str().unwrap().to_string())
+        .collect();
+    run(&["runs", &ids[1], "--verify"], &[]);
+    run(&["doctor"], &[]);
+    run(&["tin", "verify"], &[]);
+    run(&["run", "s.cig"], &[("CIG_INTERNAL_PANIC", "1")]);
+    // A tripwire report: the ledger catches a journal cut short.
+    let path = journal_path(&sb, &ids[1]);
+    let text = fs::read_to_string(&path).unwrap();
+    let kept: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+    fs::write(&path, format!("{}\n", kept[..kept.len() - 1].join("\n"))).unwrap();
+    forget_head(&sb, &ids[1]);
+    run(&["unburn", &ids[1]], &[]);
+    run(&["unburn", &ids[0]], &[]);
+    run(&["--json", "crash", "list"], &[]);
+    assert!(
+        said.contains("tripwire: cig noticed") && said.contains("crash report saved"),
+        "the reports were not made: {said}"
+    );
+    let raw = hex::decode(hexkey).unwrap();
+    let needles = [
+        hexkey.as_bytes().to_vec(),
+        hexkey.to_uppercase().into_bytes(),
+        raw,
+    ];
+    let found_in = |hay: &[u8]| {
+        needles
+            .iter()
+            .any(|n| hay.windows(n.len()).any(|w| w == n.as_slice()))
+    };
+    assert!(!found_in(said.as_bytes()), "cig printed the key");
+    let mut stack = vec![sb.path().to_path_buf()];
+    let mut read = 0;
+    while let Some(d) = stack.pop() {
+        for e in fs::read_dir(&d).into_iter().flatten().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p != key_file {
+                read += 1;
+                let bytes = fs::read(&p).unwrap_or_default();
+                assert!(!found_in(&bytes), "the key is in {}", p.display());
+            }
+        }
+    }
+    assert!(
+        read >= 12,
+        "only {read} files read: is the walk reading the sandbox?"
+    );
+}
+
+/// #105, L2: on macOS, Spotlight leaves the state directory out.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_state_directory_is_kept_out_of_spotlight() {
+    let sb = Sandbox::new();
+    sb.write("s.cig", "burn {\n  fs.write_text(\"f.txt\", \"x\")\n}\n");
+    sb.run_ok(&["run", "s.cig"]);
+    assert!(sb.home().join(".metadata_never_index").exists());
 }
