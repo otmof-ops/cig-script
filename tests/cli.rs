@@ -8685,7 +8685,7 @@ fn when_the_box_cannot_be_made_the_hop_falls_back_to_the_tin_and_says_so() {
     );
     let plan = String::from_utf8_lossy(&dry.stderr);
     assert!(
-        plan.contains("(boxed)") && plan.contains("the box cannot be made here"),
+        plan.contains("(boxed: network on)") && plan.contains("the box cannot be made here"),
         "{plan}"
     );
     let out = sb.cig_env(&["run", "s.cig"], &[("CIG_INTERNAL_NO_BOX", "1")]);
@@ -10802,6 +10802,40 @@ fn pinned_runs_survive_prune_and_keep_runs() {
     sb.run_ok(&["runs", "--unpin", &ids[0]]);
     sb.run_ok(&["runs", "--prune", "1"]);
     assert!(!sb.runs().iter().any(|r| r["id"] == ids[0].as_str()));
+}
+
+/// #106: a boxed hop's plan line and its record say what the box was asked
+/// for (the network, and whatever is not the default), not only that there
+/// was one.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_boxed_hop_says_its_box_in_the_plan_and_the_record() {
+    let sb = Sandbox::new();
+    sb.write("p/keep.txt", "k");
+    sb.write(
+        "plan.cig",
+        "pack { \"./p\" }\nburn {\n  proc.run(\"true\", [], {box: {network: \"registry\", allow_hosts: [\"registry.npmjs.org\"], contain: true, apply: \"never\"}})\n  proc.run(\"true\", [], {box: true})\n}\n",
+    );
+    let out = sb.cig(&["run", "--dry-run", "plan.cig"]);
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        said.contains("(boxed: network registry, allow registry.npmjs.org, contain, apply never)"),
+        "{said}"
+    );
+    assert!(said.contains("(boxed: network on)"), "{said}");
+    // A real run records the terms with the hop, and cig runs says them.
+    sb.write(
+        "run.cig",
+        "pack { \"./p\" }\nburn {\n  proc.run(\"true\", [], {box: {expect: [\"**\"]}})\n}\n",
+    );
+    sb.run_ok(&["run", "run.cig"]);
+    let id = sb.runs()[0]["id"].as_str().unwrap().to_string();
+    let shown = sb.run_ok(&["runs", &id]);
+    assert!(shown.contains("(boxed: network on, expect **)"), "{shown}");
 }
 
 /// #105, L6: a journal the ledger says was cut short is a tripwire as well

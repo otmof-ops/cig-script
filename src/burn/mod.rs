@@ -83,6 +83,10 @@ pub enum Op {
         /// failing hop's changes never land.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         boxed: bool,
+        /// What the box was asked for, in a few words (`network registry`,
+        /// `contain`, `apply ask`), for the plan and `cig runs` (#106).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        box_terms: Vec<String>,
     },
     EnvSet {
         key: String,
@@ -201,6 +205,7 @@ impl Op {
                 cwd,
                 touches,
                 boxed,
+                box_terms,
                 ..
             } => {
                 let mut s = format!("run {}", shell_quote(cmd));
@@ -211,8 +216,10 @@ impl Op {
                 if let Some(c) = cwd {
                     s.push_str(&format!("  (in {})", c.display()));
                 }
-                if *boxed {
+                if *boxed && box_terms.is_empty() {
                     s.push_str("  (boxed)");
+                } else if *boxed {
+                    s.push_str(&format!("  (boxed: {})", box_terms.join(", ")));
                 }
                 if !touches.is_empty() {
                     s.push_str(&format!("  (touches {})", touches.join(", ")));

@@ -2840,6 +2840,7 @@ mod tests {
                 touches: Vec::new(),
                 touches_sealed: Vec::new(),
                 boxed: false,
+                box_terms: Vec::new(),
             },
         )
         .unwrap();
