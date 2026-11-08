@@ -45,7 +45,17 @@ pub fn runs(
         Some(id) => show(ctx, &id, &all, verify),
         None => {
             if ctx.json {
-                outln!("{}", serde_json::to_string(&all).unwrap_or_default());
+                let listed: Vec<serde_json::Value> = all
+                    .iter()
+                    .map(|r| {
+                        let mut v = serde_json::to_value(r).unwrap_or_default();
+                        if is_pinned(r) {
+                            v["pinned"] = serde_json::json!(true);
+                        }
+                        v
+                    })
+                    .collect();
+                outln!("{}", serde_json::to_string(&listed).unwrap_or_default());
                 return exit::OK;
             }
             note_missing_runs(ctx, &all);
@@ -92,6 +102,11 @@ pub fn runs(
                     format!("{} (program)", r.script)
                 } else {
                     r.script.clone()
+                };
+                let script = if is_pinned(r) {
+                    format!("{script}  (pinned)")
+                } else {
+                    script
                 };
                 outln!(
                     "{:<24} {:<12} {:>5} {:>4}  {}",
@@ -900,7 +915,7 @@ pub fn retained_out(
                 r.status.as_str(),
                 "running" | "interrupted" | "unburn_failed"
             );
-            (too_many || too_old) && !pending
+            (too_many || too_old) && !pending && !is_pinned(r)
         })
         .map(|(i, _)| i)
         .collect()
@@ -932,21 +947,389 @@ fn prune_runs(ctx: &Ctx, keep: usize) -> i32 {
         }
     };
     let mut removed = 0;
+    let mut pinned = 0;
     for r in all.iter().skip(keep) {
+        if is_pinned(r) {
+            pinned += 1;
+            continue;
+        }
         if remove_run(r) {
             removed += 1;
         }
     }
+    let kept = all.len().min(keep) + pinned;
     if ctx.json {
         outln!(
             "{}",
-            serde_json::json!({ "removed": removed, "kept": all.len().min(keep) })
+            serde_json::json!({ "removed": removed, "kept": kept, "pinned": pinned })
         );
     } else {
         eprintln!(
-            "removed {removed} run record{}, kept {}",
+            "removed {removed} run record{}, kept {kept}{}",
             if removed == 1 { "" } else { "s" },
-            all.len().min(keep)
+            if pinned > 0 {
+                format!(" ({pinned} pinned)")
+            } else {
+                String::new()
+            }
+        );
+    }
+    exit::OK
+}
+
+/// The marker a pinned run's folder holds (#149): retention and `--prune`
+/// keep the run whatever they say. A file, not a field, so the run's record
+/// keeps its format and older cigs read it as before.
+pub const PIN_FILE: &str = "pinned";
+
+pub fn is_pinned(r: &runs::RunRecord) -> bool {
+    r.dir().join(PIN_FILE).exists()
+}
+
+/// `cig runs --pin <id>` and `--unpin <id>`.
+pub fn pin(ctx: &Ctx, id: &str, on: bool) -> i32 {
+    let rec = match runs::find(id) {
+        Ok(Some(r)) => r,
+        Ok(None) => {
+            eprintln!("{} no run matches `{id}`", ctx.red("error[E803 usage]:"));
+            eprintln!("  = hint: `cig runs` lists them; give more of the id if it is ambiguous");
+            eprintln!("  = explain: cig explain E803");
+            return exit::USAGE;
+        }
+        Err(e) => {
+            eprintln!("{} {e}", ctx.red("error[E803 usage]:"));
+            eprintln!("  = explain: cig explain E803");
+            return exit::USAGE;
+        }
+    };
+    let marker = rec.dir().join(PIN_FILE);
+    let done = if on {
+        std::fs::write(&marker, format!("{}\n", chrono::Utc::now().to_rfc3339()))
+    } else {
+        match std::fs::remove_file(&marker) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            other => other,
+        }
+    };
+    if let Err(e) = done {
+        eprintln!(
+            "{} cannot {} {}: {e}",
+            ctx.red("error[E802 usage]:"),
+            if on { "pin" } else { "unpin" },
+            rec.id
+        );
+        return exit::USAGE;
+    }
+    if ctx.json {
+        outln!("{}", serde_json::json!({"run": rec.id, "pinned": on}));
+    } else if on {
+        eprintln!(
+            "{} {} is pinned: keep_runs, keep_days and --prune keep it (cig runs --unpin {} lets it go)",
+            ctx.green("ok:"),
+            rec.id,
+            rec.id
+        );
+    } else {
+        eprintln!("{} {} is no longer pinned", ctx.green("ok:"), rec.id);
+    }
+    exit::OK
+}
+
+// ----- a stretch of history (#149) -------------------------------------------------
+
+/// Which runs `cig unburn` puts back when it is not given one.
+pub enum Stretch {
+    /// The newest N runs that changed something.
+    Last(usize),
+    /// Every run started within this long.
+    Since(chrono::Duration),
+    /// Every run after this one; it stays.
+    To(String),
+    /// The stretch that stopped, from its file.
+    Continue,
+}
+
+pub struct StretchOpts {
+    pub dry_run: bool,
+    pub force: bool,
+    pub accept_unsigned: bool,
+    pub yes: bool,
+}
+
+/// `90s`, `30m`, `2h`, `3d`, `1w`.
+pub fn parse_age(s: &str) -> Option<chrono::Duration> {
+    let s = s.trim();
+    let unit = s.chars().last()?;
+    let n: i64 = s[..s.len() - unit.len_utf8()].trim().parse().ok()?;
+    if n <= 0 {
+        return None;
+    }
+    match unit {
+        's' => chrono::Duration::try_seconds(n),
+        'm' => chrono::Duration::try_minutes(n),
+        'h' => chrono::Duration::try_hours(n),
+        'd' => chrono::Duration::try_days(n),
+        'w' => chrono::Duration::try_weeks(n),
+        _ => None,
+    }
+}
+
+/// Where a stretch in progress keeps its runs, so `--continue` takes up the
+/// same ones and none is undone twice.
+fn stretch_file() -> std::path::PathBuf {
+    runs::home_dir().join("unburn-stretch.json")
+}
+
+/// A run a stretch can put back: one of its own (a child goes back through
+/// its parent), that changed something, and is not back already.
+fn undoable(r: &runs::RunRecord) -> bool {
+    r.parent.is_none() && r.burns > 0 && r.status != "unburned" && !r.rolled_back
+}
+
+/// Did the run work in `pack`: a pack root it declared is that folder, or
+/// inside it, or holds it; or its journal touched a path under it.
+fn in_pack(r: &runs::RunRecord, pack: &std::path::Path) -> bool {
+    if r.pack
+        .iter()
+        .any(|p| p.starts_with(pack) || pack.starts_with(p))
+    {
+        return true;
+    }
+    Journal::load(&r.dir())
+        .map(|j| j.touched_paths().iter().any(|(p, _)| p.starts_with(pack)))
+        .unwrap_or(false)
+}
+
+/// The runs a stretch takes, as indexes into `all` (newest first), or why
+/// it cannot start. A run still running inside the stretch's reach stops
+/// it: what it writes next would land on files being put back under it.
+pub fn select_stretch(
+    all: &[runs::RunRecord],
+    how: &Stretch,
+    pack: Option<&std::path::Path>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<Vec<usize>, String> {
+    let reach: Vec<usize> = match how {
+        Stretch::Last(_) => (0..all.len()).collect(),
+        Stretch::Since(d) => {
+            let cutoff = now - *d;
+            (0..all.len())
+                .filter(|&i| {
+                    chrono::DateTime::parse_from_rfc3339(&all[i].started).is_ok_and(|s| s >= cutoff)
+                })
+                .collect()
+        }
+        Stretch::To(id) => {
+            let matching: Vec<usize> = (0..all.len())
+                .filter(|&i| all[i].id.starts_with(id.as_str()))
+                .collect();
+            match matching.as_slice() {
+                [one] => (0..*one).collect(),
+                [] => return Err(format!("no run matches `{id}`")),
+                _ => {
+                    return Err(format!(
+                        "`{id}` matches {} runs; give more of the id",
+                        matching.len()
+                    ))
+                }
+            }
+        }
+        Stretch::Continue => return Err("a stretch to continue is read from its file".to_string()),
+    };
+    let mut picked: Vec<usize> = reach
+        .iter()
+        .copied()
+        .filter(|&i| undoable(&all[i]) && pack.is_none_or(|p| in_pack(&all[i], p)))
+        .collect();
+    if let Stretch::Last(n) = how {
+        picked.truncate(*n);
+    }
+    // Everything newer than the oldest run picked is in reach.
+    if let Some(&oldest) = picked.last() {
+        if let Some(live) = all[..=oldest]
+            .iter()
+            .find(|r| r.status == "running" && !r.is_interrupted())
+        {
+            return Err(format!(
+                "{} is still running; put a stretch back once it has finished",
+                live.id
+            ));
+        }
+    }
+    Ok(picked)
+}
+
+/// `cig unburn --last N | --since AGE | --to ID | --continue`: one plan,
+/// then each run as `cig unburn <id>` would put it back, newest first. The
+/// first run refused stops the stretch: the runs after it stay undone, the
+/// ones before it untouched, and `--continue` takes up the rest once it is
+/// resolved.
+pub fn unburn_stretch(
+    ctx: &Ctx,
+    how: Stretch,
+    pack: Option<&std::path::Path>,
+    o: StretchOpts,
+) -> i32 {
+    let usage = |message: String, hint: &str| {
+        eprintln!("{} {message}", ctx.red("error[E800 usage]:"));
+        eprintln!("  = hint: {hint}");
+        eprintln!("  = explain: cig explain E800");
+        exit::USAGE
+    };
+    let all = match runs::list() {
+        Ok(r) => r,
+        Err(e) => {
+            return usage(
+                format!("cannot list runs: {e}"),
+                "cig doctor looks the state directory over",
+            )
+        }
+    };
+    let ids: Vec<String> = if let Stretch::Continue = how {
+        let Ok(text) = std::fs::read_to_string(stretch_file()) else {
+            return usage(
+                "there is no stretch to continue".to_string(),
+                "a stretch that stops leaves its runs for --continue; start one with --last, --since or --to",
+            );
+        };
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
+        v["runs"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        let pack = pack.map(|p| {
+            std::fs::canonicalize(p)
+                .unwrap_or_else(|_| std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf()))
+        });
+        match select_stretch(&all, &how, pack.as_deref(), chrono::Utc::now()) {
+            Ok(picked) => picked.into_iter().map(|i| all[i].id.clone()).collect(),
+            Err(e) => return usage(e, "cig runs lists the runs, newest first"),
+        }
+    };
+    // What is still to do, in order; a run back already is done (exactly
+    // once, whatever stopped the stretch before).
+    let todo: Vec<&runs::RunRecord> = ids
+        .iter()
+        .filter_map(|id| all.iter().find(|r| &r.id == id))
+        .filter(|r| r.status != "unburned" && !r.rolled_back)
+        .collect();
+    if todo.is_empty() {
+        let _ = std::fs::remove_file(stretch_file());
+        if ctx.json {
+            outln!(
+                "{}",
+                serde_json::json!({"runs": [], "undone": [], "stopped_at": null})
+            );
+        } else {
+            eprintln!("nothing to undo: no run in that stretch changed anything, or all of them are back already");
+        }
+        return exit::OK;
+    }
+    // The plan: how much, and where.
+    let mut ops = 0usize;
+    let mut files = std::collections::BTreeSet::new();
+    let mut irreversible = 0usize;
+    for r in &todo {
+        if let Ok(j) = Journal::load(&r.dir()) {
+            ops += j.len();
+            files.extend(j.touched_paths().into_iter().map(|(p, _)| p));
+        }
+        irreversible += r.irreversible;
+    }
+    let newest = &todo[0].id;
+    let oldest = &todo[todo.len() - 1].id;
+    if ctx.json && o.dry_run {
+        outln!(
+            "{}",
+            serde_json::json!({"runs": todo.iter().map(|r| r.id.clone()).collect::<Vec<_>>(), "ops": ops, "files": files.len(), "irreversible": irreversible, "dry_run": true})
+        );
+        return exit::OK;
+    }
+    if !ctx.json {
+        eprintln!(
+            "undo {} run{} ({} -> {}), newest first",
+            todo.len(),
+            if todo.len() == 1 { "" } else { "s" },
+            oldest,
+            newest
+        );
+        eprintln!(
+            "  {ops} op{} across {} file{}; {irreversible} irreversible (a hop's own effects, which no unburn puts back)",
+            if ops == 1 { "" } else { "s" },
+            files.len(),
+            if files.len() == 1 { "" } else { "s" }
+        );
+        for r in &todo {
+            eprintln!(
+                "  {}  {} burn{}  {}",
+                r.id,
+                r.burns,
+                if r.burns == 1 { "" } else { "s" },
+                r.script
+            );
+        }
+    }
+    if o.dry_run {
+        eprintln!("dry run: nothing changed; each run is checked as it is put back, after the ones newer than it");
+        return exit::OK;
+    }
+    use std::io::IsTerminal;
+    if !o.yes && !ctx.json && std::io::stdin().is_terminal() && std::io::stderr().is_terminal() {
+        eprint!("proceed? [y/N] ");
+        let mut line = String::new();
+        let _ = std::io::stdin().read_line(&mut line);
+        if !matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+            eprintln!("nothing changed");
+            return exit::OK;
+        }
+    }
+    let ids: Vec<String> = todo.iter().map(|r| r.id.clone()).collect();
+    let _ = std::fs::write(
+        stretch_file(),
+        serde_json::json!({"runs": ids, "made": chrono::Utc::now().to_rfc3339()}).to_string(),
+    );
+    let mut undone = Vec::new();
+    for (k, id) in ids.iter().enumerate() {
+        if !ctx.json {
+            eprintln!("-- {} ({} of {})", id, k + 1, ids.len());
+        }
+        let code = unburn(ctx, id, false, o.force, o.accept_unsigned);
+        if code != exit::OK {
+            if ctx.json {
+                outln!(
+                    "{}",
+                    serde_json::json!({"runs": ids, "undone": undone, "stopped_at": id})
+                );
+            } else {
+                eprintln!(
+                    "{} the stretch stopped at {id}: {} of {} undone, {} and the runs before it untouched; once it is resolved, cig unburn --continue carries on",
+                    ctx.yellow("stopped:"),
+                    undone.len(),
+                    ids.len(),
+                    id
+                );
+            }
+            return code;
+        }
+        undone.push(id.clone());
+    }
+    let _ = std::fs::remove_file(stretch_file());
+    if ctx.json {
+        outln!(
+            "{}",
+            serde_json::json!({"runs": ids, "undone": undone, "stopped_at": null})
+        );
+    } else {
+        eprintln!(
+            "{} undid {} run{}, newest first",
+            ctx.green("ok:"),
+            undone.len(),
+            if undone.len() == 1 { "" } else { "s" }
         );
     }
     exit::OK
@@ -1536,5 +1919,79 @@ mod tests {
         assert_eq!(retained_out(&all, 0, 2, now), vec![3]);
         assert_eq!(retained_out(&all, 1, 0, now), vec![1, 3]);
         assert_eq!(retained_out(&all, 0, 60, now), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn ages_read_as_people_write_them() {
+        assert_eq!(parse_age("90s"), chrono::Duration::try_seconds(90));
+        assert_eq!(parse_age("30m"), chrono::Duration::try_minutes(30));
+        assert_eq!(parse_age(" 2h "), chrono::Duration::try_hours(2));
+        assert_eq!(parse_age("3d"), chrono::Duration::try_days(3));
+        assert_eq!(parse_age("1w"), chrono::Duration::try_weeks(1));
+        for bad in ["", "h", "2", "2y", "-2h", "0h", "2 hours", "1é"] {
+            assert_eq!(parse_age(bad), None, "{bad}");
+        }
+    }
+
+    /// #149: a stretch takes a run's own work only (not a child, not one
+    /// that burned nothing, not one back already), newest first, and will
+    /// not start under a run that is still running.
+    #[test]
+    fn a_stretch_takes_the_runs_it_should_and_waits_for_a_live_one() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-11-08T12:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let mut all = vec![
+            record("20261108T115900-e", "2026-11-08T11:59:00Z", "ok"),
+            record("20261108T115800-d", "2026-11-08T11:58:00Z", "ok"),
+            record("20261108T115700-c", "2026-11-08T11:57:00Z", "unburned"),
+            record("20261108T100000-b", "2026-11-08T10:00:00Z", "error"),
+            record("20261107T100000-a", "2026-11-07T10:00:00Z", "ok"),
+        ];
+        for r in all.iter_mut() {
+            r.burns = 2;
+        }
+        // d is a child (put back through its parent).
+        all[1].parent = Some("20261108T115900-e".to_string());
+        assert_eq!(
+            select_stretch(&all, &Stretch::Last(2), None, now).unwrap(),
+            vec![0, 3]
+        );
+        assert_eq!(
+            select_stretch(&all, &Stretch::Last(9), None, now).unwrap(),
+            vec![0, 3, 4]
+        );
+        assert_eq!(
+            select_stretch(
+                &all,
+                &Stretch::Since(chrono::Duration::try_hours(1).unwrap()),
+                None,
+                now
+            )
+            .unwrap(),
+            vec![0]
+        );
+        assert_eq!(
+            select_stretch(&all, &Stretch::To("20261107T100000".into()), None, now).unwrap(),
+            vec![0, 3],
+            "--to keeps the run it names"
+        );
+        assert!(
+            select_stretch(&all, &Stretch::To("2026110".into()), None, now)
+                .unwrap_err()
+                .contains("matches 5 runs")
+        );
+        assert!(select_stretch(&all, &Stretch::To("nope".into()), None, now).is_err());
+        // A run that burned nothing has nothing to put back.
+        all[0].burns = 0;
+        assert_eq!(
+            select_stretch(&all, &Stretch::Last(1), None, now).unwrap(),
+            vec![3]
+        );
+        // A run still running stops a stretch that reaches past it.
+        all[0].status = "running".to_string();
+        assert!(select_stretch(&all, &Stretch::Last(1), None, now)
+            .unwrap_err()
+            .contains("still running"));
     }
 }

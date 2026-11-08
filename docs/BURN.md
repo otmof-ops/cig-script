@@ -167,6 +167,21 @@ that changed again after the hop ended is left alone, listed with the
 `--force` that restores over it. `cig unburn` holds the pack's lock while
 it works, as a run does (`E759` for a run that is using it).
 
+**A stretch of history (1.17.0).** `cig unburn --last N` puts back the
+newest N runs that changed something, `--since 2h` every run started in the
+last two hours (`90s`, `30m`, `3d`, `1w`), and `--to <id>` every run after
+that one, which stays. `--pack DIR` keeps to the runs that worked in that
+folder. A stretch takes each run's own work: a child goes back through its
+parent, and a run that burned nothing, or is back already, is skipped. It
+shows one plan first (the runs, the ops, the files, what is irreversible),
+asks at a terminal (`-y` does not), and `--dry-run` stops at the plan.
+Then each run is put back as `cig unburn <id>` would, with the same checks,
+newest first. The first run refused stops the stretch: the runs after it stay
+undone, it and the ones before it are untouched, and the message names it and
+why. Once that is resolved, `cig unburn --continue` takes up the same stretch,
+and a run back already is never undone twice. A stretch will not start under a
+run that is still running.
+
 **Interrupted runs.** A run whose process died mid-burn is left with the
 status `running` and no totals. `cig runs` recognises it (the pid is gone,
 the journal is intact), shows it as `interrupted` with its burn count taken
@@ -418,7 +433,10 @@ Two settings prune after every run, as `cig runs --prune` does, each pruned
 record a ledger line: `keep_runs N` keeps the newest N, and `keep_days N`
 drops records started more than N days ago. Both are 0 by default, which
 keeps every run. Neither drops a run with work left: one still running, one
-interrupted, or one whose unburn failed.
+interrupted, or one whose unburn failed. Neither they nor `cig runs --prune`
+drop a pinned run: `cig runs --pin <id>` keeps the run before a migration or
+a release whatever they say (`cig runs` marks it `(pinned)`), and
+`cig runs --unpin <id>` lets it go.
 
 ## Keeping the tin private
 
