@@ -956,6 +956,22 @@ pub const PENDING: &str = "tin.pending";
 pub fn referenced() -> HashSet<PathBuf> {
     let mut out = HashSet::new();
     for rec in super::runs::list().unwrap_or_default() {
+        out.extend(referenced_by(&rec));
+    }
+    // What another tool keeps here (`cig tin keep`) is referred to by its
+    // record, whatever the runs say.
+    for k in kept_copies() {
+        out.insert(k.object);
+    }
+    out
+}
+
+/// The objects one run refers to: from its journal, and from the pending
+/// list of a hop still running. The history budget (#149) counts these per
+/// run, so it knows which bytes a prune frees.
+pub fn referenced_by(rec: &super::runs::RunRecord) -> HashSet<PathBuf> {
+    let mut out = HashSet::new();
+    {
         if let Ok(j) = super::journal::Journal::load(&rec.dir()) {
             for e in j.entries() {
                 for b in e.before.iter().chain(e.took.iter()) {
@@ -1003,11 +1019,6 @@ pub fn referenced() -> HashSet<PathBuf> {
                 }
             }
         }
-    }
-    // What another tool keeps here (`cig tin keep`) is referred to by its
-    // record, whatever the runs say.
-    for k in kept_copies() {
-        out.insert(k.object);
     }
     out
 }

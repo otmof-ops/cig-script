@@ -97,6 +97,16 @@ pub const KEYS: &[(&str, &str, &str)] = &[
         "after each run, prune run records older than this many days, as cig runs --prune does; 0 keeps them however old",
     ),
     (
+        "history_budget",
+        "off",
+        "the size the history (run records and the tin) may reach before the oldest runs are pruned and the tin collected, after each run and on cig runs --prune; pinned runs, runs with work left or a box layer waiting for approval, and runs younger than history_keep stay (cig runs --pruned lists each prune as budget): off, 0, or a size like 500MB, 2GB (base 1024); cig doctor suggests one",
+    ),
+    (
+        "history_keep",
+        "30d",
+        "a floor under history_budget: runs younger than this (an age like 90s, 30m, 2h, 3d, 1w) are never pruned to meet the budget, which can be exceeded for them (cig doctor says so); off (0) protects nothing on age",
+    ),
+    (
         "verify_sample",
         "auto",
         "after a run that burned, how many tin objects, drawn at random from the whole tin, are checked against their names beside the run's own: auto (3), a number, or 0 for no check",
@@ -241,6 +251,18 @@ impl Config {
                     "issues_repo must look like owner/name, not `{other}`"
                 ))
             }
+            ("history_budget", v) if parse_bytes(v).is_some() => {}
+            ("history_budget", other) => {
+                return Err(format!(
+                    "history_budget must be off, 0, or a size like 500MB or 2GB (base 1024), not `{other}`"
+                ))
+            }
+            ("history_keep", v) if parse_history_keep(v).is_some() => {}
+            ("history_keep", other) => {
+                return Err(format!(
+                    "history_keep must be off, 0, or an age like 90s, 30m, 2h, 3d, 1w, not `{other}`"
+                ))
+            }
             _ => {}
         }
         self.values.insert(key.to_string(), value.to_string());
@@ -272,6 +294,66 @@ impl Config {
     }
 }
 
+/// Parse a byte size for `history_budget`: `off` and `0` are off (None);
+/// otherwise a whole number with an optional unit suffix K, M, G or T (a
+/// trailing `B` is accepted and ignored), base 1024. Case-insensitive.
+/// Returns `Some(None)` for off, `Some(Some(bytes))` for a size, `None`
+/// when the string is not a valid value.
+#[allow(clippy::option_option)]
+pub fn parse_bytes(s: &str) -> Option<Option<u64>> {
+    let t = s.trim();
+    if t.eq_ignore_ascii_case("off") || t == "0" {
+        return Some(None);
+    }
+    let bytes = t.as_bytes();
+    // Split the digit prefix from the unit suffix (letters only, no spaces).
+    // No non-digit character means bare bytes, so the whole string is the number.
+    let i = bytes
+        .iter()
+        .position(|b| !b.is_ascii_digit())
+        .unwrap_or(bytes.len());
+    if i == 0 {
+        return None;
+    }
+    let n: u64 = std::str::from_utf8(&bytes[..i]).ok()?.parse().ok()?;
+    let unit = t[i..].trim();
+    // An optional trailing B on K/M/G/T; a bare B is bytes.
+    let unit_up = unit.to_ascii_uppercase();
+    let mult: u64 = match unit_up.as_str() {
+        "" | "B" => 1,
+        "K" | "KB" | "KIB" => 1 << 10,
+        "M" | "MB" | "MIB" => 1 << 20,
+        "G" | "GB" | "GIB" => 1 << 30,
+        "T" | "TB" | "TIB" => 1 << 40,
+        _ => return None,
+    };
+    n.checked_mul(mult).map(Some)
+}
+
+/// Parse `history_keep`: `off` and `0` are off (None); otherwise the same
+/// shape as `parse_age` in runs.rs (90s, 30m, 2h, 3d, 1w).
+#[allow(clippy::option_option)]
+pub fn parse_history_keep(s: &str) -> Option<Option<chrono::Duration>> {
+    let t = s.trim();
+    if t.eq_ignore_ascii_case("off") || t == "0" {
+        return Some(None);
+    }
+    let unit = t.chars().last()?;
+    let n: i64 = t[..t.len() - unit.len_utf8()].trim().parse().ok()?;
+    if n <= 0 {
+        return None;
+    }
+    match unit {
+        's' => chrono::Duration::try_seconds(n),
+        'm' => chrono::Duration::try_minutes(n),
+        'h' => chrono::Duration::try_hours(n),
+        'd' => chrono::Duration::try_days(n),
+        'w' => chrono::Duration::try_weeks(n),
+        _ => None,
+    }
+    .map(Some)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -290,5 +372,41 @@ mod tests {
         assert!(c.set("crash_reports", "always").is_ok());
         assert!(c.unset("crash_reports"));
         assert!(!c.unset("crash_reports"));
+    }
+
+    #[test]
+    fn history_budget_parses_sizes_and_history_keep_parses_ages() {
+        assert_eq!(parse_bytes("off"), Some(None));
+        assert_eq!(parse_bytes("OFF"), Some(None));
+        assert_eq!(parse_bytes("0"), Some(None));
+        assert_eq!(parse_bytes("2GB"), Some(Some(2u64 << 30)));
+        assert_eq!(parse_bytes("500mb"), Some(Some(500u64 << 20)));
+        assert_eq!(parse_bytes("1G"), Some(Some(1u64 << 30)));
+        assert_eq!(parse_bytes(" 1024 "), Some(Some(1024)));
+        assert_eq!(parse_bytes("1 KiB"), Some(Some(1024)));
+        assert_eq!(parse_bytes("abc"), None);
+        assert_eq!(parse_bytes("GB"), None);
+        assert_eq!(parse_bytes("1X"), None);
+
+        assert_eq!(parse_history_keep("off"), Some(None));
+        assert_eq!(parse_history_keep("0"), Some(None));
+        assert_eq!(
+            parse_history_keep("30m"),
+            Some(chrono::Duration::try_minutes(30))
+        );
+        assert_eq!(
+            parse_history_keep("2h"),
+            Some(chrono::Duration::try_hours(2))
+        );
+        assert_eq!(parse_history_keep("bad"), None);
+        assert_eq!(parse_history_keep("-5h"), None);
+
+        let mut c = Config::default();
+        assert!(c.set("history_budget", "off").is_ok());
+        assert!(c.set("history_budget", "2GB").is_ok());
+        assert!(c.set("history_budget", "nope").is_err());
+        assert!(c.set("history_keep", "off").is_ok());
+        assert!(c.set("history_keep", "30m").is_ok());
+        assert!(c.set("history_keep", "nope").is_err());
     }
 }
