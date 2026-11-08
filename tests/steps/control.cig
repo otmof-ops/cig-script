@@ -1,0 +1,49 @@
+# SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
+# SPDX-License-Identifier: Apache-2.0
+roll out = []
+for i in range(6) {
+  if i % 2 == 0 {
+    continue
+  } else if i == 5 {
+    break
+  }
+  out.push(i)
+}
+exhale out
+roll n = 0
+while true {
+  n += 1
+  if n >= 3 {
+    break
+  }
+}
+exhale n
+for ch in "ab" {
+  exhale ch
+}
+for k in {x: 1, y: 2} {
+  exhale k
+}
+stick fixed = 1
+try {
+  cough "first"
+} ashtray e {
+  exhale "caught", e.message, e.kind
+}
+try {
+  cough {message: "structured", code: 7}
+} ashtray e {
+  exhale e.message, e.code, e.line
+}
+try {
+  exhale [1][5]
+} ashtray e {
+  exhale e.message
+}
+try {
+  roll m = {}
+  exhale m.nope
+} ashtray {
+  exhale "anonymous ashtray"
+}
+exhale "end"

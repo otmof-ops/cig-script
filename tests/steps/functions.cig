@@ -1,0 +1,27 @@
+# SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
+# SPDX-License-Identifier: Apache-2.0
+exhale fib(10)
+pull fib(n) {
+  if n < 2 {
+    snuff n
+  }
+  snuff fib(n - 1) + fib(n - 2)
+}
+pull counter() {
+  roll count = 0
+  snuff pack() {
+    count += 1
+    snuff count
+  }
+}
+stick next = counter()
+next()
+next()
+exhale next()
+stick add = pack(a, b) => a + b
+exhale add(2, 3), [1, 2, 3].map(pack(x) => x * 10), 5 >> add(1) >> str
+pull nothing() { }
+exhale nothing()
+stick obj = {name: "cig", greet: pack(who) => "hi ${who}"}
+exhale obj.greet("you")
+exhale [3, 1, 2].sort_by(pack(x) => -x), ["bb", "a"].sort(), [1, [2, 3]].flatten()

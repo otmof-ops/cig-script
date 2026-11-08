@@ -66,6 +66,30 @@ impl Interp {
         Ok(())
     }
 
+    /// `run_for` over `a..b` without the list: the same scope per turn, the
+    /// same steps, the same values.
+    fn run_for_range(
+        &mut self,
+        var: &str,
+        a: i64,
+        b: i64,
+        body: &Block,
+        env: &Env,
+        span: Span,
+    ) -> Exec {
+        for i in a..b {
+            self.tick(span)?;
+            let scope = Scope::child(env);
+            scope.declare(var, Value::Int(i), true);
+            match self.exec_block_in(&body.stmts, &scope) {
+                Ok(()) | Err(Signal::Continue(_)) => {}
+                Err(Signal::Break(_)) => break,
+                Err(other) => return Err(other),
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn exec_block_in(&mut self, stmts: &[Stmt], env: &Env) -> Exec {
         self.hoist(stmts, env)?;
         for stmt in stmts {
@@ -269,6 +293,31 @@ impl Interp {
                 body,
                 span,
             } => {
+                // `for i in a..b`: the numbers one at a time, never the list
+                // of them, with the range's own checks and errors.
+                if let ExprKind::Binary {
+                    op: BinOp::Range,
+                    lhs,
+                    rhs,
+                } = &iter.kind
+                {
+                    let l = self.eval(lhs, env)?;
+                    let r = self.eval(rhs, env)?;
+                    if let (Value::Int(a), Value::Int(b)) = (&l, &r) {
+                        range_fits(*a, *b, iter.span)?;
+                        let (a, b) = (*a, *b);
+                        self.loop_depth += 1;
+                        let result = self.run_for_range(var, a, b, body, env, *span);
+                        self.loop_depth -= 1;
+                        return result;
+                    }
+                    let iterable = self.binary(BinOp::Range, l, r, iter.span)?;
+                    let items = self.iterate(iterable, *span)?;
+                    self.loop_depth += 1;
+                    let result = self.run_for(var, items, body, env, *span);
+                    self.loop_depth -= 1;
+                    return result;
+                }
                 let iterable = self.eval(iter, env)?;
                 let items = self.iterate(iterable, *span)?;
                 self.loop_depth += 1;
@@ -852,11 +901,7 @@ impl Interp {
             }
             BinOp::Range => match (&l, &r) {
                 (Int(a), Int(b)) => {
-                    if b - a > 10_000_000 {
-                        return Err(runtime("range is too large (limit 10,000,000)")
-                            .code("E512")
-                            .at(span));
-                    }
+                    range_fits(*a, *b, span)?;
                     Ok(Value::list((*a..*b).map(Int).collect()))
                 }
                 _ => Err(type_err("make a range from").with_hint("write the range as `int..int`")),
@@ -1130,6 +1175,17 @@ pub fn error_value(diag: &Diagnostic, payload: Option<Value>) -> Value {
         }
     }
     Value::map(map)
+}
+
+/// A range holds at most 10,000,000 numbers. The width is computed without
+/// overflow, so `i64::MIN..i64::MAX` is refused too, not wrapped.
+fn range_fits(a: i64, b: i64, span: Span) -> Result<(), Diagnostic> {
+    if i128::from(b) - i128::from(a) > 10_000_000 {
+        return Err(runtime("range is too large (limit 10,000,000)")
+            .code("E512")
+            .at(span));
+    }
+    Ok(())
 }
 
 fn unknown_name(name: &str, env: &Env, span: Span) -> Diagnostic {
