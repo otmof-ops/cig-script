@@ -118,6 +118,9 @@ pub enum Command {
         /// Let a pinned run go again.
         #[arg(long, value_name = "ID")]
         unpin: Option<String>,
+        /// The runs pruned or forgotten, from the ledger: when, how, and what each was.
+        #[arg(long, conflicts_with_all = ["id", "prune", "pin", "unpin", "forget"])]
+        pruned: bool,
     },
     /// Put the world back the way it was, newest op first (rollback).
     Unburn {
@@ -487,7 +490,9 @@ fn dispatch(ctx: Ctx, command: Command) -> i32 {
             forget,
             pin,
             unpin,
+            pruned,
         } => match (pin, unpin) {
+            _ if pruned => runs::pruned(&ctx),
             (Some(id), _) => runs::pin(&ctx, &id, true),
             (None, Some(id)) => runs::pin(&ctx, &id, false),
             _ => runs::runs(&ctx, id, prune, verify, forget),
