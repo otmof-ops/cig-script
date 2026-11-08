@@ -3,8 +3,24 @@
 All notable changes to CigScript. The format follows Keep a Changelog; the
 project follows semantic versioning.
 
-## Unreleased
+## 1.18.0 — 2026-11-08
 
+What a box was asked for and is made of, the runs that went and a
+budget for the rest, a program's own stretch, hops that skip their
+caches, and the burn tests for compiled programs.
+
+- **A boxed hop says its box** (#106). The plan and `cig runs <id>` said
+  `(boxed)`; they now say what the box was asked for,
+  `(boxed: network registry, allow registry.npmjs.org, contain)`: the
+  network always, the rest where it is not the default. The terms are
+  recorded with the hop and left out when empty, so older cigs read the
+  journal as before; a bug report still says only `(boxed)`.
+- **`cig doctor` says what the box is made of** (#106). A `box` block
+  lists the user, mount, network and PID namespaces and overlayfs, each
+  tried on its own, so a box that cannot be made says which part is
+  missing; a refused user namespace names the likely cause (AppArmor's
+  `kernel.apparmor_restrict_unprivileged_userns` on Ubuntu, or a
+  container's seccomp). Off Linux it says the box is Linux's.
 - **A hop skips what it rebuilds anyway** (#148). `skip: ["build/**",
   ".cache/"]` on a hop leaves those paths out of the tin, the way a
   `.cigignore` line does: what the hop changes there is neither kept nor
@@ -13,6 +29,10 @@ project follows semantic versioning.
   nothing in the box, whose layer keeps every change. The `hop_skip`
   setting (`cig config hop_skip "**/.cache/**, *.log"`) adds globs every
   hop leaves out. The plan shows `(skip …)`.
+- **`cig runs --pruned`** (#149) lists the runs that went on purpose, from
+  the ledger, newest first: when, how (`pruned`, `forgotten` by
+  `--forget`, or `budget`), and the status each last had, so a missing run
+  is explained.
 - **A disk budget for the history, off by default** (#149). `history_budget`
   (a size like `500MB` or `2GB`, base 1024; `off`, the default, so nothing
   is pruned on upgrade) caps the history as it grows: the run records and
@@ -26,7 +46,14 @@ project follows semantic versioning.
   so. Each prune is listed by `cig runs --pruned` as `budget`. `cig doctor`
   shows the history's size and, with the budget off, suggests one (about
   5% of the free space, from 1 GB to 20 GB) without changing anything.
-
+- **Programs put back a stretch of their own runs** (#149). A compiled
+  program takes `--unburn-last N`, `--unburn-since AGE` and
+  `--unburn-to <run>`, as `cig unburn` does for any run, and keeps to its
+  own runs: another program's, and `cig run`'s, are left alone.
+- **The burn tests run against another cig** (otmof-ops/cig-compile#6). The
+  pack, hop, wall and CLI suites start cig through `CIG_TEST_BIN` when it
+  is set: cig-compile runs them with a cig that builds each script and runs
+  the program, so a compiled program's burns are held to the same tests.
 
 ## 1.17.0 — 2026-11-08
 
