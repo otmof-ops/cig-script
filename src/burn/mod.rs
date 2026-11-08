@@ -21,6 +21,7 @@ pub mod protocol;
 pub mod proxy;
 pub mod rekey;
 pub mod runs;
+pub mod runs_index;
 pub mod scan;
 pub mod seal;
 pub mod statcache;

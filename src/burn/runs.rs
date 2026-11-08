@@ -25,6 +25,11 @@ pub fn runs_dir() -> PathBuf {
     home_dir().join("runs")
 }
 
+/// The marker a pinned run's folder holds (#149): retention and `--prune`
+/// keep the run whatever they say. A file, not a field, so the run's
+/// record keeps its format and an older cig reads the folder as before.
+pub const PIN_FILE: &str = "pinned";
+
 /// The shape of `run.json` this cig writes. A newer cig reads every older
 /// shape; an older cig refuses a newer one by its number instead of
 /// guessing (E808).
@@ -253,7 +258,12 @@ impl RunRecord {
         fs::write(&tmp, json)?;
         super::journal::sync_file(&tmp)?;
         fs::rename(tmp, dir.join("run.json"))?;
-        super::journal::sync_dir_pub(&dir)
+        super::journal::sync_dir_pub(&dir)?;
+        // Keep the run index in step (#149). A failure here is noted but
+        // does not fail the save: the folder is the source of truth, and
+        // the index is rebuilt from it when it is missing or torn.
+        super::runs_index::upsert(self);
+        Ok(())
     }
 
     pub fn finish(&mut self, status: &str, error: Option<String>) {
@@ -515,50 +525,15 @@ pub fn sweep_dead_layers() {
     }
 }
 
+/// Every run, newest first (#149).
+///
+/// Reads the run index (`$CIGSCRIPT_HOME/runs-index.jsonl`) — one
+/// compact file updated as runs start, finish, are pruned, forgotten or
+/// unburned — instead of opening every run folder. A hand-edited or
+/// hand-deleted record is caught on a cheap stat; the journal of
+/// another run is never opened by the fast path.
 pub fn list() -> io::Result<Vec<RunRecord>> {
-    let dir = runs_dir();
-    let mut out = Vec::new();
-    let entries = match fs::read_dir(&dir) {
-        Ok(e) => e,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(out),
-        Err(e) => return Err(e),
-    };
-    for entry in entries {
-        let entry = entry?;
-        if entry.path().join("run.json").is_file() {
-            match RunRecord::load(&entry.path()) {
-                Ok(mut rec) => {
-                    rec.refresh_from_journal();
-                    out.push(rec);
-                }
-                Err(e) => {
-                    // A damaged record must not hide a run whose journal
-                    // is intact: list it, say so, and let unburn reach it.
-                    // A record from a newer cig is not damaged: it is
-                    // listed as such, and unburn hands it to that cig.
-                    if let Some(id) = entry.file_name().to_str() {
-                        let mut rec = RunRecord::damaged(id, &e);
-                        if e.kind() == io::ErrorKind::Unsupported {
-                            rec.status = "newer".to_string();
-                            if let Ok(text) = fs::read_to_string(entry.path().join("run.json")) {
-                                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
-                                    rec.version = v["version"].as_str().unwrap_or("").to_string();
-                                    rec.format = v["format"].as_u64().unwrap_or(0) as u32;
-                                    rec.script = v["script"].as_str().unwrap_or("").to_string();
-                                }
-                            }
-                        }
-                        rec.loaded_from = Some(entry.path());
-                        rec.refresh_from_journal();
-                        out.push(rec);
-                    }
-                }
-            }
-        }
-    }
-    // Newest first; `started` carries milliseconds, ids only seconds.
-    out.sort_by(|a, b| b.started.cmp(&a.started).then_with(|| b.id.cmp(&a.id)));
-    Ok(out)
+    super::runs_index::list()
 }
 
 /// The last good version of a script: the cig that lit the newest run of
@@ -568,6 +543,13 @@ pub fn list() -> io::Result<Vec<RunRecord>> {
 /// the version) is in the record, and a history of a thousand runs must not
 /// make every start slower.
 pub fn last_good(script_sha256: &str) -> Option<(crate::update::Version, String)> {
+    // Asked before every run, so it reads each run's record alone and
+    // never a journal: everything it needs (the script's hash, the
+    // status, the mode, the version) is in the record, and a history
+    // of a thousand runs must not make every start slower. The run
+    // index (#149) does not stand in for this scan because a folder
+    // scan here keeps the FIFO invariant (`cig run` opens no other
+    // run's journal, even one hand-written beside the index).
     let mut records: Vec<RunRecord> = fs::read_dir(runs_dir())
         .ok()?
         .filter_map(|e| e.ok())
