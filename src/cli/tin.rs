@@ -5,7 +5,7 @@
 //! no run still needs.
 
 use super::{exit, Ctx};
-use crate::burn::{seal, statcache, tin};
+use crate::burn::{rekey, seal, statcache, tin};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
@@ -106,6 +106,8 @@ pub enum TinCommand {
         #[command(subcommand)]
         cmd: KeyCommand,
     },
+    /// Make a new tin seal key and re-seal every sealed object under it; crash-safe (a `cig tin rekey` after an interruption finishes it).
+    Rekey,
 }
 
 #[derive(clap::Subcommand)]
@@ -195,9 +197,46 @@ fn key_cmd(ctx: &Ctx, cmd: KeyCommand) -> i32 {
     }
 }
 
+fn rekey_cmd(ctx: &Ctx) -> i32 {
+    match rekey::rekey() {
+        Ok(d) => {
+            if ctx.json {
+                outln!("{}", serde_json::to_string(&d).unwrap_or_default());
+            } else {
+                let noun = if d.walked == 1 { "object" } else { "objects" };
+                let when = if d.resumed {
+                    "resumed and finished"
+                } else {
+                    "done"
+                };
+                eprintln!(
+                    "{} {when}: {} {noun} walked, {} re-sealed, {} already under the new key. Fingerprint {} -> {}.",
+                    ctx.green("rekey:"),
+                    d.walked,
+                    d.resealed,
+                    d.already,
+                    d.old_fingerprint,
+                    d.new_fingerprint,
+                );
+                if d.resealed > 0 {
+                    eprintln!("  = the old key is no longer needed; a run that was sealed before this rekey still unburns, byte-exact.");
+                }
+            }
+            exit::OK
+        }
+        Err(e) => {
+            eprintln!("{} {e}", ctx.red("error[E720 burn]:"));
+            eprintln!("  = hint: nothing on disk was changed when the refusal came before the walk; an interrupted walk is picked up by running cig tin rekey again");
+            eprintln!("  = explain: cig explain E720");
+            exit::SCRIPT_ERROR
+        }
+    }
+}
+
 pub fn tin_cmd(ctx: &Ctx, cmd: Option<TinCommand>) -> i32 {
     match cmd.unwrap_or(TinCommand::Du) {
         TinCommand::Key { cmd } => key_cmd(ctx, cmd),
+        TinCommand::Rekey => rekey_cmd(ctx),
         TinCommand::Du => {
             let u = tin::du();
             let referenced = tin::referenced().len();
@@ -274,7 +313,8 @@ pub fn tin_cmd(ctx: &Ctx, cmd: Option<TinCommand>) -> i32 {
                 }
             };
             let sub = seal::derive(&master, format!("app:{label}").as_bytes());
-            let mut m = Hmac::<Sha256>::new_from_slice(&sub).expect("HMAC takes any key length");
+            let mut m =
+                Hmac::<Sha256>::new_from_slice(sub.as_bytes()).expect("HMAC takes any key length");
             m.update(&bytes);
             match check {
                 None => {

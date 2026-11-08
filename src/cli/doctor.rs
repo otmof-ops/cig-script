@@ -70,6 +70,16 @@ pub fn doctor(ctx: &Ctx, fix: bool) -> i32 {
     let newer = update::cached_newer();
 
     let mut problems: Vec<String> = Vec::new();
+    // The tin key's lock lives in the keys directory (#105): where that
+    // path is taken by something that is not a directory, a run refuses
+    // before it burns (E802). Looked at, never made: doctor makes no key.
+    let keys = crate::burn::seal::keys_dir();
+    if std::fs::symlink_metadata(&keys).is_ok_and(|m| !m.is_dir()) {
+        problems.push(format!(
+            "the keys directory {} is not a directory, so a run cannot lock the tin's key and refuses before it burns [E802]",
+            keys.display()
+        ));
+    }
     if let Err(e) = &writable {
         problems.push(format!(
             "state directory {} is not writable: {e}",

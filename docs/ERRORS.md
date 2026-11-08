@@ -1354,6 +1354,7 @@ the burn kernel and its journal (write-ahead log).
 | [`E713`](#e713-the-inbox-held-something-that-is-not-a-run) | the inbox held something that is not a run | don't have any over here | nothing to do for the run; if a tool of yours wrote there, it was writing where a cig's state root would be (CIGSCRIPT_HOME inside the hop) |
 | [`E714`](#e714-a-child-run-is-unburned-through-its-parent-(retired)) | a child run is unburned through its parent (retired) | can't see any ciggies bro | cig unburn <child> works from 1.11.0; before it, cig unburn <parent> |
 | [`E715`](#e715-debugging-is-allowed) | debugging is allowed | not one of the four | unset CIG_ALLOW_DEBUG |
+| [`E720`](#e720-a-rekey-cannot-be-done) | a rekey cannot be done | one of the four; the message says which | put the current key back (cig tin key import), or store it where a rekey can swap it (cig config seal_key keyring); after a bad seal.key.old, move it aside and run cig tin rekey again; wait for the holder of the rekey lock; fix the tampered journal cig names before trying again |
 
 ### E700 burn refused
 
@@ -1629,6 +1630,28 @@ CIG_ALLOW_DEBUG is set, so cig does not stop a debugger or another process of th
 1. CIG_ALLOW_DEBUG is set in the environment (no probe; a suggestion, not a finding). **Remedy:** unset CIG_ALLOW_DEBUG when you are done debugging cig
 
 Related: `E707`.
+
+
+### E720 a rekey cannot be done
+
+*burn · since 1.19.0 · arises in run*
+
+**Kind of no:** one of the four; the message says which (read the operating-system reason in the message; ENOENT, EACCES, ENOSPC and friends, each mapped in the causes below).
+
+cig tin rekey refuses because what it needs is not here, is already in use, or would launder tampering. The current key must be available (otherwise there is nothing to re-seal from), and the keeper must be one a rekey can write to (keyring or key file). An interrupted earlier rekey that left behind a seal.key.old file that is not a key is also this code. The rekey takes an exclusive lock on the tin: a second cig tin rekey while one is held is refused outright, named. Every format-3 journal and the ledger are verified under the current key before anything is re-signed; a chain that does not fit refuses the rekey, naming the run, and leaves the tampered bytes on disk so they can be looked at. The keeper swap at the end is read back: a keeper that would not carry the new key refuses, leaves both stashes on disk (every sealed object stays readable under the fallback), and a later cig tin rekey finishes the job. Nothing on disk is changed before the walk begins.
+
+**What to type next:** put the current key back (cig tin key import), or store it where a rekey can swap it (cig config seal_key keyring); after a bad seal.key.old, move it aside and run cig tin rekey again; wait for the holder of the rekey lock; fix the tampered journal cig names before trying again
+
+**Known causes**, ranked; doctor checks them in this order:
+
+1. the current tin key is not available (no keyring entry, no key file, nothing on --seal-key-fd) (probe `path-exists`). **Remedy:** cig tin key import the key you exported earlier, or put the keyring entry back (cigscript/tin-seal)
+2. the key came in on --seal-key-fd for this run only, so a rekey has no keeper to write to (probe `env-var`). **Remedy:** cig config seal_key keyring (or seal_key file) first, so the new key has somewhere to live
+3. an earlier rekey crashed and left a seal.key.old that no longer reads as a key (probe `path-exists`). **Remedy:** move the file aside (it is in the keys directory); the rekey picks up from a clean state on the next run
+4. another cig tin rekey is in progress on this tin (probe `path-exists`). **Remedy:** wait for the other one to finish; if it crashed, run cig tin rekey again and it picks up the walk
+5. a run's journal, or the ledger, does not verify under the current key (probe `path-exists`). **Remedy:** the run is named in the message; investigate the edit and either put the chain back (a backup) or move the run aside before running cig tin rekey again
+6. the keeper would not carry the new key (keyring write failed the read-back, or the key file could not be written) (no probe; a suggestion, not a finding). **Remedy:** both stashes stay on disk and every sealed object is still readable; fix the keeper (unlock the keyring, free space on the keys filesystem) and run cig tin rekey again to finish
+
+Related: `E703`, `E707`, `E708`, `E709`.
 
 
 ## fold (`E750`–`E769`)

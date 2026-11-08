@@ -379,6 +379,17 @@ fn run_source_inner(
         eprintln!("  = explain: cig explain E707");
         return exit::SCRIPT_ERROR;
     }
+    // A run holds the tin key's lock from before its first op, so a `cig
+    // tin rekey` cannot change the key under it; where the lock cannot be
+    // had, the run refuses before anything burns rather than run without
+    // its record (#105).
+    if !args.dry_run {
+        if let Err(e) = crate::burn::seal::hold_shared_rekey_lock() {
+            eprintln!("{} {e}", ctx.red("error[E802 usage]:"));
+            eprintln!("  = explain: cig explain E802");
+            return exit::SCRIPT_ERROR;
+        }
+    }
     let mut record = RunRecord::begin(
         &args.file,
         &source,

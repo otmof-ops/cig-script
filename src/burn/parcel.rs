@@ -45,6 +45,13 @@ pub struct Manifest {
     /// comes from), so the next import maps both to its own.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub prior: Vec<(PathBuf, PathBuf)>,
+    /// `cig parcel --with-key`: the sealing machine's master key in hex,
+    /// so the restoring machine can open the parcel's sealed objects (and
+    /// re-seal them under its own key on the way in). The parcel is a
+    /// secret while it carries this; the writer is told so, and the reader
+    /// shown the fingerprint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sealing_key: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -76,6 +83,50 @@ pub struct Written {
     pub files: usize,
     pub bytes: u64,
     pub manifest: Manifest,
+}
+
+/// `Written`, redacted for `--json` display: the raw sealing key is
+/// stripped from the embedded manifest and replaced with its
+/// fingerprint (SEC-004 M1). The manifest written INTO the parcel
+/// still carries the real key — a parcel's purpose when `--with-key`
+/// is asked for — but a user looking at `cig parcel --json` output
+/// sees no plaintext key there.
+pub fn written_for_display(w: &Written) -> serde_json::Value {
+    let mut v = serde_json::to_value(w).unwrap_or(serde_json::Value::Null);
+    if let Some(obj) = v.as_object_mut() {
+        if let Some(mv) = obj.get_mut("manifest") {
+            *mv = manifest_for_display(&w.manifest);
+        }
+    }
+    v
+}
+
+/// A manifest redacted for display: `sealing_key` removed, a derived
+/// `sealing_key_fingerprint` added when one was carried (SEC-004 M1).
+pub fn manifest_for_display(m: &Manifest) -> serde_json::Value {
+    let mut v = serde_json::to_value(m).unwrap_or(serde_json::Value::Null);
+    let fingerprint = m
+        .sealing_key
+        .as_deref()
+        .and_then(|hex| {
+            // The hex-decoded Vec sits in this scope only, and is wiped
+            // before it goes.
+            let mut bytes = hex::decode(hex).ok()?;
+            let key = super::seal::Key::try_from(bytes.as_slice()).ok();
+            super::seal::wipe_bytes(&mut bytes);
+            key
+        })
+        .map(|k| super::seal::fingerprint(&k));
+    if let Some(obj) = v.as_object_mut() {
+        obj.remove("sealing_key");
+        if let Some(fp) = fingerprint {
+            obj.insert(
+                "sealing_key_fingerprint".to_string(),
+                serde_json::Value::String(fp),
+            );
+        }
+    }
+    v
 }
 
 fn hostname() -> String {
@@ -134,8 +185,28 @@ fn archive_name(parts: &[&str]) -> String {
     parts.join("/")
 }
 
+/// Options a `cig parcel` run picks up: today just whether to carry the
+/// seal key inside the parcel (issue #105's `--with-key`).
+#[derive(Clone, Debug, Default)]
+pub struct WriteOpts {
+    /// Carry the sealing key inside the manifest so another machine can
+    /// open the sealed objects (and re-seal under its own key) without
+    /// setting up the keyring first. The parcel is then a secret.
+    pub with_key: bool,
+}
+
 /// Write the parcel of `rec` to `out`.
 pub fn write(rec: &RunRecord, journal: &Journal, out: &Path) -> io::Result<Written> {
+    write_with(rec, journal, out, &WriteOpts::default())
+}
+
+/// `write`, with options: `--with-key` embeds the sealing key.
+pub fn write_with(
+    rec: &RunRecord,
+    journal: &Journal,
+    out: &Path,
+    opts: &WriteOpts,
+) -> io::Result<Written> {
     let run_dir = rec.dir();
     let tin_dir = super::tin::dir();
     // (name in the archive, where its bytes are now)
@@ -250,6 +321,27 @@ pub fn write(rec: &RunRecord, journal: &Journal, out: &Path) -> io::Result<Writt
         total += fs::metadata(src)?.len();
         files.insert(name.clone(), super::journal::sha256_file(src)?);
     }
+    // Key the parcel can carry (when asked, and only when there is a
+    // sealed object for it to open): read it here so the Manifest has it
+    // before serialisation. The hex copy is wiped as soon as the manifest
+    // is serialised to bytes, so no plaintext sits in memory beyond that.
+    //
+    // A failure to read the key when `--with-key` was asked is an error:
+    // writing a parcel without the key and not saying so would silently
+    // make an unopenable parcel, and `--with-key` only fits when the key
+    // is at hand (finding 11).
+    let sealing_key = if opts.with_key && sealed > 0 {
+        match super::seal::key() {
+            Ok((k, _)) => Some(hex::encode(k.as_bytes())),
+            Err(e) => {
+                return Err(io::Error::other(format!(
+                    "--with-key cannot read the tin's seal key ({e}); the parcel was not written"
+                )))
+            }
+        }
+    } else {
+        None
+    };
     let manifest = Manifest {
         format: FORMAT,
         cig: crate::VERSION.to_string(),
@@ -274,20 +366,44 @@ pub fn write(rec: &RunRecord, journal: &Journal, out: &Path) -> io::Result<Writt
         },
         git_blobs,
         prior: path_map_of(&run_dir),
+        sealing_key,
     };
     let tmp = out.with_extension(format!("{EXT}.tmp"));
+    // A pre-existing `.tmp` from a crashed earlier write could be a file
+    // another user owned or whose mode the umask set non-0600: remove it
+    // first and use `create_new`, so the parcel is always written to a
+    // fresh file with the mode we set and nobody else's byte hitches a
+    // ride (SEC-004 L3).
+    let _ = fs::remove_file(&tmp);
     let written = (|| -> io::Result<()> {
-        let file = fs::File::create(&tmp)?;
+        // A parcel carrying its own sealing key is a secret: create 0600 so
+        // another user cannot read the manifest while it is being written.
+        // A plain parcel keeps 0600 too — the sealed objects inside are a
+        // secret even without a carried key (finding 6).
+        let mut opts = fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let file = opts.open(&tmp)?;
         let enc = flate2::write::GzEncoder::new(file, flate2::Compression::default());
         let mut tar = tar::Builder::new(enc);
-        let manifest_json = serde_json::to_vec_pretty(&manifest)
+        let mut manifest_json = serde_json::to_vec_pretty(&manifest)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         let mut header = tar::Header::new_gnu();
         header.set_size(manifest_json.len() as u64);
-        header.set_mode(0o644);
+        header.set_mode(0o600);
         header.set_mtime(0);
         header.set_cksum();
         tar.append_data(&mut header, "manifest.json", manifest_json.as_slice())?;
+        // The in-memory manifest bytes held the hex key once a --with-key
+        // parcel was asked for: wipe them. The archive on disk is the
+        // secret by design (that was the ask).
+        if manifest.sealing_key.is_some() {
+            super::seal::wipe_bytes(&mut manifest_json);
+        }
         for (name, src) in &sources {
             let mut f = fs::File::open(src)?;
             let len = f.metadata()?.len();
@@ -329,6 +445,12 @@ pub struct Mapping {
     pub cwd: Option<PathBuf>,
     /// Import even what this machine's key cannot open.
     pub allow_sealed_missing: bool,
+    /// The parcel carries its own sealing key: honour it only when the
+    /// caller said to (`--accept-key` on `cig unparcel`). Without the
+    /// flag a `--with-key` parcel is refused, with the fingerprint and
+    /// the flag shown, so a malicious parcel cannot slip a key of its
+    /// own in (finding 8).
+    pub accept_key: bool,
 }
 
 /// What an import did.
@@ -339,6 +461,13 @@ pub struct Imported {
     pub files: usize,
     pub path_map: Vec<(PathBuf, PathBuf)>,
     pub sealed_unopenable: bool,
+    /// When the parcel carried its own sealing key and the caller
+    /// accepted it: the fingerprint computed from the CARRIED key
+    /// bytes, so an operator can match it against what the sender
+    /// expected (SEC-004 M2). The key itself never leaves this
+    /// process.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accepted_key_fingerprint: Option<String>,
 }
 
 /// Read the manifest alone, for `cig unparcel --show` and the messages.
@@ -364,6 +493,18 @@ pub fn read_manifest(file: &Path) -> io::Result<Manifest> {
 /// Why an import was refused: one line, with what to do.
 pub type Refusal = String;
 
+/// One-word label for a tar entry type, for refusal messages.
+fn entry_type_label(t: tar::EntryType) -> &'static str {
+    match t {
+        tar::EntryType::Symlink => "symlink",
+        tar::EntryType::Link => "hardlink",
+        tar::EntryType::Char => "character-device",
+        tar::EntryType::Block => "block-device",
+        tar::EntryType::Fifo => "fifo",
+        _ => "non-regular",
+    }
+}
+
 /// Import a parcel. Everything is checked before anything is written, and
 /// a refusal leaves the state directory as it was.
 pub fn import(file: &Path, mapping: &Mapping) -> Result<Imported, Refusal> {
@@ -373,6 +514,12 @@ pub fn import(file: &Path, mapping: &Mapping) -> Result<Imported, Refusal> {
     let scratch = runs_dir.join(format!(".unparcel-{}", std::process::id()));
     let _ = fs::remove_dir_all(&scratch);
     let result = import_inner(file, mapping, &scratch);
+    // Before cleaning up, overwrite the scratch manifest.json: a
+    // --with-key parcel wrote its sealing key in there, and the
+    // directory's remove-tree leaves the inode's bytes for the
+    // allocator to hand out again (SEC-004 L3, M2).
+    let manifest_path = scratch.join("manifest.json");
+    let _ = super::rekey::wipe_and_remove_file(&manifest_path);
     let _ = fs::remove_dir_all(&scratch);
     result
 }
@@ -384,13 +531,47 @@ fn import_inner(file: &Path, mapping: &Mapping, scratch: &Path) -> Result<Import
     let dec = flate2::read::GzDecoder::new(f);
     let mut archive = tar::Archive::new(dec);
     archive.set_overwrite(false);
-    archive
-        .unpack(scratch)
-        .map_err(|e| format!("{} is not a parcel this cig can read: {e}", file.display()))?;
+    // Unpack one entry at a time so a non-regular entry is refused BEFORE
+    // it lands on disk (SEC-004 N1(a)): a hostile parcel whose
+    // `manifest.json` is a symlink to a user file (the tin's seal.key,
+    // say) would otherwise be followed by the later read, and the
+    // cleanup wipe would zero the target. A symlink, hardlink, device
+    // node or FIFO entry in a parcel has no legitimate use — the writer
+    // (parcel.rs:390-416) only ever emits regular files for the
+    // manifest and the pack's contents — so we refuse the whole parcel
+    // and the state directory stays as it was.
+    for entry in archive
+        .entries()
+        .map_err(|e| format!("{} is not a parcel this cig can read: {e}", file.display()))?
+    {
+        let mut entry = entry
+            .map_err(|e| format!("{} is not a parcel this cig can read: {e}", file.display()))?;
+        let ety = entry.header().entry_type();
+        if !matches!(ety, tar::EntryType::Regular | tar::EntryType::Directory) {
+            let name = entry
+                .path()
+                .ok()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "<unreadable name>".to_string());
+            return Err(format!(
+                "the parcel holds {name}, a {kind} entry; a parcel may only name regular files and directories, refusing the whole parcel",
+                kind = entry_type_label(ety),
+            ));
+        }
+        entry
+            .unpack_in(scratch)
+            .map_err(|e| format!("{} is not a parcel this cig can read: {e}", file.display()))?;
+    }
     let manifest_text = fs::read_to_string(scratch.join("manifest.json"))
         .map_err(|_| format!("{} has no manifest.json: not a parcel", file.display()))?;
-    let manifest: Manifest = serde_json::from_str(&manifest_text)
+    let mut manifest: Manifest = serde_json::from_str(&manifest_text)
         .map_err(|e| format!("the manifest of {} does not parse: {e}", file.display()))?;
+    // The manifest text held the carried sealing key in hex (SEC-004 M2):
+    // wipe the buffer before letting it go. The in-memory manifest keeps
+    // only the field, which we wipe after use below.
+    let mut manifest_text_bytes = manifest_text.into_bytes();
+    super::seal::wipe_bytes(&mut manifest_text_bytes);
+    drop(manifest_text_bytes);
     if manifest.format > FORMAT {
         return Err(format!(
             "the parcel is format {}, written by cig {}; this cig ({}) reads up to format {FORMAT}: cig update, or cig versions add {}",
@@ -501,31 +682,102 @@ fn import_inner(file: &Path, mapping: &Mapping, scratch: &Path) -> Result<Import
         path_map.push((origin_cwd.clone(), local_cwd.clone()));
     }
     // 6. Sealed objects: can this machine open them?
+    //
+    // Four paths:
+    //   a. the parcel's local key already opens them (the common case);
+    //   b. the parcel carries its sealing key (`--with-key`) AND the
+    //      caller said `--accept-key`, so the carried key is trusted;
+    //   c. the caller asked for `--allow-sealed-missing`, in which case
+    //      the sealed objects are imported as opaque bytes (unburn will
+    //      refuse to use them);
+    //   d. refusal, with a clear message.
+    //
+    // Whichever path lands on the carried key validates EVERY sealed
+    // object against it before anything is written: one sample passing
+    // is not enough, a malicious parcel could slip a planted object
+    // sealed under another key alongside benign ones (finding 8).
     let mut sealed_unopenable = false;
+    let mut carried_key: Option<super::seal::Key> = None;
+    let mut carried_fingerprint: Option<String> = None;
     if manifest.sealed.objects > 0 {
-        let sample = manifest
+        let sealed_names: Vec<&String> = manifest
             .files
             .keys()
-            .find(|n| n.starts_with("tin/sealed/") || n.ends_with(super::seal::SUFFIX))
-            .map(|n| scratch.join(n));
+            .filter(|n| n.starts_with("tin/sealed/") || n.ends_with(super::seal::SUFFIX))
+            .collect();
+        let sample = sealed_names.first().map(|n| scratch.join(n));
         if let Some(p) = sample {
-            if super::seal::opens(&p, &super::seal::aad_of(&p)).is_err() {
-                if !mapping.allow_sealed_missing {
-                    let mine = super::seal::key()
-                        .ok()
-                        .map(|(k, _)| super::seal::fingerprint(&k))
-                        .unwrap_or_else(|| "none".to_string());
-                    return Err(format!(
-                        "the parcel holds {} sealed object{} sealed under key {}; this machine's key ({mine}) does not open them. Copy that key here (the keyring entry cigscript/tin-seal, or ~/.cigscript/tin/seal.key), or --allow-sealed-missing to import what the rest can restore",
-                        manifest.sealed.objects,
-                        if manifest.sealed.objects == 1 { "" } else { "s" },
-                        manifest.sealed.key.as_deref().unwrap_or("?")
-                    ));
+            let local_opens = super::seal::opens(&p, &super::seal::aad_of(&p)).is_ok();
+            if !local_opens {
+                // Decode the carried key first (if any), before we decide
+                // whether to refuse. The fingerprint shown on refusal and
+                // on accept is computed from the carried KEY, not from
+                // the manifest's own `sealed.key` claim (SEC-004 M2).
+                let mut decoded: Option<super::seal::Key> = None;
+                if let Some(hex_key) = manifest.sealing_key.as_deref() {
+                    if let Ok(mut bytes) = hex::decode(hex_key) {
+                        let key = super::seal::Key::try_from(bytes.as_slice()).ok();
+                        // The hex-decoded Vec held the key for a moment.
+                        super::seal::wipe_bytes(&mut bytes);
+                        decoded = key;
+                    }
                 }
-                sealed_unopenable = true;
+                let fingerprint = decoded.as_ref().map(super::seal::fingerprint);
+                if manifest.sealing_key.is_some() {
+                    if !mapping.accept_key {
+                        return Err(format!(
+                            "the parcel carries its own sealing key (fingerprint {}); accepting it opens the parcel's sealed objects on this machine, so it is refused unless you pass --accept-key on cig unparcel",
+                            fingerprint.as_deref().unwrap_or("not a valid key")
+                        ));
+                    }
+                    if let Some(k) = decoded {
+                        // Validate EVERY sealed object against the
+                        // carried key, not only the sample.
+                        for name in &sealed_names {
+                            let p = scratch.join(name);
+                            if super::seal::opens_with(&p, &super::seal::aad_of(&p), &k).is_err() {
+                                return Err(format!(
+                                    "the parcel carries a sealing key, but {name} does not open under it; refusing the whole parcel (one malicious sealed object would land in the tin and later refuse to restore)"
+                                ));
+                            }
+                        }
+                        carried_key = Some(k);
+                        carried_fingerprint = fingerprint;
+                    } else {
+                        return Err(
+                            "the parcel's sealing_key field is not a valid hex key; refusing the whole parcel".to_string(),
+                        );
+                    }
+                }
+                if carried_key.is_none() {
+                    if !mapping.allow_sealed_missing {
+                        let mine = super::seal::key()
+                            .ok()
+                            .map(|(k, _)| super::seal::fingerprint(&k))
+                            .unwrap_or_else(|| "none".to_string());
+                        return Err(format!(
+                            "the parcel holds {} sealed object{} sealed under key {}; this machine's key ({mine}) does not open them. Copy that key here (the keyring entry cigscript/tin-seal, or ~/.cigscript/tin/seal.key), parcel --with-key on the other machine with --accept-key here, or --allow-sealed-missing to import what the rest can restore",
+                            manifest.sealed.objects,
+                            if manifest.sealed.objects == 1 { "" } else { "s" },
+                            manifest.sealed.key.as_deref().unwrap_or("?")
+                        ));
+                    }
+                    sealed_unopenable = true;
+                }
             }
         }
     }
+    // The in-memory manifest.sealing_key string still holds the hex key:
+    // wipe its backing bytes before we let it go (SEC-004 M2, L3). The
+    // Manifest value itself will be dropped later, but by then the
+    // string has been zeroed.
+    if let Some(s) = manifest.sealing_key.as_mut() {
+        // SAFETY: wipe_bytes takes &mut [u8] from the String's bytes; we
+        // then clear the String so UTF-8 invariants are kept.
+        super::seal::wipe_bytes(unsafe { s.as_bytes_mut() });
+        s.clear();
+    }
+    manifest.sealing_key = None;
     // 7. The state directories: the origin's run and tin become ours.
     let origin_state = &manifest.origin.state_dir;
     path_map.push((
@@ -547,14 +799,24 @@ fn import_inner(file: &Path, mapping: &Mapping, scratch: &Path) -> Result<Import
         }
     }
     // 8. Objects into the tin: content-named ones are checked against their
-    // name, a stand-in for a git blob is placed as a whole object.
+    // name, a stand-in for a git blob is placed as a whole object. A
+    // sealed object under `tin/sealed/` with a carried key is re-sealed
+    // under this machine's key on the way in, so it opens later without
+    // the carried key at hand.
+    //
+    // The tin key's lock before any object is placed (SEC-004 L4, U1), so
+    // a `cig tin rekey` cannot slip between the reads and the writes
+    // below; where it cannot be had, the import refuses before it writes
+    // anything. The lock alone: a parcel with nothing sealed asks for no
+    // key (#129).
+    super::seal::hold_shared_rekey_lock()?;
     let tin_dir = super::tin::dir();
     for name in manifest.files.keys() {
         let src = scratch.join(name);
-        let dest = if let Some(rel) = name.strip_prefix("tin/") {
-            tin_dir.join(rel)
+        let (dest, reseal_sealed) = if let Some(rel) = name.strip_prefix("tin/") {
+            (tin_dir.join(rel), name.starts_with("tin/sealed/"))
         } else if let Some(sha) = name.strip_prefix("git/") {
-            super::tin::object_path_pub(sha)
+            (super::tin::object_path_pub(sha), false)
         } else {
             continue;
         };
@@ -576,7 +838,21 @@ fn import_inner(file: &Path, mapping: &Mapping, scratch: &Path) -> Result<Import
             fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
         let tmp = dest.with_extension("unparcel");
-        fs::copy(&src, &tmp).map_err(|e| e.to_string())?;
+        if reseal_sealed {
+            if let Some(from) = carried_key.as_ref() {
+                let aad = super::seal::aad_of(&src);
+                super::seal::reseal(&src, &tmp, &aad, from).map_err(|e| {
+                    format!(
+                        "re-sealing sealed object {} under this machine's key failed: {e}",
+                        src.display()
+                    )
+                })?;
+            } else {
+                fs::copy(&src, &tmp).map_err(|e| e.to_string())?;
+            }
+        } else {
+            fs::copy(&src, &tmp).map_err(|e| e.to_string())?;
+        }
         super::journal::sync_file(&tmp).map_err(|e| e.to_string())?;
         #[cfg(unix)]
         {
@@ -626,6 +902,32 @@ fn import_inner(file: &Path, mapping: &Mapping, scratch: &Path) -> Result<Import
         serde_json::to_string_pretty(&rec).map_err(|e| e.to_string())?,
     )
     .map_err(|e| e.to_string())?;
+    // When the parcel carried its sealing key, the sealed snapshots the
+    // run keeps are re-sealed under this machine's key IN THE STAGED
+    // directory, before the rename places the run. A reseal that fails
+    // after the rename left a half-converted run behind, and a re-import
+    // was then refused as a duplicate; staging first lets the whole
+    // import be atomic (finding 8).
+    if let Some(from) = carried_key.as_ref() {
+        let snaps = staged_run.join("snapshots");
+        if let Ok(rd) = fs::read_dir(&snaps) {
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.file_name()
+                    .map(|n| n.to_string_lossy().ends_with(super::seal::SUFFIX))
+                    .unwrap_or(false)
+                {
+                    let aad = super::seal::aad_of(&p);
+                    super::seal::reseal(&p, &p, &aad, from).map_err(|err| {
+                        format!(
+                            "re-sealing snapshot {} under this machine's key failed: {err}",
+                            p.display()
+                        )
+                    })?;
+                }
+            }
+        }
+    }
     fs::rename(&staged_run, &local_run)
         .map_err(|e| format!("cannot place the run at {}: {e}", local_run.display()))?;
     let _ = super::journal::sync_dir_pub(&super::runs::runs_dir());
@@ -651,6 +953,7 @@ fn import_inner(file: &Path, mapping: &Mapping, scratch: &Path) -> Result<Import
         files: seen,
         path_map,
         sealed_unopenable,
+        accepted_key_fingerprint: carried_fingerprint,
     })
 }
 

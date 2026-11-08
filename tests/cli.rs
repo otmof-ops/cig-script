@@ -11624,3 +11624,1489 @@ fn statcache_verify_reports_a_lying_filesystem() {
         "{err}"
     );
 }
+
+// ----- #105: cig tin rekey, parcel --with-key, Key wipes on drop ---------
+
+/// A sealed run on a sandbox, left ready for `cig unburn`. The file sealed
+/// is `.env`, whose plaintext is under `SECRET=` — handy to grep for.
+#[cfg(unix)]
+fn a_sealed_run_ready_to_rekey(sb: &Sandbox) -> String {
+    sb.write(".env", "SECRET=before-rekey\n");
+    sb.write(
+        "s.cig",
+        "pack { \".\" }\nburn {\n  fs.write_text(\".env\", \"SECRET=after-rekey\")\n}\n",
+    );
+    sb.run_ok(&["run", "s.cig"]);
+    sb.runs()[0]["id"].as_str().unwrap().to_string()
+}
+
+/// Every sealed object or snapshot under the sandbox.
+#[cfg(unix)]
+fn every_sealed(sb: &Sandbox) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![sb.home()];
+    while let Some(d) = stack.pop() {
+        let Ok(rd) = fs::read_dir(&d) else { continue };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.starts_with(sb.home().join("tin/sealed"))
+                || p.file_name()
+                    .map(|n| n.to_string_lossy().ends_with(".cig-sealed"))
+                    .unwrap_or(false)
+            {
+                out.push(p);
+            }
+        }
+    }
+    out
+}
+
+#[cfg(unix)]
+fn key_hex_of(path: &Path) -> String {
+    fs::read_to_string(path).unwrap().trim().to_string()
+}
+
+#[cfg(unix)]
+#[test]
+fn rekey_reseals_every_sealed_object_and_the_run_still_unburns() {
+    let sb = Sandbox::new();
+    let id = a_sealed_run_ready_to_rekey(&sb);
+    let key_path = sb.path().join(".cigscript-keys").join("seal.key");
+    let old_hex = key_hex_of(&key_path);
+    let sealed_before: Vec<(PathBuf, Vec<u8>)> = every_sealed(&sb)
+        .into_iter()
+        .map(|p| {
+            let b = fs::read(&p).unwrap();
+            (p, b)
+        })
+        .collect();
+    assert!(
+        !sealed_before.is_empty(),
+        "the run produced no sealed object"
+    );
+
+    // Rekey.
+    let out = sb.run_ok(&["--json", "tin", "rekey"]);
+    let done: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
+    assert_eq!(done["walked"], sealed_before.len(), "{out}");
+    assert_eq!(done["resealed"], sealed_before.len(), "{out}");
+    assert_eq!(done["already"], 0, "{out}");
+    assert_eq!(done["resumed"], false, "{out}");
+    assert_ne!(
+        done["old_fingerprint"], done["new_fingerprint"],
+        "fingerprint did not change: {out}"
+    );
+
+    // The key on disk changed.
+    let new_hex = key_hex_of(&key_path);
+    assert_ne!(old_hex, new_hex, "the key file still holds the old key");
+    // The stash files are both gone.
+    assert!(!sb.path().join(".cigscript-keys/seal.key.old").exists());
+    assert!(!sb.path().join(".cigscript-keys/seal.key.new").exists());
+
+    // Every sealed object's bytes changed on disk (a new nonce was picked),
+    // and each opens with the new key.
+    for (p, old_bytes) in &sealed_before {
+        let new_bytes = fs::read(p).unwrap();
+        assert_ne!(&new_bytes, old_bytes, "{} unchanged", p.display());
+    }
+
+    // `cig tin verify` opens every sealed object with the new key.
+    sb.run_ok(&["tin", "verify"]);
+
+    // Unburn: the pack returns, byte-exact.
+    sb.run_ok(&["unburn", &id]);
+    assert_eq!(sb.read(".env"), "SECRET=before-rekey\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn an_interrupted_rekey_leaves_everything_readable_and_resumes() {
+    // Two sealed objects guarantees a visible middle: a fault after the
+    // first reseal leaves one new-sealed and one old-sealed on disk.
+    let sb = Sandbox::new();
+    sb.write(".env", "FIRST=old\n");
+    sb.write("second.pem", "KEY=old\n");
+    sb.write(
+        "s.cig",
+        "pack { \".\" }\nburn {\n  fs.write_text(\".env\", \"FIRST=new\")\n  fs.write_text(\"second.pem\", \"KEY=new\")\n}\n",
+    );
+    sb.run_ok(&["run", "s.cig"]);
+    let id = sb.runs()[0]["id"].as_str().unwrap().to_string();
+    let sealed = every_sealed(&sb);
+    assert!(
+        sealed.len() >= 2,
+        "need two sealed, got {}: {:?}",
+        sealed.len(),
+        sealed
+    );
+
+    // Crash on the second reseal. Everything should still be readable
+    // (new-sealed under seal.key.new, old-sealed under seal.key.old).
+    let out = sb.cig_env(
+        &["tin", "rekey"],
+        &[("CIG_INTERNAL_FAULT", "rekey-stop-after:1")],
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("E720"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // Both stash files are on disk.
+    assert!(sb.exists(".cigscript-keys/seal.key.old"));
+    assert!(sb.exists(".cigscript-keys/seal.key.new"));
+
+    // Every sealed object still opens: `cig tin verify` does not refuse.
+    let verify_out = sb.cig(&["tin", "verify"]);
+    let verify_stdout = String::from_utf8_lossy(&verify_out.stdout).to_string();
+    let verify_stderr = String::from_utf8_lossy(&verify_out.stderr).to_string();
+    assert!(
+        verify_out.status.success(),
+        "tin verify failed: code={:?}\nstdout: {verify_stdout}\nstderr: {verify_stderr}",
+        verify_out.status.code()
+    );
+
+    // Resume: finishes the rekey cleanly.
+    let done_json: serde_json::Value =
+        serde_json::from_str(sb.run_ok(&["--json", "tin", "rekey"]).trim()).unwrap();
+    assert_eq!(done_json["resumed"], true);
+    // After the resume, the stash files are gone.
+    assert!(!sb.exists(".cigscript-keys/seal.key.old"));
+    assert!(!sb.exists(".cigscript-keys/seal.key.new"));
+
+    // Unburn still works.
+    sb.run_ok(&["unburn", &id]);
+    assert_eq!(sb.read(".env"), "FIRST=old\n");
+    assert_eq!(sb.read("second.pem"), "KEY=old\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn parcel_with_key_round_trips_a_sealed_run_into_a_second_sandbox() {
+    let a = Sandbox::new();
+    // Give the pack a secret so it is sealed.
+    a.write("p/.env", "SECRET=original\n");
+    a.write("p/plain.txt", "plain original\n");
+    a.write(
+        "s.cig",
+        "pack { \"./p\" }\nburn {\n  fs.write_text(\"p/.env\", \"SECRET=after\")\n  fs.write_text(\"p/plain.txt\", \"plain after\")\n}\n",
+    );
+    a.run_ok(&["run", "s.cig"]);
+    let id = a.runs()[0]["id"].as_str().unwrap().to_string();
+    let parcel_path = a.path().join("run.cigparcel");
+    // --with-key embeds the sealing key.
+    let out = a.cig(&[
+        "parcel",
+        &id,
+        "--with-key",
+        "--out",
+        parcel_path.to_str().unwrap(),
+    ]);
+    assert!(
+        out.status.success(),
+        "parcel failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("warning"),
+        "no warning about the secret parcel: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // `unparcel --show` says the key is inside.
+    let b = Sandbox::new();
+    fs::create_dir_all(b.path().join("p")).unwrap();
+    for f in ["plain.txt", ".env"] {
+        fs::copy(a.path().join("p").join(f), b.path().join("p").join(f)).unwrap();
+    }
+    let show = b.run_ok(&["unparcel", "--show", parcel_path.to_str().unwrap()]);
+    assert!(show.contains("key       inside the parcel"), "{show}");
+    // Machine B has NO matching key: a plain unparcel would refuse, but
+    // this parcel carries the key, so it imports — with --accept-key,
+    // since 1.18.0: accepting a stranger's key is an explicit opt-in.
+    let root = format!("p={}", b.path().join("p").display());
+    let imported = b.run_ok(&[
+        "unparcel",
+        parcel_path.to_str().unwrap(),
+        "--root",
+        &root,
+        "--accept-key",
+    ]);
+    assert_eq!(imported.trim(), id, "{imported}");
+    // Unburn on machine B: the sealed secret opens under machine B's own key.
+    b.run_ok(&["unburn", &id]);
+    assert_eq!(b.read("p/.env"), "SECRET=original\n");
+    assert_eq!(b.read("p/plain.txt"), "plain original\n");
+    // Machine B's key is its own, not machine A's.
+    let a_key = fs::read_to_string(a.path().join(".cigscript-keys/seal.key")).unwrap();
+    let b_key = fs::read_to_string(b.path().join(".cigscript-keys/seal.key")).unwrap();
+    assert_ne!(
+        a_key.trim(),
+        b_key.trim(),
+        "the keys ended up the same, so --with-key did not re-seal"
+    );
+}
+
+/// Without --with-key, a parcel on a machine with no matching key is
+/// refused (the pre-existing behaviour — proof the warning is honest).
+#[cfg(unix)]
+#[test]
+fn a_parcel_without_the_key_is_refused_on_a_machine_without_one() {
+    let a = Sandbox::new();
+    a.write("p/.env", "SECRET=x\n");
+    a.write(
+        "s.cig",
+        "pack { \"./p\" }\nburn {\n  fs.write_text(\"p/.env\", \"SECRET=y\")\n}\n",
+    );
+    a.run_ok(&["run", "s.cig"]);
+    let id = a.runs()[0]["id"].as_str().unwrap().to_string();
+    let parcel_path = a.path().join("plain.cigparcel");
+    a.run_ok(&["parcel", &id, "--out", parcel_path.to_str().unwrap()]);
+    let b = Sandbox::new();
+    fs::create_dir_all(b.path().join("p")).unwrap();
+    fs::copy(a.path().join("p/.env"), b.path().join("p/.env")).unwrap();
+    let root = format!("p={}", b.path().join("p").display());
+    let err = b.run_err(
+        &["unparcel", parcel_path.to_str().unwrap(), "--root", &root],
+        1,
+    );
+    assert!(err.contains("E762") && err.contains("sealed"), "{err}");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_rekey_with_no_sealed_objects_is_a_quiet_no_op_and_still_rotates_the_key() {
+    let sb = Sandbox::new();
+    // Make a key by running a trivial burn that reads no secret.
+    sb.write("plain.txt", "one\n");
+    sb.write(
+        "s.cig",
+        "pack { \".\" }\nburn {\n  fs.write_text(\"plain.txt\", \"two\")\n}\n",
+    );
+    sb.run_ok(&["run", "s.cig"]);
+    let keyfile = sb.path().join(".cigscript-keys/seal.key");
+    let before = key_hex_of(&keyfile);
+    let out: serde_json::Value =
+        serde_json::from_str(sb.run_ok(&["--json", "tin", "rekey"]).trim()).unwrap();
+    assert_eq!(out["walked"], 0, "{out}");
+    assert_eq!(out["resealed"], 0, "{out}");
+    let after = key_hex_of(&keyfile);
+    assert_ne!(before, after, "the key must still rotate");
+}
+
+/// cig tin rekey with the key on `--seal-key-fd` refuses: there is no
+/// keeper to write the new key to.
+#[cfg(unix)]
+#[test]
+fn rekey_refuses_when_the_key_was_handed_over_on_a_descriptor() {
+    let sb = Sandbox::new();
+    a_sealed_run_ready_to_rekey(&sb);
+    // Export the current key as plain hex into a file.
+    let hex_path = sb.path().join("key.hex");
+    fs::write(
+        &hex_path,
+        key_hex_of(&sb.path().join(".cigscript-keys/seal.key")),
+    )
+    .unwrap();
+    // Remove the keeper state so the fd is the only source.
+    fs::remove_file(sb.path().join(".cigscript-keys/seal.key")).unwrap();
+    // Hand the key in on fd 3 via `sh -c '... 3<key.hex'`.
+    let cig = cig_bin();
+    let out = Command::new("sh")
+        .arg("-c")
+        .arg(format!(
+            "exec {} --seal-key-fd 3 tin rekey 3<{}",
+            cig.display(),
+            hex_path.display()
+        ))
+        .current_dir(sb.path())
+        .env("CIGSCRIPT_HOME", sb.home())
+        .env("NO_COLOR", "1")
+        .env("CIG_SEAL_KEY", "file")
+        .env("CIG_INTERNAL_TRACKER_DIR", sb.path().join("tracker"))
+        .env("CIG_UPDATE_MANIFEST", sb.path().join("no-releases.json"))
+        .env_remove("CI")
+        .output()
+        .expect("spawn cig");
+    assert!(
+        !out.status.success(),
+        "rekey on --seal-key-fd did not refuse"
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("E720") && err.contains("--seal-key-fd"),
+        "{err}"
+    );
+}
+
+// ----- #105 harden: the SEC-004 review findings 1-11 ---------------------
+
+/// Finding 1. The keeper write fails on purpose. Every sealed object must
+/// stay readable (both stashes left behind), and a second cig tin rekey
+/// finishes the job: a key that was never proven in the keeper is never
+/// trusted as the keeper's.
+#[cfg(unix)]
+#[test]
+fn rekey_keeper_write_failure_leaves_the_stashes_and_a_later_rekey_finishes() {
+    let sb = Sandbox::new();
+    let id = a_sealed_run_ready_to_rekey(&sb);
+    let old_hex = key_hex_of(&sb.path().join(".cigscript-keys").join("seal.key"));
+
+    // Keeper write fails: swap_keeper_if_needed returns E720.
+    let out = sb.cig_env(
+        &["tin", "rekey"],
+        &[("CIG_INTERNAL_FAULT", "rekey-keeper-fail")],
+    );
+    assert_eq!(out.status.code(), Some(1));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("E720"), "{err}");
+
+    // Both stashes are still there.
+    assert!(sb.exists(".cigscript-keys/seal.key.old"));
+    assert!(sb.exists(".cigscript-keys/seal.key.new"));
+    // The primary key file was NOT swapped.
+    assert_eq!(
+        key_hex_of(&sb.path().join(".cigscript-keys").join("seal.key")),
+        old_hex
+    );
+    // Every sealed object still opens: `cig tin verify` is clean. The
+    // walk already re-sealed everything under the new key, but
+    // secondary_keys honours the stashes while the rekey marker is on disk.
+    assert!(sb.exists(".cigscript-keys/rekey.in-progress"));
+    sb.run_ok(&["tin", "verify"]);
+
+    // Second cig tin rekey: finishes the job (state (a)).
+    let done: serde_json::Value =
+        serde_json::from_str(sb.run_ok(&["--json", "tin", "rekey"]).trim()).unwrap();
+    assert_eq!(done["resumed"], true, "{done}");
+    // Stashes and marker gone now.
+    assert!(!sb.exists(".cigscript-keys/seal.key.old"));
+    assert!(!sb.exists(".cigscript-keys/seal.key.new"));
+    assert!(!sb.exists(".cigscript-keys/rekey.in-progress"));
+    let new_hex = key_hex_of(&sb.path().join(".cigscript-keys").join("seal.key"));
+    assert_ne!(new_hex, old_hex);
+    // Unburn still works.
+    sb.run_ok(&["unburn", &id]);
+    assert_eq!(sb.read(".env"), "SECRET=before-rekey\n");
+}
+
+/// Finding 2. A second cig tin rekey while one is in flight is refused
+/// with E720. We simulate "in flight" the way a real rekey makes it:
+/// the `rekey.in-progress` marker on disk AND the exclusive flock
+/// taken on `rekey.lock`. The message says "another rekey".
+#[cfg(unix)]
+#[test]
+fn a_second_rekey_is_refused_while_one_holds_the_rekey_lock() {
+    use std::os::unix::io::AsRawFd;
+    let sb = Sandbox::new();
+    a_sealed_run_ready_to_rekey(&sb);
+    let keys_dir = sb.path().join(".cigscript-keys");
+    fs::create_dir_all(&keys_dir).unwrap();
+    // The marker is what distinguishes "another rekey in flight" from
+    // "a run is using the key" (SEC-004 H1 semantics).
+    fs::write(keys_dir.join("rekey.in-progress"), b"").unwrap();
+    let lock_path = keys_dir.join("rekey.lock");
+    let f = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock_path)
+        .unwrap();
+    // SAFETY: an exclusive, non-blocking flock on a descriptor we own.
+    let rc = unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    assert_eq!(rc, 0, "flock the lock file");
+
+    let err = sb.run_err(&["tin", "rekey"], 1);
+    assert!(
+        err.contains("E720") && err.contains("another cig tin rekey"),
+        "{err}"
+    );
+    drop(f);
+    fs::remove_file(keys_dir.join("rekey.in-progress")).unwrap();
+    // Now the rekey works again.
+    sb.run_ok(&["tin", "rekey"]);
+}
+
+/// SEC-004 H1. A live run (shared lock on `rekey.lock`, no marker)
+/// makes `cig tin rekey` refuse with "a run is in progress" — nothing
+/// is signed under the old key under a run that lives.
+#[cfg(unix)]
+#[test]
+fn a_rekey_refuses_while_a_run_holds_the_shared_lock() {
+    use std::os::unix::io::AsRawFd;
+    let sb = Sandbox::new();
+    a_sealed_run_ready_to_rekey(&sb);
+    let keys_dir = sb.path().join(".cigscript-keys");
+    let lock_path = keys_dir.join("rekey.lock");
+    // Take LOCK_SH ourselves, as a live cig run would (its seal::key()
+    // takes the shared lock at first use and never releases it).
+    let f = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock_path)
+        .unwrap();
+    // SAFETY: flock on a descriptor we own, shared and non-blocking.
+    let rc = unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) };
+    assert_eq!(rc, 0, "take LOCK_SH on rekey.lock");
+    // No marker on disk: this is a live run's state, not a rekey's.
+    assert!(!keys_dir.join("rekey.in-progress").exists());
+
+    let err = sb.run_err(&["tin", "rekey"], 1);
+    assert!(
+        err.contains("E720") && err.contains("a run is in progress"),
+        "{err}"
+    );
+    drop(f);
+    // Now the rekey works again — the lock is released.
+    sb.run_ok(&["tin", "rekey"]);
+}
+
+/// SEC-004 H1 cont'd. A `cig run` started while the test holds the
+/// exclusive rekey lock (simulating a rekey in flight) blocks on
+/// `seal::key()`, prints a notice on stderr, and after the test
+/// releases the lock finishes under the key the keeper now carries.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_run_started_during_a_rekey_waits_and_finishes() {
+    use std::os::unix::io::AsRawFd;
+    let sb = Sandbox::new();
+    // Give the sandbox a key file to read; nothing sealed yet, since
+    // the blocked seal::key() call is what we want to see.
+    a_sealed_run_ready_to_rekey(&sb);
+    let keys_dir = sb.path().join(".cigscript-keys");
+    let lock_path = keys_dir.join("rekey.lock");
+    let f = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock_path)
+        .unwrap();
+    // Take LOCK_EX ourselves, as a rekey would while it works.
+    // SAFETY: flock on a descriptor we own.
+    let rc = unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    assert_eq!(rc, 0, "take LOCK_EX on rekey.lock");
+
+    // Start a `cig run` in the background: it will block in
+    // seal::key()'s LOCK_SH call.
+    sb.write(
+        "wait.cig",
+        "pack { \".\" }\nburn {\n  fs.write_text(\".env\", \"SECRET=after-wait\")\n}\n",
+    );
+    let mut child = sb.cig_spawn(&["run", "wait.cig"]);
+
+    // Give the child a moment to actually block on the lock.
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    // It is still running (blocked in LOCK_SH).
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "the child exited while the exclusive lock was held"
+    );
+
+    // Release the exclusive lock: the child's LOCK_SH now succeeds, the
+    // run proceeds, and the burn's seal completes.
+    drop(f);
+    let out = child.wait_with_output().expect("child wait");
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(
+        out.status.success(),
+        "run did not succeed after the lock was released; stdout={stdout}, stderr={stderr}",
+    );
+    // The waiting notice went to stderr.
+    assert!(
+        stderr.contains("rekey is in progress") || stderr.contains("waiting for it to finish"),
+        "no waiting notice on stderr: {stderr}"
+    );
+    // The burn went through: .env's new contents are what the burn wrote.
+    assert_eq!(sb.read(".env"), "SECRET=after-wait");
+}
+
+/// Finding 3. A tampered journal is caught before anything is re-signed:
+/// the rekey refuses with E720, the journal keeps its break, and a
+/// cig tin verify after still reports the break (nothing was laundered).
+/// A two-write burn gives two op lines, so a tamper on the first is
+/// caught by the second line's `prev` mismatch.
+#[cfg(unix)]
+#[test]
+fn a_tampered_journal_refuses_the_rekey_and_tin_verify_still_reports_it() {
+    let sb = Sandbox::new();
+    sb.write(".env", "FIRST=old\n");
+    sb.write("second.pem", "KEY=old\n");
+    sb.write(
+        "s.cig",
+        "pack { \".\" }\nburn {\n  fs.write_text(\".env\", \"FIRST=new\")\n  fs.write_text(\"second.pem\", \"KEY=new\")\n}\n",
+    );
+    sb.run_ok(&["run", "s.cig"]);
+    let id = sb.runs()[0]["id"].as_str().unwrap().to_string();
+    // Tamper: flip a plaintext byte in the FIRST op line. The next op
+    // line's `prev` becomes the hash of a line that no longer exists,
+    // so `Journal::load` marks `broken_at` and the rekey refuses.
+    let journal_path = sb.home().join("runs").join(&id).join("journal.jsonl");
+    let text = fs::read_to_string(&journal_path).unwrap();
+    let mut lines: Vec<String> = text.lines().map(|s| s.to_string()).collect();
+    let idx = lines
+        .iter()
+        .position(|l| l.contains("\"op\""))
+        .expect("an op line");
+    let before = lines[idx].clone();
+    if let Some(pos) = lines[idx].find(".env") {
+        lines[idx].replace_range(pos..pos + 4, ".ENX");
+    } else {
+        let bytes = unsafe { lines[idx].as_bytes_mut() };
+        for b in bytes {
+            if b.is_ascii_lowercase() {
+                *b = b.to_ascii_uppercase();
+                break;
+            }
+        }
+    }
+    assert_ne!(before, lines[idx], "the tamper must change the line");
+    fs::write(&journal_path, lines.join("\n") + "\n").unwrap();
+
+    let err = sb.run_err(&["tin", "rekey"], 1);
+    assert!(
+        err.contains("E720") && err.contains("does not verify under the current key"),
+        "{err}"
+    );
+    // The journal was NOT re-signed (the tampered bytes are still there).
+    let again = fs::read_to_string(&journal_path).unwrap();
+    assert!(again.contains(".ENX") || again != text);
+
+    // `cig runs <id> --verify` walks the chain and reports the break,
+    // proving the rekey did not launder it. (`cig tin verify` is tin
+    // objects and ledger only; journals are checked at the run level.)
+    let v = sb.cig(&["runs", &id, "--verify"]);
+    let out = String::from_utf8_lossy(&v.stdout).to_string() + &String::from_utf8_lossy(&v.stderr);
+    assert!(
+        out.contains("E708") || out.contains("broken") || out.contains("does not"),
+        "runs --verify should report the break: {out}"
+    );
+}
+
+/// Finding 5. A stray `.reseal-plain` left where a sealed object lives
+/// (a crash during an older-style reseal) does not block a rekey: it is
+/// wipe-removed before the walk begins.
+#[cfg(unix)]
+#[test]
+fn a_stray_reseal_plain_in_the_bucket_does_not_block_a_rekey() {
+    let sb = Sandbox::new();
+    let id = a_sealed_run_ready_to_rekey(&sb);
+    // Snapshots end up under runs/<id>/snapshots/*.cig-sealed. Drop a
+    // stray `.reseal-plain` next to one (and, if any, into a tin
+    // bucket too, so both paths are covered).
+    let snaps = sb.home().join("runs").join(&id).join("snapshots");
+    let stray_snap = snaps.join("00001-1-.env.reseal-plain");
+    fs::write(&stray_snap, b"would be the secret in the clear").unwrap();
+    let mut stray_tin: Option<PathBuf> = None;
+    let tin_sealed = sb.home().join("tin").join("sealed");
+    if let Ok(rd) = fs::read_dir(&tin_sealed) {
+        if let Some(b) = rd
+            .flatten()
+            .find(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+        {
+            let p = b.path().join("deadbeef.reseal-plain");
+            fs::write(&p, b"would be the secret in the clear").unwrap();
+            stray_tin = Some(p);
+        }
+    }
+
+    sb.run_ok(&["tin", "rekey"]);
+    // Both strays gone (wiped and removed before the walk).
+    assert!(!stray_snap.exists(), "stray reseal-plain not cleaned up");
+    if let Some(p) = stray_tin {
+        assert!(!p.exists(), "stray tin reseal-plain not cleaned up");
+    }
+}
+
+/// Finding 6. A `--with-key` parcel file lands at mode 0600, not the
+/// umask's default (which could be 0644).
+#[cfg(unix)]
+#[test]
+fn a_with_key_parcel_file_is_mode_0600() {
+    use std::os::unix::fs::PermissionsExt;
+    let sb = Sandbox::new();
+    sb.write("p/.env", "SECRET=x\n");
+    sb.write(
+        "s.cig",
+        "pack { \"./p\" }\nburn {\n  fs.write_text(\"p/.env\", \"SECRET=y\")\n}\n",
+    );
+    sb.run_ok(&["run", "s.cig"]);
+    let id = sb.runs()[0]["id"].as_str().unwrap().to_string();
+    let parcel_path = sb.path().join("secret.cigparcel");
+    sb.run_ok(&[
+        "parcel",
+        &id,
+        "--with-key",
+        "--out",
+        parcel_path.to_str().unwrap(),
+    ]);
+    let mode = fs::metadata(&parcel_path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600, "parcel mode is {:o}", mode);
+}
+
+/// Finding 7. A planted `seal.key.new` with no rekey lock is ignored —
+/// `secondary_keys` returns nothing, so an object sealed under the
+/// attacker's key does not open.
+#[cfg(unix)]
+#[test]
+fn a_planted_seal_key_new_without_a_rekey_lock_is_ignored() {
+    let sb = Sandbox::new();
+    let id = a_sealed_run_ready_to_rekey(&sb);
+    let keys_dir = sb.path().join(".cigscript-keys");
+    // Plant a fresh "attacker" key at seal.key.new. No rekey.lock.
+    let attacker_hex = "ab".repeat(32);
+    let planted = keys_dir.join("seal.key.new");
+    fs::write(&planted, format!("{attacker_hex}\n")).unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&planted, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    assert!(!keys_dir.join("rekey.in-progress").exists());
+
+    // Unburn still opens with the primary key: the plant does not
+    // become a trusted fallback.
+    sb.run_ok(&["unburn", &id]);
+    assert_eq!(sb.read(".env"), "SECRET=before-rekey\n");
+}
+
+/// Finding 8. A parcel that carries its own sealing key is refused
+/// without --accept-key, with a message that names the fingerprint and
+/// the flag.
+#[cfg(unix)]
+#[test]
+fn a_with_key_parcel_is_refused_without_accept_key() {
+    let a = Sandbox::new();
+    a.write("p/.env", "SECRET=original\n");
+    a.write(
+        "s.cig",
+        "pack { \"./p\" }\nburn {\n  fs.write_text(\"p/.env\", \"SECRET=after\")\n}\n",
+    );
+    a.run_ok(&["run", "s.cig"]);
+    let id = a.runs()[0]["id"].as_str().unwrap().to_string();
+    let parcel_path = a.path().join("secret.cigparcel");
+    a.run_ok(&[
+        "parcel",
+        &id,
+        "--with-key",
+        "--out",
+        parcel_path.to_str().unwrap(),
+    ]);
+    let b = Sandbox::new();
+    fs::create_dir_all(b.path().join("p")).unwrap();
+    fs::copy(a.path().join("p/.env"), b.path().join("p/.env")).unwrap();
+    let root = format!("p={}", b.path().join("p").display());
+
+    // Without --accept-key: refused.
+    let err = b.run_err(
+        &["unparcel", parcel_path.to_str().unwrap(), "--root", &root],
+        1,
+    );
+    assert!(
+        err.contains("carries its own sealing key") && err.contains("--accept-key"),
+        "{err}"
+    );
+    // With --accept-key: imports.
+    b.run_ok(&[
+        "unparcel",
+        parcel_path.to_str().unwrap(),
+        "--root",
+        &root,
+        "--accept-key",
+    ]);
+    b.run_ok(&["unburn", &id]);
+    assert_eq!(b.read("p/.env"), "SECRET=original\n");
+}
+
+/// Finding 8 cont'd. A with-key parcel whose archive has a sealed
+/// object NOT sealed under the carried key is refused before anything
+/// is written (and the run directory is never placed).
+#[cfg(unix)]
+#[test]
+fn a_tampered_with_key_parcel_with_a_mismatched_sealed_object_is_refused() {
+    use std::io::Read;
+    let a = Sandbox::new();
+    a.write("p/.env", "SECRET=original\n");
+    // Two secrets, so we end up with at least two sealed objects.
+    a.write("p/second.pem", "KEY=original\n");
+    a.write(
+        "s.cig",
+        "pack { \"./p\" }\nburn {\n  fs.write_text(\"p/.env\", \"SECRET=after\")\n  fs.write_text(\"p/second.pem\", \"KEY=after\")\n}\n",
+    );
+    a.run_ok(&["run", "s.cig"]);
+    let id = a.runs()[0]["id"].as_str().unwrap().to_string();
+    let parcel_path = a.path().join("secret.cigparcel");
+    a.run_ok(&[
+        "parcel",
+        &id,
+        "--with-key",
+        "--out",
+        parcel_path.to_str().unwrap(),
+    ]);
+    // Swap one sealed object in the parcel for a different sealed bytes
+    // sequence (bytes from a fresh seal on sandbox C under its own key).
+    let c = Sandbox::new();
+    c.write("other/.env", "OTHER=plant\n");
+    c.write(
+        "s.cig",
+        "pack { \"./other\" }\nburn {\n  fs.write_text(\"other/.env\", \"OTHER=after\")\n}\n",
+    );
+    c.run_ok(&["run", "s.cig"]);
+    // Find any sealed file C produced — tin/sealed bucket OR a run's
+    // sealed snapshot. Whichever exists.
+    let other_sealed_bytes = {
+        let mut bytes: Option<Vec<u8>> = None;
+        let mut stack: Vec<PathBuf> = vec![c.home()];
+        while let Some(d) = stack.pop() {
+            let Ok(rd) = fs::read_dir(&d) else { continue };
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else if p
+                    .file_name()
+                    .map(|n| n.to_string_lossy().ends_with(".cig-sealed"))
+                    .unwrap_or(false)
+                    || p.starts_with(c.home().join("tin").join("sealed"))
+                {
+                    if let Ok(b) = fs::read(&p) {
+                        bytes = Some(b);
+                        break;
+                    }
+                }
+            }
+            if bytes.is_some() {
+                break;
+            }
+        }
+        bytes.expect("c has a sealed file")
+    };
+
+    // Rewrite the parcel: read its files, swap ONE sealed object's bytes,
+    // and update the manifest so the sha256 matches (so the per-file
+    // hash check passes but the sealed-object check must fail).
+    let tmp_rewritten = a.path().join("tampered.cigparcel");
+    {
+        let f = fs::File::open(&parcel_path).unwrap();
+        let dec = flate2::read::GzDecoder::new(f);
+        let mut archive = tar::Archive::new(dec);
+        let out_f = fs::File::create(&tmp_rewritten).unwrap();
+        let enc = flate2::write::GzEncoder::new(out_f, flate2::Compression::default());
+        let mut tar_w = tar::Builder::new(enc);
+        let mut manifest_json: Option<Vec<u8>> = None;
+        let mut file_bytes: Vec<(String, Vec<u8>)> = Vec::new();
+        for entry in archive.entries().unwrap() {
+            let mut e = entry.unwrap();
+            let name = e.path().unwrap().to_string_lossy().into_owned();
+            let mut buf = Vec::new();
+            e.read_to_end(&mut buf).unwrap();
+            if name == "manifest.json" {
+                manifest_json = Some(buf);
+            } else {
+                file_bytes.push((name, buf));
+            }
+        }
+        // Pick the first tin/sealed/ or run/snapshots/*.cig-sealed to tamper.
+        let victim_idx = file_bytes
+            .iter()
+            .position(|(n, _)| n.starts_with("tin/sealed/"))
+            .or_else(|| {
+                file_bytes
+                    .iter()
+                    .position(|(n, _)| n.ends_with(".cig-sealed"))
+            })
+            .expect("a sealed file in the parcel");
+        let (victim_name, victim_bytes) = &mut file_bytes[victim_idx];
+        // Replace its bytes with an unrelated sealed blob of equal-ish size.
+        let replacement = other_sealed_bytes.clone();
+        *victim_bytes = replacement;
+        // Update the manifest's sha256 for this file so the per-file check
+        // passes; the sealed-opens check is what must fail.
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(manifest_json.as_ref().unwrap()).unwrap();
+        use sha2::{Digest, Sha256};
+        let new_sha = hex::encode(Sha256::digest(victim_bytes));
+        manifest["files"][victim_name.as_str()] = serde_json::Value::String(new_sha);
+        let new_manifest = serde_json::to_vec_pretty(&manifest).unwrap();
+
+        let mut header = tar::Header::new_gnu();
+        header.set_size(new_manifest.len() as u64);
+        header.set_mode(0o600);
+        header.set_mtime(0);
+        header.set_cksum();
+        tar_w
+            .append_data(&mut header, "manifest.json", new_manifest.as_slice())
+            .unwrap();
+        for (name, bytes) in &file_bytes {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(bytes.len() as u64);
+            header.set_mode(0o644);
+            header.set_mtime(0);
+            header.set_cksum();
+            tar_w
+                .append_data(&mut header, name.as_str(), bytes.as_slice())
+                .unwrap();
+        }
+        let enc = tar_w.into_inner().unwrap();
+        let f = enc.finish().unwrap();
+        f.sync_all().unwrap();
+    }
+    let b = Sandbox::new();
+    fs::create_dir_all(b.path().join("p")).unwrap();
+    for f in [".env", "second.pem"] {
+        fs::copy(a.path().join("p").join(f), b.path().join("p").join(f)).unwrap();
+    }
+    let root = format!("p={}", b.path().join("p").display());
+    let err = b.run_err(
+        &[
+            "unparcel",
+            tmp_rewritten.to_str().unwrap(),
+            "--root",
+            &root,
+            "--accept-key",
+        ],
+        1,
+    );
+    assert!(
+        err.contains("does not open under it") || err.contains("refusing the whole parcel"),
+        "{err}"
+    );
+    // The run was NOT placed (import is atomic).
+    assert!(!b.home().join("runs").join(&id).exists());
+}
+
+/// SEC-004 H2. A planted `rekey.in-progress` + a planted 0600
+/// `seal.key.new` from an "attacker" (a key unrelated to the primary)
+/// must not make a journal, ledger line or sealed object signed/sealed
+/// under that key verify or open: the stash is honoured only when the
+/// keeper's primary key equals one of the stash keys, by a
+/// constant-time compare.
+#[cfg(unix)]
+#[test]
+fn a_planted_marker_and_stash_does_not_forge_journals_or_sealed_objects() {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::fs::PermissionsExt;
+    let sb = Sandbox::new();
+    let id = a_sealed_run_ready_to_rekey(&sb);
+    let keys_dir = sb.path().join(".cigscript-keys");
+    let runs_dir = sb.home().join("runs");
+
+    // The "attacker's" key: 32 random bytes NOT equal to the primary.
+    let attacker_hex = "11".repeat(32);
+    // Plant a marker and a 0600 seal.key.new under the attacker's key.
+    fs::write(keys_dir.join("rekey.in-progress"), b"").unwrap();
+    {
+        let mut opts = fs::OpenOptions::new();
+        opts.write(true).create(true).truncate(true).mode(0o600);
+        let mut f = opts.open(keys_dir.join("seal.key.new")).unwrap();
+        writeln!(f, "{attacker_hex}").unwrap();
+    }
+    fs::set_permissions(
+        keys_dir.join("seal.key.new"),
+        fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    // Also plant a bogus attacker-signed "journal" in a fresh run dir:
+    // without H2 the derived journal-mac subkey from the planted
+    // seal.key.new would make it verify.
+    let attacker_run_dir = runs_dir.join("20260101T000000-planted");
+    fs::create_dir_all(&attacker_run_dir).unwrap();
+    // Build a one-line format-3 journal line signed under the attacker key.
+    let attacker_master = hex::decode(&attacker_hex).unwrap();
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+    // HKDF the same way `seal::derive` does: labels LABEL_JOURNAL_MAC.
+    let hk = hkdf::Hkdf::<Sha256>::new(None, &attacker_master);
+    let mut journal_subkey = [0u8; 32];
+    hk.expand(b"journal-mac", &mut journal_subkey).unwrap();
+    // Chain seed: sha256 of the run id (same as journal::chain_seed).
+    use sha2::Digest;
+    let seed = hex::encode(Sha256::digest(b"20260101T000000-planted"));
+    // Header line: {"format":3,"run":"<id>","prev":"<HMAC under journal-mac of id>"}.
+    let mut mac = Hmac::<Sha256>::new_from_slice(&journal_subkey).unwrap();
+    mac.update(b"20260101T000000-planted");
+    let header_prev = hex::encode(mac.finalize().into_bytes());
+    assert_ne!(header_prev, seed, "sanity: subkey makes a real MAC");
+    let header_line =
+        format!("{{\"format\":3,\"run\":\"20260101T000000-planted\",\"prev\":\"{header_prev}\"}}");
+    fs::write(
+        attacker_run_dir.join("journal.jsonl"),
+        format!("{header_line}\n"),
+    )
+    .unwrap();
+    fs::write(
+        attacker_run_dir.join("run.json"),
+        r#"{"format":1,"id":"20260101T000000-planted","status":"ok","cwd":"","pack":[]}"#,
+    )
+    .unwrap();
+
+    // The planted journal MUST read as `other_key` or `unverified`,
+    // NOT as a verified chain under the planted secondary. That is
+    // what H2 proves: `secondary_keys(primary)` returns the stashes
+    // only when the primary equals one of them (it does not here, so
+    // the attacker's derivation is not a candidate for pick_mac_key).
+    //
+    // `cig runs --verify` on the planted run surfaces the state.
+    let v = sb.cig(&["runs", "20260101T000000-planted", "--verify"]);
+    let verdict =
+        String::from_utf8_lossy(&v.stdout).to_string() + &String::from_utf8_lossy(&v.stderr);
+    assert!(
+        !v.status.success()
+            || verdict.contains("other key")
+            || verdict.contains("another")
+            || verdict.contains("unverified")
+            || verdict.contains("broken")
+            || verdict.contains("does not"),
+        "planted journal should NOT verify under the attacker's planted key: {verdict}"
+    );
+    // The sealed objects of the real run still open with the primary.
+    // Unburn the original run: the planted stash must not break the read.
+    sb.run_ok(&["unburn", &id]);
+    assert_eq!(sb.read(".env"), "SECRET=before-rekey\n");
+}
+
+/// SEC-004 H3. On resume, the keeper's current key must equal one of
+/// the stash keys: a planted pair with no prior rekey is refused.
+#[cfg(unix)]
+#[test]
+fn a_rekey_resume_refuses_a_planted_pair() {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::fs::PermissionsExt;
+    let sb = Sandbox::new();
+    let _id = a_sealed_run_ready_to_rekey(&sb);
+    let keys_dir = sb.path().join(".cigscript-keys");
+    // Plant seal.key.old / seal.key.new with keys the keeper does not
+    // know, and the "in-progress" marker. A second rekey must refuse
+    // (the resume path's keeper-equals-stash check fails).
+    let old_hex = "22".repeat(32);
+    let new_hex = "33".repeat(32);
+    fs::write(keys_dir.join("rekey.in-progress"), b"").unwrap();
+    for (name, hex) in [("seal.key.old", &old_hex), ("seal.key.new", &new_hex)] {
+        let mut opts = fs::OpenOptions::new();
+        opts.write(true).create(true).truncate(true).mode(0o600);
+        let mut f = opts.open(keys_dir.join(name)).unwrap();
+        writeln!(f, "{hex}").unwrap();
+        fs::set_permissions(keys_dir.join(name), fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let err = sb.run_err(&["tin", "rekey"], 1);
+    assert!(
+        err.contains("E720") && err.contains("do not match"),
+        "{err}"
+    );
+}
+
+/// SEC-004 H4. A journal with `other_key` or `unverified` set is not
+/// re-signed. A planted journal from "another machine" (signed under a
+/// key this tin does not know) placed as a new run in the state
+/// directory is caught by `verify_everything_under_current_key` and
+/// the rekey refuses.
+#[cfg(unix)]
+#[test]
+fn a_rekey_refuses_a_journal_signed_by_another_key() {
+    // Sandbox A: produce a signed journal under A's key.
+    let a = Sandbox::new();
+    let id_a = a_sealed_run_ready_to_rekey(&a);
+    let a_journal = a.home().join("runs").join(&id_a).join("journal.jsonl");
+    let a_journal_text = fs::read_to_string(&a_journal).unwrap();
+    let a_run_json = a.home().join("runs").join(&id_a).join("run.json");
+    let a_run_text = fs::read_to_string(&a_run_json).unwrap();
+
+    // Sandbox B: has its own key.
+    let b = Sandbox::new();
+    let _id_b = a_sealed_run_ready_to_rekey(&b);
+    // Place A's journal and run.json as a new run in B, without going
+    // through `cig unparcel` (which would re-sign the journal under B's
+    // key). This represents the imported-but-unadopted state.
+    let b_run_dir = b.home().join("runs").join(&id_a);
+    fs::create_dir_all(&b_run_dir).unwrap();
+    fs::write(b_run_dir.join("journal.jsonl"), &a_journal_text).unwrap();
+    fs::write(b_run_dir.join("run.json"), &a_run_text).unwrap();
+
+    // Rekey on B: refuses with E720, naming the planted run.
+    let err = b.run_err(&["tin", "rekey"], 1);
+    assert!(
+        err.contains("E720")
+            && err.contains(&id_a)
+            && (err.contains("signed by another key") || err.contains("another key")),
+        "{err}"
+    );
+    // The journal was NOT touched (it is still under A's bytes).
+    let again = fs::read_to_string(b_run_dir.join("journal.jsonl")).unwrap();
+    assert_eq!(again, a_journal_text);
+}
+
+/// SEC-004 M1 / M2. `cig parcel --json` strips the raw sealing key
+/// from its embedded manifest and prints its fingerprint instead; the
+/// fingerprint is computed from the CARRIED key bytes.
+#[cfg(unix)]
+#[test]
+fn parcel_json_output_does_not_leak_the_raw_sealing_key() {
+    let sb = Sandbox::new();
+    sb.write("p/.env", "SECRET=x\n");
+    sb.write(
+        "s.cig",
+        "pack { \"./p\" }\nburn {\n  fs.write_text(\"p/.env\", \"SECRET=y\")\n}\n",
+    );
+    sb.run_ok(&["run", "s.cig"]);
+    let id = sb.runs()[0]["id"].as_str().unwrap().to_string();
+    let parcel_path = sb.path().join("x.cigparcel");
+    let out = sb.run_ok(&[
+        "--json",
+        "parcel",
+        &id,
+        "--with-key",
+        "--out",
+        parcel_path.to_str().unwrap(),
+    ]);
+    let v: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
+    // The raw key is NOT present in the JSON output.
+    assert!(
+        v["manifest"]["sealing_key"].is_null(),
+        "sealing_key leaked to --json: {out}"
+    );
+    // A fingerprint IS present.
+    let fp = v["manifest"]["sealing_key_fingerprint"]
+        .as_str()
+        .expect("sealing_key_fingerprint missing from --json");
+    assert_eq!(fp.len(), 16, "fingerprint is 16 hex chars: {fp}");
+
+    // `cig unparcel --show --json` also strips the key.
+    let show_out = sb.run_ok(&[
+        "--json",
+        "unparcel",
+        "--show",
+        parcel_path.to_str().unwrap(),
+    ]);
+    let sv: serde_json::Value = serde_json::from_str(show_out.trim()).unwrap();
+    assert!(
+        sv["sealing_key"].is_null(),
+        "sealing_key leaked to unparcel --show --json: {show_out}"
+    );
+    let sfp = sv["sealing_key_fingerprint"]
+        .as_str()
+        .expect("sealing_key_fingerprint missing from unparcel --show --json");
+    assert_eq!(sfp, fp);
+}
+
+/// SEC-004 M2. On accept, the carried-key fingerprint is printed from
+/// the carried key bytes (not the manifest's own claim). We prove it
+/// matches the sender's fingerprint, so an operator can check it.
+#[cfg(unix)]
+#[test]
+fn unparcel_accept_key_prints_the_carried_fingerprint() {
+    let a = Sandbox::new();
+    a.write("p/.env", "SECRET=x\n");
+    a.write(
+        "s.cig",
+        "pack { \"./p\" }\nburn {\n  fs.write_text(\"p/.env\", \"SECRET=y\")\n}\n",
+    );
+    a.run_ok(&["run", "s.cig"]);
+    let id = a.runs()[0]["id"].as_str().unwrap().to_string();
+    let parcel_path = a.path().join("secret.cigparcel");
+    let written_out = a.run_ok(&[
+        "--json",
+        "parcel",
+        &id,
+        "--with-key",
+        "--out",
+        parcel_path.to_str().unwrap(),
+    ]);
+    let wv: serde_json::Value = serde_json::from_str(written_out.trim()).unwrap();
+    let sender_fp = wv["manifest"]["sealing_key_fingerprint"]
+        .as_str()
+        .expect("sender's fingerprint")
+        .to_string();
+
+    let b = Sandbox::new();
+    fs::create_dir_all(b.path().join("p")).unwrap();
+    fs::copy(a.path().join("p/.env"), b.path().join("p/.env")).unwrap();
+    let root = format!("p={}", b.path().join("p").display());
+
+    // The accept path prints the fingerprint on stderr and carries it
+    // in --json.
+    let cig_out = b.cig(&[
+        "unparcel",
+        parcel_path.to_str().unwrap(),
+        "--root",
+        &root,
+        "--accept-key",
+    ]);
+    assert!(cig_out.status.success());
+    let stderr = String::from_utf8_lossy(&cig_out.stderr);
+    assert!(
+        stderr.contains(&sender_fp) && stderr.contains("accepted"),
+        "accept did not print the carried fingerprint: {stderr}"
+    );
+
+    // --json carries it in the structured output. We import into a
+    // fresh sandbox (the previous one already has this run).
+    let c = Sandbox::new();
+    fs::create_dir_all(c.path().join("p")).unwrap();
+    fs::copy(a.path().join("p/.env"), c.path().join("p/.env")).unwrap();
+    let root_c = format!("p={}", c.path().join("p").display());
+    let imported = c.run_ok(&[
+        "--json",
+        "unparcel",
+        parcel_path.to_str().unwrap(),
+        "--root",
+        &root_c,
+        "--accept-key",
+    ]);
+    let iv: serde_json::Value = serde_json::from_str(imported.trim()).unwrap();
+    assert_eq!(
+        iv["accepted_key_fingerprint"].as_str().unwrap_or(""),
+        sender_fp,
+        "{imported}"
+    );
+    // The refusal path (no --accept-key) names the same fingerprint,
+    // computed from the carried key bytes, not the manifest claim.
+    let d = Sandbox::new();
+    fs::create_dir_all(d.path().join("p")).unwrap();
+    fs::copy(a.path().join("p/.env"), d.path().join("p/.env")).unwrap();
+    let root_d = format!("p={}", d.path().join("p").display());
+    let err = d.run_err(
+        &["unparcel", parcel_path.to_str().unwrap(), "--root", &root_d],
+        1,
+    );
+    assert!(
+        err.contains(&sender_fp),
+        "refusal did not name the carried fingerprint: {err}"
+    );
+}
+
+/// Finding 11. `--with-key` with no readable key is an error, not a
+/// quiet "wrote a parcel without the key". (We run on a sandbox whose
+/// key file is removed between seal and parcel, so the cached key does
+/// not save us — a fresh cig process asks again.)
+#[cfg(unix)]
+#[test]
+fn with_key_errors_when_the_key_cannot_be_read() {
+    let sb = Sandbox::new();
+    sb.write("p/.env", "SECRET=x\n");
+    sb.write(
+        "s.cig",
+        "pack { \"./p\" }\nburn {\n  fs.write_text(\"p/.env\", \"SECRET=y\")\n}\n",
+    );
+    sb.run_ok(&["run", "s.cig"]);
+    let id = sb.runs()[0]["id"].as_str().unwrap().to_string();
+    // Remove the primary key file; a fresh cig process cannot read any
+    // key (keyring is forced off via CIG_SEAL_KEY=file and we have no
+    // seal-key-fd setup). The sealed snapshots still exist.
+    fs::remove_file(sb.path().join(".cigscript-keys").join("seal.key")).unwrap();
+    let parcel_path = sb.path().join("x.cigparcel");
+    let err = sb.run_err(
+        &[
+            "parcel",
+            &id,
+            "--with-key",
+            "--out",
+            parcel_path.to_str().unwrap(),
+        ],
+        1,
+    );
+    assert!(
+        err.contains("--with-key") && err.contains("seal key"),
+        "{err}"
+    );
+    assert!(!parcel_path.exists(), "parcel should not have been written");
+}
+
+/// SEC-004 N1(a). A hostile parcel whose `manifest.json` is a symlink
+/// to a file in the sandbox is refused BEFORE anything is written, and
+/// the target's bytes are left intact. Without the per-entry-type
+/// check, the write-side manifest read would follow the link, and the
+/// cleanup `wipe_and_remove_file` would zero the target (the tin's
+/// seal.key, say).
+#[cfg(unix)]
+#[test]
+fn a_parcel_whose_manifest_is_a_symlink_is_refused_and_the_target_is_intact() {
+    let sb = Sandbox::new();
+    // A target file the hostile symlink will point at.
+    let target = sb.path().join("important-key");
+    let target_bytes = b"these bytes must not be zeroed".to_vec();
+    fs::write(&target, &target_bytes).unwrap();
+
+    // Build a .cigparcel by hand: a tar.gz whose only entry is a
+    // `manifest.json` SYMLINK pointing at `target`. No regular files.
+    let parcel_path = sb.path().join("hostile.cigparcel");
+    {
+        let file = fs::File::create(&parcel_path).unwrap();
+        let enc = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+        let mut tar_w = tar::Builder::new(enc);
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::Symlink);
+        header.set_size(0);
+        header.set_mode(0o777);
+        header.set_mtime(0);
+        header.set_link_name(&target).unwrap();
+        header.set_cksum();
+        tar_w
+            .append_data(&mut header, "manifest.json", std::io::empty())
+            .unwrap();
+        let enc = tar_w.into_inner().unwrap();
+        let out = enc.finish().unwrap();
+        out.sync_all().unwrap();
+    }
+
+    // Any `--root home=...` is enough to parse the args; the symlink
+    // refusal fires in the unpack, before the mapping is used.
+    let root = format!("home={}", sb.path().display());
+    let err = sb.run_err(
+        &["unparcel", parcel_path.to_str().unwrap(), "--root", &root],
+        1,
+    );
+    assert!(
+        err.contains("symlink") && err.contains("refusing the whole parcel"),
+        "{err}"
+    );
+    // The target is untouched: not zeroed, not removed.
+    assert_eq!(fs::read(&target).unwrap(), target_bytes);
+}
+
+/// SEC-004 N1(a) cont'd. A hostile parcel with a hardlink entry is
+/// refused with "hardlink" in the message.
+#[cfg(unix)]
+#[test]
+fn a_parcel_with_a_hardlink_entry_is_refused() {
+    let sb = Sandbox::new();
+    let target = sb.path().join("some-file");
+    fs::write(&target, b"content").unwrap();
+
+    let parcel_path = sb.path().join("hostile.cigparcel");
+    {
+        let file = fs::File::create(&parcel_path).unwrap();
+        let enc = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+        let mut tar_w = tar::Builder::new(enc);
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::Link);
+        header.set_size(0);
+        header.set_mode(0o600);
+        header.set_mtime(0);
+        header.set_link_name(&target).unwrap();
+        header.set_cksum();
+        tar_w
+            .append_data(&mut header, "manifest.json", std::io::empty())
+            .unwrap();
+        let enc = tar_w.into_inner().unwrap();
+        let out = enc.finish().unwrap();
+        out.sync_all().unwrap();
+    }
+
+    let root = format!("home={}", sb.path().display());
+    let err = sb.run_err(
+        &["unparcel", parcel_path.to_str().unwrap(), "--root", &root],
+        1,
+    );
+    assert!(
+        err.contains("hardlink") && err.contains("refusing the whole parcel"),
+        "{err}"
+    );
+    assert_eq!(fs::read(&target).unwrap(), b"content");
+}
+
+/// SEC-004 N2. A ledger-appending command started while the test holds
+/// the exclusive rekey lock waits on the shared lock BEFORE reading the
+/// ledger file, then after the lock is released finishes successfully
+/// and the ledger chain still verifies. Without the fix, `ledger::load`
+/// reads the file first and the read can race a rekey rewrite; this
+/// test proves `ledger::load` now waits on the lock before the read.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_ledger_append_started_during_a_rekey_waits_and_the_chain_still_verifies() {
+    use std::os::unix::io::AsRawFd;
+    let sb = Sandbox::new();
+    let _id = a_sealed_run_ready_to_rekey(&sb);
+    let keys_dir = sb.path().join(".cigscript-keys");
+    let lock_path = keys_dir.join("rekey.lock");
+    let f = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock_path)
+        .unwrap();
+    // The test is the rekey: hold LOCK_EX.
+    // SAFETY: flock on a descriptor we own.
+    let rc = unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    assert_eq!(rc, 0, "take LOCK_EX on rekey.lock");
+
+    // Spawn a `cig runs --forget <id>` — it calls `ledger::append`,
+    // whose first step is `ledger::load`, which now takes the shared
+    // rekey lock BEFORE reading the ledger file (SEC-004 N2).
+    let fake_id = "20200101T000000-forgotten";
+    let mut child = sb.cig_spawn(&["runs", "--forget", fake_id]);
+
+    // Give it a moment to block in the lock call.
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "the ledger-appending child exited while the exclusive lock was held",
+    );
+
+    // Release the exclusive lock.
+    drop(f);
+    let out = child.wait_with_output().expect("child wait");
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(
+        out.status.success(),
+        "runs --forget did not succeed after the lock was released; stdout={stdout}, stderr={stderr}",
+    );
+    // The chain still verifies: the ledger loads without a `broken_at`.
+    sb.run_ok(&["tin", "verify"]);
+}
+
+/// SEC-004 N3. When the process's shared rekey lock cannot be had
+/// (here: the keys directory cannot be created because a regular file
+/// sits in its place), `seal::key()` fails closed with the reason,
+/// instead of quietly carrying on unprotected. A seal operation then
+/// refuses before anything is written.
+#[cfg(unix)]
+#[test]
+fn seal_refuses_when_the_rekey_lock_cannot_be_had() {
+    let sb = Sandbox::new();
+    // Put a regular file where the keys directory would be, so
+    // create_dir_all fails. The keys dir sits beside CIGSCRIPT_HOME
+    // (see `seal::keys_dir`): CIGSCRIPT_HOME=<path>/home, keys_dir =
+    // <path>/.cigscript-keys. Write a file at that exact path.
+    let keys_dir = sb.path().join(".cigscript-keys");
+    fs::write(&keys_dir, b"not a directory").unwrap();
+
+    sb.write(".env", "SECRET=x\n");
+    sb.write(
+        "s.cig",
+        "pack { \".\" }\nburn {\n  fs.write_text(\".env\", \"SECRET=y\")\n}\n",
+    );
+    // The run must fail with the lock-closed reason; what exit code
+    // and exact text the caller surfaces is less important than that
+    // it names the keys directory and the refusal to proceed
+    // unprotected.
+    let out = sb.cig(&["run", "s.cig"]);
+    assert!(
+        !out.status.success(),
+        "run should fail when the keys directory cannot be created"
+    );
+    let err = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(
+        err.contains("keys directory") && err.contains("unprotected"),
+        "lock-closed refusal expected, got: {err}"
+    );
+    // The lock failure's cache survives, so .env is NOT re-written.
+    assert_eq!(
+        fs::read_to_string(sb.path().join(".env")).unwrap(),
+        "SECRET=x\n"
+    );
+}
+
+/// SEC-004 N5. A rekey that is refused in verification must leave no
+/// `rekey.in-progress` marker on disk: a later contention with a
+/// running cig would otherwise read it as "another rekey is in
+/// progress" rather than "a run is in progress". The refusal here
+/// comes from a tampered journal (H4 path): two writes give two op
+/// lines, so a byte flipped in the first breaks the second's `prev`
+/// and `Journal::load` marks `broken_at`.
+#[cfg(unix)]
+#[test]
+fn a_refused_rekey_leaves_no_in_progress_marker() {
+    let sb = Sandbox::new();
+    sb.write(".env", "FIRST=old\n");
+    sb.write("second.pem", "KEY=old\n");
+    sb.write(
+        "s.cig",
+        "pack { \".\" }\nburn {\n  fs.write_text(\".env\", \"FIRST=new\")\n  fs.write_text(\"second.pem\", \"KEY=new\")\n}\n",
+    );
+    sb.run_ok(&["run", "s.cig"]);
+    let id = sb.runs()[0]["id"].as_str().unwrap().to_string();
+    let jp = sb.home().join("runs").join(&id).join("journal.jsonl");
+    let text = fs::read_to_string(&jp).unwrap();
+    let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+    let idx = lines
+        .iter()
+        .position(|l| l.contains("\"op\""))
+        .expect("an op line");
+    if let Some(pos) = lines[idx].find(".env") {
+        lines[idx].replace_range(pos..pos + 4, ".ENX");
+    } else {
+        panic!("op line should name .env");
+    }
+    fs::write(&jp, lines.join("\n") + "\n").unwrap();
+
+    // The rekey refuses in verification.
+    let err = sb.run_err(&["tin", "rekey"], 1);
+    assert!(
+        err.contains("E720") || err.contains("does not verify") || err.contains("refus"),
+        "rekey should refuse, got: {err}"
+    );
+    // No marker left on disk: this is SEC-004 N5. Before the fix, the
+    // marker was created at the top of `rekey_inner` and a verification
+    // refusal left it, so a later contention with a running cig read
+    // it as "another rekey is in progress" instead of "a run is in
+    // progress".
+    let marker = sb.path().join(".cigscript-keys").join("rekey.in-progress");
+    assert!(
+        !marker.exists(),
+        "rekey.in-progress must not be left behind by a refused rekey"
+    );
+}
+
+/// #105: a run that burns nothing sealed refuses too when the tin key's
+/// lock cannot be had, before its first op (E802): no file written, no run
+/// recorded, no ledger line missing; `cig doctor` says why.
+#[cfg(unix)]
+#[test]
+fn a_plain_run_refuses_before_it_burns_when_the_key_lock_cannot_be_had() {
+    let sb = Sandbox::new();
+    fs::write(sb.path().join(".cigscript-keys"), b"not a directory").unwrap();
+    sb.write(
+        "s.cig",
+        "burn {\n  fs.write_text(\"plain.txt\", \"x\")\n}\n",
+    );
+    let out = sb.cig(&["run", "s.cig"]);
+    let err = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(!out.status.success(), "{err}");
+    assert!(
+        err.contains("E802") && err.contains("keys directory"),
+        "{err}"
+    );
+    assert!(!err.contains("tripwire"), "refused before it burned: {err}");
+    assert!(!sb.exists("plain.txt"), "nothing burned");
+    assert!(sb.runs().is_empty(), "no run recorded");
+    let doctor = String::from_utf8_lossy(&sb.cig(&["doctor"]).stdout).into_owned();
+    assert!(doctor.contains("[E802]"), "{doctor}");
+}
+
+/// #105 (SEC-004 U1, U2): where the tin key's lock cannot be had, an import
+/// refuses before it places anything, and `cig runs --prune` refuses before
+/// a run goes, so no run lands or leaves without its ledger line.
+#[cfg(unix)]
+#[test]
+fn unparcel_and_prune_refuse_when_the_key_lock_cannot_be_had() {
+    let a = Sandbox::new();
+    let id = parcelled_run(&a);
+    a.run_ok(&["parcel", &id, "--out", "run.cigparcel"]);
+    let parcel = a.path().join("run.cigparcel");
+    let b = machine_b(&a);
+    fs::write(b.path().join(".cigscript-keys"), b"not a directory").unwrap();
+    let root = format!("p={}", b.path().join("p").display());
+    let out = b.cig(&["unparcel", parcel.to_str().unwrap(), "--root", &root]);
+    let err = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(!out.status.success(), "{err}");
+    assert!(err.contains("keys directory"), "{err}");
+    assert!(b.runs().is_empty(), "nothing placed: {:?}", b.runs());
+    // `--prune` on the machine that has runs, with its keys path blocked
+    // (its keys directory, which sealing made, taken away first).
+    let _ = fs::remove_dir_all(a.path().join(".cigscript-keys"));
+    fs::write(a.path().join(".cigscript-keys"), b"not a directory").unwrap();
+    let out = a.cig(&["runs", "--prune", "0"]);
+    let err = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(!out.status.success() && err.contains("E802"), "{err}");
+    assert_eq!(a.runs().len(), 1, "no run went");
+}
