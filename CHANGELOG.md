@@ -5,6 +5,24 @@ project follows semantic versioning.
 
 ## Unreleased
 
+- **`tin/` and `runs/` hidden from a boxed hop** (#105). The guard no
+  longer leaves the tin visible to a hop and read-only, it hides it: in
+  the hop's mount namespace an empty tmpfs goes over `~/.cigscript/tin`
+  and another over `~/.cigscript/runs`, and the one file under them the
+  hop legitimately writes to (its burn-protocol journal, the file
+  `CIG_JOURNAL` names) is bound back through the fresh `runs/` tmpfs so
+  the protocol keeps working. A hop that lists either folder sees
+  nothing; other runs' records and the tin's objects are out of its
+  sight. When `network: registry` is on, the run's proxy socket folder
+  under `runs/` is bound back the same way, so the forwarder stays
+  reachable. The inbox (`inbox/<run>/`) sits outside `runs/` and is
+  untouched, so a cig started inside the hop keeps the inbox as its own
+  state root and its run comes in as a child unchanged. A guarded
+  unboxed hop under `tin_guard = on` gets the same hiding. Where the
+  tmpfs mounts refuse (an unusual kernel), the fallback is the tin
+  read-only (as 1.10.0 onwards), and `tin_guard = on` refuses with
+  `E712` as before. No new setting: the hide is what `tin_guard`
+  already asks for.
 - **Quick at ten thousand runs** (#149). `cig runs` reads a compact
   **run index** (one JSONL file under the cig home, kept in step as
   runs start, finish, are pruned, forgotten or unburned) instead of
@@ -22,6 +40,7 @@ project follows semantic versioning.
   named behaviour from #128. New tests: `runs_index_survives_a_crash`,
   `runs_list_equals_a_folder_scan_for_a_mixed_history`, and
   `runs_index_is_consistent_under_two_concurrent_runs`.
+
 - **A key type that wipes itself** (#105). The 32-byte master key (and the
   HKDF subkeys derived from it) live in a type that is not `Copy`, so a
   move leaves no stack copy behind, and whose `Drop` zeros the bytes
