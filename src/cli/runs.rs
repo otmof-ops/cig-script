@@ -875,7 +875,11 @@ pub fn give_back(ctx: &Ctx, id: &str, dry_run: bool, force: bool) -> i32 {
 
 /// A run record removed, with what it holds: the git blobs it pinned, its
 /// layers, and a ledger line, so the missing-run note never fires for it.
-fn remove_run(r: &runs::RunRecord) -> bool {
+/// `how` is written into the ledger line's `status` field: `pruned` for
+/// `cig runs --prune` and the keep_runs/keep_days retention, `budget` when
+/// history_budget made the choice (#149), so `cig runs --pruned` can say
+/// why each went.
+fn remove_run(r: &runs::RunRecord, how: &str) -> bool {
     if let Ok(text) = std::fs::read_to_string(r.dir().join(crate::burn::git::PINS)) {
         for wt in text.lines().filter(|l| !l.trim().is_empty()) {
             crate::burn::git::unpin(std::path::Path::new(wt.trim()), &r.id);
@@ -887,7 +891,7 @@ fn remove_run(r: &runs::RunRecord) -> bool {
         crate::burn::overlay::sweep_scratch(&r.dir());
     }
     if crate::burn::overlay::remove_tree_force(&r.dir()).is_ok() {
-        let _ = crate::burn::ledger::append("pruned", &r.id, "", "pruned", 0);
+        let _ = crate::burn::ledger::append("pruned", &r.id, "", how, 0);
         return true;
     }
     false
@@ -934,7 +938,143 @@ pub fn keep_by_config() {
         return;
     };
     for i in retained_out(&all, keep_runs, keep_days, chrono::Utc::now()) {
-        remove_run(&all[i]);
+        remove_run(&all[i], "pruned");
+    }
+}
+
+/// The bytes of every regular file under `dir`.
+fn dir_bytes(dir: &std::path::Path) -> u64 {
+    walkdir::WalkDir::new(dir)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter_map(|e| e.metadata().ok())
+        .filter(|m| m.is_file())
+        .map(|m| m.len())
+        .sum()
+}
+
+/// Every object in the tin with its size: plain objects, recipes and sealed
+/// ones, which the collector removes alike.
+fn tin_objects() -> Vec<(std::path::PathBuf, u64)> {
+    crate::burn::tin::objects()
+        .into_iter()
+        .chain(crate::burn::tin::recipes())
+        .chain(crate::burn::tin::sealed())
+        .collect()
+}
+
+/// The history's size on disk (#149): every run's folder and every object
+/// in the tin, which is what grows by a few MB a run.
+pub fn history_bytes() -> u64 {
+    dir_bytes(&runs::runs_dir()) + tin_objects().iter().map(|(_, n)| n).sum::<u64>()
+}
+
+/// A run holding a box layer that waits for a person's approval
+/// (`kept/<seq>.json` beside its `box/<seq>`): pruning it would take the
+/// layer, so the budget never does.
+fn holds_a_layer(r: &runs::RunRecord) -> bool {
+    let dir = r.dir();
+    std::fs::read_dir(dir.join("kept"))
+        .map(|rd| {
+            rd.flatten().any(|e| {
+                e.path()
+                    .file_stem()
+                    .is_some_and(|seq| dir.join("box").join(seq).is_dir())
+            })
+        })
+        .unwrap_or(false)
+}
+
+/// `history_budget` (#149), off by default: after a run, and after
+/// `cig runs --prune`, the oldest runs go until the history (runs and tin)
+/// fits, then the tin is collected. Never pruned: a pinned run, a run with
+/// work left (running, interrupted, an unburn that failed), a run holding a
+/// box layer that waits for approval, a run younger than `history_keep`,
+/// and the newest run; the budget can be exceeded for those, and `cig
+/// doctor` says so. An object's bytes count as freed only when the last run
+/// that refers to it goes, so the pass prunes no more than it must. Each
+/// prune is a ledger line with status `budget`, so `cig runs --pruned` says
+/// why it went.
+pub fn budget_by_config() {
+    let cfg = crate::config::Config::load();
+    let Some(Some(budget)) = crate::config::parse_bytes(&cfg.get("history_budget")) else {
+        return;
+    };
+    let floor = crate::config::parse_history_keep(&cfg.get("history_keep")).unwrap_or_default();
+    let objects = tin_objects();
+    let tin_total: u64 = objects.iter().map(|(_, n)| n).sum();
+    let runs_total = dir_bytes(&runs::runs_dir());
+    if runs_total + tin_total <= budget {
+        return;
+    }
+    let Ok(all) = runs::list() else {
+        return;
+    };
+    // Who refers to each object, counted once per run; what another tool
+    // keeps (`cig tin keep`) is never freed here.
+    let refs: Vec<std::collections::HashSet<std::path::PathBuf>> =
+        all.iter().map(crate::burn::tin::referenced_by).collect();
+    let mut holders: std::collections::HashMap<&std::path::PathBuf, usize> =
+        std::collections::HashMap::new();
+    for set in &refs {
+        for p in set {
+            *holders.entry(p).or_default() += 1;
+        }
+    }
+    let kept: std::collections::HashSet<std::path::PathBuf> = crate::burn::tin::kept_copies()
+        .into_iter()
+        .map(|k| k.object)
+        .collect();
+    let size: std::collections::HashMap<&std::path::PathBuf, u64> =
+        objects.iter().map(|(p, n)| (p, *n)).collect();
+    // What the collector frees already: objects nobody refers to.
+    let dead: u64 = objects
+        .iter()
+        .filter(|(p, _)| !holders.contains_key(p) && !kept.contains(p))
+        .map(|(_, n)| n)
+        .sum();
+    let mut total = runs_total + tin_total - dead;
+    let now = chrono::Utc::now();
+    let mut pruned = 0;
+    // `list` is newest first: walk it oldest first, and leave the newest,
+    // the run whose end fired this pass.
+    for i in (1..all.len()).rev() {
+        if total <= budget {
+            break;
+        }
+        let r = &all[i];
+        let young = floor.is_some_and(|keep| {
+            chrono::DateTime::parse_from_rfc3339(&r.started)
+                .is_ok_and(|s| now - s.with_timezone(&chrono::Utc) < keep)
+        });
+        if young
+            || is_pinned(r)
+            || holds_a_layer(r)
+            || matches!(
+                r.status.as_str(),
+                "running" | "interrupted" | "unburn_failed"
+            )
+        {
+            continue;
+        }
+        let own = dir_bytes(&r.dir());
+        if !remove_run(r, "budget") {
+            continue;
+        }
+        pruned += 1;
+        let mut freed = own;
+        for p in &refs[i] {
+            if let Some(n) = holders.get_mut(p) {
+                *n -= 1;
+                if *n == 0 && !kept.contains(p) {
+                    freed += size.get(p).copied().unwrap_or(0);
+                }
+            }
+        }
+        total = total.saturating_sub(freed);
+    }
+    if pruned > 0 || dead > 0 {
+        crate::burn::tin::gc(false);
     }
 }
 
@@ -953,7 +1093,7 @@ fn prune_runs(ctx: &Ctx, keep: usize) -> i32 {
             pinned += 1;
             continue;
         }
-        if remove_run(r) {
+        if remove_run(r, "pruned") {
             removed += 1;
         }
     }
@@ -974,6 +1114,9 @@ fn prune_runs(ctx: &Ctx, keep: usize) -> i32 {
             }
         );
     }
+    // The budget runs here too (#149), in case a manual --prune left more
+    // than it allows: ignored when off, which is the default.
+    budget_by_config();
     exit::OK
 }
 
@@ -1037,8 +1180,9 @@ pub fn pin(ctx: &Ctx, id: &str, on: bool) -> i32 {
 
 /// `cig runs --pruned` (#149): the runs whose folders went on purpose, from
 /// the ledger, newest first: when, how (`pruned` by --prune or the
-/// retention settings, `forgotten` by --forget), and the status the ledger
-/// last recorded for each. A missing run is explained, not mysterious.
+/// retention settings, `budget` by history_budget, `forgotten` by
+/// --forget), and the status the ledger last recorded for each. A missing
+/// run is explained, not mysterious.
 pub fn pruned(ctx: &Ctx) -> i32 {
     let ledger = match crate::burn::ledger::load() {
         Ok(l) => l,
@@ -1063,11 +1207,20 @@ pub fn pruned(ctx: &Ctx) -> i32 {
             .map(|l| l.status.clone())
             .unwrap_or_else(|| "-".to_string())
     };
+    // A budget prune is a pruned line with status = `budget`, so --pruned
+    // says why; the hand-forget and the ordinary prune stay as their kinds.
+    fn how(l: &crate::burn::ledger::Line) -> &str {
+        if l.kind == "pruned" && l.status == "budget" {
+            "budget"
+        } else {
+            l.kind.as_str()
+        }
+    }
     if ctx.json {
         let v: Vec<serde_json::Value> = gone
             .iter()
             .map(
-                |l| serde_json::json!({"run": l.run, "at": l.t, "how": l.kind, "was": was(&l.run)}),
+                |l| serde_json::json!({"run": l.run, "at": l.t, "how": how(l), "was": was(&l.run)}),
             )
             .collect();
         outln!("{}", serde_json::to_string(&v).unwrap_or_default());
@@ -1079,7 +1232,7 @@ pub fn pruned(ctx: &Ctx) -> i32 {
     }
     outln!("{:<24} {:<26} {:<10} {}", "run", "at", "how", "was");
     for l in gone {
-        outln!("{:<24} {:<26} {:<10} {}", l.run, l.t, l.kind, was(&l.run));
+        outln!("{:<24} {:<26} {:<10} {}", l.run, l.t, how(l), was(&l.run));
     }
     exit::OK
 }
