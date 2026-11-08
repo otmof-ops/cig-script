@@ -79,6 +79,10 @@ pub enum Op {
         /// Globs among them whose files are secrets: kept sealed.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         touches_sealed: Vec<String>,
+        /// Globs the hop leaves out of the tin (`skip`, #148): its changes
+        /// under them are not kept, so it cannot undo them (E310).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        skip: Vec<String>,
         /// Run in the box: over a copy-on-write layer on the pack, so a
         /// failing hop's changes never land.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -204,6 +208,7 @@ impl Op {
                 args,
                 cwd,
                 touches,
+                skip,
                 boxed,
                 box_terms,
                 ..
@@ -223,6 +228,9 @@ impl Op {
                 }
                 if !touches.is_empty() {
                     s.push_str(&format!("  (touches {})", touches.join(", ")));
+                }
+                if !skip.is_empty() {
+                    s.push_str(&format!("  (skip {})", skip.join(", ")));
                 }
                 s
             }
@@ -443,6 +451,9 @@ pub struct PackWatch {
     tinned: std::collections::BTreeMap<PathBuf, tin::Stashed>,
     /// The hop's `touches`, for the hints the report gives.
     touches: Vec<String>,
+    /// What the hop leaves out (its `skip` and `hop_skip`): the scan after
+    /// it leaves out the same, so nothing there is journaled.
+    skip: Option<globset::GlobSet>,
     /// What could not be stashed, one line each, for the hop to report.
     pub warnings: Vec<String>,
 }
@@ -876,6 +887,7 @@ fn sealed_count(
     touches: &[String],
     touches_sealed: &[String],
     cap: usize,
+    skip: Option<&globset::GlobSet>,
 ) -> usize {
     let Ok(set) = tin::globs(touches) else {
         return 0;
@@ -892,7 +904,7 @@ fn sealed_count(
             .into_iter()
             .flatten()
             .collect();
-        let s = scan::scan(r, 64, cap, None);
+        let s = scan::scan_skipping(r, 64, cap, None, skip);
         for (rel, meta) in s.iter() {
             if meta.is_dir() || meta.is_link() {
                 continue;
@@ -909,14 +921,19 @@ fn sealed_count(
 
 /// How many of the pack's files each `touches` glob matches, for the dry
 /// run's plan line and the warning about a glob that matches nothing.
-fn touches_counts(roots: &[PathBuf], touches: &[String], cap: usize) -> Vec<(String, usize)> {
+fn touches_counts(
+    roots: &[PathBuf],
+    touches: &[String],
+    cap: usize,
+    skip: Option<&globset::GlobSet>,
+) -> Vec<(String, usize)> {
     let mut counts: Vec<(String, usize)> = touches.iter().map(|t| (t.clone(), 0)).collect();
     let singles: Vec<Option<globset::GlobSet>> = touches
         .iter()
         .map(|t| tin::globs(std::slice::from_ref(t)).ok())
         .collect();
     for r in roots {
-        for (rel, meta) in scan::scan(r, 64, cap, None).iter() {
+        for (rel, meta) in scan::scan_skipping(r, 64, cap, None, skip).iter() {
             if meta.is_dir() {
                 continue;
             }
@@ -1084,6 +1101,7 @@ impl Kernel {
         cwd: Option<&Path>,
         touches: &[String],
         touches_sealed: &[String],
+        skip: &[String],
     ) -> Option<PackWatch> {
         let roots = self.pack.clone()?;
         let roots = &roots;
@@ -1091,12 +1109,15 @@ impl Kernel {
             return None;
         }
         let cap = watch_cap();
+        // What the hop skips is never read, kept or journaled, the way a
+        // `.cigignore` line is not: a cache it rebuilds anyway (#148).
+        let skip_set = tin::skip_set(skip);
         let mut inside: Vec<Scan> = Vec::new();
         let mut partial = false;
         let mut outside: Vec<Scan> = Vec::new();
         let mut warnings = Vec::new();
         for r in roots {
-            let s = scan::scan(r, 64, cap, None);
+            let s = scan::scan_skipping(r, 64, cap, None, skip_set.as_ref());
             partial |= !s.complete;
             // A directory link that leads out of the pack: the hop may
             // write through it, so where it leads is watched for the report.
@@ -1135,10 +1156,11 @@ impl Kernel {
                     // counts each glob, and the report after the hop names
                     // the glob that would have kept a file changed outside
                     // them all.
-                    let counts: Vec<(String, usize)> = touches_counts(roots, touches, cap)
-                        .into_iter()
-                        .filter(|(g, _)| !g.starts_with('?'))
-                        .collect();
+                    let counts: Vec<(String, usize)> =
+                        touches_counts(roots, touches, cap, skip_set.as_ref())
+                            .into_iter()
+                            .filter(|(g, _)| !g.starts_with('?'))
+                            .collect();
                     if !partial && !counts.is_empty() && counts.iter().all(|(_, n)| *n == 0) {
                         let existing: Vec<String> = inside
                             .iter()
@@ -1351,6 +1373,7 @@ impl Kernel {
             outside,
             tinned,
             touches: touches.to_vec(),
+            skip: skip_set,
             warnings,
         })
     }
@@ -1413,7 +1436,7 @@ impl Kernel {
         // the directories that cannot have changed.
         let mut afters: Vec<Scan> = Vec::new();
         for (ri, r) in roots.iter().enumerate() {
-            let s = scan::scan(r, 64, cap, watch.inside.get(ri));
+            let s = scan::scan_skipping(r, 64, cap, watch.inside.get(ri), watch.skip.as_ref());
             partial |= !s.complete;
             afters.push(s);
         }
@@ -2211,18 +2234,26 @@ impl Kernel {
                 Op::Proc {
                     touches,
                     touches_sealed,
+                    skip,
                     ..
                 },
                 Some(roots),
             ) = (&op, &self.pack)
             {
                 if !touches.is_empty() {
-                    let counts = touches_counts(roots, touches, watch_cap());
+                    let skip_set = tin::skip_set(skip);
+                    let counts = touches_counts(roots, touches, watch_cap(), skip_set.as_ref());
                     let mut shown: Vec<String> = counts
                         .iter()
                         .map(|(g, n)| format!("{g}: {n} file{}", if *n == 1 { "" } else { "s" }))
                         .collect();
-                    let sealed = sealed_count(roots, touches, touches_sealed, watch_cap());
+                    let sealed = sealed_count(
+                        roots,
+                        touches,
+                        touches_sealed,
+                        watch_cap(),
+                        skip_set.as_ref(),
+                    );
                     if sealed > 0 {
                         shown.push(format!("{sealed} sealed"));
                     }
@@ -2230,6 +2261,9 @@ impl Kernel {
                         summary.truncate(at);
                     }
                     summary.push_str(&format!("  (touches {})", shown.join(", ")));
+                    if !skip.is_empty() {
+                        summary.push_str(&format!("  (skip {})", skip.join(", ")));
+                    }
                 }
             }
             // The box is asked for: say now when it cannot be made here.

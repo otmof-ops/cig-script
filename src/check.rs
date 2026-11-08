@@ -184,6 +184,64 @@ impl Checker {
         }
     }
 
+    /// A hop's `skip` globs (#148): what they cover is never kept, so the
+    /// hop cannot undo its changes there. It is opt-in, so it is said on the
+    /// hop's line; in the box, where `skip` changes nothing (the box's layer
+    /// keeps every change), that is said instead. E310.
+    fn skip_check(&mut self, args: &[Expr], span: Span) {
+        let Some(Expr {
+            kind: ExprKind::Map(entries),
+            ..
+        }) = args.last()
+        else {
+            return;
+        };
+        let mut globs: Option<Vec<String>> = None;
+        let mut boxed = false;
+        for (k, v) in entries {
+            let MapKey::Static(key) = k else { continue };
+            match key.as_str() {
+                "skip" => {
+                    let shown = |e: &Expr| literal_text(e).unwrap_or_else(|| "…".to_string());
+                    globs = Some(match &v.kind {
+                        ExprKind::List(items) => items.iter().map(shown).collect(),
+                        _ => vec![shown(v)],
+                    });
+                }
+                "box" => boxed = matches!(v.kind, ExprKind::Bool(true) | ExprKind::Map(_)),
+                _ => {}
+            }
+        }
+        let Some(globs) = globs.filter(|g| !g.is_empty()) else {
+            return;
+        };
+        let shown = globs
+            .iter()
+            .map(|g| format!("`{g}`"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        if boxed {
+            self.warn_code(
+                "E310",
+                format!("skip {shown} does nothing in the box: the box's layer keeps every change the hop makes"),
+                span,
+            )
+            .hint = Some("drop `skip`, or drop `box` if the hop should leave those paths out of the tin".to_string());
+        } else {
+            self.warn_code(
+                "E310",
+                format!(
+                    "skip {shown}: the hop's changes there are not kept, so they cannot be undone"
+                ),
+                span,
+            )
+            .hint = Some(
+                "skip only what the hop rebuilds anyway (a cache); drop `skip` to keep those files"
+                    .to_string(),
+            );
+        }
+    }
+
     /// A literal path whose name is a Windows device (`nul`, `con`,
     /// `com1`...): the script will not run there. An error where it is a
     /// device, a warning where it is only unportable. E758.
@@ -628,6 +686,9 @@ impl Checker {
                 if let ExprKind::Ident(module) = &receiver.kind {
                     if module == "proc" && name == "run" {
                         self.shell_check(args, expr.span);
+                    }
+                    if module == "proc" {
+                        self.skip_check(args, expr.span);
                     }
                     if self.modules.contains_key(module)
                         && self.lookup(module) == Some(Binding::Immutable)

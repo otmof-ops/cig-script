@@ -1240,9 +1240,65 @@ pub fn ignore_set(root: &Path) -> Option<GlobSet> {
     b.build().ok()
 }
 
+/// What a watched hop leaves out (#148): its own `skip` globs and the
+/// `hop_skip` setting, each matched like a `.cigignore` line (a directory's
+/// glob covers what is under it). A path under one is never read, kept or
+/// journaled, so the hop cannot undo its changes there (E310). `None` when
+/// nothing is skipped.
+pub fn skip_set(hop: &[String]) -> Option<GlobSet> {
+    let setting = hop_skip_setting();
+    let mut b = GlobSetBuilder::new();
+    let mut any = false;
+    for pat in hop
+        .iter()
+        .map(String::as_str)
+        .chain(skip_setting_globs(setting))
+    {
+        let pat = pat.trim().trim_start_matches("./").trim_end_matches('/');
+        if pat.is_empty() {
+            continue;
+        }
+        for p in [pat.to_string(), format!("{pat}/**")] {
+            if let Ok(g) = Glob::new(&p) {
+                b.add(g);
+                any = true;
+            }
+        }
+    }
+    if !any {
+        return None;
+    }
+    b.build().ok()
+}
+
+/// The globs a `hop_skip` setting lists: comma-separated.
+pub fn skip_setting_globs(value: &str) -> impl Iterator<Item = &str> {
+    value.split(',').map(str::trim).filter(|g| !g.is_empty())
+}
+
+/// The `hop_skip` setting, read once per process like `watch_cap`.
+fn hop_skip_setting() -> &'static str {
+    static SKIP: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    SKIP.get_or_init(|| crate::config::Config::load().get("hop_skip"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #148: a hop's `skip` globs match like `.cigignore` lines: a
+    /// directory's glob covers what is under it, `./` and a trailing `/`
+    /// are dropped, and nothing given is nothing skipped.
+    #[test]
+    fn skip_globs_match_like_cigignore_lines() {
+        let s = skip_set(&["./cache/".to_string(), "*.log".to_string()]).unwrap();
+        assert!(s.is_match("cache"));
+        assert!(s.is_match("cache/a/b.bin"));
+        assert!(s.is_match("build.log"));
+        assert!(!s.is_match("src/main.rs"));
+        let v: Vec<&str> = skip_setting_globs(" a/** , ,*.tmp").collect();
+        assert_eq!(v, ["a/**", "*.tmp"]);
+    }
 
     /// #148: staging on every core gives what staging one file at a time
     /// gives, in the paths' order: small files, chunked ones, links and a

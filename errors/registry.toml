@@ -736,6 +736,25 @@ probe = "source-line"
 remedy = "cig pin <file> rewrites the pin from what the script uses"
 
 [[code]]
+code = "E310"
+title = "skipped by a hop"
+meaning = "A hop's `skip` globs leave paths out of the tin: the hop's changes under them are not kept, so it cannot undo them. That is the point for a cache the hop rebuilds anyway, and it is said so nobody skips something they needed. In the box, `skip` does nothing: the box's layer keeps every change."
+fix = "skip only what the hop rebuilds anyway (a cache); drop `skip` to keep those files undoable"
+no = "none"
+arises = ["check"]
+tags = ["ci-likely"]
+since = "1.18.0"
+related = ["E757"]
+[[code.cause]]
+why = "the hop names `skip` globs on purpose, for a cache it rebuilds anyway"
+probe = "source-line"
+remedy = "nothing to do when the skipped paths are caches; otherwise drop them from `skip`"
+[[code.cause]]
+why = "the hop is boxed, and the box keeps every change whatever `skip` says"
+probe = "source-line"
+remedy = "drop `skip`, or drop `box` if the hop should leave those paths out"
+
+[[code]]
 code = "E400"
 title = "type error"
 meaning = "A value of the wrong type reached an operation."

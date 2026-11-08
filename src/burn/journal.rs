@@ -2839,6 +2839,7 @@ mod tests {
                 cwd: None,
                 touches: Vec::new(),
                 touches_sealed: Vec::new(),
+                skip: Vec::new(),
                 boxed: false,
                 box_terms: Vec::new(),
             },
