@@ -3,16 +3,61 @@
 All notable changes to CigScript. The format follows Keep a Changelog; the
 project follows semantic versioning.
 
-## Unreleased
+## 1.17.0 — 2026-11-08
 
+Stretches of history, a faster interpreter, and more of the tin's guard.
+
+- **A stretch of history back in one command** (#149). `cig unburn --last N`
+  puts back the newest N runs that changed something, `--since 2h` every
+  run started in the last two hours (`90s`, `30m`, `3d`, `1w`), and
+  `--to <id>` every run after that one, which stays; `--pack DIR` keeps to
+  the runs that worked there. One plan first (the runs, the ops, the files,
+  what is irreversible), a question at a terminal (`-y` skips it), and
+  `--dry-run` stops at the plan. Then each run is put back as
+  `cig unburn <id>` would, newest first. The first run refused stops the
+  stretch, the runs after it undone and the ones before it untouched, and
+  `cig unburn --continue` takes up the same stretch once that is resolved:
+  no run is undone twice. A child run goes back through its parent, and a
+  stretch will not start under a run that is still running.
+- **Pins** (#149). `cig runs --pin <id>` keeps a run whatever `keep_runs`,
+  `keep_days` and `cig runs --prune` say: the run before a migration or a
+  release. `cig runs` marks it `(pinned)` and `--json` says
+  `"pinned": true`; `--unpin` lets it go. The pin is a file in the run's
+  folder, so the record keeps its format.
+- **A faster interpreter** (#146, the first step). Scopes keep their names
+  in a short list compared directly, and hash them with a fast hasher only
+  past eight (the globals, the prelude), instead of SipHash on every read.
+  `for i in a..b` counts instead of building the list of every number and
+  copying it. On cig-compile's benchmark set this is 10% to 40% faster
+  (`loop` 0.62×, `fib` 0.73×, `closures` 0.59×, `fannkuch` 0.65×, release
+  builds on glibc), every output the same. `tests/steps.rs` holds the step
+  budget line for line: four scripts, every `--max-steps` from 1 until they
+  finish, 640 budgets, the same line and column as 1.16.1.
+- **A range too wide is refused, never wrapped.** The width of `a..b` is
+  computed without overflow, so `i64::MIN..i64::MAX` is E512 instead of
+  wrapping (a release build) or a panic (a debug one).
+- **A hop's files are staged on every core** (#148). Before a hop, every
+  file it may change is copied into the tin and hashed; that now runs on up
+  to eight threads, the results in the files' order, so the journal is as
+  before. A hop over 3,020 files on tmpfs: 277 ms to 234 ms.
 - **The tin's key on a descriptor** (#105). `cig --seal-key-fd N` reads
   the key (the 64 hex characters a key file holds) from open descriptor
   `N` at start-up, closes it, and holds it in memory only: in CI the key
   sits in no file and no environment variable, no key file is made, and
   nothing cig starts inherits the descriptor (`0` is read and then pointed
   at `/dev/null`). Programs take the same flag. `cig doctor` names the
-  keeper and skips the backup reminder, since the key is kept elsewhere.
-  Unix only; on Windows `CIG_SEAL_KEY_FILE` stays the headless way.
+  keeper and skips the backup reminder. Unix only; on Windows
+  `CIG_SEAL_KEY_FILE` stays the headless way.
+- **The ledger is a tripwire** (#105, L6). A journal the ledger catches cut
+  short or swapped (E709) is also a tripwire report: under `reports`, with
+  no path in it, and none from a dry run.
+- **The key, wiped and kept out of swap** (#105, L5). The text a key was
+  read from (a key file's hex, the keyring's answer) is zeroed before it is
+  let go, and the page holding the cached key is `mlock`ed where the system
+  allows it. A test reads every file cig writes, and everything it prints,
+  for the key and finds none.
+- **Spotlight leaves the state directory out** (#105, L2): on macOS it
+  carries `.metadata_never_index`.
 
 ## 1.16.1 — 2026-11-07
 
