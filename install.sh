@@ -112,6 +112,22 @@ fetch() {
   fi
 }
 
+# Why a fetch failed, for the message: `missing` when the server says the
+# file is not there (404), `failed (HTTP <code>)` or `failed` otherwise. A
+# 504 says nothing about the release, so it is never reported as one.
+why_not() {
+  if have curl; then
+    code=$(curl -sSL --proto '=https' --proto-redir '=https' --tlsv1.2 --max-time 60 -o /dev/null -w '%{http_code}' -I "$1" 2>/dev/null || true)
+    case "$code" in
+      404) echo missing ;;
+      ""|000) echo "failed (no answer from the network)" ;;
+      *) echo "failed (HTTP $code)" ;;
+    esac
+  else
+    echo failed
+  fi
+}
+
 sha256_of() {
   if have sha256sum; then sha256sum "$1" | cut -d' ' -f1
   elif have shasum; then shasum -a 256 "$1" | cut -d' ' -f1
@@ -163,8 +179,20 @@ download_release() {
   work="${TMPDIR:-/tmp}/cig-install.$$"
   mkdir -p "$work" || fail "cannot create $work"
   say "downloading $asset ($tag)..."
-  fetch "$base/$asset" "$work/$asset" || { rm -rf "$work"; fail "no binary for ${os}-${arch} in $tag; try --from-source"; }
-  fetch "$base/$asset.sha256" "$work/$asset.sha256" || { rm -rf "$work"; fail "release ships no checksum for $asset; refusing to install"; }
+  if ! fetch "$base/$asset" "$work/$asset"; then
+    rm -rf "$work"
+    case "$(why_not "$base/$asset")" in
+      missing) fail "no binary for ${os}-${arch} in $tag; try --from-source" ;;
+      *) fail "could not download $asset: $(why_not "$base/$asset"); the release may well have it, so try again" ;;
+    esac
+  fi
+  if ! fetch "$base/$asset.sha256" "$work/$asset.sha256"; then
+    rm -rf "$work"
+    case "$(why_not "$base/$asset.sha256")" in
+      missing) fail "release ships no checksum for $asset; refusing to install" ;;
+      *) fail "could not download $asset.sha256: $(why_not "$base/$asset.sha256"); refusing to install without it, so try again" ;;
+    esac
+  fi
   expected=$(cut -d' ' -f1 "$work/$asset.sha256")
   actual=$(sha256_of "$work/$asset")
   [ -n "$actual" ] || { rm -rf "$work"; fail "no sha256 tool (sha256sum, shasum or openssl) to verify the download"; }
