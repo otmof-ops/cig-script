@@ -634,3 +634,48 @@ fn a_program_with_raised_rights_refuses() {
         );
     }
 }
+
+/// #149: a program puts back a stretch of its own runs, newest first, and
+/// leaves every other run alone: another program's, and `cig run`'s.
+#[test]
+fn a_program_puts_back_a_stretch_of_its_own_runs() {
+    let s = Sandbox::new();
+    s.write(
+        "w.cig",
+        "burn {\n  fs.append_text(\"log.txt\", args.get(0, \"-\") + \"\\n\")\n}\n",
+    );
+    s.write(
+        "other.cig",
+        "burn {\n  fs.write_text(\"other.txt\", \"theirs\")\n}\n",
+    );
+    let exe = s.compile("w", "w.cig");
+    for k in ["1", "2", "3"] {
+        let out = s.prog(&exe, &[k]);
+        assert!(out.status.success(), "{}", text(&out.stderr));
+    }
+    // Someone else's run in between, newer than all of ours.
+    let other = s.cig(&["run", "other.cig"]);
+    assert!(other.status.success(), "{}", text(&other.stderr));
+    let plan = s.prog(&exe, &["--unburn-last", "2", "--dry-run"]);
+    assert!(
+        text(&plan.stderr).contains("undo 2 runs"),
+        "{}",
+        text(&plan.stderr)
+    );
+    let out = s.prog(&exe, &["--unburn-last", "2"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert_eq!(fs::read_to_string(s.path().join("log.txt")).unwrap(), "1\n");
+    assert_eq!(
+        fs::read_to_string(s.path().join("other.txt")).unwrap(),
+        "theirs",
+        "another run was put back"
+    );
+    // --unburn-since takes what is left of its own; an age that is not one is refused.
+    let out = s.prog(&exe, &["--unburn-since=1h"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(!s.exists("log.txt"));
+    assert!(s.exists("other.txt"));
+    let bad = s.prog(&exe, &["--unburn-since", "soon"]);
+    assert_eq!(bad.status.code(), Some(3));
+    assert!(text(&bad.stderr).contains("E1052"), "{}", text(&bad.stderr));
+}

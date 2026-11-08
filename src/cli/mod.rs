@@ -531,6 +531,7 @@ fn dispatch(ctx: Ctx, command: Command) -> i32 {
                     force,
                     accept_unsigned,
                     yes,
+                    only_program: None,
                 },
             )
         }
