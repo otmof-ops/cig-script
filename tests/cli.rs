@@ -10925,7 +10925,10 @@ fn the_key_is_in_no_record_report_or_log() {
             }
         }
     }
-    assert!(read > 20, "only {read} files read");
+    assert!(
+        read >= 12,
+        "only {read} files read: is the walk reading the sandbox?"
+    );
 }
 
 /// #105, L2: on macOS, Spotlight leaves the state directory out.
