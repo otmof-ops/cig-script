@@ -1260,8 +1260,8 @@ impl Kernel {
                         to_tin.sort();
                     }
                     let mut staged: Vec<(PathBuf, tin::Staged)> = Vec::new();
-                    for path in &to_tin {
-                        match tin::prepare(path) {
+                    for (path, r) in to_tin.iter().zip(tin::prepare_all(&to_tin, false)) {
+                        match r {
                             Ok(st) => staged.push((path.clone(), st)),
                             Err(e) => warnings.push(format!(
                                 "{} could not be kept in the tin ({e}); a change to it stays irreversible",
@@ -1269,8 +1269,8 @@ impl Kernel {
                             )),
                         }
                     }
-                    for path in &to_seal {
-                        match tin::prepare_sealed(path) {
+                    for (path, r) in to_seal.iter().zip(tin::prepare_all(&to_seal, true)) {
+                        match r {
                             Ok(st) => staged.push((path.clone(), st)),
                             Err(e) => warnings.push(format!(
                                 "{} could not be sealed into the tin ({e}); a change to it stays irreversible",
