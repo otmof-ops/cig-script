@@ -12,7 +12,7 @@
 use super::Op;
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 /// What a path looked like before an op touched it.
@@ -278,6 +278,145 @@ fn pick_journal_mac_key(header: &serde_json::Value) -> Option<super::seal::Key> 
 /// Does the setting ask for signed journals? (`journal_sign`, on by default.)
 fn signing_wanted() -> bool {
     crate::config::Config::load().get("journal_sign") != "off"
+}
+
+/// What `tail_head` found in a journal file without reading every line
+/// (#177). The computed `Head` is `link(mac_key, last_line_bytes)` for
+/// the last complete line on disk: the hash a run.json records when the
+/// run ends, so it compares directly with `rec.journal_head` and with
+/// the ledger's `head` for the run.
+pub enum TailHead {
+    /// The last line's head: compare with `rec.journal_head` and with the
+    /// ledger line's `head` for this run.
+    Head(String),
+    /// Format 1 (from before 1.5.0): no chain, nothing to compare.
+    NoChain,
+    /// Format 3 header does not fit any key this cig has: the journal was
+    /// signed by another key (another machine's, one since replaced).
+    /// Comparing the head would mean nothing, and `cig unburn` would
+    /// refuse this run with E708 as it stands.
+    OtherKey,
+    /// Format 3 but no MAC key is available here (no primary, no
+    /// stash): nothing is judged, as `load()` does.
+    Unverifiable,
+    /// The journal is empty or has only its header line (no body): a
+    /// run that burned nothing, or one whose header was written but no
+    /// burn landed. A record with `journal_head = None` is consistent
+    /// with this; a record with a head is not, and the caller flags it.
+    Empty,
+    /// The journal is missing (`NotFound`).
+    Missing,
+}
+
+/// Compute a journal's chain head from its tail alone: the first line
+/// gives the format and (for format 3) picks the MAC key, and the file
+/// is read back from the end to find the last complete line, whose
+/// bytes are hashed under that key. One cheap read per run — kept
+/// bounded by `TAIL_WINDOW` and doubled when a journal's last line is
+/// long enough to cross the window boundary — so a whole-history check
+/// (`cig runs --verify`) stays quick at ten thousand runs (#177, #149).
+pub fn tail_head(run_dir: &Path) -> io::Result<TailHead> {
+    let path = run_dir.join("journal.jsonl");
+    let mut f = match fs::File::open(&path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(TailHead::Missing),
+        Err(e) => return Err(e),
+    };
+    let len = f.metadata()?.len();
+    if len == 0 {
+        return Ok(TailHead::Empty);
+    }
+    // --- the first line: format, and the MAC key for a signed journal ---
+    // A journal's header line is comfortably shorter than 4 KiB.
+    let mut head_buf = vec![0u8; 4096];
+    f.seek(SeekFrom::Start(0))?;
+    let read = f.read(&mut head_buf)?;
+    let head_bytes = &head_buf[..read];
+    let first_end = head_bytes
+        .iter()
+        .position(|&b| b == b'\n')
+        .unwrap_or(head_bytes.len());
+    let first_line = &head_bytes[..first_end];
+    let header: serde_json::Value = match serde_json::from_slice(first_line) {
+        Ok(v) => v,
+        // No parseable header: not a chain this tool can judge.
+        Err(_) => return Ok(TailHead::NoChain),
+    };
+    let format = header.get("format").and_then(|f| f.as_u64()).unwrap_or(0) as u32;
+    if format < 2 {
+        return Ok(TailHead::NoChain);
+    }
+    let mac_key: Option<super::seal::Key> = if format >= 3 {
+        match pick_journal_mac_key(&header) {
+            Some(k) => Some(k),
+            // The header does not fit any candidate key. When this
+            // machine has no key at all (no primary, no stash), the
+            // journal is simply unverifiable here. When it has a key
+            // but none fits, the journal was signed by another key.
+            None => {
+                if candidate_journal_keys().is_empty() {
+                    return Ok(TailHead::Unverifiable);
+                }
+                return Ok(TailHead::OtherKey);
+            }
+        }
+    } else {
+        None
+    };
+    // The file has lines beyond the header: find the last complete one.
+    // Read back from the end in TAIL_WINDOW-sized bites; double the
+    // window if a line is long enough to cross it, so a very long
+    // last line still fits in at most a handful of reads.
+    const TAIL_WINDOW: u64 = 64 * 1024;
+    let mut window = TAIL_WINDOW;
+    loop {
+        let off = len.saturating_sub(window);
+        f.seek(SeekFrom::Start(off))?;
+        let mut buf = Vec::with_capacity((len - off) as usize);
+        io::Read::by_ref(&mut f)
+            .take(len - off)
+            .read_to_end(&mut buf)?;
+        // Strip a torn tail (a crashed append left half a line without
+        // a newline). A journal that ends mid-line is truncated; the
+        // last *complete* line is the one we report.
+        if !buf.is_empty() && buf[buf.len() - 1] != b'\n' {
+            if let Some(i) = buf.iter().rposition(|&b| b == b'\n') {
+                buf.truncate(i + 1);
+            } else {
+                // The whole window is one torn line. Widen if we can.
+                if off == 0 {
+                    return Ok(TailHead::Empty);
+                }
+                window = window.saturating_mul(2);
+                continue;
+            }
+        }
+        // buf now ends on '\n' (or is empty). Find the last line by
+        // the penultimate newline.
+        if buf.is_empty() {
+            return Ok(TailHead::Empty);
+        }
+        let last_line_end = buf.len() - 1; // drop trailing '\n'
+        let before = &buf[..last_line_end];
+        let line_start = before
+            .iter()
+            .rposition(|&b| b == b'\n')
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        if line_start == 0 && off > 0 {
+            // The last line reaches further back than this window;
+            // widen and try again.
+            window = window.saturating_mul(2);
+            continue;
+        }
+        let line = &buf[line_start..last_line_end];
+        // The header's own hash is not an "end of run" head: a
+        // header-only file reads as Empty.
+        if off == 0 && line_start == 0 && line == first_line {
+            return Ok(TailHead::Empty);
+        }
+        return Ok(TailHead::Head(link(mac_key.as_ref(), line)));
+    }
 }
 
 /// Rewrite a journal's chain under another link: this machine's keyed chain

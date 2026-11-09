@@ -6,15 +6,115 @@ project follows semantic versioning.
 ## 1.19.0 — 2026-11-09
 
 The tin kept further from what it protects: hidden from boxed hops, a key
-that rotates and wipes itself, parcels that can carry it; hops that read
-only what changed; the history quick at ten thousand runs; installers
-that tell a missing file from a failed download.
+that rotates and wipes itself, parcels that can carry it, and a keys
+folder that is private and checked; hops that read only what changed; a
+history that stays quick as it grows, with a whole-history verify that
+reads every journal; `cig bench`, one benchmark tool for the family;
+installers that tell a missing file from a failed download.
 
 - **The installers tell a missing file from a failed download.**
   `install.sh` and `install.ps1` called a release asset missing whenever
   its download failed. A 404 is now "missing"; any other failure names
   the HTTP code and says to try again, and `install.ps1` tries each
   download three times before it gives up.
+- **The keys folder is private, and checked** (#176). With `CIGSCRIPT_HOME`
+  under a shared parent (`/tmp`, `/var/tmp`, `/dev/shm`), the keys folder
+  landed at `<parent>/.cigscript-keys`, one folder for every user on the
+  machine. Another user who made it first could plant a `seal.key` the
+  victim's runs then sealed and signed with, delete the ledger, or refuse
+  every other user's run with `E802` on `rekey.lock`.
+  - Under a world-writable or sticky parent the folder now has a per-user
+    name, `.cigscript-keys-<uid>`. A private parent keeps
+    `.cigscript-keys`, and a folder of yours under the old shared name
+    that is still private stays in use, so nothing on an existing install
+    moves or is left behind.
+  - The folder is made 0700 from the start, through one helper every path
+    uses (the key reader, the ledger, the rekey lock), and a folder that
+    appeared while it was being made is checked like any other.
+  - OpenSSH-style checks: the folder must be ours and not writable by
+    others; the ledger and the lock ours and regular files (a symlink is
+    refused) before a run. The seal key is checked where it is read, on
+    the file actually opened (no link followed, no gap between the look
+    and the read): ours, one name (a hard link is refused), closed to
+    others. A key others could read is refused with advice that keeps it
+    (`chmod 600`, then `cig tin rekey` if anyone could have read it), and
+    a leftover key file does not stop a run whose key is in the keyring.
+    The ledger and the lock hold no secret, so one of ours that is only
+    too open is made 0600 and used.
+  - Each refusal is the new `E721`, naming the path, the owner (by uid)
+    and the mode, and saying what to do when the owner is you under sudo.
+    `CIG_KEYS_DIR` and `CIG_SEAL_KEY_FILE` get the same checks; a missing
+    `CIG_SEAL_KEY_FILE` parent is made 0700, and one that is there is left
+    as it is (it used to be chmod-ed). A key import writes without
+    following a link.
+  - `cig doctor` says where the folder is, who owns it and its mode, and
+    names what a run would refuse; it never makes the folder. Windows is
+    unchanged (`%TEMP%` is per-user).
+- **`cig runs --verify` catches a cut journal, a missing ledger and a
+  run the ledger never saw** (#177). The whole-history check from #149
+  (`cig runs --verify` with no id) now reads each journal's last line
+  on the fast path and compares its computed chain head with both the
+  record's saved head and the ledger's head for that run, so a journal
+  cut short, an older journal swapped back in or a stale cached record
+  no longer passes as `ok`. A missing, empty or unreadable ledger,
+  with sealed runs on disk, is a problem (not a silent `ok`): the
+  fast path falls back to a deep walk so the chains are still checked,
+  and the exit is non-zero. A run with a chain head and no ledger line
+  is a problem (`the ledger has no record of this run`), except for
+  runs recorded by cig 1.16 and earlier, when the ledger did not exist
+  yet. `cig doctor` names a missing or empty ledger too, so the state
+  of the ledger shows beside everything else it checks. The summary
+  line says what was actually checked (`heads checked against the
+  ledger and each journal's last line`). New tests:
+  `verify_all_catches_a_cut_journal`,
+  `verify_all_catches_a_replaced_journal`,
+  `verify_all_with_no_ledger_is_not_ok`,
+  `verify_all_with_an_empty_ledger_is_not_ok`,
+  `doctor_says_the_ledger_is_gone`.
+- **The history stays quick as it grows** (#178). `cig run` and `cig
+  runs` slowed with every run ever made, not with the runs kept: the run
+  index only grew, every ledger append re-verified the whole ledger, and
+  the listing's missing-runs note compared the ledger with itself.
+  - After each append the index compares its size with its size at the
+    last fresh write (one `stat`; the size is kept in
+    `runs-index.fresh`), and past twice that plus 64 KiB rewrites itself
+    as one line per live run, under the same lock.
+  - A prune (`--prune`, `keep_runs`, `keep_days`, `history_budget`) ends
+    with one rewrite instead of a line per run, and `keep_runs` reads the
+    live count from the index before it lists anything.
+  - A ledger append reads only the ledger's last two lines: the head it
+    chains on, and the subkey the last line verifies under. The whole
+    chain is still verified wherever a verdict is read (`cig runs
+    --verify`, `cig tin verify`, a rekey).
+  - The missing-runs note and the whole-history verify read each run's
+    ledger record from one pass, where they scanned the ledger once per
+    run.
+  - `cig runs --reindex` rebuilds the index from the run folders by
+    hand, and `cig doctor` reports an index more than 4× its live size.
+  - Measured here with `keep_runs 100` and runs interleaved (the CPU on
+    a power-saving governor): after 3,000 runs a `cig run` takes what it
+    takes after 105 (37 ms against 38), and the index holds 100 lines.
+    `cig runs` takes 10 ms against 2.7: it still reads the ledger once,
+    about 1.2 ms per thousand lines here, where #178 measured 639 ms at
+    9,000 runs.
+- **`cig bench`** (#179, step 1). One benchmark tool for the whole
+  family: each repository describes its cases in `bench/bench.toml`, and
+  `cig bench` reads that manifest, checks each case's output first (a
+  wrong answer is `WRONG` and gets no time), samples the right ones in
+  batches, and reports median, p10, p90, CV and peak resident set with
+  the machine's conditions beside them. Output in a plain table, in
+  Markdown (`--markdown`) or in JSON (`--json`). Exit 0 when every case
+  was timed, 1 when any was WRONG or failed to run, 3 when the manifest
+  or usage is wrong. Isolated by default: each sample gets a fresh
+  `HOME`, `CIGSCRIPT_HOME` and `CIGO_HOME`, removed after the sample,
+  so a case cannot touch the developer's real state while it is
+  measured. Unknown keys in the manifest are refused with their line
+  number. Fields reserved for later steps (`[bench].build`, `watch`;
+  per-case `config`, `gate`, `score`) are accepted and ignored for
+  now, so a manifest written for the whole feature still parses. The
+  upcoming steps carry `--save` / `--against` with interleaved A/B,
+  `--watch`, `--timings` / `--stats` / `--syscalls`, the family runner
+  and a reusable CI workflow. Docs: `docs/BENCH.md`.
 - **`tin/` and `runs/` hidden from a boxed hop** (#105). The guard no
   longer leaves the tin visible to a hop and read-only, it hides it: in
   the hop's mount namespace an empty tmpfs goes over `~/.cigscript/tin`

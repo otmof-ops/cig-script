@@ -80,6 +80,37 @@ pub fn doctor(ctx: &Ctx, fix: bool) -> i32 {
             keys.display()
         ));
     }
+    // StrictModes: owner and mode of the keys folder and the files in
+    // it must be ours and private; a planted folder (another user, a
+    // 0777 mode) is named here so the operator sees it before a run
+    // refuses with E721 (#176).
+    #[cfg(unix)]
+    if std::fs::symlink_metadata(&keys).is_ok() {
+        if let Err(e) = crate::burn::seal::check_keys_dir(&keys) {
+            problems.push(e);
+        }
+    }
+    #[cfg(unix)]
+    {
+        // The key file is checked only where the key is read from it: a
+        // leftover beside a keyring key is not this machine's problem.
+        if crate::burn::seal::peek_keeper() == Some(crate::burn::seal::Keeper::File) {
+            if let Err(e) =
+                crate::burn::seal::check_private_key_file(&crate::burn::seal::key_path())
+            {
+                problems.push(e);
+            }
+        }
+        // The ledger and the lock hold no secret: one that is ours and too
+        // open is made 0600 by the next run, so doctor says only what the
+        // run would refuse (another owner, a link, not a file). Doctor
+        // changes nothing.
+        for name in ["ledger.jsonl", "rekey.lock"] {
+            if let Some(e) = crate::burn::seal::state_file_problem(&keys.join(name)) {
+                problems.push(e);
+            }
+        }
+    }
     if let Err(e) = &writable {
         problems.push(format!(
             "state directory {} is not writable: {e}",
@@ -139,7 +170,45 @@ pub fn doctor(ctx: &Ctx, fix: bool) -> i32 {
         ));
     }
 
+    // The ledger (#177): a missing or empty ledger, with runs that
+    // recorded chain heads, is a problem — `cig runs --verify` cannot
+    // judge heads without it. A fresh tin with no sealed runs is fine.
+    let ledger_presence = crate::burn::ledger::presence();
+    let any_head = all_runs.iter().any(|r| r.journal_head.is_some());
+    let ledger_problem = match ledger_presence {
+        crate::burn::ledger::Presence::Missing if any_head => Some("missing"),
+        crate::burn::ledger::Presence::Empty if any_head => Some("empty"),
+        _ => None,
+    };
+    if let Some(state) = ledger_problem {
+        let p = crate::burn::ledger::path();
+        problems.push(format!(
+            "the ledger is {state} ({}): `cig runs --verify` cannot judge chain heads without it [E709]",
+            crate::crash::tilde(&p)
+        ));
+    }
+
+    // The run index (#178): oversized means `cig runs --reindex` is
+    // worth running, and every `cig run` is paying the cost.
+    let index_lines = crate::burn::runs_index::line_count();
+    let index_live = crate::burn::runs_index::live_count();
+    let index_oversize = match (index_lines, index_live) {
+        (Some(lines), Some(live)) if live > 0 && lines > 4 * live => Some((lines, live)),
+        _ => None,
+    };
+    if let Some((lines, live)) = index_oversize {
+        problems.push(format!(
+            "the run index has {lines} lines but only {live} live run{}; `cig runs --reindex` compacts it (#178)",
+            if live == 1 { "" } else { "s" }
+        ));
+    }
+
     if ctx.json {
+        let ledger_state = match ledger_presence {
+            crate::burn::ledger::Presence::Present => "present",
+            crate::burn::ledger::Presence::Empty => "empty",
+            crate::burn::ledger::Presence::Missing => "missing",
+        };
         let obj = serde_json::json!({
             "version": crate::VERSION,
             "executable": exe,
@@ -153,6 +222,9 @@ pub fn doctor(ctx: &Ctx, fix: bool) -> i32 {
             "history_over_budget": over,
             "history_budget_suggested": suggestion,
             "interrupted_runs": interrupted,
+            "ledger": ledger_state,
+            "runs_index_lines": index_lines,
+            "runs_index_live": index_live,
             "crash_reports": crashes.len(),
             "crash_reports_unsent": unsent,
             "tools": tools.iter().map(|t| serde_json::json!({"name": t.name, "present": t.present})).collect::<Vec<_>>(),
@@ -205,6 +277,46 @@ pub fn doctor(ctx: &Ctx, fix: bool) -> i32 {
             (None, false) => String::new(),
         }
     );
+    // The ledger and the run index (#177, #178): one line each, named
+    // so the operator sees them without `--json`.
+    let ledger_label = match ledger_presence {
+        crate::burn::ledger::Presence::Present => ctx.green("present"),
+        crate::burn::ledger::Presence::Empty => {
+            if any_head {
+                ctx.red("empty")
+            } else {
+                ctx.dim("empty")
+            }
+        }
+        crate::burn::ledger::Presence::Missing => {
+            if any_head {
+                ctx.red("missing")
+            } else {
+                ctx.dim("missing (no sealed runs yet)")
+            }
+        }
+    };
+    outln!(
+        "  ledger        {ledger_label}  {}",
+        ctx.dim(&crate::crash::tilde(&crate::burn::ledger::path()))
+    );
+    let index_line = match (index_lines, index_live) {
+        (Some(lines), Some(live)) => format!(
+            "{lines} line{} for {live} live run{}",
+            if lines == 1 { "" } else { "s" },
+            if live == 1 { "" } else { "s" }
+        ),
+        (Some(lines), None) => {
+            format!("{lines} lines (torn or unparseable; the next listing rebuilds)")
+        }
+        _ => "missing (built on the next cig runs)".to_string(),
+    };
+    let index_suffix = if index_oversize.is_some() {
+        ctx.yellow("  cig runs --reindex compacts it")
+    } else {
+        String::new()
+    };
+    outln!("  run index     {index_line}{index_suffix}");
     outln!(
         "  ashtray       {} report{} saved, {unsent} not filed{}",
         crashes.len(),
@@ -278,6 +390,15 @@ pub fn doctor(ctx: &Ctx, fix: bool) -> i32 {
             ),
         };
         outln!("    key           {keeper}  {}", ctx.dim(&where_));
+        // Where the key folder is, who owns it and its mode (#176).
+        // Looked at, never made: doctor still creates no files.
+        let keys_dir = seal::keys_dir();
+        let keys_line = keys_dir_line(&keys_dir);
+        outln!(
+            "    key folder    {}  {}",
+            keys_line.state,
+            ctx.dim(&keys_line.detail)
+        );
         outln!(
             "    key out of tin {}  {}",
             yes_no(ctx, !seal::key_path().starts_with(tin::dir())),
@@ -642,6 +763,57 @@ fn yes_no(ctx: &Ctx, v: bool) -> String {
         ctx.green("yes")
     } else {
         ctx.yellow("no")
+    }
+}
+
+/// One line of doctor output for the keys folder (#176): does it exist,
+/// who owns it, what mode is it in, and if a strict-mode check would
+/// refuse it, say which. Looked at only; doctor never creates the folder.
+struct KeysDirLine {
+    state: String,
+    detail: String,
+}
+
+fn keys_dir_line(dir: &Path) -> KeysDirLine {
+    let shown = crate::crash::tilde(dir);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        match std::fs::symlink_metadata(dir) {
+            Ok(m) => {
+                let euid = unsafe { libc::geteuid() };
+                let mode = m.mode() & 0o7777;
+                let owned = m.uid() == euid;
+                let private = (mode & 0o022) == 0;
+                let state = if owned && private && m.file_type().is_dir() {
+                    "private".to_string()
+                } else if !m.file_type().is_dir() {
+                    "not-a-dir".to_string()
+                } else if !owned {
+                    "not yours".to_string()
+                } else {
+                    "open".to_string()
+                };
+                KeysDirLine {
+                    state,
+                    detail: format!("{shown}  owner uid {}, mode {:04o}", m.uid(), mode,),
+                }
+            }
+            Err(_) => KeysDirLine {
+                state: "not made yet".to_string(),
+                detail: format!("{shown}  made on the first sealed object"),
+            },
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let detail = shown;
+        let state = if std::fs::symlink_metadata(dir).is_ok() {
+            "present".to_string()
+        } else {
+            "not made yet".to_string()
+        };
+        KeysDirLine { state, detail }
     }
 }
 

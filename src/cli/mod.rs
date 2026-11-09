@@ -11,6 +11,7 @@ macro_rules! outln {
     }};
 }
 
+mod bench;
 mod boxcmd;
 mod chains;
 mod compiled;
@@ -77,6 +78,8 @@ pub struct Cli {
 pub enum Command {
     /// Run a script for real: every burn journaled, rolled back if it fails (execute).
     Run(RunArgs),
+    /// Measure cases from `bench/bench.toml`: samples in batches, median, p10 to p90, CV, peak RSS (benchmark).
+    Bench(BenchArgs),
     /// Typos, sticks, effects: refuse before anything runs (static analysis).
     Check {
         /// Script to check.
@@ -124,6 +127,9 @@ pub enum Command {
         /// The runs pruned or forgotten, from the ledger: when, how, and what each was.
         #[arg(long, conflicts_with_all = ["id", "prune", "pin", "unpin", "forget"])]
         pruned: bool,
+        /// Rebuild the run index from the run folders (#178): fixes a torn or oversized runs-index.jsonl by hand.
+        #[arg(long, conflicts_with_all = ["id", "prune", "pin", "unpin", "forget", "pruned", "verify", "deep"])]
+        reindex: bool,
     },
     /// Put the world back the way it was, newest op first (rollback).
     Unburn {
@@ -274,6 +280,31 @@ pub enum Command {
         #[arg(long, value_name = "VERSION")]
         to: Option<String>,
     },
+}
+
+#[derive(Args)]
+pub struct BenchArgs {
+    /// The manifest to read; default `bench/bench.toml`.
+    #[arg(long, value_name = "FILE")]
+    pub manifest: Option<PathBuf>,
+    /// Only cases whose name contains this substring.
+    #[arg(long, value_name = "NAME")]
+    pub only: Option<String>,
+    /// Only cases in this group.
+    #[arg(long, value_name = "GROUP")]
+    pub group: Option<String>,
+    /// Override `[defaults].samples`.
+    #[arg(long, value_name = "N")]
+    pub samples: Option<usize>,
+    /// Override `[defaults].per`.
+    #[arg(long, value_name = "N")]
+    pub per: Option<usize>,
+    /// Override `[defaults].warmup`.
+    #[arg(long, value_name = "N")]
+    pub warmup: Option<usize>,
+    /// A Markdown table instead of the plain one.
+    #[arg(long)]
+    pub markdown: bool,
 }
 
 #[derive(Args)]
@@ -471,6 +502,18 @@ fn take_key_fd(ctx: &Ctx, fd: i32) -> Option<i32> {
 fn dispatch(ctx: Ctx, command: Command) -> i32 {
     match command {
         Command::Run(args) => run::run(&ctx, args, None),
+        Command::Bench(a) => bench::bench(
+            &ctx,
+            bench::Opts {
+                manifest: a.manifest,
+                only: a.only,
+                group: a.group,
+                samples: a.samples,
+                per: a.per,
+                warmup: a.warmup,
+                markdown: a.markdown,
+            },
+        ),
         Command::Light(a) => run::run(
             &ctx,
             RunArgs {
@@ -501,8 +544,10 @@ fn dispatch(ctx: Ctx, command: Command) -> i32 {
             pin,
             unpin,
             pruned,
+            reindex,
         } => match (pin, unpin) {
             _ if pruned => runs::pruned(&ctx),
+            _ if reindex => runs::reindex(&ctx),
             (Some(id), _) => runs::pin(&ctx, &id, true),
             (None, Some(id)) => runs::pin(&ctx, &id, false),
             _ => runs::runs(&ctx, id, prune, verify, deep, forget),

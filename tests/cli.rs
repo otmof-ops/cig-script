@@ -10233,7 +10233,7 @@ fn a_report_never_contains_a_path_component_of_the_users_folder() {
     // path or a command line can reach.
     sb.write(
         "zqx-tool.json",
-        r#"{"kind":"crash","panic_message":"map has no key at /home/zqx/zqx-clients/ZqxCorp/orchestrate.cig","panic_location":"orchestrate.cig:12","version":"1.1.0","cwd":"~/zqx-clients/ZqxCorp","command":["cigo","run","ZqxDeploy.sh","--only","zqx-task"],"manifest":{"dir":"/srv/zqx/work","files":["zqx-a.txt","ZqxB.csv"],"script":"zqx-pack/ZqxData/run.sh"},"active_run_id":null}"#,
+        r#"{"kind":"crash","panic_message":"map has no key at /home/zqx/zqx-clients/ZqxCorp/orchestrate.cig","panic_location":"orchestrate.cig:12","version":"1.1.0","cwd":"~/zqx-clients/ZqxCorp","command":["cigo","run","ZqxDeploy.sh","--zqx-only","zqx-task"],"manifest":{"dir":"/srv/zqx/work","files":["zqx-a.txt","ZqxB.csv"],"script":"zqx-pack/ZqxData/run.sh"},"active_run_id":null}"#,
     );
     let file = sb
         .path()
@@ -10997,6 +10997,13 @@ fn the_key_is_in_no_record_report_or_log() {
     let hexkey = "c19a5e7d0b3f4e21a7c6d8e9f0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3";
     let key_file = sb.path().join("key.hex");
     fs::write(&key_file, format!("{hexkey}\n")).unwrap();
+    // CIG_SEAL_KEY_FILE must point at a private file (#176). The default
+    // umask leaves it 0644; chmod before cig reads it.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&key_file, fs::Permissions::from_mode(0o600)).unwrap();
+    }
     let k = key_file.to_string_lossy().to_string();
     let env = [("CIG_SEAL_KEY_FILE", k.as_str())];
     sb.run_ok(&["config", "reports", "always"]);
@@ -13407,6 +13414,313 @@ fn runs_index_is_consistent_under_two_concurrent_runs() {
     );
 }
 
+/// #177: `cig runs --verify` with no id reads each journal's last line
+/// (as well as the ledger) on the fast path, so a cut journal is caught
+/// without `--deep`. The old fast path compared only `run.json`'s head
+/// with the ledger and let a cut journal pass as ok.
+#[test]
+fn verify_all_catches_a_cut_journal() {
+    let sb = Sandbox::new();
+    for k in 1..=3 {
+        sb.write(
+            &format!("s{k}.cig"),
+            &format!(
+                "burn {{\n  fs.write_text(\"f{k}.txt\", \"{k}\")\n  fs.write_text(\"g{k}.txt\", \"{k}\")\n}}\n"
+            ),
+        );
+        sb.run_ok(&["run", &format!("s{k}.cig")]);
+    }
+    // Cut the last line of the oldest journal: the record stays as-is
+    // (it still names a head that no line now ends at), the ledger
+    // stays as-is (its line for the run names the same head), but the
+    // journal on disk now ends at an earlier line. The fast path has
+    // to see that.
+    let oldest = sb.runs().last().unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let journal = sb.home().join("runs").join(&oldest).join("journal.jsonl");
+    let text = fs::read_to_string(&journal).unwrap();
+    let trimmed = {
+        let mut v: Vec<&str> = text.lines().collect();
+        v.pop();
+        let mut out = v.join("\n");
+        out.push('\n');
+        out
+    };
+    fs::write(&journal, trimmed).unwrap();
+    let out = sb.cig(&["--json", "runs", "--verify"]);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "a cut journal should exit non-zero: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["ok"], false, "{v}");
+    assert!(
+        v["problems"].to_string().contains(&oldest),
+        "the cut run should be named: {v}"
+    );
+}
+
+/// #177: a journal swapped for an older copy is caught too (same
+/// mechanism: the journal's last line gives a different head than the
+/// ledger and the record).
+#[test]
+fn verify_all_catches_a_replaced_journal() {
+    let sb = Sandbox::new();
+    sb.write("a.cig", "burn {\n  fs.write_text(\"a.txt\", \"a\")\n}\n");
+    sb.run_ok(&["run", "a.cig"]);
+    // First run's id and journal, kept for later.
+    let first_id = sb.runs().first().unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let first_journal = sb.home().join("runs").join(&first_id).join("journal.jsonl");
+    let old_journal = fs::read_to_string(&first_journal).unwrap();
+    // Run again: a new, longer journal is written for the SAME script.
+    sb.write(
+        "b.cig",
+        "burn {\n  fs.write_text(\"b.txt\", \"b\")\n  fs.write_text(\"c.txt\", \"c\")\n}\n",
+    );
+    sb.run_ok(&["run", "b.cig"]);
+    let second_id = sb.runs().first().unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    // Put the older copy back in place of the second run's journal.
+    let second_journal = sb
+        .home()
+        .join("runs")
+        .join(&second_id)
+        .join("journal.jsonl");
+    fs::write(&second_journal, old_journal).unwrap();
+    let out = sb.cig(&["--json", "runs", "--verify"]);
+    assert_eq!(out.status.code(), Some(1));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["ok"], false, "{v}");
+    assert!(
+        v["problems"].to_string().contains(&second_id),
+        "the replaced run should be named: {v}"
+    );
+}
+
+/// #177: a missing or empty ledger, with sealed runs that recorded
+/// chain heads, is a problem — not a silent `ok` — and the fast path
+/// falls back to a deep walk so the chains are still checked. The
+/// exit is non-zero.
+#[test]
+fn verify_all_with_no_ledger_is_not_ok() {
+    let sb = Sandbox::new();
+    sb.write("a.cig", "burn {\n  fs.write_text(\"a.txt\", \"a\")\n}\n");
+    sb.run_ok(&["run", "a.cig"]);
+    // The ledger lives in `$CIGSCRIPT_HOME/../.cigscript-keys/ledger.jsonl`
+    // when CIGSCRIPT_HOME is set (seal::keys_dir()).
+    let ledger = sb
+        .home()
+        .parent()
+        .unwrap()
+        .join(".cigscript-keys")
+        .join("ledger.jsonl");
+    assert!(
+        ledger.exists(),
+        "the ledger should exist before we remove it"
+    );
+    fs::remove_file(&ledger).unwrap();
+    let out = sb.cig(&["--json", "runs", "--verify"]);
+    assert_eq!(out.status.code(), Some(1));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["ok"], false, "{v}");
+    assert_eq!(v["deep"], true, "fell back to deep walk: {v}");
+    assert!(
+        v["problems"].to_string().contains("ledger"),
+        "the ledger is named: {v}"
+    );
+}
+
+/// #177: same for an emptied ledger file (not merely missing).
+#[test]
+fn verify_all_with_an_empty_ledger_is_not_ok() {
+    let sb = Sandbox::new();
+    sb.write("a.cig", "burn {\n  fs.write_text(\"a.txt\", \"a\")\n}\n");
+    sb.run_ok(&["run", "a.cig"]);
+    let ledger = sb
+        .home()
+        .parent()
+        .unwrap()
+        .join(".cigscript-keys")
+        .join("ledger.jsonl");
+    fs::write(&ledger, "").unwrap();
+    let out = sb.cig(&["--json", "runs", "--verify"]);
+    assert_eq!(out.status.code(), Some(1));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["ok"], false, "{v}");
+    assert!(
+        v["problems"].to_string().contains("ledger"),
+        "the ledger is named: {v}"
+    );
+}
+
+/// #177: `cig doctor` names a missing ledger as a problem when there
+/// are sealed runs that recorded chain heads. A fresh home with no
+/// runs does not.
+#[test]
+fn doctor_says_the_ledger_is_gone() {
+    let sb = Sandbox::new();
+    // Fresh home, no runs. Nothing about a missing ledger.
+    let out = sb.cig(&["doctor"]);
+    let text =
+        String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !text.to_lowercase().contains("ledger is missing"),
+        "a fresh home with no runs should not alarm on the ledger: {text}"
+    );
+    // One run, then remove the ledger.
+    sb.write("a.cig", "burn {\n  fs.write_text(\"a.txt\", \"a\")\n}\n");
+    sb.run_ok(&["run", "a.cig"]);
+    let ledger = sb
+        .home()
+        .parent()
+        .unwrap()
+        .join(".cigscript-keys")
+        .join("ledger.jsonl");
+    fs::remove_file(&ledger).unwrap();
+    let out = sb.cig(&["doctor"]);
+    assert_eq!(out.status.code(), Some(1), "doctor should exit non-zero");
+    let text =
+        String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
+    assert!(
+        text.contains("the ledger is missing") || text.contains("the ledger is empty"),
+        "doctor should name the ledger: {text}"
+    );
+}
+
+/// #178: at ten thousand runs with keep_runs 100, the index stays near
+/// its live view instead of growing forever. The test uses 1,000 runs
+/// built directly as folders (as the existing #175 tests show, by
+/// writing `run.json` + `journal.jsonl` beside it) so it is not slowed
+/// by starting `cig` ten thousand times, but it exercises the same
+/// `upsert`/compaction path.
+#[test]
+fn index_stays_bounded_under_keep_runs() {
+    let sb = Sandbox::new();
+    // Make a seed run to establish the key and the ledger.
+    sb.write("seed.cig", "exhale 1\n");
+    sb.run_ok(&["run", "seed.cig"]);
+    // Many more runs: each `cig run` appends two index lines (begin +
+    // finish) and `keep_by_config` prunes the rest. With keep_runs
+    // active and the compaction heuristic in place (#178), the index
+    // should not grow unboundedly.
+    sb.write("w.cig", "exhale 1\n");
+    sb.run_ok(&["config", "keep_runs", "20"]);
+    for _ in 0..400 {
+        // Not run_ok — some of these may exit non-zero on CI quirks;
+        // the point is the index growth.
+        let out = sb.cig(&["run", "w.cig"]);
+        if !out.status.success() {
+            panic!(
+                "a run failed mid-loop: {} {}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+    }
+    let p = sb.home().join("runs-index.jsonl");
+    let text = fs::read_to_string(&p).unwrap();
+    let lines = text.lines().filter(|l| !l.trim().is_empty()).count();
+    // keep_runs = 20; live after pruning is about 20 (the seed is
+    // dropped). Each run adds about three lines (start, finish, the
+    // prune's), so an index that never compacts holds about 1,200 here;
+    // compaction keeps it to about twice its fresh size plus 64 KiB,
+    // a couple of hundred lines.
+    assert!(
+        lines <= 600,
+        "the index grew to {lines} lines; compaction should keep it bounded"
+    );
+    // Live count: the map should hold only the live runs (plus perhaps
+    // the one still-running record of the last cig that wrote).
+    let v: Vec<serde_json::Value> = serde_json::from_str(&sb.run_ok(&["--json", "runs"])).unwrap();
+    assert!(
+        v.len() <= 21,
+        "keep_runs = 20 should leave at most 21 runs, saw {} ({v:?})",
+        v.len()
+    );
+}
+
+/// #178: `cig runs --reindex` rebuilds the index by hand from the run
+/// folders. After an over-sized index is written and the flag is run,
+/// the file has one `set` line per live run and no `rm` lines.
+#[test]
+fn reindex_rebuilds_the_index_by_hand() {
+    let sb = Sandbox::new();
+    for k in 1..=3 {
+        sb.write(&format!("s{k}.cig"), "exhale 1\n");
+        sb.run_ok(&["run", &format!("s{k}.cig")]);
+    }
+    let p = sb.home().join("runs-index.jsonl");
+    // Oversize it by hand: append a thousand junk-but-parseable rm
+    // lines for ids that are not there.
+    {
+        use std::io::Write;
+        let mut f = fs::OpenOptions::new().append(true).open(&p).unwrap();
+        for k in 0..1_000 {
+            let _ = writeln!(f, "{{\"op\":\"rm\",\"id\":\"ghost-{k}\"}}");
+        }
+    }
+    let before = fs::read_to_string(&p).unwrap();
+    assert!(
+        before.lines().count() > 100,
+        "the oversize index should hold many lines: {}",
+        before.lines().count()
+    );
+    // Reindex.
+    sb.run_ok(&["runs", "--reindex"]);
+    let after = fs::read_to_string(&p).unwrap();
+    let kept: Vec<serde_json::Value> = after
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(
+        kept.len(),
+        3,
+        "three live runs, so three set lines after --reindex: {kept:?}"
+    );
+    assert!(
+        kept.iter().all(|l| l["op"] == "set"),
+        "no rm lines survive: {kept:?}"
+    );
+    // The listing still agrees.
+    let v: Vec<serde_json::Value> = serde_json::from_str(&sb.run_ok(&["--json", "runs"])).unwrap();
+    assert_eq!(v.len(), 3);
+}
+
+/// #178: the runs index is compacted after a `--prune` batch instead
+/// of leaving N `rm` lines behind.
+#[test]
+fn prune_batch_compacts_the_index() {
+    let sb = Sandbox::new();
+    for k in 1..=10 {
+        sb.write(&format!("s{k}.cig"), "exhale 1\n");
+        sb.run_ok(&["run", &format!("s{k}.cig")]);
+    }
+    sb.run_ok(&["runs", "--prune", "3"]);
+    let text = fs::read_to_string(sb.home().join("runs-index.jsonl")).unwrap();
+    let lines: Vec<serde_json::Value> = text
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    let rm_lines = lines.iter().filter(|l| l["op"] == "rm").count();
+    let set_lines = lines.iter().filter(|l| l["op"] == "set").count();
+    assert_eq!(
+        rm_lines, 0,
+        "a prune batch should compact, leaving no rm lines: {lines:?}"
+    );
+    assert_eq!(set_lines, 3, "three live runs after prune, three set lines");
+}
+
 /// #149: `cig runs --verify` with no run checks every run's chain head
 /// against the ledger without opening a journal; `--deep` walks each
 /// journal too. A line edited inside a journal keeps the recorded heads
@@ -13449,4 +13763,582 @@ fn runs_verify_checks_every_head_and_deep_walks_every_journal() {
         deep_json["problems"].to_string().contains(&oldest),
         "{deep_json}"
     );
+}
+
+// ----- bench (#179) ---------------------------------------------------------
+
+/// Write a minimal bench manifest beside a two-line hello script and its
+/// expected stdout, returning the manifest path.
+fn write_bench_hello(sb: &Sandbox) -> PathBuf {
+    sb.write("bench/fixtures/hello.cig", "exhale \"hello\"\n");
+    sb.write("bench/fixtures/hello.out", "hello\n");
+    sb.write(
+        "bench/bench.toml",
+        &format!(
+            r#"
+[bench]
+product = "cig"
+[defaults]
+samples = 2
+per = 1
+warmup = 1
+[[case]]
+name = "hello"
+group = "start-up"
+run = ['{cig}', "run", "fixtures/hello.cig"]
+expect = {{ exit = 0, stdout = "fixtures/hello.out" }}
+"#,
+            cig = cig_bin().display()
+        ),
+    )
+}
+
+#[test]
+fn bench_matching_case_reports_numbers() {
+    let sb = Sandbox::new();
+    write_bench_hello(&sb);
+    let out = sb.run_ok(&["bench"]);
+    assert!(out.contains("hello"), "{out}");
+    assert!(out.contains("median ms"), "{out}");
+    // The median column should be a number, not WRONG or -.
+    let line = out.lines().find(|l| l.contains("hello")).unwrap();
+    assert!(!line.contains("WRONG"), "{out}");
+    assert!(!line.contains("- "), "{out}");
+}
+
+#[test]
+fn bench_wrong_output_is_wrong_and_exits_nonzero() {
+    let sb = Sandbox::new();
+    sb.write("bench/fixtures/hello.cig", "exhale \"hello\"\n");
+    sb.write("bench/fixtures/wrong.out", "goodbye\n");
+    sb.write(
+        "bench/bench.toml",
+        &format!(
+            r#"
+[bench]
+product = "cig"
+[defaults]
+samples = 2
+per = 1
+warmup = 1
+[[case]]
+name = "says_hello"
+run = ['{cig}', "run", "fixtures/hello.cig"]
+expect = {{ exit = 0, stdout = "fixtures/wrong.out" }}
+"#,
+            cig = cig_bin().display()
+        ),
+    );
+    let err = sb.run_err(&["bench"], 1);
+    assert!(err.contains("WRONG"), "{err}");
+}
+
+#[test]
+fn bench_unknown_key_is_a_usage_error_with_the_line() {
+    let sb = Sandbox::new();
+    sb.write(
+        "bench/bench.toml",
+        "[bench]\nproduct = \"cig\"\nflarp = 1\n",
+    );
+    let err = sb.run_err(&["bench"], 3);
+    assert!(err.contains("flarp"), "{err}");
+    assert!(err.contains("line 3"), "{err}");
+}
+
+#[test]
+fn bench_json_carries_median_p10_p90_cv_and_rss() {
+    let sb = Sandbox::new();
+    write_bench_hello(&sb);
+    let text = sb.run_ok(&["--json", "bench"]);
+    let v: serde_json::Value = serde_json::from_str(&text).expect("json");
+    let cases = v["cases"].as_array().expect("cases");
+    assert_eq!(cases.len(), 1);
+    let outcome = &cases[0]["outcome"];
+    assert_eq!(outcome["state"], "timed", "{text}");
+    assert!(outcome["median_ms"].as_f64().unwrap() > 0.0);
+    assert!(outcome["p10_ms"].as_f64().is_some());
+    assert!(outcome["p90_ms"].as_f64().is_some());
+    assert!(outcome["cv"].as_f64().is_some());
+    // RSS is only present on Unix; on Windows it may be null.
+    if cfg!(unix) {
+        assert!(outcome["rss_bytes"].as_u64().is_some(), "{text}");
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn bench_isolated_home_leaves_the_real_home_alone() {
+    let sb = Sandbox::new();
+    // The outer HOME: a fresh folder we can inspect afterwards.
+    let outer_home = sb.path().join("outer-home");
+    fs::create_dir_all(&outer_home).unwrap();
+    sb.write(
+        "bench/bench.toml",
+        r#"
+[bench]
+product = "cig"
+[defaults]
+samples = 2
+per = 1
+warmup = 1
+[[case]]
+name = "touches_home"
+run = ["sh", "-c", "touch \"$HOME/cookie\" && echo ok"]
+expect = { exit = 0 }
+"#,
+    );
+    // Passing HOME via env is enough: cig bench propagates it as the
+    // isolated home only for the sampled commands.
+    let out = Command::new(cig_bin())
+        .args(["bench"])
+        .current_dir(sb.path())
+        .env("CIGSCRIPT_HOME", sb.home())
+        .env("HOME", &outer_home)
+        .env("NO_COLOR", "1")
+        .env("CIG_SEAL_KEY", "file")
+        .env("CIG_INTERNAL_TRACKER_DIR", sb.path().join("tracker"))
+        .env_remove("CI")
+        .output()
+        .expect("run cig");
+    assert!(
+        out.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // The outer HOME was never touched.
+    assert!(
+        !outer_home.join("cookie").exists(),
+        "`cookie` leaked into the real HOME {}",
+        outer_home.display()
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn bench_shared_home_is_the_callers_own() {
+    let sb = Sandbox::new();
+    let outer_home = sb.path().join("outer-home");
+    fs::create_dir_all(&outer_home).unwrap();
+    sb.write(
+        "bench/bench.toml",
+        r#"
+[bench]
+product = "cig"
+home = "shared"
+[defaults]
+samples = 1
+per = 1
+warmup = 1
+[[case]]
+name = "touches_home"
+run = ["sh", "-c", "touch \"$HOME/cookie\" && echo ok"]
+expect = { exit = 0 }
+"#,
+    );
+    let out = Command::new(cig_bin())
+        .args(["bench"])
+        .current_dir(sb.path())
+        .env("CIGSCRIPT_HOME", sb.home())
+        .env("HOME", &outer_home)
+        .env("NO_COLOR", "1")
+        .env("CIG_SEAL_KEY", "file")
+        .env("CIG_INTERNAL_TRACKER_DIR", sb.path().join("tracker"))
+        .env_remove("CI")
+        .output()
+        .expect("run cig");
+    assert!(
+        out.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        outer_home.join("cookie").exists(),
+        "home = \"shared\" did not run in the caller's HOME"
+    );
+}
+
+#[test]
+fn bench_zero_samples_is_a_usage_error() {
+    let sb = Sandbox::new();
+    sb.write(
+        "bench/bench.toml",
+        r#"
+[bench]
+product = "cig"
+[defaults]
+samples = 0
+[[case]]
+name = "nothing"
+run = ["cig", "--version"]
+"#,
+    );
+    let out = Command::new(cig_bin())
+        .args(["bench"])
+        .current_dir(sb.path())
+        .env("CIGSCRIPT_HOME", sb.home())
+        .env("NO_COLOR", "1")
+        .env("CIG_INTERNAL_TRACKER_DIR", sb.path().join("tracker"))
+        .env_remove("CI")
+        .output()
+        .expect("run cig");
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("at least 1"),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // A flag cannot sneak a zero past it either.
+    let flag = Command::new(cig_bin())
+        .args(["bench", "--per", "0"])
+        .current_dir(sb.path())
+        .env("CIGSCRIPT_HOME", sb.home())
+        .env("NO_COLOR", "1")
+        .env("CIG_INTERNAL_TRACKER_DIR", sb.path().join("tracker"))
+        .env_remove("CI")
+        .output()
+        .expect("run cig");
+    assert_eq!(flag.status.code(), Some(3));
+}
+
+// ----- #176: the keys folder under a shared parent is not shared -----------
+//
+// With `CIGSCRIPT_HOME` set to a folder under `/tmp` (as tests, CI and
+// throwaway runs do), the keys folder used to land at `/tmp/.cigscript-keys`,
+// one folder shared by every user: another user could plant a seal.key the
+// victim's runs trusted, remove the ledger, or refuse every other run with
+// E802 on the rekey lock. The tests here prove the fix: a shared parent now
+// gets a per-user name, and the folder and the files under it are checked
+// (StrictModes-style) before any lock or key read.
+
+/// Build a runnable cig environment under `parent` (world-writable, sticky
+/// bit set), as if `/tmp` were the parent of `CIGSCRIPT_HOME`. Returns a
+/// configured `Sandbox`-like holder, with its own directories.
+#[cfg(unix)]
+struct SharedParentSandbox {
+    dir: tempfile::TempDir,
+    home: PathBuf,
+}
+
+#[cfg(unix)]
+impl SharedParentSandbox {
+    fn new() -> Self {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Mimic `/tmp`: world-writable + sticky.
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o1777)).unwrap();
+        let home = dir.path().join("cig-home");
+        fs::create_dir(&home).unwrap();
+        Self { dir, home }
+    }
+
+    fn path(&self) -> &Path {
+        self.dir.path()
+    }
+
+    fn home(&self) -> &Path {
+        &self.home
+    }
+
+    fn cig(&self, args: &[&str]) -> Output {
+        Command::new(cig_bin())
+            .args(args)
+            .current_dir(self.home())
+            .env("CIGSCRIPT_HOME", self.home())
+            .env("NO_COLOR", "1")
+            .env("CIG_SEAL_KEY", "file")
+            .env("CIG_INTERNAL_TRACKER_DIR", self.path().join("tracker"))
+            .env("CIG_UPDATE_MANIFEST", self.path().join("no-releases.json"))
+            .env_remove("CI")
+            .output()
+            .expect("run cig")
+    }
+}
+
+/// With `CIGSCRIPT_HOME` under a sticky world-writable parent (like `/tmp`),
+/// the keys folder gets a `-<uid>` suffix so two users under one parent
+/// never share one folder. Under a private parent (the default Sandbox
+/// tempdir, 0700) the name stays `.cigscript-keys` — tests that read the
+/// old name keep working.
+#[cfg(unix)]
+#[test]
+fn keys_dir_is_never_in_a_sticky_world_writable_parent() {
+    let sb = SharedParentSandbox::new();
+    fs::write(sb.home().join("s.cig"), "burn {\n  cough \"ok\"\n}\n").unwrap();
+    let out = sb.cig(&["run", "s.cig"]);
+    // The script coughs, but it ran far enough to make the keys folder.
+    assert!(!String::from_utf8_lossy(&out.stderr).contains("E721"));
+    // SAFETY: geteuid has no preconditions.
+    let uid = unsafe { libc::geteuid() };
+    let per_user = sb.path().join(format!(".cigscript-keys-{uid}"));
+    let shared = sb.path().join(".cigscript-keys");
+    assert!(
+        per_user.exists(),
+        "expected per-user folder at {}",
+        per_user.display()
+    );
+    assert!(!shared.exists(), "a shared .cigscript-keys appeared");
+    // And a sibling test with the usual private parent keeps the old name.
+    let private = Sandbox::new();
+    private.write("s.cig", "burn {\n  cough \"ok\"\n}\n");
+    let _ = private.cig(&["run", "s.cig"]);
+    assert!(
+        private.path().join(".cigscript-keys").exists(),
+        "a private parent should keep the shared name"
+    );
+}
+
+/// An install from before the per-user name (cig 1.18.0 and older) keeps
+/// its own keys folder under the old shared name while it is still its
+/// own and private, so the key and the ledger in it are not left behind.
+#[cfg(unix)]
+#[test]
+fn an_own_folder_under_the_old_shared_name_stays_in_use() {
+    use std::os::unix::fs::PermissionsExt;
+    let sb = SharedParentSandbox::new();
+    let legacy = sb.path().join(".cigscript-keys");
+    fs::create_dir(&legacy).unwrap();
+    fs::set_permissions(&legacy, fs::Permissions::from_mode(0o700)).unwrap();
+    let key = legacy.join("seal.key");
+    fs::write(&key, "ab".repeat(32) + "\n").unwrap();
+    fs::set_permissions(&key, fs::Permissions::from_mode(0o600)).unwrap();
+    fs::write(sb.home().join("s.cig"), "exhale \"ok\"\n").unwrap();
+    let out = sb.cig(&["run", "s.cig"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // SAFETY: geteuid has no preconditions.
+    let uid = unsafe { libc::geteuid() };
+    assert!(
+        !sb.path().join(format!(".cigscript-keys-{uid}")).exists(),
+        "a per-user folder was made beside the user's own old one"
+    );
+    assert_eq!(fs::read_to_string(&key).unwrap(), "ab".repeat(32) + "\n");
+}
+
+/// A seal key with a second name (a hard link) is refused: it could be
+/// read or changed through the other name.
+#[cfg(unix)]
+#[test]
+fn a_hard_linked_seal_key_is_refused() {
+    let sb = Sandbox::new();
+    sb.write("s.cig", "exhale \"ok\"\n");
+    let _ = sb.cig(&["run", "s.cig"]);
+    let key = sb.path().join(".cigscript-keys").join("seal.key");
+    if !key.exists() {
+        use std::os::unix::fs::PermissionsExt;
+        fs::write(&key, "ab".repeat(32) + "\n").unwrap();
+        fs::set_permissions(&key, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    fs::hard_link(&key, sb.path().join("another-name")).unwrap();
+    // The key is checked where it is read: `cig tin mac` reads it.
+    let err = sb.run_err(&["tin", "mac", "s.cig", "--label", "t"], 1);
+    assert!(err.contains("E721"), "{err}");
+    assert!(err.contains("hard links"), "{err}");
+}
+
+/// A seal.key planted by another user (or one world-writable by a party
+/// who is not us) is refused with E721 before it is ever read.
+#[cfg(unix)]
+#[test]
+fn a_key_owned_by_someone_else_is_refused() {
+    use std::os::unix::fs::PermissionsExt;
+    let sb = Sandbox::new();
+    // Make the keys folder and a plausible-looking key.
+    let keys = sb.path().join(".cigscript-keys");
+    fs::create_dir_all(&keys).unwrap();
+    fs::set_permissions(&keys, fs::Permissions::from_mode(0o700)).unwrap();
+    let key = keys.join("seal.key");
+    fs::write(&key, "0".repeat(64) + "\n").unwrap();
+    // We cannot chown without root, so mimic "someone else owns it" with
+    // a wide mode the check also refuses.
+    fs::set_permissions(&key, fs::Permissions::from_mode(0o644)).unwrap();
+    sb.write("s.cig", "burn {\n  cough \"ok\"\n}\n");
+    // The key is checked where it is read: `cig tin mac` reads it.
+    let err = sb.run_err(&["tin", "mac", "s.cig", "--label", "t"], 1);
+    assert!(err.contains("E721"), "{err}");
+    assert!(err.contains("seal.key"), "{err}");
+}
+
+/// A keys folder someone else can write to is refused. We simulate the
+/// unsafe folder with group- or world-write bits turned on.
+#[cfg(unix)]
+#[test]
+fn a_key_folder_others_can_write_is_refused() {
+    use std::os::unix::fs::PermissionsExt;
+    let sb = Sandbox::new();
+    let keys = sb.path().join(".cigscript-keys");
+    fs::create_dir_all(&keys).unwrap();
+    fs::set_permissions(&keys, fs::Permissions::from_mode(0o777)).unwrap();
+    sb.write("s.cig", "burn {\n  cough \"ok\"\n}\n");
+    let err = sb.run_err(&["run", "s.cig"], 1);
+    assert!(err.contains("E721"), "{err}");
+    assert!(err.contains("keys folder"), "{err}");
+}
+
+/// A seal key others could read is refused, as OpenSSH refuses such a
+/// private key, and the advice keeps the key: chmod it, and rekey if
+/// anyone else could have read it. Never "move it aside": a new key
+/// opens nothing the old one sealed.
+#[cfg(unix)]
+#[test]
+fn a_seal_key_others_could_read_is_refused_with_advice_that_keeps_it() {
+    use std::os::unix::fs::PermissionsExt;
+    let sb = Sandbox::new();
+    sb.write("s.cig", "burn {\n  cough \"ok\"\n}\n");
+    let _ = sb.cig(&["run", "s.cig"]);
+    let key = sb.path().join(".cigscript-keys").join("seal.key");
+    if !key.exists() {
+        // This build seals nothing by default here: make the key the way a
+        // sealing run would, then open it up.
+        fs::write(&key, "a".repeat(64) + "\n").unwrap();
+    }
+    fs::set_permissions(&key, fs::Permissions::from_mode(0o644)).unwrap();
+    // The key is checked where it is read: `cig tin mac` reads it.
+    let err = sb.run_err(&["tin", "mac", "s.cig", "--label", "t"], 1);
+    assert!(err.contains("E721"), "{err}");
+    assert!(err.contains("chmod 600"), "{err}");
+    assert!(err.contains("cig tin rekey"), "{err}");
+    assert!(!err.contains("move it aside"), "{err}");
+}
+
+/// The ledger and the rekey lock hold no secret, and the 0700 folder
+/// keeps others out of them: one that is ours and too open (a lock an
+/// early build made with the umask's mode) is made 0600 and the run goes
+/// ahead, rather than every run refusing.
+#[cfg(unix)]
+#[test]
+fn an_open_ledger_and_lock_of_ours_are_made_private_and_used() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let sb = Sandbox::new();
+    sb.write("s.cig", "exhale \"ok\"\n");
+    let _ = sb.cig(&["run", "s.cig"]);
+    let keys = sb.path().join(".cigscript-keys");
+    let lock = keys.join("rekey.lock");
+    let ledger = keys.join("ledger.jsonl");
+    for f in [&lock, &ledger] {
+        if !f.exists() {
+            fs::write(f, "").unwrap();
+        }
+        fs::set_permissions(f, fs::Permissions::from_mode(0o664)).unwrap();
+    }
+    let out = sb.cig(&["run", "s.cig"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    for f in [&lock, &ledger] {
+        let mode = fs::metadata(f).unwrap().mode() & 0o777;
+        assert_eq!(mode, 0o600, "{} is {mode:04o}", f.display());
+    }
+}
+
+/// The keys folder, when cig has to make it, lands at 0700 on the first
+/// stat — there is no window where it exists with wider permissions.
+#[cfg(unix)]
+#[test]
+fn the_keys_folder_is_created_0700() {
+    use std::os::unix::fs::MetadataExt;
+    let sb = Sandbox::new();
+    sb.write("s.cig", "burn {\n  cough \"ok\"\n}\n");
+    let _ = sb.cig(&["run", "s.cig"]);
+    let keys = sb.path().join(".cigscript-keys");
+    let md = fs::symlink_metadata(&keys).unwrap();
+    assert!(md.is_dir());
+    assert_eq!(md.mode() & 0o777, 0o700, "mode = {:04o}", md.mode() & 0o777);
+}
+
+/// A symlink in place of `seal.key` is refused: a `fs::read_to_string`
+/// would follow the link, so the check uses `symlink_metadata` and says
+/// no before anything is read.
+#[cfg(unix)]
+#[test]
+fn a_symlink_as_the_seal_key_is_refused() {
+    use std::os::unix::fs::PermissionsExt;
+    let sb = Sandbox::new();
+    let keys = sb.path().join(".cigscript-keys");
+    fs::create_dir_all(&keys).unwrap();
+    fs::set_permissions(&keys, fs::Permissions::from_mode(0o700)).unwrap();
+    // Plant a target file of the right shape.
+    let target = sb.path().join("evil-key");
+    fs::write(&target, "a".repeat(64) + "\n").unwrap();
+    fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).unwrap();
+    std::os::unix::fs::symlink(&target, keys.join("seal.key")).unwrap();
+    sb.write("s.cig", "burn {\n  cough \"ok\"\n}\n");
+    // The key is checked where it is read: `cig tin mac` reads it.
+    let err = sb.run_err(&["tin", "mac", "s.cig", "--label", "t"], 1);
+    assert!(err.contains("E721"), "{err}");
+    assert!(err.contains("symlink"), "{err}");
+}
+
+/// The rekey lock does not create the keys folder: a cold start where
+/// the folder does not exist still comes through the private helper,
+/// so the folder is 0700 from its first stat (not 0755 from a bare
+/// `create_dir_all`).
+#[cfg(unix)]
+#[test]
+fn the_rekey_lock_does_not_create_the_folder_wider_than_0700() {
+    use std::os::unix::fs::MetadataExt;
+    let sb = Sandbox::new();
+    // Trigger `cig tin rekey`, which goes through `acquire_rekey_lock`
+    // and `hold_shared_rekey_lock`. First a run so the key exists.
+    sb.write("s.cig", "burn {\n  cough \"ok\"\n}\n");
+    let _ = sb.cig(&["run", "s.cig"]);
+    // Rekey should go through our helper which creates the folder 0700.
+    let _ = sb.cig(&["tin", "rekey"]);
+    let keys = sb.path().join(".cigscript-keys");
+    let md = fs::symlink_metadata(&keys).unwrap();
+    assert_eq!(md.mode() & 0o777, 0o700, "mode = {:04o}", md.mode() & 0o777);
+}
+
+/// `cig doctor` names the keys folder, who owns it, and its mode; it
+/// never creates the folder (if nothing has been burned yet, doctor
+/// says so). The problem line fires when the folder would fail the
+/// StrictModes check.
+#[cfg(unix)]
+#[test]
+fn doctor_says_where_the_key_is_and_who_owns_it() {
+    use std::os::unix::fs::PermissionsExt;
+    let sb = Sandbox::new();
+    // No key has been made: doctor must not create one.
+    let out = String::from_utf8_lossy(&sb.cig(&["doctor"]).stdout).into_owned();
+    assert!(out.contains("key folder"), "{out}");
+    assert!(
+        !sb.path().join(".cigscript-keys").exists(),
+        "doctor created the keys folder"
+    );
+    // Make the folder, then widen it: doctor flags it.
+    sb.write("s.cig", "burn {\n  cough \"ok\"\n}\n");
+    let _ = sb.cig(&["run", "s.cig"]);
+    let keys = sb.path().join(".cigscript-keys");
+    fs::set_permissions(&keys, fs::Permissions::from_mode(0o777)).unwrap();
+    let doc = sb.cig(&["doctor"]);
+    let stdout = String::from_utf8_lossy(&doc.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&doc.stderr).into_owned();
+    assert!(
+        stdout.contains("owner uid") || stdout.contains("mode"),
+        "doctor should print owner and mode: {stdout}"
+    );
+    let combined = format!("{stdout}\n{stderr}");
+    assert!(
+        combined.contains("E721"),
+        "doctor should flag E721: {combined}"
+    );
+}
+
+/// `cig explain E721` prints the page.
+#[test]
+fn explain_e721_prints_a_page() {
+    let sb = Sandbox::new();
+    let out = sb.run_ok(&["explain", "E721"]);
+    assert!(out.contains("E721"), "{out}");
+    assert!(out.contains("key folder"), "{out}");
 }

@@ -550,11 +550,32 @@ of opening every run folder. Writers serialise on `runs-index.lock`, so
 two concurrent runs never interleave; a hand-edited or hand-deleted
 `run.json` is caught on a cheap stat; and a torn tail from a crashed
 append is a cache miss, so the next listing rebuilds the view from the
-folders and says so once. `cig runs --verify` with no id checks each
-run's chain head against the ledger (no journal is opened); `--deep`
-walks each journal's full chain as `cig runs <id> --verify` does, and
-is opt-in because it is slower. E704 attribution keeps the one-pass-
-per-path, first-twenty-named behaviour (#128).
+folders and says so once. The index is also kept **near its live view**:
+after each append the writer compares the file's size with its size at
+the last fresh write (one `stat`, the size kept in `runs-index.fresh`)
+and compacts past twice that plus 64 KiB, so an append costs the same at
+ten thousand live runs as at ten. A ledger append reads only the
+ledger's last two lines (the head and the subkey it chains on); the
+whole chain is verified where a verdict is read. `cig runs --prune`, `keep_runs`,
+`keep_days` and `history_budget` end with one compaction instead of N
+`rm` lines; `keep_runs` reads the live count from the index first and
+skips the folder scan when it is already under the limit, so every
+`cig run` no longer pays a listing cost (#178). `cig runs --reindex`
+rebuilds the index by hand from the run folders, for an index torn
+past rebuild or oversized after a long time off; `cig doctor` reports
+one more than 4× its live size.
+
+`cig runs --verify` with no id reads each journal's **last line** on
+the fast path and compares its computed chain head with both the
+record's saved head and the ledger's head for that run, so a journal
+cut short, an older journal swapped back in or a stale cached record
+is caught without opening every journal (#177). A missing, empty or
+unreadable ledger, with sealed runs on disk, is a problem (not a
+silent `ok`): the fast path falls back to a deep walk so the chains
+are still checked, and the exit is non-zero. `--deep` walks each
+journal's full chain as `cig runs <id> --verify` does, slower but
+opt-in. E704 attribution keeps the one-pass-per-path, first-twenty-
+named behaviour (#128).
 
 `history_budget` caps the history as it grows, the run records and the
 tin. It is off by default so nothing is pruned on upgrade; `cig doctor`
@@ -592,6 +613,30 @@ out of reach of what cig runs.
   with a passphrase to carry to another machine, and `cig tin key import` puts
   it back. `cig doctor` reminds you once to back it up when sealed objects
   exist and it was never exported.
+- **The keys folder is private, and checked.** The folder beside the state
+  root (`~/.cigscript-keys`) is made `0700` from the start (not a
+  `mkdir` followed by a `chmod`), so there is no window where it exists
+  with wider permissions, and a folder that appeared while it was being
+  made is checked like one that was there before. On every run cig
+  verifies, OpenSSH-style, that the folder is owned by you and not
+  writable by others, and that `ledger.jsonl` and `rekey.lock` are owned
+  by you and are regular files (not symlinks). The seal key is checked
+  where it is read, on the file actually opened (no link followed): yours,
+  with one name, closed to others. A `seal.key` others could read is
+  refused: chmod it 600, and if anyone else could have read it, `cig tin
+  rekey` for a key nobody has seen (never move it aside: a new key opens
+  nothing the old one sealed). The
+  ledger and the lock hold no secret, and the folder keeps others out, so
+  one of yours that is more open than 0600 is made 0600 and used. Where
+  any of the rest is not so, cig refuses with `E721` and names the path,
+  the owner and the mode. With `CIGSCRIPT_HOME` under a
+  shared parent (such as `/tmp`, `/var/tmp` or `/dev/shm`), the folder
+  is placed under a per-user name (`.cigscript-keys-<uid>`) rather than
+  the shared `.cigscript-keys`, so two users under the same parent
+  never share one folder (#176). `CIG_KEYS_DIR` and `CIG_SEAL_KEY_FILE`
+  point somewhere else but do not weaken the checks. `cig doctor`
+  prints the folder's owner and mode and names the problem, without
+  creating the folder.
 - **The tin guarded.** From 1.10.0 a boxed hop on Linux sees the state
   directory read-only and the key folder empty: in the user and mount
   namespaces the box is made in, the state root is bound over itself and
