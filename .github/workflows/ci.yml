@@ -76,6 +76,56 @@ jobs:
           CIG="$PWD/target/release/cig" bash tests/portability/probe.sh | tee probe.txt
           ! grep -q '^FAIL' probe.txt
 
+  # Passes across jobs (cig-script#186): one job checks the examples under
+  # passes and exports them; the next verifies them against the first job's
+  # key without checking again, and sees a changed example's pass stop
+  # holding.
+  passes-issue:
+    name: passes (issue and export)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release
+      - name: issue and export
+        run: |
+          export CIGSCRIPT_HOME="$RUNNER_TEMP/cig-a" CIG_SEAL_KEY=file
+          mkdir -p passes
+          target/release/cig run tests/ci/check-examples.cig > ids.txt
+          while read -r name id; do
+            target/release/cig pass export "$id" -o "passes/$name.pass"
+          done < ids.txt
+          target/release/cig pass key --kinds check > passes/allowed_signers
+          ls passes
+      - uses: actions/upload-artifact@v4
+        with:
+          name: passes
+          path: passes/
+
+  passes-verify:
+    name: passes (verify in another job)
+    needs: passes-issue
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release
+      - uses: actions/download-artifact@v4
+        with:
+          name: passes
+          path: passes/
+      - name: verify, then change an example
+        run: |
+          export CIGSCRIPT_HOME="$RUNNER_TEMP/cig-b" CIG_SEAL_KEY=file
+          chmod 600 passes/allowed_signers
+          for p in passes/*.pass; do
+            target/release/cig pass verify "$p" --allowed-signers passes/allowed_signers
+          done
+          echo '# changed in this job' >> examples/hello.cig
+          if target/release/cig pass verify passes/hello.pass --allowed-signers passes/allowed_signers; then
+            echo "a changed example's pass still held"; exit 1
+          fi
+
   # cig-pass's verifier is the one place that decides "trusted": each fuzz
   # target runs for a minute on every push, after replaying the corpus.
   fuzz-cig-pass:

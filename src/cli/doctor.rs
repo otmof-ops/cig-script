@@ -437,7 +437,7 @@ pub fn doctor(ctx: &Ctx, fix: bool) -> i32 {
     // The box's primitives (#106), each tried on its own, so a box that
     // cannot be made says which part is missing.
     outln!("  box");
-    for (name, ok, says) in box_primitives() {
+    for (name, ok, says) in box_primitives_remembered() {
         outln!("    {:<13} {}  {}", name, yes_no(ctx, ok), ctx.dim(&says));
     }
     if problems.is_empty() {
@@ -560,6 +560,43 @@ fn path_line(dir: &Path) -> Option<(PathBuf, String)> {
 /// network namespace (`network: "off"` and `"registry"`), a PID namespace
 /// (`pidns`) and overlayfs (the layer). Each namespace is tried in a child
 /// that unshares it and execs `true`; overlayfs is the box's own check.
+/// `box_primitives`, remembered as a doctor pass (cig-script#186): the
+/// probe makes namespaces, so its answer is kept while the kernel, its
+/// namespace settings, the boot and this cig stay the same, for a day at
+/// most.
+fn box_primitives_remembered() -> Vec<(&'static str, bool, String)> {
+    const NAMES: &[&str] = &[
+        "user ns",
+        "mount ns",
+        "network ns",
+        "pid ns",
+        "overlayfs",
+        "box",
+    ];
+    let files: Vec<&std::path::Path> = [
+        "/proc/sys/kernel/osrelease",
+        "/proc/sys/kernel/random/boot_id",
+        "/proc/sys/kernel/apparmor_restrict_unprivileged_userns",
+        "/proc/sys/kernel/unprivileged_userns_clone",
+        "/proc/sys/user/max_user_namespaces",
+        "/proc/sys/user/max_net_namespaces",
+    ]
+    .iter()
+    .map(std::path::Path::new)
+    .collect();
+    let answer: Vec<(String, bool, String)> =
+        crate::pass::remembered("doctor", b"box-primitives", &files, 24 * 3_600_000, || {
+            box_primitives()
+                .into_iter()
+                .map(|(n, ok, says)| (n.to_string(), ok, says))
+                .collect()
+        });
+    answer
+        .into_iter()
+        .filter_map(|(n, ok, says)| NAMES.iter().find(|k| **k == n).map(|k| (*k, ok, says)))
+        .collect()
+}
+
 fn box_primitives() -> Vec<(&'static str, bool, String)> {
     #[cfg(target_os = "linux")]
     {

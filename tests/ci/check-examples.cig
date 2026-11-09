@@ -1,0 +1,13 @@
+# SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
+# SPDX-License-Identifier: Apache-2.0
+#
+# Each example, checked under a pass (cig-script#186): CI exports them, and
+# a later job verifies them against this job's key without checking again.
+
+for f in fs.glob("examples/*.cig") {
+  stick p = pass.issue("check", {example: f}, pack(s) {
+    stick text = fs.read_text(s.example)
+    snuff {lines: text.split("\n").len()}
+  })
+  exhale path.stem(f), p.id
+}

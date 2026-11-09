@@ -936,3 +936,88 @@ pub fn check_parcel_pass(
     };
     Ok(signer)
 }
+
+// ----- remembered answers ------------------------------------------------------------
+
+/// An answer worth remembering while the files it depends on stay as they
+/// are, for at most `life_ms`: the newest pass of `kind` for `subject` that
+/// holds, else `compute` runs and its answer is kept as a pass over those
+/// files (and this cig). Without a key, or with a state that cannot be
+/// trusted, `compute` simply runs.
+pub fn remembered<T, F>(kind: &str, subject: &[u8], files: &[&Path], life_ms: i64, compute: F) -> T
+where
+    T: serde::Serialize + serde::de::DeserializeOwned,
+    F: FnOnce() -> T,
+{
+    let opened = Keys::load()
+        .ok()
+        .and_then(|k| state(&k).ok().map(|m| (k, m)));
+    if let Some((keys, marks)) = &opened {
+        let st = store().ok();
+        let ctx = CigCtx::new(keys, marks, st.as_ref());
+        if let Some((p, _)) = find(&ctx, kind, subject) {
+            if let Ok(v) = serde_json::from_slice::<T>(&p.result) {
+                return v;
+            }
+        }
+    }
+    let answer = compute();
+    if let Some((keys, marks)) = &opened {
+        let mut rec = Recorder::new();
+        for f in files {
+            if rec.file_seen(f).is_err() {
+                return answer;
+            }
+        }
+        if let Ok(result) = serde_json::to_vec(&answer) {
+            let opts = IssueOpts {
+                until: Some(cig_pass::wall_ms().saturating_add(life_ms)),
+                cig: true,
+                store: true,
+                ..Default::default()
+            };
+            prepare(&mut rec, kind, &opts);
+            let _ = issue(keys, marks, kind, subject, rec, result, &opts);
+        }
+    }
+    answer
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_remembered_answer_is_reused_until_a_file_it_read_changes() {
+        let _g = crate::burn::test_env_lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let old_home = std::env::var_os("CIGSCRIPT_HOME");
+        let old_key = std::env::var_os("CIG_SEAL_KEY");
+        std::env::set_var("CIGSCRIPT_HOME", tmp.path().join("home"));
+        std::env::set_var("CIG_SEAL_KEY", "file");
+        let f = tmp.path().join("setting");
+        std::fs::write(&f, "1").unwrap();
+        let calls = std::cell::Cell::new(0);
+        let ask = || {
+            remembered("doctor", b"test-probe", &[f.as_path()], 60_000, || {
+                calls.set(calls.get() + 1);
+                vec![("probe".to_string(), true)]
+            })
+        };
+        let a = ask();
+        let b = ask();
+        assert_eq!(a, b);
+        assert_eq!(calls.get(), 1, "the second ask is a lookup");
+        std::fs::write(&f, "22").unwrap();
+        let _ = ask();
+        assert_eq!(calls.get(), 2, "a changed file asks again");
+        match old_home {
+            Some(v) => std::env::set_var("CIGSCRIPT_HOME", v),
+            None => std::env::remove_var("CIGSCRIPT_HOME"),
+        }
+        match old_key {
+            Some(v) => std::env::set_var("CIG_SEAL_KEY", v),
+            None => std::env::remove_var("CIG_SEAL_KEY"),
+        }
+    }
+}
