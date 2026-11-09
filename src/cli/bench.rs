@@ -1039,7 +1039,7 @@ fn scratch_root() -> std::io::Result<PathBuf> {
     let base = std::env::temp_dir();
     for _ in 0..16 {
         let mut bytes = [0u8; 8];
-        getrandom::getrandom(&mut bytes).map_err(std::io::Error::other)?;
+        getrandom::getrandom(&mut bytes).map_err(|e| std::io::Error::other(e.to_string()))?;
         let tag: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
         let dir = base.join(format!("cig-bench-{}-{tag}", std::process::id()));
         let mut b = std::fs::DirBuilder::new();
