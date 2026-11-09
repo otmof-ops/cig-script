@@ -1043,6 +1043,8 @@ fn scratch_root() -> std::io::Result<PathBuf> {
         let tag: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
         let dir = base.join(format!("cig-bench-{}-{tag}", std::process::id()));
         let mut b = std::fs::DirBuilder::new();
+        // Exactly this folder: never one made on the way to it.
+        b.recursive(false);
         #[cfg(unix)]
         {
             use std::os::unix::fs::DirBuilderExt;
