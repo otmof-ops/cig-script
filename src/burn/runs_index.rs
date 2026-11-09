@@ -245,7 +245,9 @@ fn read_index_as_map() -> io::Result<std::collections::HashMap<String, CachedEnt
 
 /// Add or update a run in the index. Best effort: a failure here is
 /// logged but never fails the save of `run.json` itself (the folder is
-/// the source of truth; the index is a cache).
+/// the source of truth; the index is a cache). After the write the file
+/// is compacted in place when it has grown past a cheap size heuristic
+/// (#178): `lines > 2 × live + 256`.
 pub fn upsert(rec: &RunRecord) {
     let dir = rec
         .loaded_from
@@ -261,6 +263,7 @@ pub fn upsert(rec: &RunRecord) {
     }) {
         eprintln!("note: could not update the runs index: {e}");
     }
+    let _ = compact_if_grown();
 }
 
 /// `(mtime_ns, size)` of the run's `run.json`, to be stored in the index
@@ -277,11 +280,135 @@ fn stat_run_json(run_dir: &Path) -> Option<(u64, u64)> {
     Some((mtime_ns, meta.len()))
 }
 
-/// Mark the run gone (prune, forget, budget). Best effort.
+/// Mark the run gone (prune, forget, budget). Best effort. A prune
+/// batch calls `compact()` once at the end instead of this per run
+/// (#178), but `remove()` is kept as the one-off path and still
+/// compacts if the heuristic trips, so a single `--forget` tidies up.
 pub fn remove(id: &str) {
     if let Err(e) = append(&Line::Rm { id: id.to_string() }) {
         eprintln!("note: could not update the runs index: {e}");
     }
+    let _ = compact_if_grown();
+}
+
+/// How many `set` entries are live after replaying the index (last-wins
+/// per id; an `rm` drops the id). `None` means the index is missing,
+/// torn or unparseable — the caller should list folders instead. Cheap:
+/// one read, one parse, no stat.
+pub fn live_count() -> Option<usize> {
+    read_index_as_map().ok().map(|m| m.len())
+}
+
+/// The number of lines in the index on disk: `set` and `rm` lines
+/// alike. Cheap: one read, newline count. `None` means the file is
+/// missing. A running sum, not a live-run count: `live_count()` returns
+/// that, and the ratio of the two tells `cig doctor` when to suggest
+/// `cig runs --reindex` (#178).
+pub fn line_count() -> Option<usize> {
+    let text = fs::read_to_string(path()).ok()?;
+    Some(text.lines().filter(|l| !l.trim().is_empty()).count())
+}
+
+/// Rebuild the index from the run folders and write it fresh. The
+/// manual path behind `cig runs --reindex` (#178).
+pub fn rebuild_from_folders() -> io::Result<usize> {
+    // Read the folders once; `RunRecord::load` is used as `list()`
+    // does, and the result is written back under the index's lock.
+    let runs = runs_dir();
+    let dir_entries = match fs::read_dir(&runs) {
+        Ok(it) => it,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(0),
+        Err(e) => return Err(e),
+    };
+    let mut out: Vec<RunRecord> = Vec::new();
+    for entry in dir_entries.flatten() {
+        let id = entry.file_name().to_string_lossy().to_string();
+        if id.starts_with('.') {
+            continue;
+        }
+        let dir = entry.path();
+        if !dir.join("run.json").exists() {
+            continue;
+        }
+        match RunRecord::load(&dir) {
+            Ok(mut rec) => {
+                rec.loaded_from = Some(dir.clone());
+                out.push(rec);
+            }
+            Err(_) => {
+                let mut rec = RunRecord::damaged(&id, &io::Error::other("run.json"));
+                rec.loaded_from = Some(dir.clone());
+                out.push(rec);
+            }
+        }
+    }
+    out.sort_by(|a, b| b.started.cmp(&a.started).then_with(|| b.id.cmp(&a.id)));
+    let n = out.len();
+    write_fresh(&out)?;
+    Ok(n)
+}
+
+/// Compact the index in place: read the current (parseable) map and
+/// write a one-set-per-live-id file. Used after a prune batch and at
+/// the end of `upsert`/`remove` when the file has grown past the
+/// compaction heuristic (#178). Best effort: a failure here is noted,
+/// not fatal (the folder is the source of truth).
+pub fn compact() -> io::Result<()> {
+    let map = match read_index_as_map() {
+        Ok(m) => m,
+        // A torn or missing file is nothing to compact; `list()` will
+        // rebuild it on its next call.
+        Err(_) => return Ok(()),
+    };
+    let mut view: Vec<RunRecord> = map
+        .into_values()
+        .map(|c| {
+            let mut rec = *c.rec;
+            // The compaction preserves the folder path the index knows,
+            // so pinned/stat lookups reach the same file next time.
+            if rec.loaded_from.is_none() {
+                rec.loaded_from = Some(runs_dir().join(&rec.id));
+            }
+            rec
+        })
+        .collect();
+    view.sort_by(|a, b| b.started.cmp(&a.started).then_with(|| b.id.cmp(&a.id)));
+    write_fresh(&view)
+}
+
+/// Where the index's size at its last fresh write is kept, so an append
+/// can tell the index has grown without reading it.
+fn fresh_size_path() -> PathBuf {
+    path().with_extension("fresh")
+}
+
+/// Under this, the index is left alone whatever its shape: a rewrite is
+/// not worth it.
+const COMPACT_SLACK: u64 = 64 * 1024;
+
+/// After an append: compact when the index has grown past twice its size
+/// at the last fresh write, plus 64 KiB. One `stat` and one tiny read, so
+/// an append costs the same at ten thousand live runs as at ten. With
+/// runs pruned as fast as they come (`keep_runs`), that bounds the file to
+/// a few times the live view; with nothing pruned, it grows two lines a
+/// run and is rewritten once for every time it doubles. An index from
+/// before the size was kept is compacted at its first append past 64 KiB.
+fn compact_if_grown() -> io::Result<()> {
+    let size = match fs::metadata(path()) {
+        Ok(m) => m.len(),
+        Err(_) => return Ok(()),
+    };
+    if size <= COMPACT_SLACK {
+        return Ok(());
+    }
+    let fresh = fs::read_to_string(fresh_size_path())
+        .ok()
+        .and_then(|t| t.trim().parse::<u64>().ok())
+        .unwrap_or(0);
+    if size > fresh.saturating_mul(2).saturating_add(COMPACT_SLACK) {
+        compact()?;
+    }
+    Ok(())
 }
 
 /// Write the full view (from a folder scan), replacing whatever was
@@ -330,6 +457,11 @@ pub fn write_fresh(view: &[RunRecord]) -> io::Result<()> {
     drop(f);
     fs::rename(&tmp, &p)?;
     super::journal::sync_dir_pub(&home)?;
+    // The size this write left, for `compact_if_grown`. Best effort: a
+    // missing or stale number only makes the next compaction early.
+    if let Ok(m) = fs::metadata(&p) {
+        let _ = fs::write(fresh_size_path(), format!("{}\n", m.len()));
+    }
     Ok(())
 }
 

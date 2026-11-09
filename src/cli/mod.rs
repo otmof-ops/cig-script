@@ -127,6 +127,9 @@ pub enum Command {
         /// The runs pruned or forgotten, from the ledger: when, how, and what each was.
         #[arg(long, conflicts_with_all = ["id", "prune", "pin", "unpin", "forget"])]
         pruned: bool,
+        /// Rebuild the run index from the run folders (#178): fixes a torn or oversized runs-index.jsonl by hand.
+        #[arg(long, conflicts_with_all = ["id", "prune", "pin", "unpin", "forget", "pruned", "verify", "deep"])]
+        reindex: bool,
     },
     /// Put the world back the way it was, newest op first (rollback).
     Unburn {
@@ -541,8 +544,10 @@ fn dispatch(ctx: Ctx, command: Command) -> i32 {
             pin,
             unpin,
             pruned,
+            reindex,
         } => match (pin, unpin) {
             _ if pruned => runs::pruned(&ctx),
+            _ if reindex => runs::reindex(&ctx),
             (Some(id), _) => runs::pin(&ctx, &id, true),
             (None, Some(id)) => runs::pin(&ctx, &id, false),
             _ => runs::runs(&ctx, id, prune, verify, deep, forget),
