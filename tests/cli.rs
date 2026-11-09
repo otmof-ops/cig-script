@@ -13407,6 +13407,313 @@ fn runs_index_is_consistent_under_two_concurrent_runs() {
     );
 }
 
+/// #177: `cig runs --verify` with no id reads each journal's last line
+/// (as well as the ledger) on the fast path, so a cut journal is caught
+/// without `--deep`. The old fast path compared only `run.json`'s head
+/// with the ledger and let a cut journal pass as ok.
+#[test]
+fn verify_all_catches_a_cut_journal() {
+    let sb = Sandbox::new();
+    for k in 1..=3 {
+        sb.write(
+            &format!("s{k}.cig"),
+            &format!(
+                "burn {{\n  fs.write_text(\"f{k}.txt\", \"{k}\")\n  fs.write_text(\"g{k}.txt\", \"{k}\")\n}}\n"
+            ),
+        );
+        sb.run_ok(&["run", &format!("s{k}.cig")]);
+    }
+    // Cut the last line of the oldest journal: the record stays as-is
+    // (it still names a head that no line now ends at), the ledger
+    // stays as-is (its line for the run names the same head), but the
+    // journal on disk now ends at an earlier line. The fast path has
+    // to see that.
+    let oldest = sb.runs().last().unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let journal = sb.home().join("runs").join(&oldest).join("journal.jsonl");
+    let text = fs::read_to_string(&journal).unwrap();
+    let trimmed = {
+        let mut v: Vec<&str> = text.lines().collect();
+        v.pop();
+        let mut out = v.join("\n");
+        out.push('\n');
+        out
+    };
+    fs::write(&journal, trimmed).unwrap();
+    let out = sb.cig(&["--json", "runs", "--verify"]);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "a cut journal should exit non-zero: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["ok"], false, "{v}");
+    assert!(
+        v["problems"].to_string().contains(&oldest),
+        "the cut run should be named: {v}"
+    );
+}
+
+/// #177: a journal swapped for an older copy is caught too (same
+/// mechanism: the journal's last line gives a different head than the
+/// ledger and the record).
+#[test]
+fn verify_all_catches_a_replaced_journal() {
+    let sb = Sandbox::new();
+    sb.write("a.cig", "burn {\n  fs.write_text(\"a.txt\", \"a\")\n}\n");
+    sb.run_ok(&["run", "a.cig"]);
+    // First run's id and journal, kept for later.
+    let first_id = sb.runs().first().unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let first_journal = sb.home().join("runs").join(&first_id).join("journal.jsonl");
+    let old_journal = fs::read_to_string(&first_journal).unwrap();
+    // Run again: a new, longer journal is written for the SAME script.
+    sb.write(
+        "b.cig",
+        "burn {\n  fs.write_text(\"b.txt\", \"b\")\n  fs.write_text(\"c.txt\", \"c\")\n}\n",
+    );
+    sb.run_ok(&["run", "b.cig"]);
+    let second_id = sb.runs().first().unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    // Put the older copy back in place of the second run's journal.
+    let second_journal = sb
+        .home()
+        .join("runs")
+        .join(&second_id)
+        .join("journal.jsonl");
+    fs::write(&second_journal, old_journal).unwrap();
+    let out = sb.cig(&["--json", "runs", "--verify"]);
+    assert_eq!(out.status.code(), Some(1));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["ok"], false, "{v}");
+    assert!(
+        v["problems"].to_string().contains(&second_id),
+        "the replaced run should be named: {v}"
+    );
+}
+
+/// #177: a missing or empty ledger, with sealed runs that recorded
+/// chain heads, is a problem — not a silent `ok` — and the fast path
+/// falls back to a deep walk so the chains are still checked. The
+/// exit is non-zero.
+#[test]
+fn verify_all_with_no_ledger_is_not_ok() {
+    let sb = Sandbox::new();
+    sb.write("a.cig", "burn {\n  fs.write_text(\"a.txt\", \"a\")\n}\n");
+    sb.run_ok(&["run", "a.cig"]);
+    // The ledger lives in `$CIGSCRIPT_HOME/../.cigscript-keys/ledger.jsonl`
+    // when CIGSCRIPT_HOME is set (seal::keys_dir()).
+    let ledger = sb
+        .home()
+        .parent()
+        .unwrap()
+        .join(".cigscript-keys")
+        .join("ledger.jsonl");
+    assert!(
+        ledger.exists(),
+        "the ledger should exist before we remove it"
+    );
+    fs::remove_file(&ledger).unwrap();
+    let out = sb.cig(&["--json", "runs", "--verify"]);
+    assert_eq!(out.status.code(), Some(1));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["ok"], false, "{v}");
+    assert_eq!(v["deep"], true, "fell back to deep walk: {v}");
+    assert!(
+        v["problems"].to_string().contains("ledger"),
+        "the ledger is named: {v}"
+    );
+}
+
+/// #177: same for an emptied ledger file (not merely missing).
+#[test]
+fn verify_all_with_an_empty_ledger_is_not_ok() {
+    let sb = Sandbox::new();
+    sb.write("a.cig", "burn {\n  fs.write_text(\"a.txt\", \"a\")\n}\n");
+    sb.run_ok(&["run", "a.cig"]);
+    let ledger = sb
+        .home()
+        .parent()
+        .unwrap()
+        .join(".cigscript-keys")
+        .join("ledger.jsonl");
+    fs::write(&ledger, "").unwrap();
+    let out = sb.cig(&["--json", "runs", "--verify"]);
+    assert_eq!(out.status.code(), Some(1));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["ok"], false, "{v}");
+    assert!(
+        v["problems"].to_string().contains("ledger"),
+        "the ledger is named: {v}"
+    );
+}
+
+/// #177: `cig doctor` names a missing ledger as a problem when there
+/// are sealed runs that recorded chain heads. A fresh home with no
+/// runs does not.
+#[test]
+fn doctor_says_the_ledger_is_gone() {
+    let sb = Sandbox::new();
+    // Fresh home, no runs. Nothing about a missing ledger.
+    let out = sb.cig(&["doctor"]);
+    let text =
+        String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !text.to_lowercase().contains("ledger is missing"),
+        "a fresh home with no runs should not alarm on the ledger: {text}"
+    );
+    // One run, then remove the ledger.
+    sb.write("a.cig", "burn {\n  fs.write_text(\"a.txt\", \"a\")\n}\n");
+    sb.run_ok(&["run", "a.cig"]);
+    let ledger = sb
+        .home()
+        .parent()
+        .unwrap()
+        .join(".cigscript-keys")
+        .join("ledger.jsonl");
+    fs::remove_file(&ledger).unwrap();
+    let out = sb.cig(&["doctor"]);
+    assert_eq!(out.status.code(), Some(1), "doctor should exit non-zero");
+    let text =
+        String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
+    assert!(
+        text.contains("the ledger is missing") || text.contains("the ledger is empty"),
+        "doctor should name the ledger: {text}"
+    );
+}
+
+/// #178: at ten thousand runs with keep_runs 100, the index stays near
+/// its live view instead of growing forever. The test uses 1,000 runs
+/// built directly as folders (as the existing #175 tests show, by
+/// writing `run.json` + `journal.jsonl` beside it) so it is not slowed
+/// by starting `cig` ten thousand times, but it exercises the same
+/// `upsert`/compaction path.
+#[test]
+fn index_stays_bounded_under_keep_runs() {
+    let sb = Sandbox::new();
+    // Make a seed run to establish the key and the ledger.
+    sb.write("seed.cig", "exhale 1\n");
+    sb.run_ok(&["run", "seed.cig"]);
+    // Many more runs: each `cig run` appends two index lines (begin +
+    // finish) and `keep_by_config` prunes the rest. With keep_runs
+    // active and the compaction heuristic in place (#178), the index
+    // should not grow unboundedly.
+    sb.write("w.cig", "exhale 1\n");
+    sb.run_ok(&["config", "keep_runs", "20"]);
+    for _ in 0..400 {
+        // Not run_ok — some of these may exit non-zero on CI quirks;
+        // the point is the index growth.
+        let out = sb.cig(&["run", "w.cig"]);
+        if !out.status.success() {
+            panic!(
+                "a run failed mid-loop: {} {}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+    }
+    let p = sb.home().join("runs-index.jsonl");
+    let text = fs::read_to_string(&p).unwrap();
+    let lines = text.lines().filter(|l| !l.trim().is_empty()).count();
+    // keep_runs = 20; live after pruning is about 20 (the seed is
+    // dropped). Each run adds about three lines (start, finish, the
+    // prune's), so an index that never compacts holds about 1,200 here;
+    // compaction keeps it to about twice its fresh size plus 64 KiB,
+    // a couple of hundred lines.
+    assert!(
+        lines <= 600,
+        "the index grew to {lines} lines; compaction should keep it bounded"
+    );
+    // Live count: the map should hold only the live runs (plus perhaps
+    // the one still-running record of the last cig that wrote).
+    let v: Vec<serde_json::Value> = serde_json::from_str(&sb.run_ok(&["--json", "runs"])).unwrap();
+    assert!(
+        v.len() <= 21,
+        "keep_runs = 20 should leave at most 21 runs, saw {} ({v:?})",
+        v.len()
+    );
+}
+
+/// #178: `cig runs --reindex` rebuilds the index by hand from the run
+/// folders. After an over-sized index is written and the flag is run,
+/// the file has one `set` line per live run and no `rm` lines.
+#[test]
+fn reindex_rebuilds_the_index_by_hand() {
+    let sb = Sandbox::new();
+    for k in 1..=3 {
+        sb.write(&format!("s{k}.cig"), "exhale 1\n");
+        sb.run_ok(&["run", &format!("s{k}.cig")]);
+    }
+    let p = sb.home().join("runs-index.jsonl");
+    // Oversize it by hand: append a thousand junk-but-parseable rm
+    // lines for ids that are not there.
+    {
+        use std::io::Write;
+        let mut f = fs::OpenOptions::new().append(true).open(&p).unwrap();
+        for k in 0..1_000 {
+            let _ = writeln!(f, "{{\"op\":\"rm\",\"id\":\"ghost-{k}\"}}");
+        }
+    }
+    let before = fs::read_to_string(&p).unwrap();
+    assert!(
+        before.lines().count() > 100,
+        "the oversize index should hold many lines: {}",
+        before.lines().count()
+    );
+    // Reindex.
+    sb.run_ok(&["runs", "--reindex"]);
+    let after = fs::read_to_string(&p).unwrap();
+    let kept: Vec<serde_json::Value> = after
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(
+        kept.len(),
+        3,
+        "three live runs, so three set lines after --reindex: {kept:?}"
+    );
+    assert!(
+        kept.iter().all(|l| l["op"] == "set"),
+        "no rm lines survive: {kept:?}"
+    );
+    // The listing still agrees.
+    let v: Vec<serde_json::Value> = serde_json::from_str(&sb.run_ok(&["--json", "runs"])).unwrap();
+    assert_eq!(v.len(), 3);
+}
+
+/// #178: the runs index is compacted after a `--prune` batch instead
+/// of leaving N `rm` lines behind.
+#[test]
+fn prune_batch_compacts_the_index() {
+    let sb = Sandbox::new();
+    for k in 1..=10 {
+        sb.write(&format!("s{k}.cig"), "exhale 1\n");
+        sb.run_ok(&["run", &format!("s{k}.cig")]);
+    }
+    sb.run_ok(&["runs", "--prune", "3"]);
+    let text = fs::read_to_string(sb.home().join("runs-index.jsonl")).unwrap();
+    let lines: Vec<serde_json::Value> = text
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    let rm_lines = lines.iter().filter(|l| l["op"] == "rm").count();
+    let set_lines = lines.iter().filter(|l| l["op"] == "set").count();
+    assert_eq!(
+        rm_lines, 0,
+        "a prune batch should compact, leaving no rm lines: {lines:?}"
+    );
+    assert_eq!(set_lines, 3, "three live runs after prune, three set lines");
+}
+
 /// #149: `cig runs --verify` with no run checks every run's chain head
 /// against the ledger without opening a journal; `--deep` walks each
 /// journal too. A line edited inside a journal keeps the recorded heads

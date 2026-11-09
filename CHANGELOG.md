@@ -5,6 +5,54 @@ project follows semantic versioning.
 
 ## Unreleased
 
+- **`cig runs --verify` catches a cut journal, a missing ledger and a
+  run the ledger never saw** (#177). The whole-history check from #149
+  (`cig runs --verify` with no id) now reads each journal's last line
+  on the fast path and compares its computed chain head with both the
+  record's saved head and the ledger's head for that run, so a journal
+  cut short, an older journal swapped back in or a stale cached record
+  no longer passes as `ok`. A missing, empty or unreadable ledger,
+  with sealed runs on disk, is a problem (not a silent `ok`): the
+  fast path falls back to a deep walk so the chains are still checked,
+  and the exit is non-zero. A run with a chain head and no ledger line
+  is a problem (`the ledger has no record of this run`), except for
+  runs recorded by cig 1.16 and earlier, when the ledger did not exist
+  yet. `cig doctor` names a missing or empty ledger too, so the state
+  of the ledger shows beside everything else it checks. The summary
+  line says what was actually checked (`heads checked against the
+  ledger and each journal's last line`). New tests:
+  `verify_all_catches_a_cut_journal`,
+  `verify_all_catches_a_replaced_journal`,
+  `verify_all_with_no_ledger_is_not_ok`,
+  `verify_all_with_an_empty_ledger_is_not_ok`,
+  `doctor_says_the_ledger_is_gone`.
+- **The history stays quick as it grows** (#178). `cig run` and `cig
+  runs` slowed with every run ever made, not with the runs kept: the run
+  index only grew, every ledger append re-verified the whole ledger, and
+  the listing's missing-runs note compared the ledger with itself.
+  - After each append the index compares its size with its size at the
+    last fresh write (one `stat`; the size is kept in
+    `runs-index.fresh`), and past twice that plus 64 KiB rewrites itself
+    as one line per live run, under the same lock.
+  - A prune (`--prune`, `keep_runs`, `keep_days`, `history_budget`) ends
+    with one rewrite instead of a line per run, and `keep_runs` reads the
+    live count from the index before it lists anything.
+  - A ledger append reads only the ledger's last two lines: the head it
+    chains on, and the subkey the last line verifies under. The whole
+    chain is still verified wherever a verdict is read (`cig runs
+    --verify`, `cig tin verify`, a rekey).
+  - The missing-runs note and the whole-history verify read each run's
+    ledger record from one pass, where they scanned the ledger once per
+    run.
+  - `cig runs --reindex` rebuilds the index from the run folders by
+    hand, and `cig doctor` reports an index more than 4× its live size.
+  - Measured here with `keep_runs 100` and runs interleaved (the CPU on
+    a power-saving governor): after 3,000 runs a `cig run` takes what it
+    takes after 105 (37 ms against 38), and the index holds 100 lines.
+    `cig runs` takes 10 ms against 2.7: it still reads the ledger once,
+    about 1.2 ms per thousand lines here, where #178 measured 639 ms at
+    9,000 runs.
+
 - **`tin/` and `runs/` hidden from a boxed hop** (#105). The guard no
   longer leaves the tin visible to a hop and read-only, it hides it: in
   the hop's mount namespace an empty tmpfs goes over `~/.cigscript/tin`

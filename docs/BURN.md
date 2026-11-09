@@ -550,11 +550,32 @@ of opening every run folder. Writers serialise on `runs-index.lock`, so
 two concurrent runs never interleave; a hand-edited or hand-deleted
 `run.json` is caught on a cheap stat; and a torn tail from a crashed
 append is a cache miss, so the next listing rebuilds the view from the
-folders and says so once. `cig runs --verify` with no id checks each
-run's chain head against the ledger (no journal is opened); `--deep`
-walks each journal's full chain as `cig runs <id> --verify` does, and
-is opt-in because it is slower. E704 attribution keeps the one-pass-
-per-path, first-twenty-named behaviour (#128).
+folders and says so once. The index is also kept **near its live view**:
+after each append the writer compares the file's size with its size at
+the last fresh write (one `stat`, the size kept in `runs-index.fresh`)
+and compacts past twice that plus 64 KiB, so an append costs the same at
+ten thousand live runs as at ten. A ledger append reads only the
+ledger's last two lines (the head and the subkey it chains on); the
+whole chain is verified where a verdict is read. `cig runs --prune`, `keep_runs`,
+`keep_days` and `history_budget` end with one compaction instead of N
+`rm` lines; `keep_runs` reads the live count from the index first and
+skips the folder scan when it is already under the limit, so every
+`cig run` no longer pays a listing cost (#178). `cig runs --reindex`
+rebuilds the index by hand from the run folders, for an index torn
+past rebuild or oversized after a long time off; `cig doctor` reports
+one more than 4× its live size.
+
+`cig runs --verify` with no id reads each journal's **last line** on
+the fast path and compares its computed chain head with both the
+record's saved head and the ledger's head for that run, so a journal
+cut short, an older journal swapped back in or a stale cached record
+is caught without opening every journal (#177). A missing, empty or
+unreadable ledger, with sealed runs on disk, is a problem (not a
+silent `ok`): the fast path falls back to a deep walk so the chains
+are still checked, and the exit is non-zero. `--deep` walks each
+journal's full chain as `cig runs <id> --verify` does, slower but
+opt-in. E704 attribution keeps the one-pass-per-path, first-twenty-
+named behaviour (#128).
 
 `history_budget` caps the history as it grows, the run records and the
 tin. It is off by default so nothing is pruned on upgrade; `cig doctor`

@@ -139,7 +139,45 @@ pub fn doctor(ctx: &Ctx, fix: bool) -> i32 {
         ));
     }
 
+    // The ledger (#177): a missing or empty ledger, with runs that
+    // recorded chain heads, is a problem — `cig runs --verify` cannot
+    // judge heads without it. A fresh tin with no sealed runs is fine.
+    let ledger_presence = crate::burn::ledger::presence();
+    let any_head = all_runs.iter().any(|r| r.journal_head.is_some());
+    let ledger_problem = match ledger_presence {
+        crate::burn::ledger::Presence::Missing if any_head => Some("missing"),
+        crate::burn::ledger::Presence::Empty if any_head => Some("empty"),
+        _ => None,
+    };
+    if let Some(state) = ledger_problem {
+        let p = crate::burn::ledger::path();
+        problems.push(format!(
+            "the ledger is {state} ({}): `cig runs --verify` cannot judge chain heads without it [E709]",
+            crate::crash::tilde(&p)
+        ));
+    }
+
+    // The run index (#178): oversized means `cig runs --reindex` is
+    // worth running, and every `cig run` is paying the cost.
+    let index_lines = crate::burn::runs_index::line_count();
+    let index_live = crate::burn::runs_index::live_count();
+    let index_oversize = match (index_lines, index_live) {
+        (Some(lines), Some(live)) if live > 0 && lines > 4 * live => Some((lines, live)),
+        _ => None,
+    };
+    if let Some((lines, live)) = index_oversize {
+        problems.push(format!(
+            "the run index has {lines} lines but only {live} live run{}; `cig runs --reindex` compacts it (#178)",
+            if live == 1 { "" } else { "s" }
+        ));
+    }
+
     if ctx.json {
+        let ledger_state = match ledger_presence {
+            crate::burn::ledger::Presence::Present => "present",
+            crate::burn::ledger::Presence::Empty => "empty",
+            crate::burn::ledger::Presence::Missing => "missing",
+        };
         let obj = serde_json::json!({
             "version": crate::VERSION,
             "executable": exe,
@@ -153,6 +191,9 @@ pub fn doctor(ctx: &Ctx, fix: bool) -> i32 {
             "history_over_budget": over,
             "history_budget_suggested": suggestion,
             "interrupted_runs": interrupted,
+            "ledger": ledger_state,
+            "runs_index_lines": index_lines,
+            "runs_index_live": index_live,
             "crash_reports": crashes.len(),
             "crash_reports_unsent": unsent,
             "tools": tools.iter().map(|t| serde_json::json!({"name": t.name, "present": t.present})).collect::<Vec<_>>(),
@@ -205,6 +246,46 @@ pub fn doctor(ctx: &Ctx, fix: bool) -> i32 {
             (None, false) => String::new(),
         }
     );
+    // The ledger and the run index (#177, #178): one line each, named
+    // so the operator sees them without `--json`.
+    let ledger_label = match ledger_presence {
+        crate::burn::ledger::Presence::Present => ctx.green("present"),
+        crate::burn::ledger::Presence::Empty => {
+            if any_head {
+                ctx.red("empty")
+            } else {
+                ctx.dim("empty")
+            }
+        }
+        crate::burn::ledger::Presence::Missing => {
+            if any_head {
+                ctx.red("missing")
+            } else {
+                ctx.dim("missing (no sealed runs yet)")
+            }
+        }
+    };
+    outln!(
+        "  ledger        {ledger_label}  {}",
+        ctx.dim(&crate::crash::tilde(&crate::burn::ledger::path()))
+    );
+    let index_line = match (index_lines, index_live) {
+        (Some(lines), Some(live)) => format!(
+            "{lines} line{} for {live} live run{}",
+            if lines == 1 { "" } else { "s" },
+            if live == 1 { "" } else { "s" }
+        ),
+        (Some(lines), None) => {
+            format!("{lines} lines (torn or unparseable; the next listing rebuilds)")
+        }
+        _ => "missing (built on the next cig runs)".to_string(),
+    };
+    let index_suffix = if index_oversize.is_some() {
+        ctx.yellow("  cig runs --reindex compacts it")
+    } else {
+        String::new()
+    };
+    outln!("  run index     {index_line}{index_suffix}");
     outln!(
         "  ashtray       {} report{} saved, {unsent} not filed{}",
         crashes.len(),

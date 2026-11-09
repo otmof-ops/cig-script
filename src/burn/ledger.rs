@@ -29,6 +29,33 @@ pub fn path() -> PathBuf {
     super::seal::keys_dir().join(FILE)
 }
 
+/// The shape of the ledger file on disk, for callers that want to tell
+/// a missing file from one with no lines (#177): `cig runs --verify`
+/// and `cig doctor` both report both conditions, and `cig doctor`
+/// names a missing ledger as a problem when there are sealed runs.
+pub enum Presence {
+    /// The file exists and has bytes.
+    Present,
+    /// The file exists but is zero-length.
+    Empty,
+    /// There is no file (a fresh tin, or the file was removed).
+    Missing,
+}
+
+/// Does the ledger file exist on disk, and does it carry any bytes?
+/// A missing or empty ledger is what #177 catches: the whole-history
+/// verify cannot judge heads without a ledger.
+pub fn presence() -> Presence {
+    match fs::metadata(path()) {
+        Ok(m) if m.len() == 0 => Presence::Empty,
+        Ok(_) => Presence::Present,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Presence::Missing,
+        // An unreadable file is as good as missing for the caller's
+        // purposes (and `load()` will surface the real error).
+        Err(_) => Presence::Missing,
+    }
+}
+
 /// One entry. `kind` is `run` (a run ended), `unburn` (a rollback ended),
 /// `pruned`, `forgotten` (the user said to stop noting a missing run) or
 /// `origin` (a run a parcel brought in).
@@ -335,20 +362,110 @@ pub fn resign_under(
 /// process asks for the key (`seal::key()`), so a `cig tin rekey`
 /// holding the exclusive lock cannot sign anything out from under a
 /// run that lives (SEC-004 H1).
+/// What an append needs from the ledger, read from its last two lines
+/// alone: the last line's MAC (the head the next line chains on), its
+/// `seq`, and the subkey the last line verifies under. The whole chain is
+/// verified where the ledger is read for a verdict (`load`: `cig runs
+/// --verify`, `cig tin verify`, a rekey); an append does not pay for it,
+/// so a `cig run` costs the same at ten thousand runs as at ten (#178).
+struct Tail {
+    head: String,
+    seq: u64,
+    key: Option<super::seal::Key>,
+}
+
+/// The tail an append chains on, or `None` when the tail is not one an
+/// append can read on its own (a torn last line, a line that does not
+/// parse, a last line longer than the window): the caller loads the whole
+/// ledger then, as before.
+fn tail_for_append() -> Result<Option<Tail>, String> {
+    use std::io::{Read, Seek, SeekFrom};
+    // The same order as `load` (SEC-004 N2): the shared rekey lock first.
+    super::seal::hold_shared_rekey_lock()?;
+    let empty = || Tail {
+        head: SEED.to_string(),
+        seq: 0,
+        key: None,
+    };
+    let mut f = match fs::File::open(path()) {
+        Ok(f) => f,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Some(empty())),
+        Err(e) => return Err(format!("cannot read the ledger: {e}")),
+    };
+    let len = f.metadata().map_err(|e| e.to_string())?.len();
+    // Two ledger lines are a few hundred bytes; 64 KiB is plenty.
+    let start = len.saturating_sub(64 * 1024);
+    f.seek(SeekFrom::Start(start)).map_err(|e| e.to_string())?;
+    let mut buf = Vec::new();
+    f.read_to_end(&mut buf).map_err(|e| e.to_string())?;
+    if start > 0 {
+        // The window began mid-line: start at the first whole one.
+        match buf.iter().position(|&b| b == b'\n') {
+            Some(i) => {
+                buf.drain(..=i);
+            }
+            None => return Ok(None),
+        }
+    }
+    let Ok(text) = std::str::from_utf8(&buf) else {
+        return Ok(None);
+    };
+    if !text.is_empty() && !text.ends_with('\n') {
+        // A torn last line (a crashed append): the whole load decides.
+        return Ok(None);
+    }
+    let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+    let Some(last_raw) = lines.last().copied() else {
+        return Ok(if start == 0 { Some(empty()) } else { None });
+    };
+    let prev = if lines.len() >= 2 {
+        match serde_json::from_str::<Line>(lines[lines.len() - 2]) {
+            Ok(l) => l.mac,
+            Err(_) => return Ok(None),
+        }
+    } else if start == 0 {
+        SEED.to_string()
+    } else {
+        return Ok(None);
+    };
+    let Ok(last) = serde_json::from_str::<Line>(last_raw) else {
+        return Ok(None);
+    };
+    let body = body_of(last_raw);
+    let key = candidate_keys()
+        .into_iter()
+        .find(|k| mac_hex(k, &prev, body.as_bytes()) == last.mac);
+    Ok(Some(Tail {
+        head: last.mac,
+        seq: last.seq,
+        key,
+    }))
+}
+
 pub fn append(kind: &str, run: &str, head: &str, status: &str, lines: u64) -> Result<(), String> {
-    let loaded = load()?;
-    // Sign with the subkey that verified the ledger on disk (SEC-004
-    // M3): between a rekey's ledger re-sign and its keeper swap, the
-    // keeper's subkey differs from the one that verified the chain,
-    // and MAC-ing under the keeper's would break the next line's
-    // chain. For a fresh ledger (no file yet, no chain to verify), the
-    // primary subkey is the one to use.
-    let key = match loaded.verified_key.clone() {
+    let tail = match tail_for_append()? {
+        Some(t) => t,
+        None => {
+            let loaded = load()?;
+            Tail {
+                head: loaded.head.clone(),
+                seq: loaded.lines.last().map(|l| l.seq).unwrap_or(0),
+                key: loaded.verified_key.clone(),
+            }
+        }
+    };
+    // Sign with the subkey the chain on disk is written in (SEC-004 M3):
+    // between a rekey's ledger re-sign and its keeper swap, the keeper's
+    // subkey differs from the one the last line verifies under, and
+    // MAC-ing under the keeper's would break the next line's chain. For a
+    // fresh ledger (no file yet), or a last line no candidate verifies,
+    // the primary subkey is the one to use, as before.
+    let key = match tail.key {
         Some(k) => k,
         None => super::seal::key()
             .map(|(m, _)| super::seal::derive(&m, super::seal::LABEL_LEDGER_MAC))?,
     };
-    let seq = loaded.lines.last().map(|l| l.seq + 1).unwrap_or(1);
+    let seq = tail.seq + 1;
     let t = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
     // The body, with `mac` written last so `body_of` finds it again.
     let mut v = serde_json::json!({
@@ -356,7 +473,7 @@ pub fn append(kind: &str, run: &str, head: &str, status: &str, lines: u64) -> Re
         "tin": tin_id(), "t": t,
     });
     let body = serde_json::to_string(&v).map_err(|e| e.to_string())?;
-    let mac = mac_hex(&key, &loaded.head, body.as_bytes());
+    let mac = mac_hex(&key, &tail.head, body.as_bytes());
     v["mac"] = serde_json::Value::String(mac);
     let text = serde_json::to_string(&v).map_err(|e| e.to_string())?;
     debug_assert_eq!(body_of(&text), body, "the MAC must cover exactly the body");

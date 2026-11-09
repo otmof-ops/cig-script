@@ -124,22 +124,76 @@ pub fn runs(
     }
 }
 
-/// `cig runs --verify` with no id (#149): a quick check across the whole
-/// history. Each run's recorded `journal_head` is compared with what the
-/// ledger kept for it (the chain's head at the last `run`/`unburn`/`origin`
-/// line for that id), so the sweep is bounded by reads per run rather
-/// than journal lines. With `--deep`, each journal's own chain is walked
-/// too (slower; the path the `<id> --verify` call takes, for every run).
+/// `cig runs --verify` with no id (#149, #177): a quick check across the
+/// whole history. The fast path reads each journal's **last line only**
+/// (`journal::tail_head`), computes its chain head, and compares it with
+/// the record's `journal_head` and the ledger's head for that run. A cut
+/// journal is caught (its tail head does not fit either), a replaced one
+/// is caught, a record rewritten after the fact is caught, and a stale
+/// cached view is caught. No full journal is opened by the fast path.
+///
+/// A missing, empty or unreadable ledger, with runs that recorded heads,
+/// is a problem (not a silent `ok`): the ledger is what names a journal
+/// whose record was made to agree with it. The fast path then falls
+/// back to a deep walk, so the chains are still checked by their own
+/// `prev` links, and exits non-zero.
+///
+/// With `--deep` the chain of each journal is also walked (slower; the
+/// path the `<id> --verify` call takes, for every run).
 fn verify_all(ctx: &Ctx, all: &[RunRecord], deep: bool) -> i32 {
+    let ledger_presence = crate::burn::ledger::presence();
     let ledger = crate::burn::ledger::load().ok();
+    // Each run's last record and whether the ledger let it go, found in
+    // one pass, so the check costs the ledger's length and not runs ×
+    // ledger at ten thousand runs.
+    let mut last_rec: std::collections::HashMap<&str, &crate::burn::ledger::Line> =
+        std::collections::HashMap::new();
+    let mut let_go: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    if let Some(l) = ledger.as_ref() {
+        let mut decided: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for line in l.lines.iter().rev() {
+            if decided.insert(line.run.as_str())
+                && (line.kind == "pruned" || line.kind == "forgotten")
+            {
+                let_go.insert(line.run.as_str());
+            }
+            if (line.kind == "run" || line.kind == "unburn" || line.kind == "origin")
+                && !last_rec.contains_key(line.run.as_str())
+            {
+                last_rec.insert(line.run.as_str(), line);
+            }
+        }
+    }
     let mut checked = 0usize;
     let mut problems: Vec<String> = Vec::new();
+    // The ledger is required when any run recorded a head: without it,
+    // the one thing that can catch a journal cut short on the fast
+    // path is the ledger's own record of where each chain ended.
+    // Runs from before the ledger (1.17.0) have heads and no ledger
+    // lines, so a history of only those has nothing to check against.
+    let any_head = all
+        .iter()
+        .any(|r| r.journal_head.is_some() && records_the_ledger(&r.version));
+    let ledger_gone = matches!(
+        ledger_presence,
+        crate::burn::ledger::Presence::Missing | crate::burn::ledger::Presence::Empty
+    );
+    let mut forced_deep = deep;
+    if any_head && ledger_gone {
+        let where_ = crate::burn::ledger::path();
+        problems.push(format!(
+            "the ledger is gone ({}): heads cannot be checked against it. Every run's chain was walked instead.",
+            crate::crash::tilde(&where_)
+        ));
+        forced_deep = true;
+    }
     for r in all {
         checked += 1;
-        if deep {
+        if forced_deep {
             // Walk the journal and compare it with the record, as the
             // `<id> --verify` path does. Reads the journal: slow at ten
-            // thousand runs, which is why `--deep` is opt-in.
+            // thousand runs, which is why `--deep` is opt-in — a missing
+            // ledger falls back here so the chains are still checked.
             let Ok(j) = Journal::load(&r.dir()) else {
                 problems.push(format!("{}: the journal cannot be read", r.id));
                 continue;
@@ -152,37 +206,124 @@ fn verify_all(ctx: &Ctx, all: &[RunRecord], deep: bool) -> i32 {
                     v.verdict.unwrap_or_else(|| "not verified".to_string())
                 ));
             }
-        } else {
-            // Heads only: the ledger's record of what this run's journal
-            // ended at, against the record's `journal_head`. No journal
-            // is opened.
-            let ledger_head = ledger
-                .as_ref()
-                .and_then(|l| crate::burn::ledger::last_record_of(l, &r.id))
-                .map(|line| line.head.clone());
-            match (&r.journal_head, ledger_head) {
-                (Some(rh), Some(lh)) if *rh != lh => {
+            continue;
+        }
+        // Heads only, with the journal tail for honesty (#177): the
+        // last line's chain hash is the one the record saved when the
+        // run ended, so a comparison that leaves it out will not catch
+        // a journal cut short.
+        let ledger_line = last_rec.get(r.id.as_str()).copied();
+        let ledger_head = ledger_line.map(|line| line.head.clone());
+        let tail = crate::burn::journal::tail_head(&r.dir())
+            .ok()
+            .unwrap_or(crate::burn::journal::TailHead::NoChain);
+        let tail_h: Option<&str> = match &tail {
+            crate::burn::journal::TailHead::Head(h) => Some(h.as_str()),
+            // These do not give a head to compare with on the fast
+            // path; the deep walk is the one that can judge them.
+            _ => None,
+        };
+        let rec_h = r.journal_head.as_deref();
+        let led_h = ledger_head.as_deref();
+        match (&tail, tail_h, rec_h, led_h) {
+            // Journal missing, but the record says there was one.
+            (crate::burn::journal::TailHead::Missing, _, Some(_), _) => {
+                problems.push(format!(
+                    "{}: the journal is gone, but the record has a chain head for it",
+                    r.id
+                ));
+            }
+            // The journal is empty (zero bytes, or only the header on
+            // disk) yet the record carries a head: the lines the record
+            // was made against are gone. This is the #112 case: a
+            // journal cut back below its body lines (#177).
+            (crate::burn::journal::TailHead::Empty, _, Some(_), _) => {
+                problems.push(format!(
+                    "{}: the journal is cut back to its header, but the record carries a chain head for lines beyond it",
+                    r.id
+                ));
+            }
+            // The whole triple agrees, or there is nothing to judge (a
+            // run that burned nothing, format 1, another key).
+            (_, Some(t), Some(rh), Some(lh)) if t == rh && rh == lh => {}
+            (_, _, None, None) => {}
+            // All three disagree somewhere. Name every one that does.
+            (_, _, _, _) => {
+                let mut said = false;
+                if let (Some(t), Some(lh)) = (tail_h, led_h) {
+                    if t != lh {
+                        problems.push(format!(
+                            "{}: the journal's last line does not fit the ledger's head for this run (cut short, or replaced)",
+                            r.id
+                        ));
+                        said = true;
+                    }
+                }
+                if let (Some(rh), Some(lh)) = (rec_h, led_h) {
+                    if rh != lh {
+                        problems.push(format!(
+                            "{}: the record's chain head is not the ledger's head for this run (the record was rewritten)",
+                            r.id
+                        ));
+                        said = true;
+                    }
+                }
+                if let (Some(t), Some(rh)) = (tail_h, rec_h) {
+                    if t != rh {
+                        problems.push(format!(
+                            "{}: the journal's last line is not the chain head the record saved (the cached view is stale, or the journal was changed since)",
+                            r.id
+                        ));
+                        said = true;
+                    }
+                }
+                // A head with no ledger line: the ledger has no record
+                // of this run. Exception: runs from before the ledger
+                // (1.17.0), which have no line because nothing wrote one.
+                if !said && rec_h.is_some() && led_h.is_none() && !ledger_gone {
+                    if !records_the_ledger(&r.version) {
+                        // A pre-1.17.0 run: the ledger was not written
+                        // yet when this run ended, so a missing line is
+                        // expected. Not a problem.
+                    } else if ledger.is_some() {
+                        if let_go.contains(r.id.as_str()) {
+                            // Pruned or forgotten: the ledger said so
+                            // on purpose; `cig runs --pruned` lists it.
+                        } else {
+                            problems.push(format!(
+                                "{}: the ledger has no record of this run (hand-added, or its line was removed)",
+                                r.id
+                            ));
+                        }
+                    }
+                }
+                // A head the record should have carried but does not,
+                // while the tail-read says the chain is intact: the
+                // record was not saved, or it was reset to no head.
+                if !said && tail_h.is_some() && rec_h.is_none() && r.finished.is_some() {
                     problems.push(format!(
-                        "{}: the record's chain head is not the ledger's head for this run (it was cut short, or an older copy stood in for it)",
+                        "{}: the record carries no chain head but the journal does (the record was reset)",
                         r.id
                     ));
                 }
-                (None, Some(lh)) if !lh.is_empty() => {
-                    problems.push(format!(
-                        "{}: the ledger has a head for this run but the record has none",
-                        r.id
-                    ));
-                }
-                _ => {}
             }
         }
     }
+    let summary_tail = if forced_deep {
+        if deep {
+            "chains walked"
+        } else {
+            "chains walked, since the ledger is gone"
+        }
+    } else {
+        "heads checked against the ledger and each journal's last line"
+    };
     if ctx.json {
         outln!(
             "{}",
             serde_json::json!({
                 "checked": checked,
-                "deep": deep,
+                "deep": forced_deep,
                 "problems": problems,
                 "ok": problems.is_empty(),
             })
@@ -197,16 +338,12 @@ fn verify_all(ctx: &Ctx, all: &[RunRecord], deep: bool) -> i32 {
             },
             checked,
             if checked == 1 { "" } else { "s" },
-            if deep {
-                "chains walked"
-            } else {
-                "heads checked against the ledger"
-            }
+            summary_tail
         );
         for p in &problems {
             outln!("  {}", ctx.red(p));
         }
-        if !deep {
+        if !forced_deep {
             outln!("  --deep walks each journal's chain (slower).");
         }
     }
@@ -215,6 +352,23 @@ fn verify_all(ctx: &Ctx, all: &[RunRecord], deep: bool) -> i32 {
     } else {
         exit::SCRIPT_ERROR
     }
+}
+
+/// Does this version write ledger lines? The ledger was added in 1.17.0:
+/// before it, a run that ended wrote no `run`/`unburn` line, so a run
+/// with a recorded head and no ledger line is not missing from the
+/// ledger — the ledger did not exist yet. Later runs do, and are flagged.
+fn records_the_ledger(version: &str) -> bool {
+    let mut parts = version
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|p| !p.is_empty())
+        .map(|p| p.parse::<u64>().unwrap_or(0));
+    let v = (
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0),
+    );
+    v >= (1, 17, 0)
 }
 
 fn show(ctx: &Ctx, id: &str, all: &[RunRecord], verify: bool) -> i32 {
@@ -483,6 +637,17 @@ fn note_missing_runs(ctx: &Ctx, all: &[RunRecord]) {
     let Ok(ledger) = crate::burn::ledger::load() else {
         return;
     };
+    // One pass each way, so the note costs the ledger's length, not its
+    // square (#178): the runs here, and the runs whose last ledger line
+    // lets them go (pruned or forgotten), as `is_let_go` reads it.
+    let live: std::collections::HashSet<&str> = all.iter().map(|r| r.id.as_str()).collect();
+    let mut last_seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut let_go: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for l in ledger.lines.iter().rev() {
+        if last_seen.insert(l.run.as_str()) && (l.kind == "pruned" || l.kind == "forgotten") {
+            let_go.insert(l.run.as_str());
+        }
+    }
     let mut seen = std::collections::BTreeSet::new();
     let mut missing: Vec<String> = Vec::new();
     // Only this tin's lines: another state directory beside the same key
@@ -494,7 +659,7 @@ fn note_missing_runs(ctx: &Ctx, all: &[RunRecord]) {
         if !seen.insert(l.run.clone()) {
             continue;
         }
-        if all.iter().any(|r| r.id == l.run) || crate::burn::ledger::is_let_go(&ledger, &l.run) {
+        if live.contains(l.run.as_str()) || let_go.contains(l.run.as_str()) {
             continue;
         }
         missing.push(l.run.clone());
@@ -1032,6 +1197,12 @@ pub fn retained_out(
 
 /// After a run: `keep_runs` and `keep_days`, applied as `cig runs --prune`
 /// prunes. Nothing is read when both are 0.
+///
+/// (#178) When `keep_days` is off, the live count is read cheaply from
+/// the index first; if it does not exceed `keep_runs`, `list()` is not
+/// called at all. Pruning the retained-out set still walks the records,
+/// but only when there is work to do, and the index is compacted once
+/// at the end of a prune batch instead of one `rm` line per run.
 pub fn keep_by_config() {
     let cfg = crate::config::Config::load();
     let keep_runs: usize = cfg.get("keep_runs").trim().parse().unwrap_or(0);
@@ -1039,11 +1210,28 @@ pub fn keep_by_config() {
     if keep_runs == 0 && keep_days == 0 {
         return;
     }
+    // The cheap path (#178): with keep_days off, the index already
+    // knows how many runs are live. No list walk, no stat, no record
+    // re-read. keep_days needs a per-run started comparison, so the
+    // slow path is kept when it is set.
+    if keep_days == 0 && keep_runs > 0 {
+        if let Some(live) = crate::burn::runs_index::live_count() {
+            if live <= keep_runs {
+                return;
+            }
+        }
+    }
     let Ok(all) = runs::list() else {
         return;
     };
+    let mut pruned = 0usize;
     for i in retained_out(&all, keep_runs, keep_days, chrono::Utc::now()) {
-        remove_run(&all[i], "pruned");
+        if remove_run(&all[i], "pruned") {
+            pruned += 1;
+        }
+    }
+    if pruned > 0 {
+        let _ = crate::burn::runs_index::compact();
     }
 }
 
@@ -1181,6 +1369,9 @@ pub fn budget_by_config() {
     if pruned > 0 || dead > 0 {
         crate::burn::tin::gc(false);
     }
+    if pruned > 0 {
+        let _ = crate::burn::runs_index::compact();
+    }
 }
 
 fn prune_runs(ctx: &Ctx, keep: usize) -> i32 {
@@ -1227,6 +1418,10 @@ fn prune_runs(ctx: &Ctx, keep: usize) -> i32 {
     // The budget runs here too (#149), in case a manual --prune left more
     // than it allows: ignored when off, which is the default.
     budget_by_config();
+    // One compaction for the whole batch (#178) instead of N rm lines.
+    if removed > 0 {
+        let _ = crate::burn::runs_index::compact();
+    }
     exit::OK
 }
 
@@ -1347,6 +1542,32 @@ pub fn pruned(ctx: &Ctx) -> i32 {
         outln!("{:<24} {:<26} {:<10} {}", l.run, l.t, how(l), was(&l.run));
     }
     exit::OK
+}
+
+/// `cig runs --reindex` (#178): rebuild the run index from the run
+/// folders. `cig runs` rebuilds the index on its own when a stat
+/// mismatches or the file is torn; this is the manual path for an
+/// index that has grown far past its live view (`cig doctor` flags
+/// that), or after a hand-edit of `runs-index.jsonl`.
+pub fn reindex(ctx: &Ctx) -> i32 {
+    match crate::burn::runs_index::rebuild_from_folders() {
+        Ok(n) => {
+            if ctx.json {
+                outln!("{}", serde_json::json!({ "reindexed": true, "live": n }));
+            } else {
+                eprintln!(
+                    "{} the run index now holds {n} live run{}",
+                    ctx.green("ok:"),
+                    if n == 1 { "" } else { "s" }
+                );
+            }
+            exit::OK
+        }
+        Err(e) => {
+            eprintln!("{} could not rebuild the run index: {e}", ctx.red("error:"));
+            exit::SCRIPT_ERROR
+        }
+    }
 }
 
 // ----- a stretch of history (#149) -------------------------------------------------
