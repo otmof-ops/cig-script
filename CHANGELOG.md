@@ -3,9 +3,12 @@
 All notable changes to CigScript. The format follows Keep a Changelog; the
 project follows semantic versioning.
 
-## Unreleased
+## 1.20.0 — 2026-11-09
 
-Passes: one primitive for every "already checked" in the family (#186).
+Passes: one primitive for every "already checked" in the family, and the
+first things that use it: a trial that remembers, parcels that say who
+made them, a doctor that asks the kernel once; and a ledger whose appends
+take turns (#186).
 
 - **`pass`: checked once, trusted exactly as long as it is true** (#186). A
   pass is a small authenticated record of what was checked, every input
@@ -40,6 +43,21 @@ Passes: one primitive for every "already checked" in the family (#186).
   - The verifier lives in its own crate, `crates/cig-pass`, beside a
     threat model, with property tests and fuzz targets (run in CI).
   - Docs: `docs/PASS.md`. Errors: E730 to E739, E809.
+- **The trial remembers** (#186). A trial's verdict is kept as a `trial`
+  pass over what this cig's dry run read, the script and the proved
+  cig's binary; the same script, arguments and versions with none of
+  that changed is a lookup, with no dry run on either version.
+- **Parcels carry a pass** (#186). `cig parcel` writes `<parcel>.pass`
+  beside it, a sealed shareable pass over the run and the manifest's
+  digest; `cig unparcel` says who made the parcel, and `--require-pass`
+  refuses one without a pass that holds here. New config keys:
+  `pass_allowed_signers`, `pass_budget`.
+- **Doctor asks the kernel once a day** (#186). The box check makes
+  namespaces to see what the kernel allows; its answer is now a `doctor`
+  pass over the kernel's release, the boot and its namespace settings,
+  held for a day at most.
+- **CI carries passes between jobs** (#186): one job checks the examples
+  under passes and exports them, the next verifies them against its key.
 - **The ledger takes a lock for every append.** Two runs appending at once
   could chain onto the same head and fork it, after which `cig runs
   --verify` called the ledger broken. Appends now take turns.
