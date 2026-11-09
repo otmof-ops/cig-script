@@ -56,7 +56,7 @@ inputs, would see what it saw.
 | resurrect a revoked pass by deleting the cache | the cache is folded from the ledger; a missing cache is rebuilt, never reset |
 | delete the ledger and the cache together | every local pass carries the ledger's length when it was made; a shorter ledger refuses it |
 | put back an older cache | the cache is pinned to the ledger's length and last line; a mismatch refuses every pass (E739) |
-| stale "yes" after an input changed | every input re-identified: stat identity for a local pass's calm files, the content hash otherwise (racy files, shareable passes, network and FUSE file systems, Windows) |
+| stale "yes" after an input changed | every input re-identified: stat identity for a local pass's calm files, the content hash otherwise (racy files, shareable passes, network and FUSE file systems, pseudo file systems such as `/proc` and `/sys` whose times do not move when their contents do, Windows) |
 | a same-tick edit with the times put back | the racy flag (mtime or ctime within two seconds of the read), hashed at every verify |
 | a value the work saw but did not record | the recorder sits in every read builtin; an unclassified builtin is open-world; outer variables are refused; a global is recorded by a digest of its value; a hop needs `reads` and gets a fixed, recorded environment |
 | a pass made from a dry run's simulated world | a dry run issues nothing |
@@ -101,7 +101,7 @@ inputs, would see what it saw.
 5. The state cache: folded from the ledger, pinned to it, named by its key.
 6. Key derivation: labels distinct and versioned; the epoch in the info.
 7. The identity shortcut: local passes only, the racy flag, the file-system
-   check.
+   check (network, FUSE and pseudo file systems always hashed).
 8. Any compare of a tag, key or digest that decides: constant time.
 9. Any parse of outside bytes (tokens, store records, segments, allowed
    signers): lengths checked before allocation, never a panic, the fuzz

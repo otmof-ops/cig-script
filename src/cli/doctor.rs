@@ -562,8 +562,9 @@ fn path_line(dir: &Path) -> Option<(PathBuf, String)> {
 /// that unshares it and execs `true`; overlayfs is the box's own check.
 /// `box_primitives`, remembered as a doctor pass (cig-script#186): the
 /// probe makes namespaces, so its answer is kept while the kernel, its
-/// namespace settings, the boot and this cig stay the same, for a day at
-/// most.
+/// namespace settings, its file systems and mounts, the boot, the
+/// variables the probe reads and this cig stay the same, for a day at
+/// most. Only on a machine that already has a key: doctor never makes one.
 fn box_primitives_remembered() -> Vec<(&'static str, bool, String)> {
     const NAMES: &[&str] = &[
         "user ns",
@@ -577,20 +578,32 @@ fn box_primitives_remembered() -> Vec<(&'static str, bool, String)> {
         "/proc/sys/kernel/osrelease",
         "/proc/sys/kernel/random/boot_id",
         "/proc/sys/kernel/apparmor_restrict_unprivileged_userns",
+        "/proc/sys/kernel/apparmor_restrict_unprivileged_unconfined",
         "/proc/sys/kernel/unprivileged_userns_clone",
         "/proc/sys/user/max_user_namespaces",
+        "/proc/sys/user/max_mnt_namespaces",
         "/proc/sys/user/max_net_namespaces",
+        "/proc/sys/user/max_pid_namespaces",
+        "/proc/filesystems",
+        "/proc/self/mountinfo",
+        "/sys/module/overlay",
     ]
     .iter()
     .map(std::path::Path::new)
     .collect();
-    let answer: Vec<(String, bool, String)> =
-        crate::pass::remembered("doctor", b"box-primitives", &files, 24 * 3_600_000, || {
+    let answer: Vec<(String, bool, String)> = crate::pass::remembered(
+        "doctor",
+        b"box-primitives",
+        &files,
+        &["CIG_INTERNAL_NO_BOX", "CIGSCRIPT_HOME", "HOME"],
+        24 * 3_600_000,
+        || {
             box_primitives()
                 .into_iter()
                 .map(|(n, ok, says)| (n.to_string(), ok, says))
                 .collect()
-        });
+        },
+    );
     answer
         .into_iter()
         .filter_map(|(n, ok, says)| NAMES.iter().find(|k| **k == n).map(|k| (*k, ok, says)))

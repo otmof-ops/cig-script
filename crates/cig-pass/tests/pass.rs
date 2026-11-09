@@ -1299,6 +1299,39 @@ fn a_pass_is_never_bigger_than_the_limits() {
     assert!(attenuate(&p, Caveat::Max(1)).is_err(), "at most 64 caveats");
 }
 
+/// A file on a pseudo file system is hashed at every check: writing a
+/// sysctl leaves its file's times as they were, so its identity says
+/// nothing. An ordinary file is not.
+#[cfg(target_os = "linux")]
+#[test]
+fn files_under_proc_and_sys_are_always_hashed() {
+    assert!(cig_pass::always_hash(Path::new("/proc/self/status")));
+    assert!(cig_pass::always_hash(Path::new(
+        "/proc/sys/kernel/osrelease"
+    )));
+    if Path::new("/sys/kernel").exists() {
+        assert!(cig_pass::always_hash(Path::new("/sys/kernel")));
+    }
+    let d = tmp();
+    let f = d.path().join("plain");
+    fs::write(&f, "x").unwrap();
+    let on_network = {
+        // A temporary folder on NFS or FUSE is hashed too; only assert the
+        // ordinary case where the folder is an ordinary one.
+        let mounts = fs::read_to_string("/proc/self/mounts").unwrap_or_default();
+        mounts.lines().any(|l| {
+            let mut w = l.split_whitespace();
+            let (_, at, ty) = (w.next(), w.next().unwrap_or(""), w.next().unwrap_or(""));
+            (ty.starts_with("nfs") || ty.starts_with("fuse") || ty == "9p")
+                && d.path().starts_with(at)
+                && at != "/"
+        })
+    };
+    if !on_network {
+        assert!(!cig_pass::always_hash(&f));
+    }
+}
+
 // Some helpers' imports are used only on one system.
 #[allow(dead_code)]
 fn _unused(_: PathBuf, _: Input) {}

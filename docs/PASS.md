@@ -107,7 +107,9 @@ version.
 
 **A file that changed as it was read** (written within two seconds of the
 read) is always hashed when the pass is checked, whatever its size and times
-say.
+say. So is every file on a network or FUSE file system, whose times can be
+cached, and every file under `/proc`, `/sys` and their kin, whose times do
+not move when a setting is written.
 
 **Hops.** A program the work runs cannot be seen into, so it must say what
 it reads: `proc.run(cmd, args, {reads: ["package.json", "src"]})`, inside a
