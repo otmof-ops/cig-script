@@ -80,6 +80,37 @@ pub fn doctor(ctx: &Ctx, fix: bool) -> i32 {
             keys.display()
         ));
     }
+    // StrictModes: owner and mode of the keys folder and the files in
+    // it must be ours and private; a planted folder (another user, a
+    // 0777 mode) is named here so the operator sees it before a run
+    // refuses with E721 (#176).
+    #[cfg(unix)]
+    if std::fs::symlink_metadata(&keys).is_ok() {
+        if let Err(e) = crate::burn::seal::check_keys_dir(&keys) {
+            problems.push(e);
+        }
+    }
+    #[cfg(unix)]
+    {
+        // The key file is checked only where the key is read from it: a
+        // leftover beside a keyring key is not this machine's problem.
+        if crate::burn::seal::peek_keeper() == Some(crate::burn::seal::Keeper::File) {
+            if let Err(e) =
+                crate::burn::seal::check_private_key_file(&crate::burn::seal::key_path())
+            {
+                problems.push(e);
+            }
+        }
+        // The ledger and the lock hold no secret: one that is ours and too
+        // open is made 0600 by the next run, so doctor says only what the
+        // run would refuse (another owner, a link, not a file). Doctor
+        // changes nothing.
+        for name in ["ledger.jsonl", "rekey.lock"] {
+            if let Some(e) = crate::burn::seal::state_file_problem(&keys.join(name)) {
+                problems.push(e);
+            }
+        }
+    }
     if let Err(e) = &writable {
         problems.push(format!(
             "state directory {} is not writable: {e}",
@@ -278,6 +309,15 @@ pub fn doctor(ctx: &Ctx, fix: bool) -> i32 {
             ),
         };
         outln!("    key           {keeper}  {}", ctx.dim(&where_));
+        // Where the key folder is, who owns it and its mode (#176).
+        // Looked at, never made: doctor still creates no files.
+        let keys_dir = seal::keys_dir();
+        let keys_line = keys_dir_line(&keys_dir);
+        outln!(
+            "    key folder    {}  {}",
+            keys_line.state,
+            ctx.dim(&keys_line.detail)
+        );
         outln!(
             "    key out of tin {}  {}",
             yes_no(ctx, !seal::key_path().starts_with(tin::dir())),
@@ -642,6 +682,57 @@ fn yes_no(ctx: &Ctx, v: bool) -> String {
         ctx.green("yes")
     } else {
         ctx.yellow("no")
+    }
+}
+
+/// One line of doctor output for the keys folder (#176): does it exist,
+/// who owns it, what mode is it in, and if a strict-mode check would
+/// refuse it, say which. Looked at only; doctor never creates the folder.
+struct KeysDirLine {
+    state: String,
+    detail: String,
+}
+
+fn keys_dir_line(dir: &Path) -> KeysDirLine {
+    let shown = crate::crash::tilde(dir);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        match std::fs::symlink_metadata(dir) {
+            Ok(m) => {
+                let euid = unsafe { libc::geteuid() };
+                let mode = m.mode() & 0o7777;
+                let owned = m.uid() == euid;
+                let private = (mode & 0o022) == 0;
+                let state = if owned && private && m.file_type().is_dir() {
+                    "private".to_string()
+                } else if !m.file_type().is_dir() {
+                    "not-a-dir".to_string()
+                } else if !owned {
+                    "not yours".to_string()
+                } else {
+                    "open".to_string()
+                };
+                KeysDirLine {
+                    state,
+                    detail: format!("{shown}  owner uid {}, mode {:04o}", m.uid(), mode,),
+                }
+            }
+            Err(_) => KeysDirLine {
+                state: "not made yet".to_string(),
+                detail: format!("{shown}  made on the first sealed object"),
+            },
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let detail = shown;
+        let state = if std::fs::symlink_metadata(dir).is_ok() {
+            "present".to_string()
+        } else {
+            "not made yet".to_string()
+        };
+        KeysDirLine { state, detail }
     }
 }
 

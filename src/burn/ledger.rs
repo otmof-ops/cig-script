@@ -149,6 +149,10 @@ pub fn load() -> Result<Loaded, String> {
     // `seal::hold_shared_rekey_lock`), so a verify-only call pays the
     // same cost once and the `key()` later calls skip it.
     super::seal::hold_shared_rekey_lock()?;
+    // StrictModes: the ledger file must be ours, a regular file, not
+    // group- or world-readable or writable (#176). A missing file is
+    // the fresh-ledger path below.
+    super::seal::check_private_state_file(&path())?;
     let text = match fs::read_to_string(path()) {
         Ok(t) => t,
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
@@ -361,14 +365,11 @@ pub fn append(kind: &str, run: &str, head: &str, status: &str, lines: u64) -> Re
     let text = serde_json::to_string(&v).map_err(|e| e.to_string())?;
     debug_assert_eq!(body_of(&text), body, "the MAC must cover exactly the body");
     let p = path();
-    if let Some(parent) = p.parent() {
-        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(parent, fs::Permissions::from_mode(0o700));
-        }
-    }
+    // Make or verify the keys folder private (#176). The folder exists
+    // already once `load()` has run above, but keep this guard here too
+    // so a later refactor cannot sneak in a wider mode.
+    let _ = super::seal::ensure_keys_dir()?;
+    super::seal::check_private_state_file(&p)?;
     let mut opts = fs::OpenOptions::new();
     opts.create(true).append(true);
     #[cfg(unix)]

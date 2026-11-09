@@ -24,6 +24,19 @@ use std::path::Path;
 /// otherwise be read forever.
 const MAX_SCRIPT_BYTES: u64 = 64 * 1024 * 1024;
 
+/// Print a lock-or-strict-mode error: when the message was tagged by the
+/// strict-mode check (`E721`), emit under that code with a pointer to
+/// `cig explain E721`; otherwise emit under `E802` as before.
+pub(crate) fn emit_lock_or_strict_error(ctx: &Ctx, e: &str) {
+    if let Some(rest) = e.strip_prefix("E721 burn: ") {
+        eprintln!("{} {rest}", ctx.red("error[E721 burn]:"));
+        eprintln!("  = explain: cig explain E721");
+    } else {
+        eprintln!("{} {e}", ctx.red("error[E802 usage]:"));
+        eprintln!("  = explain: cig explain E802");
+    }
+}
+
 fn read_capped(file: &Path) -> std::io::Result<String> {
     use std::io::Read;
     let mut buf = Vec::new();
@@ -385,8 +398,7 @@ fn run_source_inner(
     // its record (#105).
     if !args.dry_run {
         if let Err(e) = crate::burn::seal::hold_shared_rekey_lock() {
-            eprintln!("{} {e}", ctx.red("error[E802 usage]:"));
-            eprintln!("  = explain: cig explain E802");
+            emit_lock_or_strict_error(ctx, &e);
             return exit::SCRIPT_ERROR;
         }
     }
