@@ -914,7 +914,9 @@ pub fn issue_artifact_pass(
 /// machine's own, or from a signer trusted here for `kind`: the configured
 /// allowed signers, or `allowed_signers` when given), and its result says
 /// each `(field, value, else)` of `expect`, `else` being the reason when it
-/// does not. The signer is returned for the message.
+/// does not. The signer is returned for the message. Checking makes no
+/// key: on a machine without one, no pass was made or revoked here, so the
+/// pass is checked against the trusted signers alone.
 pub fn check_artifact_pass(
     pass: &Pass,
     kind: &str,
@@ -927,13 +929,28 @@ pub fn check_artifact_pass(
             cig_pass::clean(&pass.kind)
         ));
     }
-    let keys = Keys::load()?;
-    let marks = state(&keys)?;
-    let mut ctx = CigCtx::new(&keys, &marks, None);
-    if let Some(path) = allowed_signers {
-        ctx.signers = read_signers(path);
-    }
-    cig_pass::verify(pass, &ctx).map_err(|w| w.to_string())?;
+    let signers = read_signers(allowed_signers.unwrap_or(&allowed_signers_path()));
+    let own = match open_existing() {
+        Some((keys, marks)) => {
+            let mut ctx = CigCtx::new(&keys, &marks, None);
+            ctx.signers = signers.clone();
+            cig_pass::verify(pass, &ctx).map_err(|w| w.to_string())?;
+            Some(keys.public())
+        }
+        None => {
+            let mut ctx = cig_pass::MemCtx::default();
+            for s in &signers {
+                ctx.signers
+                    .entry(s.key)
+                    .or_default()
+                    .extend(s.kinds.iter().filter(|k| *k != "*").cloned());
+            }
+            ctx.authorities = authorities().into_iter().collect();
+            ctx.cig = (crate::VERSION.to_string(), BUILD.to_string());
+            cig_pass::verify(pass, &ctx).map_err(|w| w.to_string())?;
+            None
+        }
+    };
     let said: serde_json::Value =
         serde_json::from_slice(&pass.result).map_err(|_| "its result does not read".to_string())?;
     for (field, value, otherwise) in expect {
@@ -942,9 +959,8 @@ pub fn check_artifact_pass(
         }
     }
     let signer = match pass.issuer {
-        cig_pass::Issuer::Ed25519(pk) if pk == keys.public() => "this machine".to_string(),
-        cig_pass::Issuer::Ed25519(pk) => ctx
-            .signers
+        cig_pass::Issuer::Ed25519(pk) if Some(pk) == own => "this machine".to_string(),
+        cig_pass::Issuer::Ed25519(pk) => signers
             .iter()
             .find(|s| s.key == pk)
             .map(|s| cig_pass::clean(&s.principals))
@@ -1055,6 +1071,28 @@ where
 mod tests {
     use super::*;
 
+    /// One process keeps one key (`seal::key` caches it), so a test that
+    /// moves `CIGSCRIPT_HOME` gets the key an earlier test loaded, with no
+    /// file in its own keys folder. Put that key's file there, as the first
+    /// load in a fresh process would have, so `open_existing` finds it.
+    fn key_here() {
+        seal::ensure_keys_dir().unwrap();
+        let (k, _) = seal::key().unwrap();
+        let path = seal::key_path();
+        if !path.exists() {
+            let mut opts = std::fs::OpenOptions::new();
+            opts.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                opts.mode(0o600);
+            }
+            use std::io::Write;
+            let mut f = opts.open(&path).unwrap();
+            writeln!(f, "{}", hex::encode(k.as_bytes())).unwrap();
+        }
+    }
+
     /// An artifact pass (a program's, a parcel's) names who made what, and
     /// a checker that is handed another artifact, or expects another kind,
     /// is told so.
@@ -1072,6 +1110,7 @@ mod tests {
             &serde_json::json!({"program_sha256": "abc123", "target": "x86_64-unknown-linux-gnu"}),
         )
         .unwrap();
+        key_here();
         let back = Pass::from_token(&made.token()).unwrap();
         let why = "it is about another program";
         assert_eq!(
@@ -1106,6 +1145,59 @@ mod tests {
             Some(&signers)
         )
         .is_ok());
+        // Another machine, with no key of its own yet: the pass holds only
+        // when its allowed signers trust this machine for programs, and
+        // checking it makes no key there.
+        let made_by = Keys::load().unwrap().public();
+        let there = tmp.path().join("there");
+        std::fs::create_dir_all(&there).unwrap();
+        std::env::set_var("CIGSCRIPT_HOME", there.join("home"));
+        let trusted = there.join("signers");
+        std::fs::write(
+            &trusted,
+            cig_pass::ssh::allowed_signers_line("builder@ci", &made_by, &["program"]) + "\n",
+        )
+        .unwrap();
+        let for_parcels = there.join("parcel-signers");
+        std::fs::write(
+            &for_parcels,
+            cig_pass::ssh::allowed_signers_line("builder@ci", &made_by, &["parcel"]) + "\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        for f in [&trusted, &for_parcels] {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(f, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        assert_eq!(
+            check_artifact_pass(
+                &back,
+                "program",
+                &[("program_sha256", "abc123", why)],
+                Some(&trusted)
+            )
+            .unwrap(),
+            "builder@ci"
+        );
+        assert!(check_artifact_pass(
+            &back,
+            "program",
+            &[("program_sha256", "abc123", why)],
+            Some(&for_parcels)
+        )
+        .is_err());
+        assert!(check_artifact_pass(
+            &back,
+            "program",
+            &[("program_sha256", "abc123", why)],
+            Some(&signers)
+        )
+        .is_err());
+        assert!(
+            !seal::keys_dir().exists(),
+            "checking a pass made a key folder at {}",
+            seal::keys_dir().display()
+        );
         match old_home {
             Some(v) => std::env::set_var("CIGSCRIPT_HOME", v),
             None => std::env::remove_var("CIGSCRIPT_HOME"),
@@ -1150,8 +1242,7 @@ mod tests {
             "remembering made the keys folder"
         );
         // With the key and the folder here, the answer is remembered.
-        seal::ensure_keys_dir().unwrap();
-        Keys::load().unwrap();
+        key_here();
         let a = ask();
         let b = ask();
         assert_eq!(a, b);
