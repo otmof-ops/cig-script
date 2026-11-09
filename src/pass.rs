@@ -872,24 +872,35 @@ fn feed(h: &mut blake3::Hasher, v: &crate::value::Value, depth: usize) -> Option
     Some(())
 }
 
-// ----- parcels -----------------------------------------------------------------------
+// ----- artifacts: what one machine made, carried to another -------------------------
 
-/// The pass a parcel carries beside it (`<parcel>.pass`): a sealed,
-/// shareable `parcel` pass from this machine over the run's id and the
-/// digest of the parcel's manifest. Another machine that trusts this one
-/// for parcels knows who made it, and that nothing in it changed.
-pub fn issue_parcel_pass(run: &str, manifest_sha256: &str) -> Result<Pass, String> {
+/// A sealed, shareable pass from this machine about an artifact it made (a
+/// parcel, a program), carried beside it as `<file>.pass`. It records no
+/// path, so it reads the same on any machine: `subject` names the artifact
+/// and `result` carries the digests a checker compares with the artifact
+/// in hand. Another machine that trusts this one for `kind` knows who made
+/// it, and that it is what was made.
+pub fn issue_artifact_pass(
+    kind: &str,
+    subject: &[u8],
+    result: &serde_json::Value,
+) -> Result<Pass, String> {
+    match cig_pass::policy::policy(kind) {
+        Some(k) if k.shareable && k.foreign && !k.authority => {}
+        _ => {
+            return Err(format!(
+                "a {kind} pass cannot be carried to another machine"
+            ))
+        }
+    }
     let keys = Keys::load()?;
     let marks = state(&keys)?;
-    let result =
-        serde_json::to_vec(&serde_json::json!({"manifest_sha256": manifest_sha256, "run": run}))
-            .map_err(|e| e.to_string())?;
     let draft = Draft {
-        kind: "parcel".to_string(),
-        subject: run.as_bytes().to_vec(),
+        kind: kind.to_string(),
+        subject: subject.to_vec(),
         inputs: Vec::new(),
-        result,
-        epoch: marks.epoch("parcel"),
+        result: serde_json::to_vec(result).map_err(|e| e.to_string())?,
+        epoch: marks.epoch(kind),
         ledger_seq: 0,
         issued_ms: cig_pass::wall_ms(),
         mono: cig_pass::mono_now(),
@@ -897,6 +908,60 @@ pub fn issue_parcel_pass(run: &str, manifest_sha256: &str) -> Result<Pass, Strin
     };
     let p = cig_pass::issue_shareable(&draft, &keys.signing_seed()).map_err(|e| e.to_string())?;
     cig_pass::seal(&p)
+}
+
+/// Check an artifact's pass: it is of `kind`, it holds here (this
+/// machine's own, or from a signer trusted here for `kind`: the configured
+/// allowed signers, or `allowed_signers` when given), and its result says
+/// each `(field, value, else)` of `expect`, `else` being the reason when it
+/// does not. The signer is returned for the message.
+pub fn check_artifact_pass(
+    pass: &Pass,
+    kind: &str,
+    expect: &[(&str, &str, &str)],
+    allowed_signers: Option<&Path>,
+) -> Result<String, String> {
+    if pass.kind != kind {
+        return Err(format!(
+            "it is a {} pass, not a {kind} pass",
+            cig_pass::clean(&pass.kind)
+        ));
+    }
+    let keys = Keys::load()?;
+    let marks = state(&keys)?;
+    let mut ctx = CigCtx::new(&keys, &marks, None);
+    if let Some(path) = allowed_signers {
+        ctx.signers = read_signers(path);
+    }
+    cig_pass::verify(pass, &ctx).map_err(|w| w.to_string())?;
+    let said: serde_json::Value =
+        serde_json::from_slice(&pass.result).map_err(|_| "its result does not read".to_string())?;
+    for (field, value, otherwise) in expect {
+        if said[*field].as_str() != Some(*value) {
+            return Err((*otherwise).to_string());
+        }
+    }
+    let signer = match pass.issuer {
+        cig_pass::Issuer::Ed25519(pk) if pk == keys.public() => "this machine".to_string(),
+        cig_pass::Issuer::Ed25519(pk) => ctx
+            .signers
+            .iter()
+            .find(|s| s.key == pk)
+            .map(|s| cig_pass::clean(&s.principals))
+            .unwrap_or_else(|| "a trusted signer".to_string()),
+        cig_pass::Issuer::Local(_) => "this machine".to_string(),
+    };
+    Ok(signer)
+}
+
+/// The pass a parcel carries beside it (`<parcel>.pass`): a `parcel`
+/// artifact pass over the run's id and the digest of the parcel's manifest.
+pub fn issue_parcel_pass(run: &str, manifest_sha256: &str) -> Result<Pass, String> {
+    issue_artifact_pass(
+        "parcel",
+        run.as_bytes(),
+        &serde_json::json!({"manifest_sha256": manifest_sha256, "run": run}),
+    )
 }
 
 /// Check a parcel's pass: it holds here (a trusted signer for parcels),
@@ -907,34 +972,15 @@ pub fn check_parcel_pass(
     run: Option<&str>,
     manifest_sha256: &str,
 ) -> Result<String, String> {
-    let keys = Keys::load()?;
-    let marks = state(&keys)?;
-    let ctx = CigCtx::new(&keys, &marks, None);
-    if pass.kind != "parcel" {
-        return Err(format!("it is a {} pass, not a parcel's", pass.kind));
-    }
-    cig_pass::verify(pass, &ctx).map_err(|w| w.to_string())?;
-    let said: serde_json::Value =
-        serde_json::from_slice(&pass.result).map_err(|_| "its result does not read".to_string())?;
-    if said["manifest_sha256"].as_str() != Some(manifest_sha256) {
-        return Err("it is about another parcel (the manifest's digest differs)".to_string());
-    }
+    let mut expect = vec![(
+        "manifest_sha256",
+        manifest_sha256,
+        "it is about another parcel (the manifest's digest differs)",
+    )];
     if let Some(r) = run {
-        if said["run"].as_str() != Some(r) {
-            return Err("it is about another run".to_string());
-        }
+        expect.push(("run", r, "it is about another run"));
     }
-    let signer = match pass.issuer {
-        cig_pass::Issuer::Ed25519(pk) if pk == keys.public() => "this machine".to_string(),
-        cig_pass::Issuer::Ed25519(pk) => ctx
-            .signers
-            .iter()
-            .find(|s| s.key == pk)
-            .map(|s| s.principals.clone())
-            .unwrap_or_else(|| "a trusted signer".to_string()),
-        cig_pass::Issuer::Local(_) => "this machine".to_string(),
-    };
-    Ok(signer)
+    check_artifact_pass(pass, "parcel", &expect, None)
 }
 
 // ----- remembered answers ------------------------------------------------------------
@@ -1008,6 +1054,67 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An artifact pass (a program's, a parcel's) names who made what, and
+    /// a checker that is handed another artifact, or expects another kind,
+    /// is told so.
+    #[test]
+    fn an_artifact_pass_says_who_made_what() {
+        let _g = crate::burn::test_env_lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let old_home = std::env::var_os("CIGSCRIPT_HOME");
+        let old_key = std::env::var_os("CIG_SEAL_KEY");
+        std::env::set_var("CIGSCRIPT_HOME", tmp.path().join("home"));
+        std::env::set_var("CIG_SEAL_KEY", "file");
+        let made = issue_artifact_pass(
+            "program",
+            b"abc123",
+            &serde_json::json!({"program_sha256": "abc123", "target": "x86_64-unknown-linux-gnu"}),
+        )
+        .unwrap();
+        let back = Pass::from_token(&made.token()).unwrap();
+        let why = "it is about another program";
+        assert_eq!(
+            check_artifact_pass(&back, "program", &[("program_sha256", "abc123", why)], None)
+                .unwrap(),
+            "this machine"
+        );
+        assert_eq!(
+            check_artifact_pass(&back, "program", &[("program_sha256", "abc124", why)], None)
+                .unwrap_err(),
+            why
+        );
+        assert!(check_artifact_pass(&back, "parcel", &[], None)
+            .unwrap_err()
+            .contains("not a parcel pass"));
+        // A kind that never leaves its machine is never made to.
+        assert!(issue_artifact_pass("approval", b"x", &serde_json::json!({})).is_err());
+        // Signers handed in by path are the only ones trusted besides this
+        // machine: an empty file trusts nobody else, and this machine's
+        // own pass still holds.
+        let signers = tmp.path().join("signers");
+        std::fs::write(&signers, "").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&signers, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        assert!(check_artifact_pass(
+            &back,
+            "program",
+            &[("program_sha256", "abc123", why)],
+            Some(&signers)
+        )
+        .is_ok());
+        match old_home {
+            Some(v) => std::env::set_var("CIGSCRIPT_HOME", v),
+            None => std::env::remove_var("CIGSCRIPT_HOME"),
+        }
+        match old_key {
+            Some(v) => std::env::set_var("CIG_SEAL_KEY", v),
+            None => std::env::remove_var("CIG_SEAL_KEY"),
+        }
+    }
 
     #[test]
     fn a_remembered_answer_is_reused_until_a_file_it_read_changes() {
