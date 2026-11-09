@@ -92,8 +92,14 @@ pub fn doctor(ctx: &Ctx, fix: bool) -> i32 {
     }
     #[cfg(unix)]
     {
-        if let Err(e) = crate::burn::seal::check_private_key_file(&keys.join("seal.key")) {
-            problems.push(e);
+        // The key file is checked only where the key is read from it: a
+        // leftover beside a keyring key is not this machine's problem.
+        if crate::burn::seal::peek_keeper() == Some(crate::burn::seal::Keeper::File) {
+            if let Err(e) =
+                crate::burn::seal::check_private_key_file(&crate::burn::seal::key_path())
+            {
+                problems.push(e);
+            }
         }
         // The ledger and the lock hold no secret: one that is ours and too
         // open is made 0600 by the next run, so doctor says only what the

@@ -13,19 +13,28 @@ project follows semantic versioning.
   every other user's run with `E802` on `rekey.lock`.
   - Under a world-writable or sticky parent the folder now has a per-user
     name, `.cigscript-keys-<uid>`. A private parent keeps
-    `.cigscript-keys`, so nothing on an existing install moves.
+    `.cigscript-keys`, and a folder of yours under the old shared name
+    that is still private stays in use, so nothing on an existing install
+    moves or is left behind.
   - The folder is made 0700 from the start, through one helper every path
     uses (the key reader, the ledger, the rekey lock), and a folder that
     appeared while it was being made is checked like any other.
-  - Before a run, OpenSSH-style: the folder must be ours and not writable
-    by others; `seal.key`, `ledger.jsonl` and `rekey.lock` must be ours and
-    regular files (a symlink is refused). A `seal.key` others could read
-    is refused, with advice that keeps it (`chmod 600`, then `cig tin
-    rekey` if anyone could have read it). The ledger and the lock hold no
-    secret, so one of ours that is too open is made 0600 and used.
-  - Each refusal is the new `E721`, naming the path, the owner and the
-    mode, and saying what to do when the owner is you under sudo.
-    `CIG_KEYS_DIR` and `CIG_SEAL_KEY_FILE` get the same checks.
+  - OpenSSH-style checks: the folder must be ours and not writable by
+    others; the ledger and the lock ours and regular files (a symlink is
+    refused) before a run. The seal key is checked where it is read, on
+    the file actually opened (no link followed, no gap between the look
+    and the read): ours, one name (a hard link is refused), closed to
+    others. A key others could read is refused with advice that keeps it
+    (`chmod 600`, then `cig tin rekey` if anyone could have read it), and
+    a leftover key file does not stop a run whose key is in the keyring.
+    The ledger and the lock hold no secret, so one of ours that is only
+    too open is made 0600 and used.
+  - Each refusal is the new `E721`, naming the path, the owner (by uid)
+    and the mode, and saying what to do when the owner is you under sudo.
+    `CIG_KEYS_DIR` and `CIG_SEAL_KEY_FILE` get the same checks; a missing
+    `CIG_SEAL_KEY_FILE` parent is made 0700, and one that is there is left
+    as it is (it used to be chmod-ed). A key import writes without
+    following a link.
   - `cig doctor` says where the folder is, who owns it and its mode, and
     names what a run would refuse; it never makes the folder. Windows is
     unchanged (`%TEMP%` is per-user).

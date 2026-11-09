@@ -598,11 +598,13 @@ out of reach of what cig runs.
   with wider permissions, and a folder that appeared while it was being
   made is checked like one that was there before. On every run cig
   verifies, OpenSSH-style, that the folder is owned by you and not
-  writable by others, and that `seal.key`, `ledger.jsonl` and
-  `rekey.lock` are owned by you and are regular files (not symlinks). A
-  `seal.key` others could read is refused: chmod it 600, and if anyone
-  else could have read it, `cig tin rekey` for a key nobody has seen
-  (never move it aside: a new key opens nothing the old one sealed). The
+  writable by others, and that `ledger.jsonl` and `rekey.lock` are owned
+  by you and are regular files (not symlinks). The seal key is checked
+  where it is read, on the file actually opened (no link followed): yours,
+  with one name, closed to others. A `seal.key` others could read is
+  refused: chmod it 600, and if anyone else could have read it, `cig tin
+  rekey` for a key nobody has seen (never move it aside: a new key opens
+  nothing the old one sealed). The
   ledger and the lock hold no secret, and the folder keeps others out, so
   one of yours that is more open than 0600 is made 0600 and used. Where
   any of the rest is not so, cig refuses with `E721` and names the path,

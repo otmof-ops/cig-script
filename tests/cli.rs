@@ -13545,6 +13545,57 @@ fn keys_dir_is_never_in_a_sticky_world_writable_parent() {
     );
 }
 
+/// An install from before the per-user name (cig 1.18.0 and older) keeps
+/// its own keys folder under the old shared name while it is still its
+/// own and private, so the key and the ledger in it are not left behind.
+#[cfg(unix)]
+#[test]
+fn an_own_folder_under_the_old_shared_name_stays_in_use() {
+    use std::os::unix::fs::PermissionsExt;
+    let sb = SharedParentSandbox::new();
+    let legacy = sb.path().join(".cigscript-keys");
+    fs::create_dir(&legacy).unwrap();
+    fs::set_permissions(&legacy, fs::Permissions::from_mode(0o700)).unwrap();
+    let key = legacy.join("seal.key");
+    fs::write(&key, "ab".repeat(32) + "\n").unwrap();
+    fs::set_permissions(&key, fs::Permissions::from_mode(0o600)).unwrap();
+    fs::write(sb.home().join("s.cig"), "exhale \"ok\"\n").unwrap();
+    let out = sb.cig(&["run", "s.cig"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // SAFETY: geteuid has no preconditions.
+    let uid = unsafe { libc::geteuid() };
+    assert!(
+        !sb.path().join(format!(".cigscript-keys-{uid}")).exists(),
+        "a per-user folder was made beside the user's own old one"
+    );
+    assert_eq!(fs::read_to_string(&key).unwrap(), "ab".repeat(32) + "\n");
+}
+
+/// A seal key with a second name (a hard link) is refused: it could be
+/// read or changed through the other name.
+#[cfg(unix)]
+#[test]
+fn a_hard_linked_seal_key_is_refused() {
+    let sb = Sandbox::new();
+    sb.write("s.cig", "exhale \"ok\"\n");
+    let _ = sb.cig(&["run", "s.cig"]);
+    let key = sb.path().join(".cigscript-keys").join("seal.key");
+    if !key.exists() {
+        use std::os::unix::fs::PermissionsExt;
+        fs::write(&key, "ab".repeat(32) + "\n").unwrap();
+        fs::set_permissions(&key, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    fs::hard_link(&key, sb.path().join("another-name")).unwrap();
+    // The key is checked where it is read: `cig tin mac` reads it.
+    let err = sb.run_err(&["tin", "mac", "s.cig", "--label", "t"], 1);
+    assert!(err.contains("E721"), "{err}");
+    assert!(err.contains("hard links"), "{err}");
+}
+
 /// A seal.key planted by another user (or one world-writable by a party
 /// who is not us) is refused with E721 before it is ever read.
 #[cfg(unix)]
@@ -13562,7 +13613,8 @@ fn a_key_owned_by_someone_else_is_refused() {
     // a wide mode the check also refuses.
     fs::set_permissions(&key, fs::Permissions::from_mode(0o644)).unwrap();
     sb.write("s.cig", "burn {\n  cough \"ok\"\n}\n");
-    let err = sb.run_err(&["run", "s.cig"], 1);
+    // The key is checked where it is read: `cig tin mac` reads it.
+    let err = sb.run_err(&["tin", "mac", "s.cig", "--label", "t"], 1);
     assert!(err.contains("E721"), "{err}");
     assert!(err.contains("seal.key"), "{err}");
 }
@@ -13601,7 +13653,8 @@ fn a_seal_key_others_could_read_is_refused_with_advice_that_keeps_it() {
         fs::write(&key, "a".repeat(64) + "\n").unwrap();
     }
     fs::set_permissions(&key, fs::Permissions::from_mode(0o644)).unwrap();
-    let err = sb.run_err(&["run", "s.cig"], 1);
+    // The key is checked where it is read: `cig tin mac` reads it.
+    let err = sb.run_err(&["tin", "mac", "s.cig", "--label", "t"], 1);
     assert!(err.contains("E721"), "{err}");
     assert!(err.contains("chmod 600"), "{err}");
     assert!(err.contains("cig tin rekey"), "{err}");
@@ -13672,7 +13725,8 @@ fn a_symlink_as_the_seal_key_is_refused() {
     fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).unwrap();
     std::os::unix::fs::symlink(&target, keys.join("seal.key")).unwrap();
     sb.write("s.cig", "burn {\n  cough \"ok\"\n}\n");
-    let err = sb.run_err(&["run", "s.cig"], 1);
+    // The key is checked where it is read: `cig tin mac` reads it.
+    let err = sb.run_err(&["tin", "mac", "s.cig", "--label", "t"], 1);
     assert!(err.contains("E721"), "{err}");
     assert!(err.contains("symlink"), "{err}");
 }
