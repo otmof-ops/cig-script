@@ -5,6 +5,24 @@ project follows semantic versioning.
 
 ## Unreleased
 
+- **`cig bench`** (#179, step 1). One benchmark tool for the whole
+  family: each repository describes its cases in `bench/bench.toml`, and
+  `cig bench` reads that manifest, checks each case's output first (a
+  wrong answer is `WRONG` and gets no time), samples the right ones in
+  batches, and reports median, p10, p90, CV and peak resident set with
+  the machine's conditions beside them. Output in a plain table, in
+  Markdown (`--markdown`) or in JSON (`--json`). Exit 0 when every case
+  was timed, 1 when any was WRONG or failed to run, 3 when the manifest
+  or usage is wrong. Isolated by default: each sample gets a fresh
+  `HOME`, `CIGSCRIPT_HOME` and `CIGO_HOME`, removed after the sample,
+  so a case cannot touch the developer's real state while it is
+  measured. Unknown keys in the manifest are refused with their line
+  number. Fields reserved for later steps (`[bench].build`, `watch`;
+  per-case `config`, `gate`, `score`) are accepted and ignored for
+  now, so a manifest written for the whole feature still parses. The
+  upcoming steps carry `--save` / `--against` with interleaved A/B,
+  `--watch`, `--timings` / `--stats` / `--syscalls`, the family runner
+  and a reusable CI workflow. Docs: `docs/BENCH.md`.
 - **`tin/` and `runs/` hidden from a boxed hop** (#105). The guard no
   longer leaves the tin visible to a hop and read-only, it hides it: in
   the hop's mount namespace an empty tmpfs goes over `~/.cigscript/tin`

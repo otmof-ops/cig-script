@@ -13450,3 +13450,244 @@ fn runs_verify_checks_every_head_and_deep_walks_every_journal() {
         "{deep_json}"
     );
 }
+
+// ----- bench (#179) ---------------------------------------------------------
+
+/// Write a minimal bench manifest beside a two-line hello script and its
+/// expected stdout, returning the manifest path.
+fn write_bench_hello(sb: &Sandbox) -> PathBuf {
+    sb.write("bench/fixtures/hello.cig", "exhale \"hello\"\n");
+    sb.write("bench/fixtures/hello.out", "hello\n");
+    sb.write(
+        "bench/bench.toml",
+        &format!(
+            r#"
+[bench]
+product = "cig"
+[defaults]
+samples = 2
+per = 1
+warmup = 1
+[[case]]
+name = "hello"
+group = "start-up"
+run = ["{cig}", "run", "fixtures/hello.cig"]
+expect = {{ exit = 0, stdout = "fixtures/hello.out" }}
+"#,
+            cig = cig_bin().display()
+        ),
+    )
+}
+
+#[test]
+fn bench_matching_case_reports_numbers() {
+    let sb = Sandbox::new();
+    write_bench_hello(&sb);
+    let out = sb.run_ok(&["bench"]);
+    assert!(out.contains("hello"), "{out}");
+    assert!(out.contains("median ms"), "{out}");
+    // The median column should be a number, not WRONG or -.
+    let line = out.lines().find(|l| l.contains("hello")).unwrap();
+    assert!(!line.contains("WRONG"), "{out}");
+    assert!(!line.contains("- "), "{out}");
+}
+
+#[test]
+fn bench_wrong_output_is_wrong_and_exits_nonzero() {
+    let sb = Sandbox::new();
+    sb.write("bench/fixtures/hello.cig", "exhale \"hello\"\n");
+    sb.write("bench/fixtures/wrong.out", "goodbye\n");
+    sb.write(
+        "bench/bench.toml",
+        &format!(
+            r#"
+[bench]
+product = "cig"
+[defaults]
+samples = 2
+per = 1
+warmup = 1
+[[case]]
+name = "says_hello"
+run = ["{cig}", "run", "fixtures/hello.cig"]
+expect = {{ exit = 0, stdout = "fixtures/wrong.out" }}
+"#,
+            cig = cig_bin().display()
+        ),
+    );
+    let err = sb.run_err(&["bench"], 1);
+    assert!(err.contains("WRONG"), "{err}");
+}
+
+#[test]
+fn bench_unknown_key_is_a_usage_error_with_the_line() {
+    let sb = Sandbox::new();
+    sb.write(
+        "bench/bench.toml",
+        "[bench]\nproduct = \"cig\"\nflarp = 1\n",
+    );
+    let err = sb.run_err(&["bench"], 3);
+    assert!(err.contains("flarp"), "{err}");
+    assert!(err.contains("line 3"), "{err}");
+}
+
+#[test]
+fn bench_json_carries_median_p10_p90_cv_and_rss() {
+    let sb = Sandbox::new();
+    write_bench_hello(&sb);
+    let text = sb.run_ok(&["--json", "bench"]);
+    let v: serde_json::Value = serde_json::from_str(&text).expect("json");
+    let cases = v["cases"].as_array().expect("cases");
+    assert_eq!(cases.len(), 1);
+    let outcome = &cases[0]["outcome"];
+    assert_eq!(outcome["state"], "timed", "{text}");
+    assert!(outcome["median_ms"].as_f64().unwrap() > 0.0);
+    assert!(outcome["p10_ms"].as_f64().is_some());
+    assert!(outcome["p90_ms"].as_f64().is_some());
+    assert!(outcome["cv"].as_f64().is_some());
+    // RSS is only present on Unix; on Windows it may be null.
+    if cfg!(unix) {
+        assert!(outcome["rss_bytes"].as_u64().is_some(), "{text}");
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn bench_isolated_home_leaves_the_real_home_alone() {
+    let sb = Sandbox::new();
+    // The outer HOME: a fresh folder we can inspect afterwards.
+    let outer_home = sb.path().join("outer-home");
+    fs::create_dir_all(&outer_home).unwrap();
+    sb.write(
+        "bench/bench.toml",
+        r#"
+[bench]
+product = "cig"
+[defaults]
+samples = 2
+per = 1
+warmup = 1
+[[case]]
+name = "touches_home"
+run = ["sh", "-c", "touch \"$HOME/cookie\" && echo ok"]
+expect = { exit = 0 }
+"#,
+    );
+    // Passing HOME via env is enough: cig bench propagates it as the
+    // isolated home only for the sampled commands.
+    let out = Command::new(cig_bin())
+        .args(["bench"])
+        .current_dir(sb.path())
+        .env("CIGSCRIPT_HOME", sb.home())
+        .env("HOME", &outer_home)
+        .env("NO_COLOR", "1")
+        .env("CIG_SEAL_KEY", "file")
+        .env("CIG_INTERNAL_TRACKER_DIR", sb.path().join("tracker"))
+        .env_remove("CI")
+        .output()
+        .expect("run cig");
+    assert!(
+        out.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // The outer HOME was never touched.
+    assert!(
+        !outer_home.join("cookie").exists(),
+        "`cookie` leaked into the real HOME {}",
+        outer_home.display()
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn bench_shared_home_is_the_callers_own() {
+    let sb = Sandbox::new();
+    let outer_home = sb.path().join("outer-home");
+    fs::create_dir_all(&outer_home).unwrap();
+    sb.write(
+        "bench/bench.toml",
+        r#"
+[bench]
+product = "cig"
+home = "shared"
+[defaults]
+samples = 1
+per = 1
+warmup = 1
+[[case]]
+name = "touches_home"
+run = ["sh", "-c", "touch \"$HOME/cookie\" && echo ok"]
+expect = { exit = 0 }
+"#,
+    );
+    let out = Command::new(cig_bin())
+        .args(["bench"])
+        .current_dir(sb.path())
+        .env("CIGSCRIPT_HOME", sb.home())
+        .env("HOME", &outer_home)
+        .env("NO_COLOR", "1")
+        .env("CIG_SEAL_KEY", "file")
+        .env("CIG_INTERNAL_TRACKER_DIR", sb.path().join("tracker"))
+        .env_remove("CI")
+        .output()
+        .expect("run cig");
+    assert!(
+        out.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        outer_home.join("cookie").exists(),
+        "home = \"shared\" did not run in the caller's HOME"
+    );
+}
+
+#[test]
+fn bench_zero_samples_is_a_usage_error() {
+    let sb = Sandbox::new();
+    sb.write(
+        "bench/bench.toml",
+        r#"
+[bench]
+product = "cig"
+[defaults]
+samples = 0
+[[case]]
+name = "nothing"
+run = ["cig", "--version"]
+"#,
+    );
+    let out = Command::new(cig_bin())
+        .args(["bench"])
+        .current_dir(sb.path())
+        .env("CIGSCRIPT_HOME", sb.home())
+        .env("NO_COLOR", "1")
+        .env("CIG_INTERNAL_TRACKER_DIR", sb.path().join("tracker"))
+        .env_remove("CI")
+        .output()
+        .expect("run cig");
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("at least 1"),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // A flag cannot sneak a zero past it either.
+    let flag = Command::new(cig_bin())
+        .args(["bench", "--per", "0"])
+        .current_dir(sb.path())
+        .env("CIGSCRIPT_HOME", sb.home())
+        .env("NO_COLOR", "1")
+        .env("CIG_INTERNAL_TRACKER_DIR", sb.path().join("tracker"))
+        .env_remove("CI")
+        .output()
+        .expect("run cig");
+    assert_eq!(flag.status.code(), Some(3));
+}
