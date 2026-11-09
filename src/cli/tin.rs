@@ -225,9 +225,14 @@ fn rekey_cmd(ctx: &Ctx) -> i32 {
             exit::OK
         }
         Err(e) => {
-            eprintln!("{} {e}", ctx.red("error[E720 burn]:"));
-            eprintln!("  = hint: nothing on disk was changed when the refusal came before the walk; an interrupted walk is picked up by running cig tin rekey again");
-            eprintln!("  = explain: cig explain E720");
+            if let Some(rest) = e.strip_prefix("E721 burn: ") {
+                eprintln!("{} {rest}", ctx.red("error[E721 burn]:"));
+                eprintln!("  = explain: cig explain E721");
+            } else {
+                eprintln!("{} {e}", ctx.red("error[E720 burn]:"));
+                eprintln!("  = hint: nothing on disk was changed when the refusal came before the walk; an interrupted walk is picked up by running cig tin rekey again");
+                eprintln!("  = explain: cig explain E720");
+            }
             exit::SCRIPT_ERROR
         }
     }

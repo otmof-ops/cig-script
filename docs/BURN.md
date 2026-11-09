@@ -592,6 +592,30 @@ out of reach of what cig runs.
   with a passphrase to carry to another machine, and `cig tin key import` puts
   it back. `cig doctor` reminds you once to back it up when sealed objects
   exist and it was never exported.
+- **The keys folder is private, and checked.** The folder beside the state
+  root (`~/.cigscript-keys`) is made `0700` from the start (not a
+  `mkdir` followed by a `chmod`), so there is no window where it exists
+  with wider permissions, and a folder that appeared while it was being
+  made is checked like one that was there before. On every run cig
+  verifies, OpenSSH-style, that the folder is owned by you and not
+  writable by others, and that `ledger.jsonl` and `rekey.lock` are owned
+  by you and are regular files (not symlinks). The seal key is checked
+  where it is read, on the file actually opened (no link followed): yours,
+  with one name, closed to others. A `seal.key` others could read is
+  refused: chmod it 600, and if anyone else could have read it, `cig tin
+  rekey` for a key nobody has seen (never move it aside: a new key opens
+  nothing the old one sealed). The
+  ledger and the lock hold no secret, and the folder keeps others out, so
+  one of yours that is more open than 0600 is made 0600 and used. Where
+  any of the rest is not so, cig refuses with `E721` and names the path,
+  the owner and the mode. With `CIGSCRIPT_HOME` under a
+  shared parent (such as `/tmp`, `/var/tmp` or `/dev/shm`), the folder
+  is placed under a per-user name (`.cigscript-keys-<uid>`) rather than
+  the shared `.cigscript-keys`, so two users under the same parent
+  never share one folder (#176). `CIG_KEYS_DIR` and `CIG_SEAL_KEY_FILE`
+  point somewhere else but do not weaken the checks. `cig doctor`
+  prints the folder's owner and mode and names the problem, without
+  creating the folder.
 - **The tin guarded.** From 1.10.0 a boxed hop on Linux sees the state
   directory read-only and the key folder empty: in the user and mount
   namespaces the box is made in, the state root is bound over itself and
