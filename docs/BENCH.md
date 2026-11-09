@@ -189,3 +189,36 @@ with the same statistics and the same manifest, add:
 - **step 6** the reusable CI workflow;
 - **step 7** `--family`, `--with` and `--matrix`;
 - **step 8** `--profile` and `--diff`.
+
+## Passes (`cig-pass`)
+
+The budgets for #186, measured one call at a time by the crate's harness:
+
+```
+cargo run --release -p cig-pass --example pass-bench            # the table
+cargo run --release -p cig-pass --example pass-bench -- --json  # for a tool
+cargo run --release -p cig-pass --example pass-bench -- --gate  # exit 1 on a miss
+```
+
+Each measure runs in batches of about 200 us, the rounds interleaved so a
+CPU governor ramping up or down lands on all of them alike, and the output
+is checked before it is timed (a fresh pass verifies, a changed file makes
+it fail, a narrowing adds exactly one caveat, a lookup hits). "Warm" means
+the files are older than the racy window, so verify trusts their identity.
+
+Measured 2026-11-09 on an Intel Core Ultra 7 255H, powersave governor, 401
+rounds, medians:
+
+| measure | median | p90 | budget |
+|---|---:|---:|---:|
+| verify a local pass with 10 file inputs, warm | 29.3 us | 30.3 us | <= 30 us |
+| narrow (attenuate) by one caveat | 0.37 us | 0.39 us | <= 5 us |
+| find a hit among 100,000 stored passes | 5.9 us | 6.1 us | <= 50 us |
+| decode a 400-byte pass | 0.06 us | 0.06 us | |
+| read 10 files and record them, then issue | 23.8 us | 24.5 us | |
+| read the same 10 files, no recording | 11.1 us | 11.6 us | |
+
+The issue overhead budget (<= 5% on top of the work) is not met when the
+work is only reading ten small files: recording and issuing add about 12.7
+us, which is 114% of 11.1 us. On any work worth remembering (a `cig check`
+of a large script is tens of milliseconds) the same 12.7 us is far under 1%.
