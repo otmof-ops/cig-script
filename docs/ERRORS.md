@@ -1355,6 +1355,7 @@ the burn kernel and its journal (write-ahead log).
 | [`E714`](#e714-a-child-run-is-unburned-through-its-parent-(retired)) | a child run is unburned through its parent (retired) | can't see any ciggies bro | cig unburn <child> works from 1.11.0; before it, cig unburn <parent> |
 | [`E715`](#e715-debugging-is-allowed) | debugging is allowed | not one of the four | unset CIG_ALLOW_DEBUG |
 | [`E720`](#e720-a-rekey-cannot-be-done) | a rekey cannot be done | one of the four; the message says which | put the current key back (cig tin key import), or store it where a rekey can swap it (cig config seal_key keyring); after a bad seal.key.old, move it aside and run cig tin rekey again; wait for the holder of the rekey lock; fix the tampered journal cig names before trying again |
+| [`E721`](#e721-the-tin's-key-folder-is-not-private) | the tin's key folder is not private | these are MY ciggies | a folder or file that is yours, made under sudo: chown it back to yourself. One that is not yours: move it aside (it is not your key), or set CIG_KEYS_DIR to a folder only you can write. A seal.key others could read: chmod 600 it, then cig tin rekey if anyone else could have read it; never move your own key aside, a new key opens nothing the old one sealed |
 
 ### E700 burn refused
 
@@ -1652,6 +1653,26 @@ cig tin rekey refuses because what it needs is not here, is already in use, or w
 6. the keeper would not carry the new key (keyring write failed the read-back, or the key file could not be written) (no probe; a suggestion, not a finding). **Remedy:** both stashes stay on disk and every sealed object is still readable; fix the keeper (unlock the keyring, free space on the keys filesystem) and run cig tin rekey again to finish
 
 Related: `E703`, `E707`, `E708`, `E709`.
+
+
+### E721 the tin's key folder is not private
+
+*burn · since 1.19.0 · arises in run, any*
+
+**Kind of no:** these are MY ciggies (the door: it knows you and said no; 403 Forbidden; permission denied; a lock; a refusal by policy).
+
+The keys folder beside the state root holds the seal key, the ledger and the rekey lock; for the tin's history and its sealed objects to mean anything, that folder and the files in it must be yours and closed to other users. cig refuses when they are not: a folder another user owns or others can write to; a seal.key, ledger.jsonl or rekey.lock another user owns, or one that is a symlink or not a file; a seal.key others could read. Nothing is signed, sealed or read under it. A ledger or lock of yours that is only too open holds no secret, so cig makes it 0600 and goes on. With CIGSCRIPT_HOME under a shared parent (such as /tmp, /var/tmp or /dev/shm) the folder has a per-user name (.cigscript-keys-<uid>), so two users under the same parent never share one. The folder is made 0700 from the start; CIG_KEYS_DIR and CIG_SEAL_KEY_FILE point somewhere else but do not weaken the checks.
+
+**What to type next:** a folder or file that is yours, made under sudo: chown it back to yourself. One that is not yours: move it aside (it is not your key), or set CIG_KEYS_DIR to a folder only you can write. A seal.key others could read: chmod 600 it, then cig tin rekey if anyone else could have read it; never move your own key aside, a new key opens nothing the old one sealed
+
+**Known causes**, ranked; doctor checks them in this order:
+
+1. another user owns the keys folder (CIGSCRIPT_HOME under /tmp is the usual way in), or it is yours but was made under sudo (probe `path-exists`). **Remedy:** made under sudo: chown it back to yourself; not yours: move it aside, and cig makes a fresh one under a per-user name on the next run
+2. the keys folder is group- or world-writable, so someone else could plant seal.key or delete the ledger (probe `path-exists`). **Remedy:** chmod 700 the folder, or set CIG_KEYS_DIR to a folder only you can write
+3. seal.key is readable by group or world, so someone else may have read the key (probe `path-exists`). **Remedy:** chmod 600 it, then cig tin rekey if anyone else could have read it; keep the file, a new key opens nothing the old one sealed
+4. seal.key, ledger.jsonl or rekey.lock is owned by another user, or is a symlink or not a file, so a read may be redirected or the file planted (probe `path-exists`). **Remedy:** yours, made under sudo: chown it back; a link: put the real file back in place; not yours: move it aside, or set CIG_KEYS_DIR / CIG_SEAL_KEY_FILE to a path only you can write
+
+Related: `E707`, `E720`.
 
 
 ## fold (`E750`–`E769`)

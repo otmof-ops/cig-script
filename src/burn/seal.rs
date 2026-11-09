@@ -358,6 +358,12 @@ pub fn key_path() -> PathBuf {
 /// `CIGSCRIPT_HOME` set (tests, a custom state root) it sits beside that
 /// home, never inside it; otherwise it is the OS config directory, so that
 /// copying `~/.cigscript` leaves the key behind. `CIG_KEYS_DIR` overrides.
+///
+/// Where the parent directory is shared (world-writable, or sticky like
+/// `/tmp` or `/var/tmp`), the folder's name gets a `-<uid>` suffix so two
+/// users under the same shared parent do not share one `.cigscript-keys`.
+/// A non-shared parent keeps the old name, so no existing install moves
+/// (#176).
 pub fn keys_dir() -> PathBuf {
     if let Some(d) = std::env::var_os("CIG_KEYS_DIR") {
         return PathBuf::from(d);
@@ -369,9 +375,35 @@ pub fn keys_dir() -> PathBuf {
             .parent()
             .map(Path::to_path_buf)
             .unwrap_or_else(|| home.clone());
-        return parent.join(".cigscript-keys");
+        return parent.join(keys_dir_name_in(&parent));
     }
     os_config_dir().join("cigscript").join("keys")
+}
+
+/// The keys-folder name to use under `parent`: `.cigscript-keys` when the
+/// parent is private, and `.cigscript-keys-<uid>` when the parent is
+/// world-writable or has the sticky bit set (so two users under `/tmp`
+/// never land in one folder).
+#[cfg(unix)]
+fn keys_dir_name_in(parent: &Path) -> String {
+    use std::os::unix::fs::MetadataExt;
+    let shared = fs::metadata(parent)
+        .map(|m| (m.mode() & 0o002) != 0 || (m.mode() & 0o1000) != 0)
+        .unwrap_or(false);
+    if shared {
+        // SAFETY: geteuid() has no preconditions and returns the uid.
+        let uid = unsafe { libc::geteuid() };
+        format!(".cigscript-keys-{uid}")
+    } else {
+        ".cigscript-keys".to_string()
+    }
+}
+
+#[cfg(not(unix))]
+fn keys_dir_name_in(_parent: &Path) -> String {
+    // On Windows `%TEMP%` is per-user, so a shared parent does not arise
+    // the way `/tmp` does on Unix. Keep the name stable.
+    ".cigscript-keys".to_string()
 }
 
 /// The OS configuration directory for a user-level tool.
@@ -568,9 +600,35 @@ pub(crate) fn hold_shared_rekey_lock() -> Result<(), String> {
     }
     static HELD: OnceLock<Result<fs::File, String>> = OnceLock::new();
     match HELD.get_or_init(super::rekey::take_process_shared_lock) {
-        Ok(_) => Ok(()),
+        Ok(_) => {
+            // StrictModes (#176): the lock has been taken, which already
+            // verifies the keys folder is ours. Every file next to it
+            // (seal.key, ledger.jsonl) must be ours too before a run
+            // proceeds, so a planted file never ends up read or signed
+            // against. These checks run once per process (OnceLock below
+            // caches the outcome).
+            static FILES: OnceLock<Result<(), String>> = OnceLock::new();
+            FILES
+                .get_or_init(check_keys_contents)
+                .as_ref()
+                .map_err(Clone::clone)?;
+            Ok(())
+        }
         Err(e) => Err(e.clone()),
     }
+}
+
+/// Check every file in the keys folder we read or append to: `seal.key`,
+/// `ledger.jsonl`, and anything `CIG_SEAL_KEY_FILE` points at. A missing
+/// file is not an error (cig will make it). Called once per process by
+/// `hold_shared_rekey_lock`.
+fn check_keys_contents() -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        check_private_key_file(&key_path())?;
+        check_private_state_file(&super::ledger::path())?;
+    }
+    Ok(())
 }
 
 /// The page that holds the key, kept out of swap where the platform allows
@@ -695,6 +753,13 @@ fn sealed_in_use() -> bool {
 
 fn file_key() -> Result<Key, String> {
     let path = key_path();
+    // Keys live in the keys folder; even when CIG_SEAL_KEY_FILE names a
+    // file elsewhere, that file must still be owned by us and private
+    // (SEC-176). The folder check only fires for the default location.
+    if std::env::var_os("CIG_SEAL_KEY_FILE").is_none() {
+        let _ = ensure_keys_dir()?;
+    }
+    check_private_key_file(&path)?;
     migrate_legacy_key(&path);
     match fs::read_to_string(&path) {
         Ok(text) => {
@@ -713,8 +778,13 @@ fn file_key() -> Result<Key, String> {
             }
             let k = random_key()?;
             if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-                own_only_dir(parent);
+                // The default parent was created private by `ensure_keys_dir`
+                // above; a `CIG_SEAL_KEY_FILE` outside that folder still
+                // needs its own parent, which the user owns.
+                if std::env::var_os("CIG_SEAL_KEY_FILE").is_some() {
+                    fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+                    own_only_dir(parent);
+                }
             }
             let mut opts = fs::OpenOptions::new();
             opts.write(true).create_new(true);
@@ -750,6 +820,8 @@ fn migrate_legacy_key(new_path: &Path) {
         return;
     };
     if let Some(parent) = new_path.parent() {
+        // `ensure_keys_dir` already made the default parent 0700;
+        // a `CIG_SEAL_KEY_FILE` outside it keeps the old path here.
         if fs::create_dir_all(parent).is_err() {
             return;
         }
@@ -789,6 +861,244 @@ fn own_only_dir(dir: &Path) {
     #[cfg(not(unix))]
     {
         let _ = dir;
+    }
+}
+
+// ----- the keys directory and strict-mode checks (#176) -------------------------
+
+/// Make the keys directory and return its path. On Unix the directory is
+/// created `0700` from the start (not `create_dir_all` followed by a
+/// `chmod`), so there is no window where it exists with wider
+/// permissions. When the directory already exists, it is checked instead
+/// of touched: the owner and mode must be safe (`check_keys_dir`), or
+/// the call refuses with the `E721` message.
+///
+/// Every path that can create the folder (the key reader, the rekey lock,
+/// the ledger) goes through this helper, so the lock cannot be the one
+/// that creates it with the umask's mode (#176).
+pub fn ensure_keys_dir() -> Result<PathBuf, String> {
+    let dir = keys_dir();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        match fs::symlink_metadata(&dir) {
+            Ok(m) if m.file_type().is_dir() => {
+                check_keys_dir(&dir)?;
+            }
+            _ => {
+                // Doesn't exist, or something else is in the way (a file,
+                // a dangling symlink). Let `DirBuilder` report the OS
+                // error in the "unprotected" wording that `cig run`
+                // already catches as E802: this is a filesystem issue,
+                // not a strict-mode one.
+                let mut b = fs::DirBuilder::new();
+                b.recursive(true).mode(0o700);
+                b.create(&dir).map_err(|e| {
+                    format!(
+                        "could not create the keys directory {} ({e}); refusing to proceed unprotected against a concurrent cig tin rekey",
+                        dir.display()
+                    )
+                })?;
+                // A recursive create says yes to a folder that appeared
+                // between the look above and this call, whoever made it:
+                // check what is there now, as for one that was there
+                // before.
+                check_keys_dir(&dir)?;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        fs::create_dir_all(&dir).map_err(|e| {
+            format!(
+                "could not create the keys directory {} ({e}); refusing to proceed unprotected against a concurrent cig tin rekey",
+                dir.display()
+            )
+        })?;
+    }
+    Ok(dir)
+}
+
+/// The keys folder, checked. Owned by this uid; not a symlink; not a
+/// regular file; not group- or world-writable. Refuses with the `E721`
+/// wording the operator reads if any of those fails.
+#[cfg(unix)]
+pub fn check_keys_dir(path: &Path) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt;
+    let md = fs::symlink_metadata(path).map_err(|e| {
+        format!(
+            "E721 burn: cannot look at the keys folder {}: {e}; move it aside or set CIG_KEYS_DIR to a folder only you can write",
+            path.display()
+        )
+    })?;
+    if md.file_type().is_symlink() {
+        return Err(format!(
+            "E721 burn: the keys folder {} is a symlink; a read may be redirected. Move it aside or set CIG_KEYS_DIR to a folder only you can write",
+            path.display()
+        ));
+    }
+    if !md.file_type().is_dir() {
+        return Err(format!(
+            "E721 burn: the keys folder {} is not a directory. Move it aside or set CIG_KEYS_DIR to a folder only you can write",
+            path.display()
+        ));
+    }
+    // SAFETY: geteuid() has no preconditions.
+    let euid = unsafe { libc::geteuid() };
+    if md.uid() != euid {
+        return Err(format!(
+            "E721 burn: the keys folder {} is owned by {}, not you (uid {euid}); whoever owns it could plant the seal key or delete the ledger. If it is yours (made under sudo), chown it back to yourself; if it is not, move it aside, or set CIG_KEYS_DIR to a folder only you can write",
+            path.display(),
+            fmt_owner(md.uid()),
+        ));
+    }
+    if (md.mode() & 0o022) != 0 {
+        return Err(format!(
+            "E721 burn: the keys folder {} has mode {:04o}: others can write to it, and could plant the seal key or delete the ledger. chmod 700 it, or set CIG_KEYS_DIR to a folder only you can write",
+            path.display(),
+            md.mode() & 0o7777,
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+pub fn check_keys_dir(_path: &Path) -> Result<(), String> {
+    Ok(())
+}
+
+/// The seal key, checked before it is read: owned by this uid, a regular
+/// file (not a symlink: `symlink_metadata`), and not readable or writable
+/// by group or world. Missing is not an error: the caller will create it.
+/// A key others could read may have been read, so a key that is ours but
+/// too open is refused, as OpenSSH refuses such a private key, with the
+/// fix that keeps it (never "move it aside": a new key opens nothing the
+/// old one sealed).
+#[cfg(unix)]
+pub fn check_private_key_file(path: &Path) -> Result<(), String> {
+    check_own_file(path, false)
+}
+
+/// The ledger and the rekey lock, checked before they are opened: owned by
+/// this uid and a regular file, or refused. Neither holds a secret, and
+/// the keys folder (0700) keeps others out, so one that is ours but more
+/// open than 0600 (a lock an early build made with the umask's mode) is
+/// made 0600 and used.
+#[cfg(unix)]
+pub fn check_private_state_file(path: &Path) -> Result<(), String> {
+    check_own_file(path, true)
+}
+
+#[cfg(unix)]
+fn check_own_file(path: &Path, tighten: bool) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt;
+    let md = match fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => {
+            return Err(format!(
+                "E721 burn: cannot look at {}: {e}; move it aside or set CIG_KEYS_DIR to a folder only you can write",
+                path.display()
+            ));
+        }
+    };
+    if md.file_type().is_symlink() {
+        return Err(format!(
+            "E721 burn: {} is a symlink, so a read may be redirected. Remove the link and put the file back in place",
+            path.display()
+        ));
+    }
+    if !md.file_type().is_file() {
+        return Err(format!(
+            "E721 burn: {} is not a regular file. Move it aside and run again",
+            path.display()
+        ));
+    }
+    // SAFETY: geteuid() has no preconditions.
+    let euid = unsafe { libc::geteuid() };
+    if md.uid() != euid {
+        return Err(format!(
+            "E721 burn: {} is owned by {}, not you (uid {euid}); whoever owns it could have planted or changed it. If it is yours (made under sudo), chown it back to yourself; if it is not, it is not your key: move it aside, or set CIG_KEYS_DIR / CIG_SEAL_KEY_FILE to a file only you can write",
+            path.display(),
+            fmt_owner(md.uid()),
+        ));
+    }
+    if (md.mode() & 0o077) != 0 {
+        if tighten {
+            use std::os::unix::fs::PermissionsExt;
+            return fs::set_permissions(path, fs::Permissions::from_mode(0o600)).map_err(|e| {
+                format!(
+                    "E721 burn: {} has mode {:04o} and cannot be made 0600 ({e}). chmod 600 it",
+                    path.display(),
+                    md.mode() & 0o7777,
+                )
+            });
+        }
+        return Err(format!(
+            "E721 burn: the seal key {} has mode {:04o}: others could read it. chmod 600 it, then, if anyone else could have read it, cig tin rekey for a key nobody else has seen",
+            path.display(),
+            md.mode() & 0o7777,
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+pub fn check_private_key_file(_path: &Path) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(not(unix))]
+pub fn check_private_state_file(_path: &Path) -> Result<(), String> {
+    Ok(())
+}
+
+/// What a run would refuse about the ledger or the lock, found without
+/// changing anything (doctor's look): another owner, a link, not a file.
+/// A file that is ours and only too open is not a problem: the next run
+/// makes it 0600.
+#[cfg(unix)]
+pub fn state_file_problem(path: &Path) -> Option<String> {
+    use std::os::unix::fs::MetadataExt;
+    let md = fs::symlink_metadata(path).ok()?;
+    // SAFETY: geteuid() has no preconditions.
+    let euid = unsafe { libc::geteuid() };
+    if md.file_type().is_symlink() || !md.file_type().is_file() || md.uid() != euid {
+        // Each of these is refused before the tightening step, so this
+        // changes nothing.
+        return check_own_file(path, true).err();
+    }
+    None
+}
+
+#[cfg(not(unix))]
+pub fn state_file_problem(_path: &Path) -> Option<String> {
+    None
+}
+
+/// A user's login name, when one can be found; the raw uid otherwise.
+#[cfg(unix)]
+fn fmt_owner(uid: u32) -> String {
+    // getpwuid's returned pointer is owned by libc's static buffer, so
+    // we copy the name into a Rust String before letting go.
+    // SAFETY: a null return means no entry, which we handle; a non-null
+    // return points into a libc-owned buffer valid until the next call
+    // to getpwuid on this thread.
+    let p = unsafe { libc::getpwuid(uid) };
+    if p.is_null() {
+        return format!("uid {uid}");
+    }
+    // SAFETY: the pw_name field is a NUL-terminated C string the libc
+    // call set, valid for the lifetime of the pointer above.
+    let name_ptr = unsafe { (*p).pw_name };
+    if name_ptr.is_null() {
+        return format!("uid {uid}");
+    }
+    // SAFETY: a valid NUL-terminated C string from libc.
+    let cstr = unsafe { std::ffi::CStr::from_ptr(name_ptr) };
+    match cstr.to_str() {
+        Ok(s) if !s.is_empty() => format!("{s} (uid {uid})"),
+        _ => format!("uid {uid}"),
     }
 }
 

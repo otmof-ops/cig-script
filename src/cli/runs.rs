@@ -1185,8 +1185,7 @@ pub fn budget_by_config() {
 
 fn prune_runs(ctx: &Ctx, keep: usize) -> i32 {
     if let Err(e) = crate::burn::seal::hold_shared_rekey_lock() {
-        eprintln!("{} {e}", ctx.red("error[E802 usage]:"));
-        eprintln!("  = explain: cig explain E802");
+        super::run::emit_lock_or_strict_error(ctx, &e);
         return exit::SCRIPT_ERROR;
     }
     let all = match runs::list() {

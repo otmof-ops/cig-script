@@ -73,12 +73,13 @@ pub enum LockBusy {
 /// returned handle must be kept alive for the lock to hold.
 #[cfg(unix)]
 fn acquire_rekey_lock() -> Result<fs::File, LockBusy> {
+    use std::os::unix::fs::OpenOptionsExt;
     use std::os::unix::io::AsRawFd;
-    fs::create_dir_all(seal::keys_dir()).map_err(LockBusy::Io)?;
     let f = fs::OpenOptions::new()
         .create(true)
         .truncate(false)
         .write(true)
+        .mode(0o600)
         .open(rekey_lock_path())
         .map_err(LockBusy::Io)?;
     // SAFETY: flock on a descriptor this handle owns.
@@ -103,7 +104,6 @@ fn acquire_rekey_lock() -> Result<fs::File, LockBusy> {
 #[cfg(windows)]
 fn acquire_rekey_lock() -> Result<fs::File, LockBusy> {
     use std::os::windows::fs::OpenOptionsExt;
-    fs::create_dir_all(seal::keys_dir()).map_err(LockBusy::Io)?;
     match fs::OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -125,7 +125,6 @@ fn acquire_rekey_lock() -> Result<fs::File, LockBusy> {
 
 #[cfg(not(any(unix, windows)))]
 fn acquire_rekey_lock() -> Result<fs::File, LockBusy> {
-    fs::create_dir_all(seal::keys_dir()).map_err(LockBusy::Io)?;
     fs::OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -149,18 +148,21 @@ fn acquire_rekey_lock() -> Result<fs::File, LockBusy> {
 /// that actually refused, not from the non-blocking probe before it.
 #[cfg(unix)]
 pub fn take_process_shared_lock() -> Result<fs::File, String> {
+    use std::os::unix::fs::OpenOptionsExt;
     use std::os::unix::io::AsRawFd;
-    let keys_dir = seal::keys_dir();
-    if let Err(e) = fs::create_dir_all(&keys_dir) {
-        return Err(format!(
-            "could not create the keys directory {} ({e}); refusing to proceed unprotected against a concurrent cig tin rekey",
-            keys_dir.display()
-        ));
-    }
+    // Make or verify the keys folder (#176): private from the start,
+    // owned by us. A folder another user owns, or that is group- or
+    // world-writable, refuses here with `E721`, so a run or rekey
+    // never reads a planted lock, seal.key or ledger.jsonl.
+    let _keys_dir = seal::ensure_keys_dir()?;
+    // The lock file itself must be ours, and not a symlink someone else
+    // can swing at another path. Checked before we open it.
+    seal::check_private_state_file(&rekey_lock_path())?;
     let f = match fs::OpenOptions::new()
         .create(true)
         .truncate(false)
         .write(true)
+        .mode(0o600)
         .open(rekey_lock_path())
     {
         Ok(f) => f,
@@ -205,13 +207,7 @@ pub fn take_process_shared_lock() -> Result<fs::File, String> {
 #[cfg(windows)]
 pub fn take_process_shared_lock() -> Result<fs::File, String> {
     use std::os::windows::fs::OpenOptionsExt;
-    let keys_dir = seal::keys_dir();
-    if let Err(e) = fs::create_dir_all(&keys_dir) {
-        return Err(format!(
-            "could not create the keys directory {} ({e}); refusing to proceed unprotected against a concurrent cig tin rekey",
-            keys_dir.display()
-        ));
-    }
+    let _keys_dir = seal::ensure_keys_dir()?;
     // FILE_SHARE_READ | FILE_SHARE_WRITE: other shared holders can open
     // the file too, but a share_mode(0) exclusive open (the rekey) has
     // to wait. A sharing violation (error 32) means a rekey is in flight:
@@ -266,6 +262,10 @@ pub fn take_process_shared_lock() -> Result<fs::File, String> {
 /// Run the rekey. Refuses when the current key is not available (nothing
 /// safe to do: a key gone is #103's problem, not this command's).
 pub fn rekey() -> Result<Done, String> {
+    // The keys folder must be ours and private before any lock or key
+    // read; a planted folder or lock refuses here with E721 (#176).
+    let _ = seal::ensure_keys_dir()?;
+    seal::check_private_state_file(&rekey_lock_path())?;
     // The rekey holds the exclusive lock. First take it so no run that
     // seals or signs can slip in between the key reads and the walk; the
     // rekey's own `seal::key()` call below must opt out of the shared
