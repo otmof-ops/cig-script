@@ -143,6 +143,15 @@ the same facts without the jokes. The whole model is in
   = fix: proc.which("name") to check; give the full path, or fix PATH in the environment the run inherits
 ```
 
+**Checked once, trusted exactly as long as it is true.** A *pass* is a note
+that something was checked, with every file, folder, variable and tool the
+check looked at recorded while it ran, never listed by hand. Ask again and
+cig checks one signature and looks at each input: if nothing moved, the work
+does not run twice; if anything did, the pass stops holding. Whoever holds a
+pass can make it smaller (`within ~/work/site`, `for 2h`, `once`) and never
+bigger, so it is also something to hand an agent, cut to what it may do.
+[docs/PASS.md](docs/PASS.md) is the guide.
+
 **Batteries that match the job.** `fs`, `path`, `json`, `csv`, `text`
 (regex), `proc`, `env`, `time`, `hash`, `math`, `log`, plus 64 methods on
 strings, lists and maps.

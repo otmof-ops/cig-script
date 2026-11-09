@@ -141,3 +141,50 @@ Its own text. Download it, read it, then run it; the README shows the pinned
 form. It downloads a tagged release and its checksum over HTTPS, verifies
 before installing, installs into your home directory, never uses `sudo`, and
 asks before touching your shell configuration or running a package manager.
+
+## Passes (`cig pass`, the `cig-pass` crate)
+
+A pass is a small authenticated record of something cig checked: what it
+was about, every input the check read (recorded while it ran, never
+declared by hand), the result, and the conditions under which it holds. cig
+reuses a result only when a pass for exactly these inputs verifies now. The
+threat model is `crates/cig-pass/THREAT-MODEL.md`.
+
+**What a pass is trusted for.** Skipping work whose inputs have not
+changed, and limiting what a token you hand someone may do (`within`,
+`until`, `boxed`, `network`, `args`, `once`, `max`). Anyone holding a pass
+can narrow it; nobody can widen it or drop a condition.
+
+**What it is not.** A pass is not protection against a program of yours
+that runs outside the box and can read your tin's key: that program can make
+any local pass. A condition is checked by the caller before it runs
+something; the box, not the pass, holds the program to it. A hop run with
+declared `reads` can depend on things cig did not see; such passes are
+marked, and approvals, verdicts and rules never rest on one.
+
+**Where things live.** The passes, the pass state and the allowed signers
+sit in the keys folder (0700, yours, hidden from every boxed hop). Local
+passes verify only under this machine's key; a rekey retires them all.
+Shareable passes are signed with this machine's key (`cig pass key` prints
+the allowed-signers line) and are trusted elsewhere only for the kinds a
+signer is allowed (`check`, `program`, `parcel`, `archive`). A `human-yes`
+is accepted only from a key in `/etc/cigscript/authority.pub`, installed by
+an administrator; without one, nothing is approved that way.
+
+**Treat a token as a secret.** It names paths and works for whoever holds
+it. Keep it in a file (`-o` writes 0600) or on stdin, not on a command line.
+`cig pass export` seals what it writes and adds an expiry.
+
+**How to revoke.** One pass and everything narrowed from it: `cig pass
+revoke <id>`. Every pass of a kind: `cig pass revoke --kind <kind>`.
+Everything, and the signing key: `cig tin rekey` (give other machines the
+new `cig pass key` line). An exported pass has its own id: revoke it where
+it is held. `cig pass log` shows every spend and revocation. E739 means
+the pass state does not match the ledger: `cig pass gc` folds it again
+after checking the ledger's chain; a ledger cut short or replaced is shown
+by `cig runs --verify`.
+
+**Limits.** Restoring the whole keys folder from a backup brings back
+spent and revoked passes: keep `cig tin head` elsewhere if that matters. A
+shareable `once` pass is counted per machine. A file can change between the
+check and its use: run what you checked.

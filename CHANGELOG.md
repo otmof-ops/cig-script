@@ -3,6 +3,47 @@
 All notable changes to CigScript. The format follows Keep a Changelog; the
 project follows semantic versioning.
 
+## Unreleased
+
+Passes: one primitive for every "already checked" in the family (#186).
+
+- **`pass`: checked once, trusted exactly as long as it is true** (#186). A
+  pass is a small authenticated record of what was checked, every input
+  the check depended on (recorded while it ran, never declared by hand),
+  the result, and the caveats under which it holds. Checking it again is a
+  MAC or a signature and a look at each input, whatever the work it stands
+  for.
+  - `pass.issue`, `find`, `memo`, `check`, `narrow`, `spend`, `show` and
+    `recording` in scripts; `cig pass list`, `show`, `verify`, `narrow`,
+    `revoke`, `export`, `import`, `log`, `stats`, `key` and `gc`.
+  - The recorder sees every read the work makes: files (from the same read
+    the work gets), folders, absences, variables, the program a name
+    resolves to, and a digest of each global the work reads. A hop says
+    what it reads with `reads: [paths]` (a folder covers everything under
+    it) and runs with a small recorded environment (`env_reads: [names]`
+    adds to it). Anything a recording cannot see into makes the work
+    open-world (E731); a variable from the function around the work is
+    refused (E732), as is a change to the world inside it (E733).
+  - Anyone holding a pass can narrow it (`within`, `until`, `for`,
+    `boxed`, `network`, `args`, `cig >=`, `build`, `agent`, `once`, `max`,
+    `needs`), and nobody can widen it. A narrowing keeps its spends.
+  - Local passes are HMAC-chained under subkeys of the tin's key, their
+    content digests keyed; shareable passes (`cig pass export`, sealed and
+    expiring by default) carry Ed25519 signatures another machine checks
+    against allowed signers scoped per kind. Approvals, verdicts and rules
+    never come from another machine; a `human-yes` comes only from a human
+    authority whose key root installs, and none exists by default.
+  - Revocation by id (and everything narrowed from it), by kind (an epoch),
+    and by `cig tin rekey`; spends, revocations and epochs are ledger lines,
+    and the state folded from them refuses a ledger cut, swapped or
+    deleted under it (E739). A dry run vouches for nothing.
+  - The verifier lives in its own crate, `crates/cig-pass`, beside a
+    threat model, with property tests and fuzz targets (run in CI).
+  - Docs: `docs/PASS.md`. Errors: E730 to E739, E809.
+- **The ledger takes a lock for every append.** Two runs appending at once
+  could chain onto the same head and fork it, after which `cig runs
+  --verify` called the ledger broken. Appends now take turns.
+
 ## 1.19.0 — 2026-11-09
 
 The tin kept further from what it protects: hidden from boxed hops, a key
