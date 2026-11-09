@@ -3,8 +3,18 @@
 All notable changes to CigScript. The format follows Keep a Changelog; the
 project follows semantic versioning.
 
-## Unreleased
+## 1.19.0 — 2026-11-09
 
+The tin kept further from what it protects: hidden from boxed hops, a key
+that rotates and wipes itself, parcels that can carry it; hops that read
+only what changed; the history quick at ten thousand runs; installers
+that tell a missing file from a failed download.
+
+- **The installers tell a missing file from a failed download.**
+  `install.sh` and `install.ps1` called a release asset missing whenever
+  its download failed. A 404 is now "missing"; any other failure names
+  the HTTP code and says to try again, and `install.ps1` tries each
+  download three times before it gives up.
 - **`tin/` and `runs/` hidden from a boxed hop** (#105). The guard no
   longer leaves the tin visible to a hop and read-only, it hides it: in
   the hop's mount namespace an empty tmpfs goes over `~/.cigscript/tin`
