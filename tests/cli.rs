@@ -10233,7 +10233,7 @@ fn a_report_never_contains_a_path_component_of_the_users_folder() {
     // path or a command line can reach.
     sb.write(
         "zqx-tool.json",
-        r#"{"kind":"crash","panic_message":"map has no key at /home/zqx/zqx-clients/ZqxCorp/orchestrate.cig","panic_location":"orchestrate.cig:12","version":"1.1.0","cwd":"~/zqx-clients/ZqxCorp","command":["cigo","run","ZqxDeploy.sh","--only","zqx-task"],"manifest":{"dir":"/srv/zqx/work","files":["zqx-a.txt","ZqxB.csv"],"script":"zqx-pack/ZqxData/run.sh"},"active_run_id":null}"#,
+        r#"{"kind":"crash","panic_message":"map has no key at /home/zqx/zqx-clients/ZqxCorp/orchestrate.cig","panic_location":"orchestrate.cig:12","version":"1.1.0","cwd":"~/zqx-clients/ZqxCorp","command":["cigo","run","ZqxDeploy.sh","--zqx-only","zqx-task"],"manifest":{"dir":"/srv/zqx/work","files":["zqx-a.txt","ZqxB.csv"],"script":"zqx-pack/ZqxData/run.sh"},"active_run_id":null}"#,
     );
     let file = sb
         .path()
