@@ -461,18 +461,24 @@ pub fn lock() -> Result<Guard, String> {
     super::seal::hold_shared_rekey_lock()?;
     let dir = super::seal::ensure_keys_dir()?;
     let p = dir.join("ledger.lock");
+    // On Unix the lock file is made private, and never through a link,
+    // before it is locked. Not on Windows: there the lock is an exclusive
+    // open, so a plain open while another process holds it fails with a
+    // sharing violation instead of waiting; `exclusive_lock` makes the file
+    // itself and waits its turn.
+    #[cfg(unix)]
     {
-        let mut opts = fs::OpenOptions::new();
-        opts.create(true).truncate(false).write(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            opts.mode(0o600).custom_flags(libc::O_NOFOLLOW);
-        }
-        opts.open(&p)
+        use std::os::unix::fs::OpenOptionsExt;
+        fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&p)
             .map_err(|e| format!("cannot make the ledger's lock {}: {e}", p.display()))?;
+        super::seal::check_private_state_file(&p)?;
     }
-    super::seal::check_private_state_file(&p)?;
     let f = super::runs_index::exclusive_lock(&p)
         .map_err(|e| format!("cannot lock the ledger: {e}"))?;
     Ok(Guard { _file: f })

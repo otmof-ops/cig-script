@@ -49,10 +49,16 @@ impl Sandbox {
         self.path().join(name).exists()
     }
 
-    /// The sandbox's path as the scripts spell it (absolute: a pass records
-    /// paths as the work used them).
+    /// The sandbox's path as the scripts spell it: absolute (a pass records
+    /// paths as the work used them), written as the inside of a string
+    /// literal, so a Windows path's backslashes are not read as escapes.
     fn abs(&self, name: &str) -> String {
-        self.path().join(name).to_string_lossy().to_string()
+        self.path()
+            .join(name)
+            .to_string_lossy()
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('$', "\\$")
     }
 
     fn cig_env(&self, args: &[&str], envs: &[(&str, &str)]) -> Output {
@@ -325,6 +331,8 @@ exhale q != null, r == null
     assert_eq!(out.trim(), "true true", "{out}");
 }
 
+// `cat` and `ls` are Unix programs, and the test reads the program's path.
+#[cfg(unix)]
 #[test]
 fn proc_run_with_reads_is_recorded() {
     // `reads: [..]` declares the inputs of a program: the file, the resolved
@@ -975,7 +983,7 @@ fn an_unknown_pass_subcommand_is_a_usage_error_with_a_hint() {
     let sb = Sandbox::new();
     let out = sb.run_fails(&["pass", "frobnicate"]);
     assert!(
-        out.contains("cig pass"),
+        out.contains("cig pass") || out.contains("cig.exe pass"),
         "a hint says what to type next: {out}"
     );
 }
@@ -1089,6 +1097,7 @@ fn deleting_the_ledger_and_the_state_refuses_older_passes() {
     assert!(why.contains("ledger is shorter"), "{why}");
 }
 
+#[cfg(unix)]
 #[test]
 fn a_folder_in_reads_covers_the_files_in_it() {
     let sb = Sandbox::new();
