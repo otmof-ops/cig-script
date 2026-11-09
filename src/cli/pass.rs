@@ -165,6 +165,9 @@ fn input_line(i: &Input) -> String {
         Input::Present { path, kind } => {
             format!("present  {} ({})", cig_pass::shown(path), kind.word())
         }
+        Input::Env { name, .. } if name.as_slice() == b":cwd" => {
+            "env      the working folder".to_string()
+        }
         Input::Env { name, value } => format!(
             "env      ${}{}",
             cig_pass::clean(&String::from_utf8_lossy(name)),
