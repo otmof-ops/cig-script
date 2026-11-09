@@ -125,8 +125,27 @@ pub fn store() -> Result<Store, String> {
     Store::open(&dir(), &Guard).map_err(|e| format!("the pass store: {e}"))
 }
 
-fn marks_path() -> PathBuf {
-    dir().join("marks")
+/// The state cache, named by its key: after `cig tin rekey` the name is
+/// another, so the old cache (sealed under the old key) is left behind and
+/// the state is folded again from the ledger the rekey re-signed.
+fn marks_path(keys: &Keys) -> PathBuf {
+    let id = blake3::hash(keys.marks.as_bytes());
+    dir().join(format!("marks-{}", cig_pass::hex(&id.as_bytes()[..8])))
+}
+
+/// Remove state caches left by an older key.
+fn sweep_old_marks(current: &Path) {
+    let Ok(rd) = std::fs::read_dir(dir()) else {
+        return;
+    };
+    for e in rd.flatten() {
+        let p = e.path();
+        let name = e.file_name();
+        let name = name.to_string_lossy();
+        if (name.starts_with("marks-") || name == "marks") && p != current {
+            let _ = std::fs::remove_file(&p);
+        }
+    }
 }
 
 fn pos_of(lp: &LedgerPos) -> ledger::Pos {
@@ -164,14 +183,15 @@ pub const STATE_E739: &str = "E739";
 /// until `cig doctor` looks (E739).
 pub fn state(keys: &Keys) -> Result<Marks, String> {
     let mac = |b: &[u8]| keys.marks_mac(b);
-    let loaded = Marks::load(&marks_path(), &Guard, &mac)
+    let path = marks_path(keys);
+    let loaded = Marks::load(&path, &Guard, &mac)
         .map_err(|e| format!("the pass state cannot be read: {e}"))?;
     let mut marks = match loaded {
         Loaded::Ok(m) => m,
         Loaded::Stale => Marks::empty(),
         Loaded::Tampered(why) => {
             return Err(format!(
-                "{STATE_E739}: the pass state does not verify ({why}); every pass is refused until cig doctor looks"
+                "{STATE_E739}: the pass state does not verify ({why}); every pass is refused until cig pass gc rebuilds it from the ledger"
             ))
         }
     };
@@ -186,17 +206,34 @@ pub fn state(keys: &Keys) -> Result<Marks, String> {
                     }
                 }
                 marks.advance(lp);
-                let _ = marks.save(&marks_path(), &Guard, &mac);
+                if marks.save(&path, &Guard, &mac).is_ok() {
+                    sweep_old_marks(&path);
+                }
             }
             Ok(marks)
         }
         ledger::Since::Shorter => Err(format!(
-            "{STATE_E739}: the ledger is shorter than the pass state expects (cut, or an older copy put back); every pass is refused until cig doctor looks"
+            "{STATE_E739}: the ledger is shorter than the pass state expects (cut, or an older copy put back); every pass is refused (cig runs --verify says what is missing)"
         )),
         ledger::Since::Swapped => Err(format!(
-            "{STATE_E739}: the ledger is not the one the pass state was read from; every pass is refused until cig doctor looks"
+            "{STATE_E739}: the ledger is not the one the pass state was read from; every pass is refused (cig runs --verify says what changed)"
         )),
     }
+}
+
+/// Fold the pass state again from the whole ledger, after verifying its
+/// chain: what `cig pass gc` does for a cache that no longer verifies.
+pub fn rebuild_state(keys: &Keys) -> Result<Marks, String> {
+    let loaded = ledger::load()?;
+    if let Some(at) = loaded.broken_at {
+        return Err(format!(
+            "{STATE_E739}: the ledger's chain is broken at line {at}; the pass state cannot be folded from it (cig runs --verify says more)"
+        ));
+    }
+    let path = marks_path(keys);
+    let _ = std::fs::remove_file(&path);
+    sweep_old_marks(&path);
+    state(keys)
 }
 
 fn mark_of(l: &ledger::Line) -> Option<(MarkKind, [u8; 32])> {
@@ -217,14 +254,33 @@ fn mark_of(l: &ledger::Line) -> Option<(MarkKind, [u8; 32])> {
 pub fn allowed_signers_path() -> PathBuf {
     let c = crate::config::Config::load().get("pass_allowed_signers");
     if c.is_empty() {
-        crate::burn::runs::home_dir().join("allowed_signers")
+        seal::keys_dir().join("allowed_signers")
     } else {
         PathBuf::from(c)
     }
 }
 
-/// The allowed signers in a file (none when it is not there).
+/// The allowed signers in a file (none when it is not there). Whoever can
+/// write this file decides which machines' passes hold here, so it is read
+/// only when it is ours, a regular file (not a link) and closed to others'
+/// writes; otherwise it trusts nobody, and says why on stderr.
 pub fn read_signers(path: &Path) -> Vec<cig_pass::ssh::Signer> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let Ok(md) = std::fs::symlink_metadata(path) else {
+            return Vec::new();
+        };
+        // SAFETY: geteuid has no preconditions.
+        let me = unsafe { libc::geteuid() };
+        if !md.file_type().is_file() || md.uid() != me || md.mode() & 0o022 != 0 {
+            eprintln!(
+                "note: {} is not a private file of yours (a link, another owner's, or writable by others), so it trusts no signer",
+                path.display()
+            );
+            return Vec::new();
+        }
+    }
     std::fs::read_to_string(path)
         .map(|t| cig_pass::ssh::parse_allowed_signers(&t))
         .unwrap_or_default()
@@ -282,6 +338,8 @@ pub struct CigCtx<'a> {
     pub signers: Vec<cig_pass::ssh::Signer>,
     pub authorities: Vec<[u8; 32]>,
     pub discharges: Vec<Pass>,
+    /// The running script's globals, for passes that recorded one.
+    pub globals: Option<crate::interp::env::Env>,
 }
 
 impl<'a> CigCtx<'a> {
@@ -296,6 +354,7 @@ impl<'a> CigCtx<'a> {
             signers: read_signers(&allowed_signers_path()),
             authorities: authorities(),
             discharges: Vec::new(),
+            globals: None,
         }
     }
 }
@@ -335,6 +394,10 @@ impl Ctx for CigCtx<'_> {
         self.marks.epoch(kind)
     }
 
+    fn ledger_seq(&self) -> Option<u64> {
+        Some(self.marks.ledger().seq)
+    }
+
     fn allowed_signer(&self, pk: &[u8; 32], kind: &str) -> bool {
         self.signers
             .iter()
@@ -358,6 +421,10 @@ impl Ctx for CigCtx<'_> {
     }
 
     fn rules(&self, name: &str) -> Option<[u8; 32]> {
+        if let Some(g) = name.strip_prefix("global:") {
+            let v = self.globals.as_ref()?.get(g)?;
+            return digest_value(&v);
+        }
         self.rules.get(name).copied()
     }
 
@@ -418,16 +485,10 @@ pub struct IssueOpts {
 /// Kinds whose result is cig's own judgment: they always record cig.
 const CIG_JUDGES: &[&str] = &["check", "trial", "verdict", "doctor"];
 
-/// Issue a local pass from what the work recorded, and keep it.
-pub fn issue(
-    keys: &Keys,
-    marks: &Marks,
-    kind: &str,
-    subject: &[u8],
-    mut rec: Recorder,
-    result: Vec<u8>,
-    opts: &IssueOpts,
-) -> Result<Pass, IssueError> {
+/// Add what the options declare to a recording: cig itself, other tools,
+/// rule data, a time limit. Done before a nested recording is absorbed into
+/// the one around it, so the outer pass carries the inner one's limits too.
+pub fn prepare(rec: &mut Recorder, kind: &str, opts: &IssueOpts) {
     if opts.cig || CIG_JUDGES.contains(&kind) {
         rec.tool("cig", crate::VERSION, BUILD);
     }
@@ -440,6 +501,19 @@ pub fn issue(
     if let Some(t) = opts.until {
         rec.clock(t);
     }
+}
+
+/// Issue a local pass from what the work recorded (after `prepare`), and
+/// keep it.
+pub fn issue(
+    keys: &Keys,
+    marks: &Marks,
+    kind: &str,
+    subject: &[u8],
+    rec: Recorder,
+    result: Vec<u8>,
+    opts: &IssueOpts,
+) -> Result<Pass, IssueError> {
     let flags = rec.flags();
     let inputs = rec.finish()?;
     let epoch = marks.epoch(kind);
@@ -449,6 +523,7 @@ pub fn issue(
         inputs,
         result,
         epoch,
+        ledger_seq: marks.ledger().seq,
         issued_ms: cig_pass::wall_ms(),
         mono: cig_pass::mono_now(),
         flags,
@@ -464,10 +539,14 @@ pub fn issue(
             cig_pass::attenuate(&pass, cig_pass::Caveat::Until(t)).map_err(IssueError::Invalid)?;
     }
     if opts.store {
-        keep(&pass).map_err(IssueError::NoKey)?;
+        keep(&pass).map_err(|e| IssueError::Invalid(format!("{STORE_FAILED}{e}")))?;
     }
     Ok(pass)
 }
+
+/// What an issue error starts with when the pass was made and could not be
+/// kept (the work's result is still good).
+pub const STORE_FAILED: &str = "the pass could not be kept: ";
 
 /// Keep a pass in the store.
 pub fn keep(pass: &Pass) -> Result<(), String> {
@@ -530,27 +609,54 @@ pub fn find(ctx: &CigCtx<'_>, kind: &str, subject: &[u8]) -> Option<(Pass, Verif
 }
 
 /// Spend a pass: verify it and count one use of each `once` or `max` it
-/// carries (and of its discharges'), as one step under the ledger's lock.
-/// Refused when any of them is used up.
+/// carries (and of its discharges'). The full check runs first, without
+/// the ledger's lock; then, under the lock, the state is read again and
+/// what can have moved meanwhile (revocations, epochs, the counts) is
+/// checked again before the spend lines are appended. Refused when any
+/// count is used up.
 pub fn spend(pass: &Pass, setup: impl FnOnce(&mut CigCtx<'_>)) -> Result<Verified, String> {
     let keys = Keys::load()?;
+    let v = {
+        let marks = state(&keys)?;
+        let st = store().ok();
+        let mut ctx = CigCtx::new(&keys, &marks, st.as_ref());
+        setup(&mut ctx);
+        cig_pass::verify(pass, &ctx).map_err(|w| w.to_string())?
+    };
     let held = ledger::lock()?;
     let marks = state(&keys)?;
-    let st = store().ok();
-    let mut ctx = CigCtx::new(&keys, &marks, st.as_ref());
-    setup(&mut ctx);
-    let v = cig_pass::verify(pass, &ctx).map_err(|w| w.to_string())?;
+    for id in pass.prefix_ids() {
+        if marks.is_revoked(&id) {
+            return Err(Why::Revoked { prefix: 0 }.to_string());
+        }
+    }
+    if pass.form == cig_pass::Form::Local && marks.epoch(&pass.kind) != pass.epoch {
+        return Err(Why::Epoch {
+            then: pass.epoch,
+            now: marks.epoch(&pass.kind),
+            kind: pass.kind.clone(),
+        }
+        .to_string());
+    }
     for s in &v.spend {
-        if marks.spend_count(&s.key) >= s.limit {
+        let used = marks.spend_count(&s.key);
+        if used >= s.limit {
             return Err(Why::Spent {
-                text: format!("used {} of {}", marks.spend_count(&s.key), s.limit),
-                used: marks.spend_count(&s.key),
+                text: format!("used {used} of {}", s.limit),
+                used,
             }
             .to_string());
         }
     }
-    for s in &v.spend {
-        ledger::append_locked(&held, "pass-spend", "", &cig_pass::hex(&s.key), "spent", 0)?;
+    for (n, s) in v.spend.iter().enumerate() {
+        if let Err(e) =
+            ledger::append_locked(&held, "pass-spend", "", &cig_pass::hex(&s.key), "spent", 0)
+        {
+            return Err(format!(
+                "{e} ({n} of its {} spend(s) were recorded before this)",
+                v.spend.len()
+            ));
+        }
     }
     drop(held);
     let _ = state(&keys);
@@ -688,4 +794,80 @@ fn write_canonical(v: &crate::value::Value, out: &mut Vec<u8>) -> Result<(), Str
         }
     }
     Ok(())
+}
+
+/// A digest of a value as a pass records a global the work read: its type
+/// and contents, nested lists and maps included, keys in order. A
+/// function inside is named by its text's place, not its captures (what it
+/// captured is checked where its body reads it). `None` for a value no
+/// digest can name.
+pub fn digest_value(v: &crate::value::Value) -> Option<[u8; 32]> {
+    let mut h = blake3::Hasher::new();
+    h.update(b"cigpass1-global");
+    feed(&mut h, v, 0)?;
+    Some(*h.finalize().as_bytes())
+}
+
+fn feed(h: &mut blake3::Hasher, v: &crate::value::Value, depth: usize) -> Option<()> {
+    use crate::value::Value;
+    if depth > 256 {
+        return None;
+    }
+    match v {
+        Value::Null => {
+            h.update(b"n");
+        }
+        Value::Bool(b) => {
+            h.update(if *b { b"t" } else { b"f" });
+        }
+        Value::Int(n) => {
+            h.update(b"i");
+            h.update(&n.to_le_bytes());
+        }
+        Value::Float(x) => {
+            h.update(b"d");
+            h.update(&x.to_bits().to_le_bytes());
+        }
+        Value::Str(s) => {
+            h.update(b"s");
+            h.update(&(s.len() as u64).to_le_bytes());
+            h.update(s.as_bytes());
+        }
+        Value::List(items) => {
+            let items = items.borrow();
+            h.update(b"l");
+            h.update(&(items.len() as u64).to_le_bytes());
+            for x in items.iter() {
+                feed(h, x, depth + 1)?;
+            }
+        }
+        Value::Map(m) => {
+            let m = m.borrow();
+            h.update(b"m");
+            h.update(&(m.len() as u64).to_le_bytes());
+            for (k, x) in m.iter() {
+                h.update(&(k.len() as u64).to_le_bytes());
+                h.update(k.as_bytes());
+                feed(h, x, depth + 1)?;
+            }
+        }
+        Value::Func(f) => {
+            h.update(b"F");
+            h.update(f.name.as_deref().unwrap_or("pack").as_bytes());
+            h.update(&(f.params.len() as u64).to_le_bytes());
+        }
+        Value::Builtin(b) => {
+            h.update(b"B");
+            h.update(b.name.as_bytes());
+        }
+        Value::Module(m) => {
+            h.update(b"M");
+            h.update(m.name.as_bytes());
+        }
+        Value::Chain(c) => {
+            h.update(b"C");
+            h.update(c.name.as_bytes());
+        }
+    }
+    Some(())
 }

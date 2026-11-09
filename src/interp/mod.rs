@@ -47,8 +47,6 @@ pub struct Interp {
     pub(crate) chain_stack: Vec<String>,
     /// Passes being issued, innermost last (cig-script#186).
     pub(crate) recs: Vec<record::RecFrame>,
-    /// The program's constant globals: what a pass's work may read.
-    pub(crate) const_globals: std::collections::HashSet<String>,
     /// The script's own file, recorded by a pass that depends on its code.
     pub script_path: Option<std::path::PathBuf>,
 }
@@ -86,7 +84,6 @@ impl Interp {
             loop_depth: 0,
             chain_stack: Vec::new(),
             recs: Vec::new(),
-            const_globals: std::collections::HashSet::new(),
             script_path: None,
         }
     }
@@ -229,7 +226,6 @@ impl Interp {
             panic!("deliberate test panic in the evaluator (CIG_INTERNAL_PANIC=eval)");
         }
         let globals = self.globals.clone();
-        self.const_globals = record::const_globals_of(program);
         let result = self.exec_block_in(&program.body, &globals);
         self.out.flush().ok();
         match result {

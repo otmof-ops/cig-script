@@ -58,6 +58,8 @@ pub struct Draft {
     pub inputs: Vec<Input>,
     pub result: Vec<u8>,
     pub epoch: u64,
+    /// The issuer's ledger length now (local passes; 0 otherwise).
+    pub ledger_seq: u64,
     pub issued_ms: i64,
     pub mono: Option<Mono>,
     /// From `Recorder::flags`.
@@ -165,6 +167,11 @@ impl Draft {
             result: self.result.clone(),
             issuer,
             epoch: self.epoch,
+            ledger_seq: if form == Form::Local {
+                self.ledger_seq
+            } else {
+                0
+            },
             issued_ms: self.issued_ms,
             mono: self.mono,
             caveats: Vec::new(),
@@ -433,6 +440,7 @@ pub fn reissue_shareable(
     let sk = auth::signing_key(signing_seed);
     let mut p = pass.clone();
     p.form = Form::Shareable;
+    p.ledger_seq = 0;
     p.issuer = Issuer::Ed25519(sk.verifying_key().to_bytes());
     p.inputs = inputs;
     p.caveats = Vec::new();

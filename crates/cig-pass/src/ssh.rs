@@ -81,11 +81,26 @@ pub fn parse_allowed_signers(text: &str) -> Vec<Signer> {
         let options: Vec<&String> = words[1..at].iter().collect();
         let mut kinds: Vec<String> = Vec::new();
         let mut ok = true;
+        let today = now_stamp();
         for o in options {
             for opt in split_options(o) {
                 let opt_l = opt.to_ascii_lowercase();
                 if opt_l == "cert-authority" {
                     ok = false;
+                }
+                // `valid-after` and `valid-before` (YYYYMMDD[HHMM[SS]], UTC):
+                // outside them the line trusts nothing.
+                if let Some(t) = opt_l.strip_prefix("valid-after=") {
+                    match stamp_of(t.trim_matches('"')) {
+                        Some(t) if today >= t => {}
+                        _ => ok = false,
+                    }
+                }
+                if let Some(t) = opt_l.strip_prefix("valid-before=") {
+                    match stamp_of(t.trim_matches('"')) {
+                        Some(t) if today < t => {}
+                        _ => ok = false,
+                    }
                 }
                 if let Some(ns) = opt_l.strip_prefix("namespaces=") {
                     for n in ns.trim_matches('"').split(',') {
@@ -166,4 +181,25 @@ pub fn allowed_signers_line(principal: &str, pk: &[u8; 32], kinds: &[&str]) -> S
         ns.join(","),
         to_openssh(pk)
     )
+}
+
+/// Now as `YYYYMMDDHHMMSS` (UTC), for comparing with `valid-after`.
+fn now_stamp() -> u64 {
+    let iso = crate::text::iso(crate::fsid::wall_ms());
+    let digits: String = iso.chars().filter(|c| c.is_ascii_digit()).collect();
+    digits.parse().unwrap_or(0)
+}
+
+/// `YYYYMMDD[HHMM[SS]]` padded to `YYYYMMDDHHMMSS`; a trailing `Z` is
+/// UTC, as every time here is.
+fn stamp_of(t: &str) -> Option<u64> {
+    let t = t.trim_end_matches(['Z', 'z']);
+    if !(t.len() == 8 || t.len() == 12 || t.len() == 14) || !t.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let mut padded = t.to_string();
+    while padded.len() < 14 {
+        padded.push('0');
+    }
+    padded.parse().ok()
 }

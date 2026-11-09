@@ -1365,7 +1365,7 @@ the burn kernel and its journal (write-ahead log).
 | [`E736`](#e736-not-a-pass) | not a pass | can't see any ciggies bro | copy the whole token (it starts with cigpass1.), or ask for it again; a token from a newer cig needs cig update |
 | [`E737`](#e737-a-pass-needs-a-discharge) | a pass needs a discharge | don't have any over here | ask for the discharge (for human-yes, the approval the gate shows); then give both: the pass and its discharge |
 | [`E738`](#e738-the-signer-is-not-trusted-here) | the signer is not trusted here | never heard of you | on the machine that signed, cig pass key --kinds check,program prints the line to add; add it to the allowed signers file (cig config pass_allowed_signers <file>), or pass --allowed-signers <file> for one command |
-| [`E739`](#e739-the-pass-state-cannot-be-trusted) | the pass state cannot be trusted | these are MY ciggies | a cache that fails its MAC: remove <keys>/passes/marks and cig rebuilds it from the ledger, whose chain it verifies; a ledger cut short or replaced: cig runs --verify says what is missing |
+| [`E739`](#e739-the-pass-state-cannot-be-trusted) | the pass state cannot be trusted | these are MY ciggies | a cache that fails its MAC: cig pass gc folds the state again from the ledger, after checking the ledger's chain; a ledger cut short or replaced: cig runs --verify says what is missing |
 
 ### E700 burn refused
 
@@ -1860,14 +1860,14 @@ Related: `E730`, `E736`.
 
 **Kind of no:** these are MY ciggies (the door: it knows you and said no; 403 Forbidden; permission denied; a lock; a refusal by policy).
 
-The pass state (each kind's epoch, the spends and the revocations) is folded from the ledger and kept in a cache beside the passes, MAC'd under a subkey of the tin's key and pinned to the ledger's length and last line. cig refuses it when the cache fails its MAC, when the ledger is shorter than the cache expects (cut, or an older copy put back), or when the line the cache was read at is another one. A missing cache is rebuilt from the ledger, never reset, so deleting it never brings a revoked pass back. While refused, every pass is invalid. A whole keys folder put back from an older copy cannot be told apart here: cig tin head is the anchor to keep elsewhere.
+The pass state (each kind's epoch, the spends and the revocations) is folded from the ledger and kept in a cache beside the passes, MAC'd under a subkey of the tin's key (a cig tin rekey starts a new one, folded again from the re-signed ledger) and pinned to the ledger's length and last line. Each local pass also carries the ledger's length when it was made, so a ledger deleted or cut below that refuses it. cig refuses it when the cache fails its MAC, when the ledger is shorter than the cache expects (cut, or an older copy put back), or when the line the cache was read at is another one. A missing cache is rebuilt from the ledger, never reset, so deleting it never brings a revoked pass back. While refused, every pass is invalid. A whole keys folder put back from an older copy cannot be told apart here: cig tin head is the anchor to keep elsewhere.
 
-**What to type next:** a cache that fails its MAC: remove <keys>/passes/marks and cig rebuilds it from the ledger, whose chain it verifies; a ledger cut short or replaced: cig runs --verify says what is missing
+**What to type next:** a cache that fails its MAC: cig pass gc folds the state again from the ledger, after checking the ledger's chain; a ledger cut short or replaced: cig runs --verify says what is missing
 
 **Known causes**, ranked; doctor checks them in this order:
 
 1. the passes folder or a file in it is owned by another user, is group- or world-writable, or is a symlink (probe `path-permissions`). **Remedy:** made under sudo: chown it back to yourself; not yours: move it aside, it holds nothing of yours, and cig makes a new one
-2. the cache was edited or written by something else, or the ledger was cut or put back from an older copy (probe `path-exists`). **Remedy:** remove the cache to have it rebuilt from the ledger; for the ledger itself, cig runs --verify and cig tin verify --head say what changed
+2. the cache was edited or written by something else, or the ledger was cut or put back from an older copy (probe `path-exists`). **Remedy:** cig pass gc rebuilds the cache from the ledger; for the ledger itself, cig runs --verify and cig tin verify --head say what changed
 
 Related: `E721`, `E720`, `E730`.
 

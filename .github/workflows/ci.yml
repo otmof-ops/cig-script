@@ -76,6 +76,23 @@ jobs:
           CIG="$PWD/target/release/cig" bash tests/portability/probe.sh | tee probe.txt
           ! grep -q '^FAIL' probe.txt
 
+  # cig-pass's verifier is the one place that decides "trusted": each fuzz
+  # target runs for a minute on every push, after replaying the corpus.
+  fuzz-cig-pass:
+    name: fuzz (cig-pass)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - run: cargo install cargo-fuzz --locked
+      - working-directory: crates/cig-pass
+        run: |
+          for t in decode verify attenuate; do
+            mkdir -p fuzz/corpus/$t
+            cp -n fuzz/corpus/decode/* fuzz/corpus/$t/ 2>/dev/null || true
+            cargo +nightly fuzz run $t fuzz/corpus/$t -- -max_total_time=60
+          done
+
   # No hosted runner: a VM. It must not hold a merge back when the VM itself
   # misbehaves, so its failure is reported, not fatal; the log says.
   test-freebsd:

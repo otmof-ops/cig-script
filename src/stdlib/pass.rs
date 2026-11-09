@@ -306,7 +306,7 @@ fn memo(i: &mut Interp, a: &[Value], s: Span) -> Result<Value, Diagnostic> {
 /// over what it read.
 fn run(i: &mut Interp, a: &[Value], s: Span, name: &str, memo: bool) -> Result<Value, Diagnostic> {
     let kind = kind_arg(a, name, s)?;
-    let subject = subject_arg(a, name, s)?;
+    let canonical = subject_arg(a, name, s)?;
     let work = a[2].clone();
     if !matches!(work, Value::Func(_)) {
         return Err(type_error(format!(
@@ -316,9 +316,18 @@ fn run(i: &mut Interp, a: &[Value], s: Span, name: &str, memo: bool) -> Result<V
         .at(s));
     }
     let o = opts_arg(a, 3, name, s)?;
+    // With `code` (the default) the pass is about this subject from this
+    // script: `pass.find` in the same script finds it. A memo is also about
+    // its call, so two memos with one subject never return each other's
+    // result.
+    let mut subject = keyed_subject(i, &canonical, o.code);
+    if memo && o.code {
+        subject.extend_from_slice(format!("\0at\0{}", s.start).as_bytes());
+    }
     let (keys, marks, store) = open(name, s)?;
     if memo {
-        let ctx = ctx_with(&keys, &marks, store.as_ref(), &o);
+        let mut ctx = ctx_with(&keys, &marks, store.as_ref(), &o);
+        ctx.globals = Some(i.globals.clone());
         if let Some((p, _)) = pass::find(&ctx, &kind, &subject) {
             if let Some(outer) = i.recorder() {
                 outer.pass(p.id());
@@ -326,30 +335,34 @@ fn run(i: &mut Interp, a: &[Value], s: Span, name: &str, memo: bool) -> Result<V
             return Ok(pass_value(&p, Some(true)));
         }
     }
-    let frame = RecFrame {
-        rec: cig_pass::Recorder::new(),
-        barrier: next_serial(),
-        clock: o.until.is_some(),
-    };
-    i.recs.push(frame);
+    // The work gets a copy of its subject as the pass names it: what it
+    // changes in that copy changes nothing outside.
+    let subject_value = serde_json::from_slice::<serde_json::Value>(&canonical)
+        .map(super::json::to_value)
+        .map_err(|e| type_error(format!("{name}: the subject: {e}")).at(s))?;
+    i.recs.push(RecFrame::new(next_serial(), o.until.is_some()));
     if o.code {
-        if let Some(p) = i.script_path.clone() {
-            if let Some(r) = i.recorder() {
-                if let Err(err) = r.file_seen(&p) {
-                    r.open_world(format!(
-                        "the script {} could not be read ({err})",
-                        p.display()
-                    ));
+        match i.script_path.clone() {
+            Some(p) => {
+                if let Some(r) = i.recorder() {
+                    if let Err(err) = r.file_seen(&p) {
+                        r.open_world(format!(
+                            "the script {} could not be read ({err})",
+                            p.display()
+                        ));
+                    }
+                }
+            }
+            None => {
+                if let Some(r) = i.recorder() {
+                    r.open_world("the script has no file a pass could record (code: false vouches without it)".to_string());
                 }
             }
         }
     }
-    let out = i.call(&work, vec![a[1].clone()], s);
-    let frame = i.recs.pop().expect("the frame pushed above");
+    let out = i.call(&work, vec![subject_value], s);
+    let mut frame = i.recs.pop().expect("the frame pushed above");
     let value = out?;
-    if let Some(outer) = i.recorder() {
-        outer.absorb(&frame.rec);
-    }
     let result = pass::canonical_json(&value)
         .map_err(|w| type_error(format!("{name}: the work's result: {w}")).at(s))?;
     let dry = i.kernel.mode == Mode::DryRun;
@@ -358,44 +371,89 @@ fn run(i: &mut Interp, a: &[Value], s: Span, name: &str, memo: bool) -> Result<V
         cig: o.cig,
         tools: o.tools.clone(),
         rules: o.rules.clone(),
-        store: o.store && !dry,
+        store: o.store,
     };
-    match pass::issue(&keys, &marks, &kind, &subject, frame.rec, result, &iopts) {
-        Ok(p) => Ok(pass_value(&p, if memo { Some(false) } else { None })),
-        Err(IssueError::OpenWorld(w)) if memo => Ok(unissued(value, &w)),
-        Err(IssueError::Changed(w)) if memo => Ok(unissued(value, &format!("{w} changed while the work ran"))),
+    pass::prepare(&mut frame.rec, &kind, &iopts);
+    if let Some(outer) = i.recorder() {
+        outer.absorb(&frame.rec);
+    }
+    if dry {
+        // A dry run reads through the ghost and simulates its hops: what
+        // the work saw never happened, so nothing is vouched for.
+        return Ok(unissued(
+            &result,
+            "a dry run vouches for nothing: what the work saw was simulated",
+        ));
+    }
+    match pass::issue(&keys, &marks, &kind, &subject, frame.rec, result.clone(), &iopts) {
+        Ok(p) => {
+            if let Some(outer) = i.recorder() {
+                outer.pass(p.id());
+            }
+            Ok(pass_value(&p, if memo { Some(false) } else { None }))
+        }
+        Err(IssueError::OpenWorld(w)) if memo => Ok(unissued(&result, &w)),
+        Err(IssueError::Changed(w)) if memo => {
+            Ok(unissued(&result, &format!("{w} changed while the work ran")))
+        }
+        Err(IssueError::Invalid(w)) if memo && w.starts_with(pass::STORE_FAILED) => {
+            Ok(unissued(&result, &w))
+        }
         Err(IssueError::OpenWorld(w)) => Err(e(
             "E731",
             format!("{name}: {w}: a pass cannot vouch for what it cannot see, so none was issued"),
             s,
         )
-        .with_hint("read through fs, env and proc.which inside the work; give a hop `reads: [the paths it reads]`; pass `until` to read the clock")),
+        .with_hint("read through fs, env and proc.which inside the work; run a hop inside burn { } with `reads: [the paths it reads]`; give `until` to read the clock")),
         Err(IssueError::Changed(w)) => Err(e(
             "E734",
             format!("{name}: {w} changed while the work ran: two reads, two answers, so no pass was issued"),
             s,
         )
         .with_hint("run it again once nothing is writing there")),
+        Err(IssueError::Invalid(w)) if w.starts_with(pass::STORE_FAILED) => {
+            Err(e("E739", format!("{name}: {w}"), s).with_hint("cig pass stats says where the store is"))
+        }
         Err(other) => Err(e("E730", format!("{name}: {other}"), s)),
     }
 }
 
-/// A memo whose work could not be vouched for: its result, no pass.
-fn unissued(result: Value, why: &str) -> Value {
+/// The subject a pass is found by: the canonical subject, and with `code`
+/// the script it was issued from.
+fn keyed_subject(i: &Interp, canonical: &[u8], code: bool) -> Vec<u8> {
+    let mut subject = canonical.to_vec();
+    if code {
+        if let Some(p) = &i.script_path {
+            subject.extend_from_slice(b"\0code\0");
+            subject.extend_from_slice(p.to_string_lossy().as_bytes());
+        }
+    }
+    subject
+}
+
+/// A memo (or a dry run) whose work was not vouched for: its result, no
+/// pass. The same keys as a pass map where they mean anything.
+fn unissued(result: &[u8], why: &str) -> Value {
     let mut m = IndexMap::new();
-    m.insert("result".to_string(), result);
+    let value = serde_json::from_slice::<serde_json::Value>(result)
+        .map(super::json::to_value)
+        .unwrap_or(Value::Null);
+    m.insert("result".to_string(), value);
     m.insert("hit".to_string(), Value::Bool(false));
-    m.insert("issued".to_string(), Value::Bool(false));
+    m.insert("id".to_string(), Value::Null);
+    m.insert("token".to_string(), Value::Null);
     m.insert("why".to_string(), Value::str(why));
     Value::map(m)
 }
 
 fn find(i: &mut Interp, a: &[Value], s: Span) -> Result<Value, Diagnostic> {
     let kind = expect_str(a, 0, "pass.find", s)?.to_string();
-    let subject = subject_arg(a, "pass.find", s)?;
+    let canonical = subject_arg(a, "pass.find", s)?;
     let o = opts_arg(a, 2, "pass.find", s)?;
+    let subject = keyed_subject(i, &canonical, o.code);
     let (keys, marks, store) = open("pass.find", s)?;
-    let ctx = ctx_with(&keys, &marks, store.as_ref(), &o);
+    let mut ctx = ctx_with(&keys, &marks, store.as_ref(), &o);
+    ctx.globals = Some(i.globals.clone());
     Ok(match pass::find(&ctx, &kind, &subject) {
         Some((p, _)) => {
             if let Some(r) = i.recorder() {
@@ -403,7 +461,12 @@ fn find(i: &mut Interp, a: &[Value], s: Span) -> Result<Value, Diagnostic> {
             }
             pass_value(&p, None)
         }
-        None => Value::Null,
+        None => {
+            if let Some(r) = i.recorder() {
+                r.open_world("pass.find found nothing, and a later find may".to_string());
+            }
+            Value::Null
+        }
     })
 }
 
@@ -413,6 +476,7 @@ fn check(i: &mut Interp, a: &[Value], s: Span) -> Result<Value, Diagnostic> {
     let (keys, marks, store) = open("pass.check", s)?;
     let mut ctx = CigCtx::new(&keys, &marks, store.as_ref());
     ctx.action = action;
+    ctx.globals = Some(i.globals.clone());
     let mut m = IndexMap::new();
     match cig_pass::verify(&p, &ctx) {
         Ok(_) => {
@@ -423,6 +487,9 @@ fn check(i: &mut Interp, a: &[Value], s: Span) -> Result<Value, Diagnostic> {
             m.insert("why".to_string(), Value::Null);
         }
         Err(w) => {
+            if let Some(r) = i.recorder() {
+                r.open_world("pass.check said no, and the answer can change".to_string());
+            }
             m.insert("ok".to_string(), Value::Bool(false));
             m.insert("why".to_string(), Value::str(w.to_string()));
         }
@@ -430,9 +497,15 @@ fn check(i: &mut Interp, a: &[Value], s: Span) -> Result<Value, Diagnostic> {
     Ok(Value::map(m))
 }
 
-fn narrow(_: &mut Interp, a: &[Value], s: Span) -> Result<Value, Diagnostic> {
+fn narrow(i: &mut Interp, a: &[Value], s: Span) -> Result<Value, Diagnostic> {
     let p = pass_arg(a, 0, "pass.narrow", s)?;
     let text = expect_str(a, 1, "pass.narrow", s)?;
+    if let Some(r) = i.recorder() {
+        // `for` reads the clock, `~` HOME, a relative `within` the folder.
+        r.open_world(
+            "pass.narrow ran inside the work: narrow the pass it returns instead".to_string(),
+        );
+    }
     let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
     let cwd = std::env::current_dir().unwrap_or_default();
     let c = cig_pass::parse_caveat(text, home.as_deref(), &cwd, cig_pass::wall_ms())
@@ -451,6 +524,7 @@ fn spend(i: &mut Interp, a: &[Value], s: Span) -> Result<Value, Diagnostic> {
         ctx.action = action;
         return match cig_pass::verify(&p, &ctx) {
             Ok(_) => Ok(Value::Bool(true)),
+            Err(w @ cig_pass::Why::Spent { .. }) => Err(e("E735", format!("pass.spend: {w}"), s)),
             Err(w) => Err(e("E730", format!("pass.spend: {w}"), s)),
         };
     }

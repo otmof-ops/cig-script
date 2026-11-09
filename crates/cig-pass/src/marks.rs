@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
 // SPDX-License-Identifier: Apache-2.0
 
-//! The marks cache (SPEC section 8 and the v2 decisions): the pass state
+//! The marks cache (cig-script#186): the pass state
 //! folded from the ledger lines `pass-epoch`, `pass-spend` and
 //! `pass-revoke`: each kind's epoch, how many times each spend key has been
 //! spent, and which ids are revoked. The ledger is the truth; this file only

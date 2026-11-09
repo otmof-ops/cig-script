@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
 // SPDX-License-Identifier: Apache-2.0
 
-//! The pass store (SPEC section 8): opaque encoded passes with the little
+//! The pass store (cig-script#186): opaque encoded passes with the little
 //! metadata the store needs, found by (kind, subject) or by id.
 //!
 //! ```text
@@ -39,7 +39,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -87,7 +87,7 @@ const NIL: u32 = u32::MAX;
 /// What the store keeps beside each encoded pass.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Meta {
-    /// The pass id (BLAKE3 over base and caveats; SPEC section 3).
+    /// The pass id (BLAKE3 over its base and caveats).
     pub id: [u8; 32],
     /// The pass kind; 1 to 255 bytes of UTF-8.
     pub kind: String,
@@ -1368,8 +1368,12 @@ impl Store {
     /// and no torn tail.
     fn prepare_log(&self, c: &mut Cache) -> io::Result<File> {
         let path = self.young_path();
+        // Read and write, not append: Windows lets a handle opened only to
+        // append neither cut a torn tail nor take back a half-written
+        // record (no write-data right). The store lock makes writers take
+        // turns, so seeking to the end before each write is an append.
         let mut o = OpenOptions::new();
-        o.read(true).append(true).create(true);
+        o.read(true).write(true).create(true).truncate(false);
         let mut f = open_private(&path, o, self.owner)?;
         let len = f.metadata()?.len();
         let mut head = [0u8; 16];
@@ -1378,6 +1382,7 @@ impl Store {
             && &head[..8] == YOUNG_MAGIC;
         if !ok {
             f.set_len(0)?;
+            f.seek(SeekFrom::Start(0))?;
             f.write_all(&young_header(new_gen(c.gen)))?;
             c.fp = None;
         }
@@ -1386,6 +1391,7 @@ impl Store {
         if c.consumed < len {
             f.set_len(c.consumed)?;
         }
+        f.seek(SeekFrom::End(0))?;
         Ok(f)
     }
 

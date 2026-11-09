@@ -28,3 +28,7 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage
 
 [dev-dependencies]
 tempfile = "3"
+
+[[test]]
+name = "never_more_permissive"
+path = "tests/property/never_more_permissive.rs"

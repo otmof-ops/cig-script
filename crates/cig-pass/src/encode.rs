@@ -519,6 +519,10 @@ pub struct Pass {
     pub result: Vec<u8>,
     pub issuer: Issuer,
     pub epoch: u64,
+    /// How long the issuer's ledger was when the pass was made (local
+    /// passes; 0 for shareable ones): a ledger shorter than this was cut
+    /// or deleted, and the pass does not hold.
+    pub ledger_seq: u64,
     pub issued_ms: i64,
     pub mono: Option<Mono>,
     pub caveats: Vec<Caveat>,
@@ -597,6 +601,7 @@ impl Pass {
             }
         }
         put_u64(&mut out, self.epoch);
+        put_u64(&mut out, self.ledger_seq);
         put_i64(&mut out, self.issued_ms);
         match self.mono {
             Some(m) => {
@@ -701,6 +706,7 @@ impl Pass {
             _ => return Err(DecodeError::new("its issuer does not match its form")),
         }
         let epoch = r.u64()?;
+        let ledger_seq = r.u64()?;
         let issued_ms = r.i64()?;
         let mono = match r.u8()? {
             0 => None,
@@ -756,6 +762,7 @@ impl Pass {
             result,
             issuer,
             epoch,
+            ledger_seq,
             issued_ms,
             mono,
             caveats,

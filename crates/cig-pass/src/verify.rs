@@ -75,6 +75,11 @@ pub trait Ctx {
     fn local_issuer(&self) -> Option<[u8; 16]>;
     /// The current epoch of a kind on this machine.
     fn epoch(&self, kind: &str) -> u64;
+    /// How long this machine's ledger is now (`None`: not known, and not
+    /// checked). A local pass made when the ledger was longer does not hold.
+    fn ledger_seq(&self) -> Option<u64> {
+        None
+    }
     /// Is this Ed25519 key trusted to issue shareable passes of this kind?
     fn allowed_signer(&self, pk: &[u8; 32], kind: &str) -> bool;
     /// Is this Ed25519 key a human authority (for `human-yes`)? Read from
@@ -323,6 +328,14 @@ impl<'a> Verifier<'a> {
                         now,
                         kind: pass.kind.clone(),
                     });
+                }
+                if let Some(len) = ctx.ledger_seq() {
+                    if len < pass.ledger_seq {
+                        return Err(Why::Policy(format!(
+                            "the ledger is shorter than when it was made ({len} lines now, {} then): cut, deleted or put back from an older copy",
+                            pass.ledger_seq
+                        )));
+                    }
                 }
             }
             (Form::Shareable, Issuer::Ed25519(pk)) => {

@@ -34,6 +34,21 @@ pub enum PassCommand {
         /// Trust these signers (OpenSSH allowed-signers format) instead of the configured file.
         #[arg(long, value_name = "FILE")]
         allowed_signers: Option<PathBuf>,
+        /// The action works in this folder (for `within`); repeat for more.
+        #[arg(long = "root", value_name = "DIR")]
+        roots: Vec<PathBuf>,
+        /// The action runs in a box (for `boxed`).
+        #[arg(long)]
+        boxed: bool,
+        /// The action's network: `none`, or hosts separated by commas (for `network`).
+        #[arg(long, value_name = "POLICY")]
+        network: Option<String>,
+        /// The action's arguments, one per flag (for `args`).
+        #[arg(long = "arg", value_name = "ARG", allow_hyphen_values = true)]
+        args: Vec<String>,
+        /// The agent the action runs under (for `agent`).
+        #[arg(long, value_name = "NAME")]
+        agent: Option<String>,
     },
     /// Add caveats to a pass (each only narrows it) and print the new token.
     Narrow {
@@ -171,6 +186,29 @@ fn input_line(i: &Input) -> String {
     }
 }
 
+/// One input for `--json`: its kind and what it names (never a digest).
+fn input_json(i: &Input) -> serde_json::Value {
+    let (kind, name) = match i {
+        Input::File { path, .. } => ("file", cig_pass::shown(path)),
+        Input::Absent { path } => ("absent", cig_pass::shown(path)),
+        Input::Dir { path, .. } => ("dir", cig_pass::shown(path)),
+        Input::Present { path, .. } => ("present", cig_pass::shown(path)),
+        Input::Env { name, .. } => ("env", cig_pass::clean(&String::from_utf8_lossy(name))),
+        Input::Tool {
+            name,
+            version,
+            build,
+        } => (
+            "tool",
+            cig_pass::clean(&format!("{name} {version} {build}")),
+        ),
+        Input::Rules { name, .. } => ("rules", cig_pass::clean(name)),
+        Input::Pass { id } => ("pass", cig_pass::hex(id)),
+        Input::Clock { not_after_ms } => ("clock", cig_pass::iso(*not_after_ms)),
+    };
+    serde_json::json!({"kind": kind, "name": name})
+}
+
 fn form_word(p: &Pass) -> &'static str {
     match p.form {
         Form::Local => "local",
@@ -185,15 +223,22 @@ fn write_token(ctx: &Ctx, token: &str, out: &Option<PathBuf>) -> i32 {
             exit::OK
         }
         Some(path) => {
+            // Never through a link, and 0600 whatever the file was before:
+            // a token is a bearer credential.
             let mut o = std::fs::OpenOptions::new();
             o.write(true).create(true).truncate(true);
             #[cfg(unix)]
             {
                 use std::os::unix::fs::OpenOptionsExt;
-                o.mode(0o600);
+                o.mode(0o600).custom_flags(libc::O_NOFOLLOW);
             }
             match o.open(path).and_then(|mut f| {
                 use std::io::Write;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+                }
                 f.write_all(token.as_bytes())?;
                 f.write_all(b"\n")
             }) {
@@ -217,7 +262,39 @@ pub fn pass_cmd(ctx: &Ctx, cmd: Option<PassCommand>) -> i32 {
         PassCommand::Verify {
             pass: arg,
             allowed_signers,
-        } => verify(ctx, &arg, allowed_signers),
+            roots,
+            boxed,
+            network,
+            args,
+            agent,
+        } => {
+            let mut action = cig_pass::Action {
+                boxed,
+                agent,
+                ..Default::default()
+            };
+            for r in roots {
+                let abs = std::fs::canonicalize(&r).unwrap_or(r);
+                if let Some(b) = cig_pass::path_bytes(&abs) {
+                    action.roots.push(b);
+                }
+            }
+            if !args.is_empty() {
+                action.argv = Some(args);
+            }
+            action.network = match network.as_deref() {
+                None => None,
+                Some("none") => Some(cig_pass::Network::None),
+                Some(hosts) => Some(cig_pass::Network::Hosts(
+                    hosts
+                        .split(',')
+                        .map(|h| h.trim().to_ascii_lowercase())
+                        .filter(|h| !h.is_empty())
+                        .collect(),
+                )),
+            };
+            verify(ctx, &arg, allowed_signers, action)
+        }
         PassCommand::Narrow {
             pass: arg,
             caveats,
@@ -312,12 +389,14 @@ fn check_now(
     marks: &cig_pass::marks::Marks,
     p: &Pass,
     signers: Option<PathBuf>,
+    action: cig_pass::Action,
 ) -> Result<cig_pass::Verified, cig_pass::Why> {
     let st = pass::store().ok();
     let mut c = CigCtx::new(keys, marks, st.as_ref());
     if let Some(f) = signers {
         c.signers = pass::read_signers(&f);
     }
+    c.action = action;
     cig_pass::verify(p, &c)
 }
 
@@ -328,9 +407,9 @@ fn show(ctx: &Ctx, arg: &str) -> i32 {
     let Some((keys, marks)) = open_or_report(ctx) else {
         return exit::SCRIPT_ERROR;
     };
-    let now = check_now(&keys, &marks, &p, None);
+    let now = check_now(&keys, &marks, &p, None, cig_pass::Action::default());
     if ctx.json {
-        let inputs: Vec<String> = p.inputs.iter().map(input_line).collect();
+        let inputs: Vec<serde_json::Value> = p.inputs.iter().map(input_json).collect();
         outln!(
             "{}",
             serde_json::json!({
@@ -374,14 +453,14 @@ fn show(ctx: &Ctx, arg: &str) -> i32 {
     exit::OK
 }
 
-fn verify(ctx: &Ctx, arg: &str, signers: Option<PathBuf>) -> i32 {
+fn verify(ctx: &Ctx, arg: &str, signers: Option<PathBuf>, action: cig_pass::Action) -> i32 {
     let Some(p) = read_or_report(ctx, arg) else {
         return exit::USAGE;
     };
     let Some((keys, marks)) = open_or_report(ctx) else {
         return exit::SCRIPT_ERROR;
     };
-    let r = check_now(&keys, &marks, &p, signers);
+    let r = check_now(&keys, &marks, &p, signers, action);
     if ctx.json {
         outln!(
             "{}",
@@ -500,7 +579,7 @@ fn export(ctx: &Ctx, arg: &str, out: &Option<PathBuf>, unsealed: bool, for_: &st
     let Some((keys, marks)) = open_or_report(ctx) else {
         return exit::SCRIPT_ERROR;
     };
-    if let Err(w) = check_now(&keys, &marks, &p, None) {
+    if let Err(w) = check_now(&keys, &marks, &p, None, cig_pass::Action::default()) {
         err(
             ctx,
             "E730",
@@ -545,6 +624,11 @@ fn export(ctx: &Ctx, arg: &str, out: &Option<PathBuf>, unsealed: bool, for_: &st
             }
         }
     };
+    eprintln!(
+        "exported as {} (revoking {} here does not revoke it: revoke that id too)",
+        &cig_pass::hex(&shared.id())[..16],
+        &cig_pass::hex(&p.id())[..16]
+    );
     write_token(ctx, &shared.token(), out)
 }
 
@@ -563,7 +647,7 @@ fn import(ctx: &Ctx, file: &str, signers: Option<PathBuf>) -> i32 {
         );
         return exit::SCRIPT_ERROR;
     }
-    match check_now(&keys, &marks, &p, signers) {
+    match check_now(&keys, &marks, &p, signers, cig_pass::Action::default()) {
         Ok(_) => match pass::keep(&p) {
             Ok(()) => {
                 outln!("kept {} ({} pass)", &cig_pass::hex(&p.id())[..16], p.kind);
@@ -598,12 +682,15 @@ fn log(ctx: &Ctx) -> i32 {
             }
             for l in lines {
                 let what = match l.kind.as_str() {
-                    "pass-spend" => format!("spent    {}", &l.head[..16.min(l.head.len())]),
-                    "pass-revoke" => format!("revoked  {}", &l.head[..16.min(l.head.len())]),
-                    "pass-epoch" => format!("epoch    every {} pass before this", l.status),
-                    other => other.to_string(),
+                    "pass-spend" => format!("spent {}", &l.head[..16.min(l.head.len())]),
+                    "pass-revoke" => format!(
+                        "revoked {} and what was narrowed from it",
+                        &l.head[..16.min(l.head.len())]
+                    ),
+                    "pass-epoch" => format!("every {} pass before this stops holding", l.status),
+                    _ => String::new(),
                 };
-                outln!("{}  #{}  {what}", l.t, l.seq);
+                outln!("{}  #{:<5} {:<12} {what}", l.t, l.seq, l.kind);
             }
             exit::OK
         }
@@ -690,6 +777,28 @@ fn key(ctx: &Ctx, kinds: &[String]) -> i32 {
 }
 
 fn gc(ctx: &Ctx) -> i32 {
+    let keys = match Keys::load() {
+        Ok(k) => k,
+        Err(e) => {
+            err(
+                ctx,
+                "E721",
+                &format!("the tin's key is not available ({e})"),
+            );
+            return exit::SCRIPT_ERROR;
+        }
+    };
+    // A state that no longer verifies is folded again from the ledger,
+    // whose chain is checked first.
+    if pass::state(&keys).is_err() {
+        match pass::rebuild_state(&keys) {
+            Ok(_) => eprintln!("the pass state was folded again from the ledger"),
+            Err(e) => {
+                err(ctx, "E739", &e);
+                return exit::SCRIPT_ERROR;
+            }
+        }
+    }
     let s = match pass::store() {
         Ok(s) => s,
         Err(e) => {
@@ -699,7 +808,16 @@ fn gc(ctx: &Ctx) -> i32 {
     };
     match s.compact_full(pass::budget_bytes(), &|b| Pass::decode(b).is_ok()) {
         Ok(r) => {
-            outln!("{r:?}");
+            let kept = s.list(None).map(|v| v.len()).unwrap_or(0);
+            let disk = s.disk_bytes().unwrap_or(0);
+            if ctx.json {
+                outln!(
+                    "{}",
+                    serde_json::json!({"passes": kept, "disk_bytes": disk, "report": format!("{r:?}")})
+                );
+            } else {
+                outln!("{kept} pass(es) kept, {disk} bytes on disk");
+            }
             exit::OK
         }
         Err(e) => {

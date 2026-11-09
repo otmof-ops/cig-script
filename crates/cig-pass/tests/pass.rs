@@ -164,6 +164,7 @@ mod adapter {
             inputs,
             result,
             epoch: keys.epoch,
+            ledger_seq: 0,
             issued_ms,
             mono,
             flags: 0,
@@ -886,8 +887,8 @@ fn racy_mtime_hashes() {
     let future = record_stale(mtime_ms - 5_000);
     assert!(verify(&future, &ctx()).is_err());
     // Control: not racy (issued an hour after the mtime) and the stat
-    // matches, so the stat is trusted. This is the stat-cache contract of
-    // SPEC section 2; it is why the racy rule exists.
+    // matches, so the stat is trusted: the stat cache's contract, and the
+    // reason the racy rule exists.
     let calm = record_stale(mtime_ms + 3_600_000);
     verify(&calm, &ctx()).expect("identity equal and not racy trusts the stat");
 }
@@ -1298,6 +1299,6 @@ fn a_pass_is_never_bigger_than_the_limits() {
     assert!(attenuate(&p, Caveat::Max(1)).is_err(), "at most 64 caveats");
 }
 
-// Keep the compiler honest about helpers the main session may drop.
+// Some helpers' imports are used only on one system.
 #[allow(dead_code)]
 fn _unused(_: PathBuf, _: Input) {}

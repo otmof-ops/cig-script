@@ -2128,8 +2128,8 @@ remedy = "a rekey changes the signing key; add the new line from cig pass key an
 [[code]]
 code = "E739"
 title = "the pass state cannot be trusted"
-meaning = "The pass state (each kind's epoch, the spends and the revocations) is folded from the ledger and kept in a cache beside the passes, MAC'd under a subkey of the tin's key and pinned to the ledger's length and last line. cig refuses it when the cache fails its MAC, when the ledger is shorter than the cache expects (cut, or an older copy put back), or when the line the cache was read at is another one. A missing cache is rebuilt from the ledger, never reset, so deleting it never brings a revoked pass back. While refused, every pass is invalid. A whole keys folder put back from an older copy cannot be told apart here: cig tin head is the anchor to keep elsewhere."
-fix = "a cache that fails its MAC: remove <keys>/passes/marks and cig rebuilds it from the ledger, whose chain it verifies; a ledger cut short or replaced: cig runs --verify says what is missing"
+meaning = "The pass state (each kind's epoch, the spends and the revocations) is folded from the ledger and kept in a cache beside the passes, MAC'd under a subkey of the tin's key (a cig tin rekey starts a new one, folded again from the re-signed ledger) and pinned to the ledger's length and last line. Each local pass also carries the ledger's length when it was made, so a ledger deleted or cut below that refuses it. cig refuses it when the cache fails its MAC, when the ledger is shorter than the cache expects (cut, or an older copy put back), or when the line the cache was read at is another one. A missing cache is rebuilt from the ledger, never reset, so deleting it never brings a revoked pass back. While refused, every pass is invalid. A whole keys folder put back from an older copy cannot be told apart here: cig tin head is the anchor to keep elsewhere."
+fix = "a cache that fails its MAC: cig pass gc folds the state again from the ledger, after checking the ledger's chain; a ledger cut short or replaced: cig runs --verify says what is missing"
 no = "these-are-mine"
 arises = ["run", "any"]
 tags = ["kernel"]
@@ -2142,7 +2142,7 @@ remedy = "made under sudo: chown it back to yourself; not yours: move it aside, 
 [[code.cause]]
 why = "the cache was edited or written by something else, or the ledger was cut or put back from an older copy"
 probe = "path-exists"
-remedy = "remove the cache to have it rebuilt from the ledger; for the ledger itself, cig runs --verify and cig tin verify --head say what changed"
+remedy = "cig pass gc rebuilds the cache from the ledger; for the ledger itself, cig runs --verify and cig tin verify --head say what changed"
 
 [[code]]
 code = "E750"
