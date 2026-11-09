@@ -785,8 +785,8 @@ fn run(o: &Opts, scratch: &Path) -> ExitCode {
         );
         println!();
         println!(
-            "{:<36} {:>9} {:>9} {:>9} {:>9} {:>6} {:>9}  {}",
-            "measure", "median", "p10", "p90", "p95", "CV", "budget", ""
+            "{:<36} {:>9} {:>9} {:>9} {:>9} {:>6} {:>9}",
+            "measure", "median", "p10", "p90", "p95", "CV", "budget"
         );
         for r in &rows {
             let budget = r
