@@ -255,6 +255,9 @@ pub enum Command {
         /// Only list what the parcel holds and the roots to map.
         #[arg(long)]
         show: bool,
+        /// Refuse a parcel without a pass beside it that holds here (its maker trusted for parcels).
+        #[arg(long)]
+        require_pass: bool,
     },
     /// The layers hops kept rather than applied: list, apply (as a new run), discard.
     Box {
@@ -629,6 +632,7 @@ fn dispatch(ctx: Ctx, command: Command) -> i32 {
             allow_sealed_missing,
             accept_key,
             show,
+            require_pass,
         } => parcel::unparcel(
             &ctx,
             &file,
@@ -637,6 +641,7 @@ fn dispatch(ctx: Ctx, command: Command) -> i32 {
             allow_sealed_missing,
             accept_key,
             show,
+            require_pass,
         ),
     }
 }

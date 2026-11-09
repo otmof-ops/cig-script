@@ -57,6 +57,16 @@ pub const KEYS: &[(&str, &str, &str)] = &[
         "globs every watched hop leaves out of the tin, comma-separated and relative to a pack root (`**/.cache/**, *.log`), on top of each hop's own `skip`: their changes are not kept, so a hop cannot undo them (E310)",
     ),
     (
+        "pass_allowed_signers",
+        "",
+        "the allowed-signers file (OpenSSH format) whose keys this machine trusts for shareable passes, each for the kinds its namespaces=\"cigpass-<kind>\" names; empty means allowed_signers in the keys folder. Read only when it is your own private file (cig-script#186)",
+    ),
+    (
+        "pass_budget",
+        "64MB",
+        "how much the pass store may hold before its oldest passes go (approvals, human-yes and revocation lists have their own 4 MB and are never pushed out by others): a size such as 64MB or 1GB (cig-script#186)",
+    ),
+    (
         "hop_statcache",
         "off",
         "the stat cache (#148): off keeps every hop reading and hashing the tree anyway; on remembers each touched file's (dev, inode, size, mtime, ctime, mode) with the tin object it was stashed under, so a later hop whose files all match the cache reads none of them (restores still re-hash: E704 is unchanged). `cig tin verify --statcache` re-checks it",
@@ -233,6 +243,13 @@ impl Config {
                         return Err(format!("hop_skip: `{g}` is not a glob: {e}"));
                     }
                 }
+            }
+            ("pass_allowed_signers", _) => {}
+            ("pass_budget", v) if crate::pass::parse_size(v).is_some() => {}
+            ("pass_budget", other) => {
+                return Err(format!(
+                    "pass_budget is a size such as 64MB or 1GB, not `{other}`"
+                ))
             }
             ("hop_statcache", "on" | "off") => {}
             ("hop_statcache", other) => {

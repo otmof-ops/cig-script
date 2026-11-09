@@ -574,7 +574,7 @@ pub fn budget_bytes() -> u64 {
     parse_size(&v).unwrap_or(64 * 1024 * 1024)
 }
 
-fn parse_size(v: &str) -> Option<u64> {
+pub fn parse_size(v: &str) -> Option<u64> {
     let v = v.trim();
     if v.is_empty() {
         return None;
@@ -870,4 +870,69 @@ fn feed(h: &mut blake3::Hasher, v: &crate::value::Value, depth: usize) -> Option
         }
     }
     Some(())
+}
+
+// ----- parcels -----------------------------------------------------------------------
+
+/// The pass a parcel carries beside it (`<parcel>.pass`): a sealed,
+/// shareable `parcel` pass from this machine over the run's id and the
+/// digest of the parcel's manifest. Another machine that trusts this one
+/// for parcels knows who made it, and that nothing in it changed.
+pub fn issue_parcel_pass(run: &str, manifest_sha256: &str) -> Result<Pass, String> {
+    let keys = Keys::load()?;
+    let marks = state(&keys)?;
+    let result =
+        serde_json::to_vec(&serde_json::json!({"manifest_sha256": manifest_sha256, "run": run}))
+            .map_err(|e| e.to_string())?;
+    let draft = Draft {
+        kind: "parcel".to_string(),
+        subject: run.as_bytes().to_vec(),
+        inputs: Vec::new(),
+        result,
+        epoch: marks.epoch("parcel"),
+        ledger_seq: 0,
+        issued_ms: cig_pass::wall_ms(),
+        mono: cig_pass::mono_now(),
+        flags: 0,
+    };
+    let p = cig_pass::issue_shareable(&draft, &keys.signing_seed()).map_err(|e| e.to_string())?;
+    cig_pass::seal(&p)
+}
+
+/// Check a parcel's pass: it holds here (a trusted signer for parcels),
+/// and it is about this run and this manifest. The signer's principal is
+/// returned for the message.
+pub fn check_parcel_pass(
+    pass: &Pass,
+    run: Option<&str>,
+    manifest_sha256: &str,
+) -> Result<String, String> {
+    let keys = Keys::load()?;
+    let marks = state(&keys)?;
+    let ctx = CigCtx::new(&keys, &marks, None);
+    if pass.kind != "parcel" {
+        return Err(format!("it is a {} pass, not a parcel's", pass.kind));
+    }
+    cig_pass::verify(pass, &ctx).map_err(|w| w.to_string())?;
+    let said: serde_json::Value =
+        serde_json::from_slice(&pass.result).map_err(|_| "its result does not read".to_string())?;
+    if said["manifest_sha256"].as_str() != Some(manifest_sha256) {
+        return Err("it is about another parcel (the manifest's digest differs)".to_string());
+    }
+    if let Some(r) = run {
+        if said["run"].as_str() != Some(r) {
+            return Err("it is about another run".to_string());
+        }
+    }
+    let signer = match pass.issuer {
+        cig_pass::Issuer::Ed25519(pk) if pk == keys.public() => "this machine".to_string(),
+        cig_pass::Issuer::Ed25519(pk) => ctx
+            .signers
+            .iter()
+            .find(|s| s.key == pk)
+            .map(|s| s.principals.clone())
+            .unwrap_or_else(|| "a trusted signer".to_string()),
+        cig_pass::Issuer::Local(_) => "this machine".to_string(),
+    };
+    Ok(signer)
 }

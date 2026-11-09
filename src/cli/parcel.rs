@@ -41,6 +41,33 @@ pub fn parcel(ctx: &Ctx, id: &str, out: Option<PathBuf>, with_key: bool) -> i32 
     let opts = parcel::WriteOpts { with_key };
     match parcel::write_with(&rec, &journal, &out, &opts) {
         Ok(w) => {
+            // The parcel's pass, beside it: who made it, and that nothing in
+            // it changed (cig-script#186). No key here: no pass, and the
+            // parcel is as it always was.
+            let pass_path = PathBuf::from(format!("{}.pass", w.path.display()));
+            match crate::pass::issue_parcel_pass(&rec.id, &w.manifest_sha256) {
+                Ok(p) => {
+                    let mut o = std::fs::OpenOptions::new();
+                    o.write(true).create(true).truncate(true);
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::OpenOptionsExt;
+                        o.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+                    }
+                    let wrote = o.open(&pass_path).and_then(|mut f| {
+                        use std::io::Write;
+                        f.write_all(p.token().as_bytes())?;
+                        f.write_all(b"\n")
+                    });
+                    if let Err(e) = wrote {
+                        eprintln!(
+                            "{} the parcel's pass was not written ({e}); the parcel is good, but another machine cannot tell who made it",
+                            ctx.yellow("note:")
+                        );
+                    }
+                }
+                Err(e) => eprintln!("{}", ctx.dim(&format!("no pass beside the parcel ({e})"))),
+            }
             if ctx.json {
                 // --json strips the raw sealing key from the embedded
                 // manifest and prints its fingerprint instead
@@ -117,6 +144,7 @@ pub fn parse_root(s: &str) -> Result<(String, PathBuf), String> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn unparcel(
     ctx: &Ctx,
     file: &Path,
@@ -125,7 +153,51 @@ pub fn unparcel(
     allow_sealed_missing: bool,
     accept_key: bool,
     show: bool,
+    require_pass: bool,
 ) -> i32 {
+    // The parcel's pass, when one is beside it: who made the parcel, and
+    // that nothing in it changed since. `--require-pass` refuses a parcel
+    // without one that holds here.
+    let pass_path = PathBuf::from(format!("{}.pass", file.display()));
+    let checked = if pass_path.is_file() {
+        let outcome = crate::pass::read_pass(&pass_path.to_string_lossy()).and_then(|p| {
+            let digest = parcel::manifest_sha256(file).map_err(|e| e.to_string())?;
+            crate::pass::check_parcel_pass(&p, None, &digest)
+        });
+        Some(outcome)
+    } else {
+        None
+    };
+    match &checked {
+        Some(Ok(signer)) => eprintln!(
+            "{} made by {signer}, and unchanged since (its pass holds)",
+            ctx.green("unparcel:")
+        ),
+        Some(Err(why)) => {
+            if require_pass {
+                eprintln!(
+                    "{} the parcel's pass does not hold here: {why}",
+                    ctx.red("error[E730 burn]:")
+                );
+                eprintln!("  = hint: trust its maker for parcels (cig pass key --kinds parcel on that machine), or import without --require-pass");
+                return exit::SCRIPT_ERROR;
+            }
+            eprintln!(
+                "{} the parcel's pass does not hold here: {why}",
+                ctx.yellow("note:")
+            );
+        }
+        None if require_pass => {
+            eprintln!(
+                "{} {} has no pass beside it ({} is not there)",
+                ctx.red("error[E730 burn]:"),
+                file.display(),
+                pass_path.display()
+            );
+            return exit::SCRIPT_ERROR;
+        }
+        None => {}
+    }
     if show {
         return match parcel::read_manifest(file) {
             Ok(m) => {
