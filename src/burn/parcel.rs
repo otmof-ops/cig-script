@@ -83,6 +83,10 @@ pub struct Written {
     pub files: usize,
     pub bytes: u64,
     pub manifest: Manifest,
+    /// The SHA-256 of `manifest.json` as written: what the parcel's pass
+    /// vouches for (cig-script#186). The manifest names every other file
+    /// with its own SHA-256, so this one digest covers the whole parcel.
+    pub manifest_sha256: String,
 }
 
 /// `Written`, redacted for `--json` display: the raw sealing key is
@@ -375,6 +379,7 @@ pub fn write_with(
     // fresh file with the mode we set and nobody else's byte hitches a
     // ride (SEC-004 L3).
     let _ = fs::remove_file(&tmp);
+    let mut manifest_sha256 = String::new();
     let written = (|| -> io::Result<()> {
         // A parcel carrying its own sealing key is a secret: create 0600 so
         // another user cannot read the manifest while it is being written.
@@ -398,6 +403,10 @@ pub fn write_with(
         header.set_mtime(0);
         header.set_cksum();
         tar.append_data(&mut header, "manifest.json", manifest_json.as_slice())?;
+        manifest_sha256 = {
+            use sha2::{Digest, Sha256};
+            hex::encode(Sha256::digest(&manifest_json))
+        };
         // The in-memory manifest bytes held the hex key once a --with-key
         // parcel was asked for: wipe them. The archive on disk is the
         // secret by design (that was the ask).
@@ -433,6 +442,7 @@ pub fn write_with(
         files: sources.len(),
         bytes,
         manifest,
+        manifest_sha256,
     })
 }
 
@@ -482,6 +492,28 @@ pub fn read_manifest(file: &Path) -> io::Result<Manifest> {
             entry.read_to_string(&mut text)?;
             return serde_json::from_str(&text)
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e));
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        "no manifest.json: not a parcel",
+    ))
+}
+
+/// The SHA-256 of a parcel's `manifest.json`, as its pass names it.
+pub fn manifest_sha256(file: &Path) -> io::Result<String> {
+    use sha2::{Digest, Sha256};
+    let f = fs::File::open(file)?;
+    let dec = flate2::read::GzDecoder::new(f);
+    let mut archive = tar::Archive::new(dec);
+    for entry in archive.entries()? {
+        let mut entry = entry?;
+        if entry.path()?.to_string_lossy() == "manifest.json" {
+            let mut bytes = Vec::new();
+            entry.read_to_end(&mut bytes)?;
+            let digest = hex::encode(Sha256::digest(&bytes));
+            super::seal::wipe_bytes(&mut bytes);
+            return Ok(digest);
         }
     }
     Err(io::Error::new(

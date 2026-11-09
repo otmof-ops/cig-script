@@ -3,6 +3,68 @@
 All notable changes to CigScript. The format follows Keep a Changelog; the
 project follows semantic versioning.
 
+## 1.20.0 — 2026-11-09
+
+Passes: one primitive for every "already checked" in the family, and the
+first things that use it: a trial that remembers, parcels that say who
+made them, a doctor that asks the kernel once; and a ledger whose appends
+take turns (#186).
+
+- **`pass`: checked once, trusted exactly as long as it is true** (#186). A
+  pass is a small authenticated record of what was checked, every input
+  the check depended on (recorded while it ran, never declared by hand),
+  the result, and the caveats under which it holds. Checking it again is a
+  MAC or a signature and a look at each input, whatever the work it stands
+  for.
+  - `pass.issue`, `find`, `memo`, `check`, `narrow`, `spend`, `show` and
+    `recording` in scripts; `cig pass list`, `show`, `verify`, `narrow`,
+    `revoke`, `export`, `import`, `log`, `stats`, `key` and `gc`.
+  - The recorder sees every read the work makes: files (from the same read
+    the work gets), folders, absences, variables, the program a name
+    resolves to, and a digest of each global the work reads. A hop says
+    what it reads with `reads: [paths]` (a folder covers everything under
+    it) and runs with a small recorded environment (`env_reads: [names]`
+    adds to it). Anything a recording cannot see into makes the work
+    open-world (E731); a variable from the function around the work is
+    refused (E732), as is a change to the world inside it (E733).
+  - Anyone holding a pass can narrow it (`within`, `until`, `for`,
+    `boxed`, `network`, `args`, `cig >=`, `build`, `agent`, `once`, `max`,
+    `needs`), and nobody can widen it. A narrowing keeps its spends.
+  - Local passes are HMAC-chained under subkeys of the tin's key, their
+    content digests keyed; shareable passes (`cig pass export`, sealed and
+    expiring by default) carry Ed25519 signatures another machine checks
+    against allowed signers scoped per kind. Approvals, verdicts and rules
+    never come from another machine; a `human-yes` comes only from a human
+    authority whose key root installs, and none exists by default.
+  - Revocation by id (and everything narrowed from it), by kind (an epoch),
+    and by `cig tin rekey`; spends, revocations and epochs are ledger lines,
+    and the state folded from them refuses a ledger cut, swapped or
+    deleted under it (E739). A dry run vouches for nothing.
+  - The verifier lives in its own crate, `crates/cig-pass`, beside a
+    threat model, with property tests and fuzz targets (run in CI).
+  - Docs: `docs/PASS.md`. Errors: E730 to E739, E809.
+- **The trial remembers** (#186). A trial's verdict is kept as a `trial`
+  pass over what this cig's dry run read, the script and the proved
+  cig's binary; the same script, arguments and versions with none of
+  that changed is a lookup, with no dry run on either version.
+- **Parcels carry a pass** (#186). `cig parcel` writes `<parcel>.pass`
+  beside it, a sealed shareable pass over the run and the manifest's
+  digest; `cig unparcel` says who made the parcel, and `--require-pass`
+  refuses one without a pass that holds here. New config keys:
+  `pass_allowed_signers`, `pass_budget`.
+- **Doctor asks the kernel once a day** (#186). The box check makes
+  namespaces to see what the kernel allows; its answer is now a `doctor`
+  pass over the kernel's release, the boot, its namespace settings, its
+  file systems and mounts, the variables the check reads and who runs it
+  under what confinement (uid, seccomp, no_new_privs, AppArmor), held for
+  a day at most. Doctor remembers only on a machine that already has a key:
+  looking never makes one.
+- **CI carries passes between jobs** (#186): one job checks the examples
+  under passes and exports them, the next verifies them against its key.
+- **The ledger takes a lock for every append.** Two runs appending at once
+  could chain onto the same head and fork it, after which `cig runs
+  --verify` called the ledger broken. Appends now take turns.
+
 ## 1.19.0 — 2026-11-09
 
 The tin kept further from what it protects: hidden from boxed hops, a key

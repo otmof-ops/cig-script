@@ -200,6 +200,10 @@ fn read(i: &mut Interp, a: &[Value], s: Span) -> Result<Value, Diagnostic> {
     let o = opts(a, 1, "csv.read", s)?;
     let text = match super::fs::ghost_text(i, "csv.read", std::path::Path::new(p), s)? {
         Some(t) => t,
+        None if i.recording() => {
+            let b = super::fs::rec_read(i, "csv.read", std::path::Path::new(p), s)?;
+            String::from_utf8_lossy(&b).into_owned()
+        }
         None => {
             super::fs::check_read_size("csv.read", std::path::Path::new(p), s)?;
             std::fs::read_to_string(p).map_err(|e| {

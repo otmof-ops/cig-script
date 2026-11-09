@@ -24,13 +24,13 @@ jobs:
         with:
           components: clippy, rustfmt
       - run: cargo fmt --all --check
-      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo clippy --workspace --all-targets -- -D warnings
       # The box needs unprivileged user namespaces, which Ubuntu's AppArmor
       # restricts by default; the tests fall back and say so where it
       # cannot be lifted.
       - if: runner.os == 'Linux'
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
-      - run: cargo test
+      - run: cargo test --workspace
       # Release inlining changes which frames a backtrace keeps, and the
       # crash tests read them: run the suite once as users run cig.
       - if: matrix.os == 'ubuntu-latest'
@@ -69,12 +69,79 @@ jobs:
       - run: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
       - run: |
           . "$HOME/.cargo/env"
-          cargo test
+          cargo test --workspace
       - run: |
           . "$HOME/.cargo/env"
           cargo build --release
           CIG="$PWD/target/release/cig" bash tests/portability/probe.sh | tee probe.txt
           ! grep -q '^FAIL' probe.txt
+
+  # Passes across jobs (cig-script#186): one job checks the examples under
+  # passes and exports them; the next verifies them against the first job's
+  # key without checking again, and sees a changed example's pass stop
+  # holding.
+  passes-issue:
+    name: passes (issue and export)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release
+      - name: issue and export
+        run: |
+          export CIGSCRIPT_HOME="$RUNNER_TEMP/cig-a" CIG_SEAL_KEY=file
+          mkdir -p passes
+          target/release/cig run tests/ci/check-examples.cig > ids.txt
+          while read -r name id; do
+            target/release/cig pass export "$id" -o "passes/$name.pass"
+          done < ids.txt
+          target/release/cig pass key --kinds check > passes/allowed_signers
+          ls passes
+      - uses: actions/upload-artifact@v4
+        with:
+          name: passes
+          path: passes/
+
+  passes-verify:
+    name: passes (verify in another job)
+    needs: passes-issue
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release
+      - uses: actions/download-artifact@v4
+        with:
+          name: passes
+          path: passes/
+      - name: verify, then change an example
+        run: |
+          export CIGSCRIPT_HOME="$RUNNER_TEMP/cig-b" CIG_SEAL_KEY=file
+          chmod 600 passes/allowed_signers
+          for p in passes/*.pass; do
+            target/release/cig pass verify "$p" --allowed-signers passes/allowed_signers
+          done
+          echo '# changed in this job' >> examples/hello.cig
+          if target/release/cig pass verify passes/hello.pass --allowed-signers passes/allowed_signers; then
+            echo "a changed example's pass still held"; exit 1
+          fi
+
+  # cig-pass's verifier is the one place that decides "trusted": each fuzz
+  # target runs for a minute on every push, after replaying the corpus.
+  fuzz-cig-pass:
+    name: fuzz (cig-pass)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - run: cargo install cargo-fuzz --locked
+      - working-directory: crates/cig-pass
+        run: |
+          for t in decode verify attenuate; do
+            mkdir -p fuzz/corpus/$t
+            cp -n fuzz/corpus/decode/* fuzz/corpus/$t/ 2>/dev/null || true
+            cargo +nightly fuzz run $t fuzz/corpus/$t -- -max_total_time=60
+          done
 
   # No hosted runner: a VM. It must not hold a merge back when the VM itself
   # misbehaves, so its failure is reported, not fatal; the log says.
@@ -90,7 +157,7 @@ jobs:
           usesh: true
           prepare: pkg install -y rust bash python3 git
           run: |
-            cargo test
+            cargo test --workspace
             cargo build --release
             CIG="$PWD/target/release/cig" bash tests/portability/probe.sh | tee probe.txt
             ! grep -q '^FAIL' probe.txt

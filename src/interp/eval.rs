@@ -493,6 +493,9 @@ impl Interp {
         let rhs = self.eval(value, env)?;
         match target {
             AssignTarget::Var(name) => {
+                if self.recording() {
+                    self.recorded_assign(env, name, span)?;
+                }
                 let new = match op {
                     AssignOp::Set => rhs,
                     _ => {
@@ -622,7 +625,15 @@ impl Interp {
                 }
                 Ok(Value::str(s))
             }
-            ExprKind::Ident(name) => env.get(name).ok_or_else(|| unknown_name(name, env, span)),
+            ExprKind::Ident(name) => {
+                if self.recording() {
+                    return match self.recorded_get(env, name, span) {
+                        Some(r) => r,
+                        None => Err(unknown_name(name, env, span)),
+                    };
+                }
+                env.get(name).ok_or_else(|| unknown_name(name, env, span))
+            }
             ExprKind::List(items) => {
                 let mut out = Vec::with_capacity(items.len());
                 for item in items {
@@ -1033,6 +1044,9 @@ impl Interp {
             Value::Func(func) => self.call_function(func, args, span),
             Value::Builtin(b) => {
                 b.check_arity(args.len(), span)?;
+                if self.recording() {
+                    self.recording_admits(b, span)?;
+                }
                 (b.func)(self, &args, span).map_err(|e| e.or_at(span))
             }
             Value::Module(m) => Err(type_error(format!(

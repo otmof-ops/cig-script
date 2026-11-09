@@ -51,6 +51,117 @@ pub fn plan_here(
     Ok(interp.kernel.dry_run_plan().map(PlanOp::from).collect())
 }
 
+/// `plan_here`, recorded: the dry run runs inside a pass's recording, so
+/// what it read (files, folders, variables) is known, and a trial whose
+/// inputs have not changed can be remembered (cig-script#186). The whole
+/// program is the work: its globals are its own.
+pub fn plan_here_recorded(
+    program: &Program,
+    name: &str,
+    args: &[String],
+    max_steps: Option<u64>,
+) -> (Result<Vec<PlanOp>, String>, cig_pass::Recorder) {
+    let barrier = crate::interp::env::next_serial();
+    let kernel = Kernel::ephemeral(Mode::DryRun);
+    let mut interp = Interp::new(kernel);
+    interp.out = Box::new(std::io::sink());
+    interp.script_name = Some(name.to_string());
+    interp.set_args(args);
+    if let Some(n) = max_steps {
+        interp.set_max_steps(n);
+    }
+    interp
+        .recs
+        .push(crate::interp::record::RecFrame::simulated(barrier));
+    let ran = interp.run_program(program);
+    let frame = interp.recs.pop().expect("the frame pushed above");
+    let plan = ran
+        .map(|()| interp.kernel.dry_run_plan().map(PlanOp::from).collect())
+        .map_err(|d| format!("the dry run on this cig failed: {}", d.message));
+    (plan, frame.rec)
+}
+
+/// What a remembered trial says.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Remembered {
+    pub same: bool,
+    pub ops: usize,
+    pub diff: Vec<String>,
+}
+
+fn trial_subject(source_sha: &str, args: &[String], here: &str, there: &str) -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({
+        "args": args, "here": here, "script": source_sha, "there": there,
+    }))
+    .unwrap_or_default()
+}
+
+/// A trial this machine remembers for this script, these arguments and
+/// these two versions, still holding: nothing it read has changed.
+pub fn remembered(
+    source_sha: &str,
+    args: &[String],
+    here: &str,
+    there: &str,
+) -> Option<Remembered> {
+    let keys = crate::pass::Keys::load().ok()?;
+    let marks = crate::pass::state(&keys).ok()?;
+    let store = crate::pass::store().ok()?;
+    let ctx = crate::pass::CigCtx::new(&keys, &marks, Some(&store));
+    let (p, _) = crate::pass::find(&ctx, "trial", &trial_subject(source_sha, args, here, there))?;
+    serde_json::from_slice(&p.result).ok()
+}
+
+/// Remember a trial: a `trial` pass over what the dry run read, the
+/// script, and the proved cig's binary. Nothing is kept when the dry run
+/// could not be vouched for (a hop without `reads`, the clock).
+#[allow(clippy::too_many_arguments)]
+pub fn remember(
+    mut rec: cig_pass::Recorder,
+    script: &Path,
+    proved_bin: &Path,
+    source_sha: &str,
+    args: &[String],
+    here: &str,
+    there: &str,
+    verdict: &Remembered,
+) {
+    let (Ok(script), Ok(bin)) = (std::path::absolute(script), std::path::absolute(proved_bin))
+    else {
+        return;
+    };
+    if rec.file_seen(&script).is_err() || rec.file_seen(&bin).is_err() {
+        return;
+    }
+    // The proved cig's own plan came from a process cig cannot see into;
+    // it ran the same script on the same inputs, a declaration the pass
+    // carries.
+    rec.declared_reads();
+    let Ok(keys) = crate::pass::Keys::load() else {
+        return;
+    };
+    let Ok(marks) = crate::pass::state(&keys) else {
+        return;
+    };
+    let Ok(result) = serde_json::to_vec(verdict) else {
+        return;
+    };
+    let opts = crate::pass::IssueOpts {
+        cig: true,
+        store: true,
+        ..Default::default()
+    };
+    let _ = crate::pass::issue(
+        &keys,
+        &marks,
+        "trial",
+        &trial_subject(source_sha, args, here, there),
+        rec,
+        result,
+        &opts,
+    );
+}
+
 /// The plan another cig makes: `cig --json --no-doctor run --dry-run`, the
 /// last line of its stdout being the plan.
 pub fn plan_with(bin: &Path, file: &Path, args: &[String]) -> Result<Vec<PlanOp>, String> {

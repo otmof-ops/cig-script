@@ -21,6 +21,7 @@ CigScript's binary links the Rust crates below, pulled from crates.io as package
 | anstyle-query | 1.1.5 | unrecorded | https://github.com/rust-cli/anstyle.git |
 | anstyle-wincon | 3.0.11 | unrecorded | https://github.com/rust-cli/anstyle.git |
 | argon2 | 0.5.3 | RustCrypto Developers | https://github.com/RustCrypto/password-hashes/tree/master/argon2 |
+| arrayvec | 0.7.8 | bluss | https://github.com/bluss/arrayvec |
 | async-broadcast | 0.7.2 | Stjepan Glavina <stjepang@gmail.com>, Yoshua Wuyts <yoshuawuyts@gmail.com>, Zeeshan Ali Khan <zeeshanak@gnome.org> | https://github.com/smol-rs/async-broadcast |
 | async-channel | 2.5.0 | Stjepan Glavina <stjepang@gmail.com> | https://github.com/smol-rs/async-channel |
 | async-executor | 1.14.0 | Stjepan Glavina <stjepang@gmail.com>, John Nunley <dev@notgull.net> | https://github.com/smol-rs/async-executor |
@@ -34,6 +35,7 @@ CigScript's binary links the Rust crates below, pulled from crates.io as package
 | async-trait | 0.1.92 | David Tolnay <dtolnay@gmail.com> | https://github.com/dtolnay/async-trait |
 | atomic-waker | 1.1.2 | Stjepan Glavina <stjepang@gmail.com>, Contributors to futures-rs | https://github.com/smol-rs/atomic-waker |
 | autocfg | 1.5.1 | Josh Stone <cuviper@gmail.com> | https://github.com/cuviper/autocfg |
+| base64 | 0.22.1 | Marshall Pierce <marshall@mpierce.org> | https://github.com/marshallpierce/rust-base64 |
 | base64ct | 1.8.3 | RustCrypto Developers | https://github.com/RustCrypto/formats |
 | bitflags | 2.13.2 | The Rust Project Developers | https://github.com/bitflags/bitflags |
 | blake2 | 0.10.6 | RustCrypto Developers | https://github.com/RustCrypto/hashes |
@@ -55,16 +57,21 @@ CigScript's binary links the Rust crates below, pulled from crates.io as package
 | clap_lex | 1.1.1 | unrecorded | https://github.com/clap-rs/clap |
 | colorchoice | 1.0.5 | unrecorded | https://github.com/rust-cli/anstyle.git |
 | concurrent-queue | 2.5.0 | Stjepan Glavina <stjepang@gmail.com>, Taiki Endo <te316e89@gmail.com>, John Nunley <dev@notgull.net> | https://github.com/smol-rs/concurrent-queue |
+| const-oid | 0.9.6 | RustCrypto Developers | https://github.com/RustCrypto/formats/tree/master/const-oid |
 | core-foundation | 0.9.4 | The Servo Project Developers | https://github.com/servo/core-foundation-rs |
 | core-foundation | 0.10.1 | The Servo Project Developers | https://github.com/servo/core-foundation-rs |
 | core-foundation-sys | 0.8.7 | The Servo Project Developers | https://github.com/servo/core-foundation-rs |
 | cpufeatures | 0.2.17 | RustCrypto Developers | https://github.com/RustCrypto/utils |
+| cpufeatures | 0.3.1 | RustCrypto Developers | https://github.com/RustCrypto/utils |
 | crc32fast | 1.5.3 | Sam Rijs <srijs@airpost.net>, Alex Crichton <alex@alexcrichton.com> | https://github.com/srijs/rust-crc32fast |
 | crossbeam-utils | 0.8.23 | unrecorded | https://github.com/crossbeam-rs/crossbeam |
 | crypto-common | 0.1.7 | RustCrypto Developers | https://github.com/RustCrypto/traits |
+| curve25519-dalek-derive | 0.1.1 | unrecorded | https://github.com/dalek-cryptography/curve25519-dalek |
 | dbus | 0.9.12 | David Henningsson <diwic@ubuntu.com> | https://github.com/diwic/dbus-rs |
 | dbus-secret-service | 4.1.0 | Daniel Brotsky <dev@brotsky.com> | https://github.com/brotskydotcom/dbus-secret-service.git |
+| der | 0.7.10 | RustCrypto Developers | https://github.com/RustCrypto/formats/tree/master/der |
 | digest | 0.10.7 | RustCrypto Developers | https://github.com/RustCrypto/traits |
+| ed25519 | 2.2.3 | RustCrypto Developers | https://github.com/RustCrypto/signatures/tree/master/ed25519 |
 | enumflags2 | 0.7.12 | maik klein <maikklein@googlemail.com>, Maja Kądziołka <maya@compilercrim.es> | https://github.com/meithecatte/enumflags2 |
 | enumflags2_derive | 0.7.12 | maik klein <maikklein@googlemail.com>, Maja Kądziołka <maya@compilercrim.es> | https://github.com/meithecatte/enumflags2 |
 | equivalent | 1.0.2 | unrecorded | https://github.com/indexmap-rs/equivalent |
@@ -116,6 +123,7 @@ CigScript's binary links the Rust crates below, pulled from crates.io as package
 | password-hash | 0.5.0 | RustCrypto Developers | https://github.com/RustCrypto/traits/tree/master/password-hash |
 | pin-project-lite | 0.2.17 | unrecorded | https://github.com/taiki-e/pin-project-lite |
 | piper | 0.2.5 | Stjepan Glavina <stjepang@gmail.com>, John Nunley <dev@notgull.net> | https://github.com/smol-rs/piper |
+| pkcs8 | 0.10.2 | RustCrypto Developers | https://github.com/RustCrypto/formats/tree/master/pkcs8 |
 | pkg-config | 0.3.34 | Alex Crichton <alex@alexcrichton.com> | https://github.com/rust-lang/pkg-config-rs |
 | polling | 3.11.0 | Stjepan Glavina <stjepang@gmail.com>, John Nunley <dev@notgull.net> | https://github.com/smol-rs/polling |
 | poly1305 | 0.8.0 | RustCrypto Developers | https://github.com/RustCrypto/universal-hashes |
@@ -129,11 +137,13 @@ CigScript's binary links the Rust crates below, pulled from crates.io as package
 | regex | 1.13.1 | The Rust Project Developers, Andrew Gallant <jamslam@gmail.com> | https://github.com/rust-lang/regex |
 | regex-automata | 0.4.18 | The Rust Project Developers, Andrew Gallant <jamslam@gmail.com> | https://github.com/rust-lang/regex |
 | regex-syntax | 0.8.11 | The Rust Project Developers, Andrew Gallant <jamslam@gmail.com> | https://github.com/rust-lang/regex |
+| rustc_version | 0.4.1 | unrecorded | https://github.com/djc/rustc-version-rs |
 | rustversion | 1.0.23 | David Tolnay <dtolnay@gmail.com> | https://github.com/dtolnay/rustversion |
 | secret-service | 4.0.0 | Walther Chen <walther.chen@gmail.com> | https://github.com/hwchen/secret-service-rs.git |
 | security-framework | 2.11.1 | Steven Fackler <sfackler@gmail.com>, Kornel <kornel@geekhood.net> | https://github.com/kornelski/rust-security-framework |
 | security-framework | 3.7.0 | Steven Fackler <sfackler@gmail.com>, Kornel <kornel@geekhood.net> | https://github.com/kornelski/rust-security-framework |
 | security-framework-sys | 2.17.0 | Steven Fackler <sfackler@gmail.com>, Kornel <kornel@geekhood.net> | https://github.com/kornelski/rust-security-framework |
+| semver | 1.0.28 | David Tolnay <dtolnay@gmail.com> | https://github.com/dtolnay/semver |
 | serde | 1.0.229 | Erick Tryzelaar <erick.tryzelaar@gmail.com>, David Tolnay <dtolnay@gmail.com> | https://github.com/serde-rs/serde |
 | serde_core | 1.0.229 | Erick Tryzelaar <erick.tryzelaar@gmail.com>, David Tolnay <dtolnay@gmail.com> | https://github.com/serde-rs/serde |
 | serde_derive | 1.0.229 | Erick Tryzelaar <erick.tryzelaar@gmail.com>, David Tolnay <dtolnay@gmail.com> | https://github.com/serde-rs/serde |
@@ -144,6 +154,8 @@ CigScript's binary links the Rust crates below, pulled from crates.io as package
 | sha2 | 0.10.9 | RustCrypto Developers | https://github.com/RustCrypto/hashes |
 | shlex | 2.0.1 | comex <comexk@gmail.com>, Fenhl <fenhl@fenhl.net>, Adrian Taylor <adetaylor@chromium.org>, Alex Touchet <alextouchet@outlook.com>, Daniel Parks <dp+git@oxidized.org>, Garrett Berg <googberg@gmail.com> | https://github.com/comex/rust-shlex |
 | signal-hook-registry | 1.4.8 | Michal 'vorner' Vaner <vorner@vorner.cz>, Masaki Hara <ackie.h.gmai@gmail.com> | https://github.com/vorner/signal-hook |
+| signature | 2.2.0 | RustCrypto Developers | https://github.com/RustCrypto/traits/tree/master/signature |
+| spki | 0.7.3 | RustCrypto Developers | https://github.com/RustCrypto/formats/tree/master/spki |
 | static_assertions | 1.1.0 | Nikolai Vazquez | https://github.com/nvzqz/static-assertions-rs |
 | syn | 2.0.119 | David Tolnay <dtolnay@gmail.com> | https://github.com/dtolnay/syn |
 | syn | 3.0.6 | David Tolnay <dtolnay@gmail.com> | https://github.com/dtolnay/syn |
@@ -208,6 +220,12 @@ CigScript's binary links the Rust crates below, pulled from crates.io as package
 | walkdir | 2.5.0 | Andrew Gallant <jamslam@gmail.com> | https://github.com/BurntSushi/walkdir |
 | winapi-util | 0.1.11 | Andrew Gallant <jamslam@gmail.com> | https://github.com/BurntSushi/winapi-util |
 
+## Apache-2.0 OR Apache-2.0 WITH LLVM-exception OR CC0-1.0
+
+| crate | version | holder | source |
+|---|---|---|---|
+| blake3 | 1.8.7 | Jack O'Connor <oconnor663@gmail.com>, Samuel Neves | https://github.com/BLAKE3-team/BLAKE3 |
+
 ## MIT
 
 | crate | version | holder | source |
@@ -236,6 +254,32 @@ CigScript's binary links the Rust crates below, pulled from crates.io as package
 | zvariant_derive | 4.2.0 | Zeeshan Ali Khan <zeeshanak@gnome.org> | https://github.com/dbus2/zbus/ |
 | zvariant_utils | 2.1.0 | Zeeshan Ali Khan <zeeshanak@gnome.org>, turbocooler <turbocooler@cocaine.ninja> | https://github.com/dbus2/zbus/ |
 
+## Apache-2.0
+
+| crate | version | holder | source |
+|---|---|---|---|
+| cig-pass | 0.1.0 | unrecorded | https://github.com/otmof-ops/cig-script |
+
+## Apache-2.0 OR CC0-1.0 OR MIT-0
+
+| crate | version | holder | source |
+|---|---|---|---|
+| constant_time_eq | 0.4.2 | Cesar Eduardo Barros <cesarb@cesarb.eti.br> | https://github.com/cesarb/constant_time_eq |
+
+## BSD-3-Clause
+
+| crate | version | holder | source |
+|---|---|---|---|
+| curve25519-dalek | 4.1.3 | Isis Lovecruft <isis@patternsinthevoid.net>, Henry de Valence <hdevalence@hdevalence.ca> | https://github.com/dalek-cryptography/curve25519-dalek/tree/main/curve25519-dalek |
+| ed25519-dalek | 2.2.0 | isis lovecruft <isis@patternsinthevoid.net>, Tony Arcieri <bascule@gmail.com>, Michael Rosenberg <michael@mrosenberg.pub> | https://github.com/dalek-cryptography/curve25519-dalek/tree/main/ed25519-dalek |
+| subtle | 2.6.1 | Isis Lovecruft <isis@patternsinthevoid.net>, Henry de Valence <hdevalence@hdevalence.ca> | https://github.com/dalek-cryptography/subtle |
+
+## Apache-2.0 OR BSD-1-Clause OR MIT
+
+| crate | version | holder | source |
+|---|---|---|---|
+| fiat-crypto | 0.2.9 | Fiat Crypto library authors <jgross@mit.edu> | https://github.com/mit-plv/fiat-crypto |
+
 ## Apache-2.0 OR Apache-2.0 WITH LLVM-exception OR MIT
 
 | crate | version | holder | source |
@@ -255,12 +299,6 @@ CigScript's binary links the Rust crates below, pulled from crates.io as package
 | crate | version | holder | source |
 |---|---|---|---|
 | r-efi | 6.0.0 | unrecorded | https://github.com/r-efi/r-efi |
-
-## BSD-3-Clause
-
-| crate | version | holder | source |
-|---|---|---|---|
-| subtle | 2.6.1 | Isis Lovecruft <isis@patternsinthevoid.net>, Henry de Valence <hdevalence@hdevalence.ca> | https://github.com/dalek-cryptography/subtle |
 
 ## (Apache-2.0 OR MIT) AND Unicode-3.0
 

@@ -445,6 +445,7 @@ fn run_source_inner(
     });
     let mut interp = Interp::new(kernel);
     interp.script_name = Some(name.clone());
+    interp.script_path = std::path::absolute(&args.file).ok();
     interp.set_args(&args.args);
     if let Some(n) = args.max_steps {
         interp.set_max_steps(n);
@@ -1050,13 +1051,36 @@ fn trial_before_run(
             );
         }
     };
+    let source_sha = sha256(source);
+    let (here_v, there_v) = (current.to_string(), last.to_string());
+    if let Some(r) = trial::remembered(&source_sha, &args.args, &here_v, &there_v) {
+        if r.same {
+            eprintln!(
+                "{}",
+                ctx.dim(&format!(
+                    "trial: identical plans ({} op{}) on {last} and {current}, remembered: nothing the script read has changed; running on {current}",
+                    r.ops,
+                    if r.ops == 1 { "" } else { "s" }
+                ))
+            );
+            let note = serde_json::json!({
+                "compared": [last.to_string(), current.to_string()],
+                "same": true,
+                "ran_on": current.to_string(),
+                "ops": r.ops,
+                "remembered": true,
+            });
+            return (None, Some(note), Some((last, bin)));
+        }
+    }
     eprintln!(
         "{}",
         ctx.dim(&format!(
             "trial: this script last went through on cig {last} (run {run_id}); comparing its plan with {current}"
         ))
     );
-    let mine = match trial::plan_here(program, name, &args.args, args.max_steps) {
+    let (mine, recorded) = trial::plan_here_recorded(program, name, &args.args, args.max_steps);
+    let mine = match mine {
         Ok(p) => p,
         Err(e) => {
             eprintln!("{} {e}", ctx.yellow("trial skipped:"));
@@ -1079,6 +1103,20 @@ fn trial_before_run(
         }
     };
     let diff = trial::diff(&mine, &theirs);
+    trial::remember(
+        recorded,
+        &args.file,
+        &bin,
+        &source_sha,
+        &args.args,
+        &here_v,
+        &there_v,
+        &trial::Remembered {
+            same: diff.is_empty(),
+            ops: mine.len(),
+            diff: diff.clone(),
+        },
+    );
     if diff.is_empty() {
         eprintln!(
             "{}",

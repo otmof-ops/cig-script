@@ -12,6 +12,7 @@ out = ["# Standard library reference", "",
        "`read` functions look at the world without changing it; `pure` functions touch nothing.", "",
        "Methods are called on a value (`\"x\".upper()`, `list.map(f)`, `map.has(\"k\")`); the receiver is not counted in the arity column.", ""]
 INTROS = {
+    "pass": "**Passes.** `pass.issue(kind, subject, pack(s) { ... })` runs its work with a recorder: every file, folder, variable and program it reads is noted, and the pass it returns holds while all of them stay as they were. `pass.memo` finds a pass that still holds, else does the work. A hop inside the work needs `reads: [paths]`; anything a recording cannot see makes the work open-world (E731). See docs/PASS.md.",
     "proc": "**Hops.** Every `proc.*` call crosses a process boundary (a *hop*, in the lexicon): the kernel cannot see inside, "
             "so a hop is journaled as **irreversible** and the plan says so out loud. `proc.run` is the one call shape; "
             "`proc.text`, `proc.lines`, `proc.json`, `proc.csv` and `proc.kv` parse stdout into a real value under the "

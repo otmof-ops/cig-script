@@ -1,0 +1,42 @@
+# SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "cig-pass-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+blake3 = { version = "1", features = ["pure"] }
+
+[dependencies.cig-pass]
+path = ".."
+
+# Not a workspace member: cargo-fuzz builds with its own flags.
+[workspace]
+
+[[bin]]
+name = "decode"
+path = "fuzz_targets/decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "verify"
+path = "fuzz_targets/verify.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "attenuate"
+path = "fuzz_targets/attenuate.rs"
+test = false
+doc = false
+bench = false

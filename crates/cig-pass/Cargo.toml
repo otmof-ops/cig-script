@@ -1,0 +1,34 @@
+[package]
+name = "cig-pass"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+description = "cig-pass: one authenticated record for every \"already checked\" in the cig family"
+license = "Apache-2.0"
+repository = "https://github.com/otmof-ops/cig-script"
+readme = "README.md"
+keywords = ["capabilities", "macaroons", "cache", "verification"]
+categories = ["cryptography", "caching"]
+
+[dependencies]
+blake3 = { version = "1", features = ["pure"] }
+hmac = "0.12"
+sha2 = "0.10"
+subtle = "2.6"
+ed25519-dalek = { version = "2", default-features = false, features = ["std", "zeroize", "fast"] }
+base64 = "0.22"
+getrandom = "0.2"
+globset = "0.4"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[[test]]
+name = "never_more_permissive"
+path = "tests/property/never_more_permissive.rs"

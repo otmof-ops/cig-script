@@ -21,6 +21,14 @@ const BUILTINS: &[(&str, Version)] = &[
     ("proc.pipe", Version(1, 1, 0)),
     ("proc.shell", Version(1, 1, 0)),
     ("proc.text", Version(1, 1, 0)),
+    ("pass.issue", Version(1, 20, 0)),
+    ("pass.find", Version(1, 20, 0)),
+    ("pass.memo", Version(1, 20, 0)),
+    ("pass.check", Version(1, 20, 0)),
+    ("pass.narrow", Version(1, 20, 0)),
+    ("pass.spend", Version(1, 20, 0)),
+    ("pass.show", Version(1, 20, 0)),
+    ("pass.recording", Version(1, 20, 0)),
 ];
 
 /// Statements and clauses that arrived after 1.0.0.

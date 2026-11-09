@@ -1356,6 +1356,16 @@ the burn kernel and its journal (write-ahead log).
 | [`E715`](#e715-debugging-is-allowed) | debugging is allowed | not one of the four | unset CIG_ALLOW_DEBUG |
 | [`E720`](#e720-a-rekey-cannot-be-done) | a rekey cannot be done | one of the four; the message says which | put the current key back (cig tin key import), or store it where a rekey can swap it (cig config seal_key keyring); after a bad seal.key.old, move it aside and run cig tin rekey again; wait for the holder of the rekey lock; fix the tampered journal cig names before trying again |
 | [`E721`](#e721-the-tin's-key-folder-is-not-private) | the tin's key folder is not private | these are MY ciggies | a folder or file that is yours, made under sudo: chown it back to yourself. One that is not yours: move it aside (it is not your key), or set CIG_KEYS_DIR to a folder only you can write. A seal.key others could read: chmod 600 it, then cig tin rekey if anyone else could have read it; never move your own key aside, a new key opens nothing the old one sealed |
+| [`E730`](#e730-a-pass-does-not-hold) | a pass does not hold | these are MY ciggies | cig pass show <id> says which input or caveat failed; redo the work and issue a new pass (pass.memo does both), or ask for a fresh pass from whoever issued this one |
+| [`E731`](#e731-the-work-cannot-be-vouched-for) | the work cannot be vouched for | these are MY ciggies | declare what the program reads: proc.run(cmd, args, {reads: [paths]}); for a clock, give pass.issue an until; otherwise take the call out of the work, or do not issue a pass for it |
+| [`E732`](#e732-the-work-reads-a-variable-from-outside-it) | the work reads a variable from outside it | these are MY ciggies | put the value in the subject, and read it from the argument the work is called with: pass.issue("check", {n: n}, pack(s) => s.n + 1) |
+| [`E733`](#e733-the-work-changed-the-world) | the work changed the world | these are MY ciggies | keep the burn outside: do the checking in pass.issue, then burn { } on what it returned |
+| [`E734`](#e734-an-input-changed-while-the-work-ran) | an input changed while the work ran | one of the four; the message says which | run it again when nothing else is writing; if the same input is read more than once, read it once and keep the value |
+| [`E735`](#e735-a-pass-is-already-spent) | a pass is already spent | these are MY ciggies | ask for a new pass; cig pass log shows where this one was spent |
+| [`E736`](#e736-not-a-pass) | not a pass | can't see any ciggies bro | copy the whole token (it starts with cigpass1.), or ask for it again; a token from a newer cig needs cig update |
+| [`E737`](#e737-a-pass-needs-a-discharge) | a pass needs a discharge | don't have any over here | ask for the discharge (for human-yes, the approval the gate shows); then give both: the pass and its discharge |
+| [`E738`](#e738-the-signer-is-not-trusted-here) | the signer is not trusted here | never heard of you | on the machine that signed, cig pass key --kinds check,program prints the line to add; add it to the allowed signers file (cig config pass_allowed_signers <file>), or pass --allowed-signers <file> for one command |
+| [`E739`](#e739-the-pass-state-cannot-be-trusted) | the pass state cannot be trusted | these are MY ciggies | a cache that fails its MAC: cig pass gc folds the state again from the ledger, after checking the ledger's chain; a ledger cut short or replaced: cig runs --verify says what is missing |
 
 ### E700 burn refused
 
@@ -1673,6 +1683,193 @@ The keys folder beside the state root holds the seal key, the ledger and the rek
 4. seal.key, ledger.jsonl or rekey.lock is owned by another user, or is a symlink or not a file, so a read may be redirected or the file planted (probe `path-exists`). **Remedy:** yours, made under sudo: chown it back; a link: put the real file back in place; not yours: move it aside, or set CIG_KEYS_DIR / CIG_SEAL_KEY_FILE to a path only you can write
 
 Related: `E707`, `E720`.
+
+
+### E730 a pass does not hold
+
+*burn · since 1.20.0 · arises in run, any*
+
+**Kind of no:** these are MY ciggies (the door: it knows you and said no; 403 Forbidden; permission denied; a lock; a refusal by policy).
+
+A pass was needed and the one given does not verify. The message names the first thing that failed, in the order cig checks: the tag, the issuer and epoch, revocation, the caveats, then the inputs. Examples of what it says: deploy.sh changed (size 120 then, 131 now); ~/.npmrc appeared; PATH changed; the caveat until 2026-11-14 has passed; revoked (cig pass revoke, 2026-11-09); issued under another key (another machine, or before cig tin rekey); issued at epoch 3, verdict passes are at epoch 4 (cig pass revoke --kind verdict). pass.check returns the same words as a value instead of stopping; pass.spend and cig pass verify stop with this code. Nothing is spent and nothing is written when a pass does not hold.
+
+**What to type next:** cig pass show <id> says which input or caveat failed; redo the work and issue a new pass (pass.memo does both), or ask for a fresh pass from whoever issued this one
+
+**Known causes**, ranked; doctor checks them in this order:
+
+1. an input the pass recorded has changed: a file edited, a file that appeared or went away, a folder listing, an environment variable, the cig build (probe `file-hash`). **Remedy:** the message names it; if the change is meant, redo the work (pass.memo, or cig run again) and the new pass records what is there now
+2. the pass was issued under another key: another machine, or before cig tin rekey (no probe; a suggestion, not a finding). **Remedy:** a local pass only verifies on the machine and tin that issued it; for another machine use a shareable one (cig pass export on the issuing machine), or redo the work here
+3. the pass was revoked: cig pass revoke <id>, or cig pass revoke --kind <kind> moved the epoch past it (no probe; a suggestion, not a finding). **Remedy:** cig pass log shows when and by what; redo the work for a new pass
+4. a caveat does not hold for what is being run: a time that has passed, a folder, a box, a network, an argument pattern, a cig version or build, an agent name (no probe; a suggestion, not a finding). **Remedy:** the message names the caveat; narrowing only ever restricts, so ask the holder of the wider pass for one that fits, or run what the caveat allows
+5. a pass this one relied on no longer holds (a nested pass) (no probe; a suggestion, not a finding). **Remedy:** cig pass show <id> lists the nested pass; fix that one first
+
+Related: `E731`, `E735`, `E736`, `E737`, `E738`, `E739`.
+
+
+### E731 the work cannot be vouched for
+
+*burn · since 1.20.0 · arises in run, dry-run, light*
+
+**Kind of no:** these are MY ciggies (the door: it knows you and said no; 403 Forbidden; permission denied; a lock; a refusal by policy).
+
+pass.issue (or pass.memo) ran the work and could not record everything it depended on, so no pass was issued: a pass that missed an input would vouch for something that has changed. The message names the call that made the work open-world. The calls are proc.run and the rest of proc.* without reads: [paths]; proc.pipe; stdin(); cig.run_id(); fs.modified_ms (a time, not the bytes); time.now_ms, time.now_iso and time.stamp with no until given; any builtin a recording does not know; a read that failed for any reason other than the file not being there; and, on Windows, a path that is not UTF-8.
+
+**What to type next:** declare what the program reads: proc.run(cmd, args, {reads: [paths]}); for a clock, give pass.issue an until; otherwise take the call out of the work, or do not issue a pass for it
+
+**Known causes**, ranked; doctor checks them in this order:
+
+1. a proc.* call inside the work has no reads list, so what the program opened cannot be seen (probe `source-line`). **Remedy:** add reads: [the files and folders it looks at] to the call; reads: true alone keeps its old meaning (a hop that only reads) and declares nothing
+2. the work asks for something that is different every time: stdin(), cig.run_id(), time.now_ms with no until (probe `source-line`). **Remedy:** move the call out of the work and pass its value in through the subject; for a clock, give pass.issue an until so the pass expires
+3. a read inside the work failed for a reason other than the file being absent (permission denied, a bad path) (probe `path-permissions`). **Remedy:** fix the read; a file that is simply not there is fine, it is recorded as absent
+4. on Windows, a path or name the work used is not UTF-8 (no probe; a suggestion, not a finding). **Remedy:** use a path that is valid UTF-8, or do not issue a pass for this work
+
+Related: `E730`, `E732`, `E733`, `E734`.
+
+
+### E732 the work reads a variable from outside it
+
+*burn · since 1.20.0 · arises in run, dry-run, light*
+
+**Kind of no:** these are MY ciggies (the door: it knows you and said no; 403 Forbidden; permission denied; a lock; a refusal by policy).
+
+The work given to pass.issue uses a value the recording cannot vouch for: a variable of the function around it, one a closure captured before the work began, a global that is not a constant (a roll, or a stick that is computed or changed anywhere), or args. The pass is looked up by its subject, so a value the work depends on that is not in the subject would let the pass be reused when that value is different. Constant sticks (literals, and lists and maps of them, never changed) and pulls may be read. The work may not change a variable outside it either. pass.recording() is true inside a work, so a cache can step aside there. The message names the variable and the line.
+
+**What to type next:** put the value in the subject, and read it from the argument the work is called with: pass.issue("check", {n: n}, pack(s) => s.n + 1)
+
+**Known causes**, ranked; doctor checks them in this order:
+
+1. the work names a roll, a stick or a parameter of the function it sits in (probe `source-line`). **Remedy:** add it to the subject map and read it from the work's argument, so the pass is keyed on it
+2. the work uses a global or a pulled name whose value changes between runs (probe `source-line`). **Remedy:** put what it holds in the subject, or read it inside the work, where the recorder sees it
+
+Related: `E731`, `E733`.
+
+
+### E733 the work changed the world
+
+*burn · since 1.20.0 · arises in run, dry-run, light*
+
+**Kind of no:** these are MY ciggies (the door: it knows you and said no; 403 Forbidden; permission denied; a lock; a refusal by policy).
+
+A burn happened inside the work given to pass.issue. A pass vouches for something that was looked at; work that changes the world cannot be skipped by a later lookup, so it cannot be vouched for.
+
+**What to type next:** keep the burn outside: do the checking in pass.issue, then burn { } on what it returned
+
+**Known causes**, ranked; doctor checks them in this order:
+
+1. an fs write, an env set or another burn sits inside the work (probe `source-line`). **Remedy:** move it out; use the pass's result to decide whether to burn
+2. the work calls a pull that burns, or a hop that is declared as changing things (probe `source-line`). **Remedy:** call it outside pass.issue, after the pass is found or issued
+
+Related: `E701`, `E731`, `E732`.
+
+
+### E734 an input changed while the work ran
+
+*burn · since 1.20.0 · arises in run, light*
+
+**Kind of no:** one of the four; the message says which (read the operating-system reason in the message; ENOENT, EACCES, ENOSPC and friends, each mapped in the causes below).
+
+The work read the same thing twice and got two different answers, so there is no one state to vouch for. No pass was issued. The message names the input and what differed.
+
+**What to type next:** run it again when nothing else is writing; if the same input is read more than once, read it once and keep the value
+
+**Known causes**, ranked; doctor checks them in this order:
+
+1. another program, or a watcher, changed a file while the work was reading it (probe `file-hash`). **Remedy:** stop the writer, or run the work when it is quiet, then run it again
+
+Related: `E730`, `E731`.
+
+
+### E735 a pass is already spent
+
+*burn · since 1.20.0 · arises in run, any*
+
+**Kind of no:** these are MY ciggies (the door: it knows you and said no; 403 Forbidden; permission denied; a lock; a refusal by policy).
+
+A pass with a once caveat was used before, or a pass with max n was used n times. The use is recorded in the ledger (a pass-spend line), and narrowing the pass further does not give it a new spend. The message says which caveat and, when it is known, which run used it.
+
+**What to type next:** ask for a new pass; cig pass log shows where this one was spent
+
+**Known causes**, ranked; doctor checks them in this order:
+
+1. the pass was issued with once and has been used (no probe; a suggestion, not a finding). **Remedy:** cig pass log shows the run that used it; issue another pass if another use is meant
+2. the pass was issued with max n and has been used n times (no probe; a suggestion, not a finding). **Remedy:** cig pass log shows each use; issue another pass if more are meant
+3. the pass is a narrowing of one that was spent (a caveat appended after once keeps the original's spend) (no probe; a suggestion, not a finding). **Remedy:** narrowing never adds uses; go back to whoever issued the original
+
+Related: `E730`, `E737`.
+
+
+### E736 not a pass
+
+*burn · since 1.20.0 · arises in run, any*
+
+**Kind of no:** can't see any ciggies bro (yours: you're pointed at the wrong place; wrong address: a path, a name, a directory not on PATH; ENOENT).
+
+The bytes given as a pass do not decode. Decoding is strict, so a token cut short, one with extra bytes after it, an unknown version, an unknown kind, input or caveat, an input list that is not sorted, or a path that is not absolute is refused as a whole; nothing is read past the first problem.
+
+**What to type next:** copy the whole token (it starts with cigpass1.), or ask for it again; a token from a newer cig needs cig update
+
+**Known causes**, ranked; doctor checks them in this order:
+
+1. the token was cut or changed on the way (a line wrap, a missing end, a stray space) (no probe; a suggestion, not a finding). **Remedy:** pass it as a file (cig pass verify <file>), or copy it again in one piece
+2. the pass was made by a newer cig, and uses a version, kind, input or caveat this one does not know (no probe; a suggestion, not a finding). **Remedy:** cig update; an unknown caveat is never ignored, because ignoring it would widen the pass
+3. the file is not a pass (probe `file-hash`). **Remedy:** check the path; cig pass list shows the passes this machine holds
+
+Related: `E730`, `E738`.
+
+
+### E737 a pass needs a discharge
+
+*burn · since 1.20.0 · arises in run, any*
+
+**Kind of no:** don't have any over here (nobody's: right place, right you, nothing there; 404 from the server's side; an empty result).
+
+The pass carries a needs caveat, such as needs human-yes, and nothing given with it discharges it. The discharge is a second pass of that kind, about this pass's root id. A human-yes is signed only by a human authority this machine trusts: an Ed25519 key in /etc/cigscript/authority.pub, a file root owns, installed by an administrator, whose private key sits behind the platform's own authentication; it must expire within the hour. No variable, flag or other file stands in for it. On a machine with no authority installed, needs human-yes cannot be met.
+
+**What to type next:** ask for the discharge (for human-yes, the approval the gate shows); then give both: the pass and its discharge
+
+**Known causes**, ranked; doctor checks them in this order:
+
+1. the person has not approved yet, so no discharge exists (no probe; a suggestion, not a finding). **Remedy:** approve it where the gate asks; the discharge is made after that, and cannot be made before
+2. a discharge was given but it is for a different pass, or has failed to verify itself (no probe; a suggestion, not a finding). **Remedy:** cig pass show <discharge> says why; a discharge only fits the pass whose root id it names
+
+Related: `E730`, `E735`.
+
+
+### E738 the signer is not trusted here
+
+*burn · since 1.20.0 · arises in run, any*
+
+**Kind of no:** never heard of you (the door: it doesn't know you; 401 Unauthorized; authentication failure).
+
+A shareable pass was signed by a key that is not trusted here for its kind, so the signature was never trusted. Nothing was read from the pass beyond the key. Allowed signers use the OpenSSH format cigcompile verify --allowed-signers reads; each key is trusted only for the kinds its namespaces option names (namespaces="cigpass-check,cigpass-program"), and a line without one allows no pass. Approvals, verdicts, rules, doctor, trial and run passes never come from another machine at all.
+
+**What to type next:** on the machine that signed, cig pass key --kinds check,program prints the line to add; add it to the allowed signers file (cig config pass_allowed_signers <file>), or pass --allowed-signers <file> for one command
+
+**Known causes**, ranked; doctor checks them in this order:
+
+1. the signer's key has not been added to the allowed signers file (probe `path-exists`). **Remedy:** ask the signer for the line cig pass key prints, and add it to the file
+2. the allowed signers file is not where cig looks (the default is the allowed_signers file in the cig home) (probe `path-exists`). **Remedy:** cig config pass_allowed_signers <file>, or --allowed-signers <file>
+3. the signer ran cig tin rekey, so its key is a new one (no probe; a suggestion, not a finding). **Remedy:** a rekey changes the signing key; add the new line from cig pass key and drop the old one
+
+Related: `E730`, `E736`.
+
+
+### E739 the pass state cannot be trusted
+
+*burn · since 1.20.0 · arises in run, any*
+
+**Kind of no:** these are MY ciggies (the door: it knows you and said no; 403 Forbidden; permission denied; a lock; a refusal by policy).
+
+The pass state (each kind's epoch, the spends and the revocations) is folded from the ledger and kept in a cache beside the passes, MAC'd under a subkey of the tin's key (a cig tin rekey starts a new one, folded again from the re-signed ledger) and pinned to the ledger's length and last line. Each local pass also carries the ledger's length when it was made, so a ledger deleted or cut below that refuses it. cig refuses it when the cache fails its MAC, when the ledger is shorter than the cache expects (cut, or an older copy put back), or when the line the cache was read at is another one. A missing cache is rebuilt from the ledger, never reset, so deleting it never brings a revoked pass back. While refused, every pass is invalid. A whole keys folder put back from an older copy cannot be told apart here: cig tin head is the anchor to keep elsewhere.
+
+**What to type next:** a cache that fails its MAC: cig pass gc folds the state again from the ledger, after checking the ledger's chain; a ledger cut short or replaced: cig runs --verify says what is missing
+
+**Known causes**, ranked; doctor checks them in this order:
+
+1. the passes folder or a file in it is owned by another user, is group- or world-writable, or is a symlink (probe `path-permissions`). **Remedy:** made under sudo: chown it back to yourself; not yours: move it aside, it holds nothing of yours, and cig makes a new one
+2. the cache was edited or written by something else, or the ledger was cut or put back from an older copy (probe `path-exists`). **Remedy:** cig pass gc rebuilds the cache from the ledger; for the ledger itself, cig runs --verify and cig tin verify --head say what changed
+
+Related: `E721`, `E720`, `E730`.
 
 
 ## fold (`E750`–`E769`)
@@ -2054,6 +2251,7 @@ the command line and the environment.
 | [`E806`](#e806-update-failed) | update failed | one of the four; the message says which | the message says which step; retry, or install from the releases page |
 | [`E807`](#e807-pinned-version-not-available) | pinned version not available | don't have any over here | cig versions add <version> when online, or change the pin |
 | [`E808`](#e808-record-from-a-newer-cig) | record from a newer cig | don't have any over here | cig versions add <the version that wrote it>; cig unburn then hands the run to that version |
+| [`E809`](#e809-cannot-read-this-caveat) | cannot read this caveat | not one of the four | write one of: within <path>, until <time>, for <span>, boxed, network none, network <host,host>, args <one pattern per argument> [...], cig >= <version>, build <id>, agent <name>, once, max <n>, needs <kind> |
 
 ### E800 usage error
 
@@ -2203,6 +2401,25 @@ A run record or journal was written in a format this cig does not read; it is ne
 1. cig was downgraded after the run was made (no probe; a suggestion, not a finding). **Remedy:** cig update, or cig versions add <version> so unburn can hand the run to it
 
 Related: `E807`.
+
+
+### E809 cannot read this caveat
+
+*usage · since 1.20.0 · arises in any*
+
+**Kind of no:** not one of the four (a mistake in the text, in the arithmetic, or in CigScript; syntax, type or logic error; an internal error).
+
+A caveat given to pass.narrow, cig pass narrow or pass.check is not one of the forms cig knows, or its value does not parse. The message quotes the text and says which part it could not read. A caveat is never guessed at: a misread one could widen what a pass allows.
+
+**What to type next:** write one of: within <path>, until <time>, for <span>, boxed, network none, network <host,host>, args <one pattern per argument> [...], cig >= <version>, build <id>, agent <name>, once, max <n>, needs <kind>
+
+**Known causes**, ranked; doctor checks them in this order:
+
+1. a typo in the keyword, or a form cig does not have (no probe; a suggestion, not a finding). **Remedy:** the keywords are listed in the fix; a time is until 2026-11-14T00:00:00Z, a span is for 2h
+2. the value does not parse: a time not written like 2026-11-14T00:00:00Z, a span with no unit, max with no whole number, a version that is not a number (no probe; a suggestion, not a finding). **Remedy:** until 2026-11-14T00:00:00Z, for 2h, max 20, cig >= 1.20.0
+3. a caveat with spaces was split by the shell into several arguments (no probe; a suggestion, not a finding). **Remedy:** quote each caveat: cig pass narrow <id> "within ~/work/site" "for 2h"
+
+Related: `E800`, `E736`.
 
 
 ## update (`E850`–`E869`)

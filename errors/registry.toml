@@ -1927,6 +1927,224 @@ probe = "path-exists"
 remedy = "yours, made under sudo: chown it back; a link: put the real file back in place; not yours: move it aside, or set CIG_KEYS_DIR / CIG_SEAL_KEY_FILE to a path only you can write"
 
 [[code]]
+code = "E730"
+title = "a pass does not hold"
+meaning = "A pass was needed and the one given does not verify. The message names the first thing that failed, in the order cig checks: the tag, the issuer and epoch, revocation, the caveats, then the inputs. Examples of what it says: deploy.sh changed (size 120 then, 131 now); ~/.npmrc appeared; PATH changed; the caveat until 2026-11-14 has passed; revoked (cig pass revoke, 2026-11-09); issued under another key (another machine, or before cig tin rekey); issued at epoch 3, verdict passes are at epoch 4 (cig pass revoke --kind verdict). pass.check returns the same words as a value instead of stopping; pass.spend and cig pass verify stop with this code. Nothing is spent and nothing is written when a pass does not hold."
+fix = "cig pass show <id> says which input or caveat failed; redo the work and issue a new pass (pass.memo does both), or ask for a fresh pass from whoever issued this one"
+no = "these-are-mine"
+arises = ["run", "any"]
+tags = ["kernel"]
+since = "1.20.0"
+related = ["E731", "E735", "E736", "E737", "E738", "E739"]
+[[code.cause]]
+why = "an input the pass recorded has changed: a file edited, a file that appeared or went away, a folder listing, an environment variable, the cig build"
+probe = "file-hash"
+remedy = "the message names it; if the change is meant, redo the work (pass.memo, or cig run again) and the new pass records what is there now"
+[[code.cause]]
+why = "the pass was issued under another key: another machine, or before cig tin rekey"
+probe = "none"
+remedy = "a local pass only verifies on the machine and tin that issued it; for another machine use a shareable one (cig pass export on the issuing machine), or redo the work here"
+[[code.cause]]
+why = "the pass was revoked: cig pass revoke <id>, or cig pass revoke --kind <kind> moved the epoch past it"
+probe = "none"
+remedy = "cig pass log shows when and by what; redo the work for a new pass"
+[[code.cause]]
+why = "a caveat does not hold for what is being run: a time that has passed, a folder, a box, a network, an argument pattern, a cig version or build, an agent name"
+probe = "none"
+remedy = "the message names the caveat; narrowing only ever restricts, so ask the holder of the wider pass for one that fits, or run what the caveat allows"
+[[code.cause]]
+why = "a pass this one relied on no longer holds (a nested pass)"
+probe = "none"
+remedy = "cig pass show <id> lists the nested pass; fix that one first"
+
+[[code]]
+code = "E731"
+title = "the work cannot be vouched for"
+meaning = "pass.issue (or pass.memo) ran the work and could not record everything it depended on, so no pass was issued: a pass that missed an input would vouch for something that has changed. The message names the call that made the work open-world. The calls are proc.run and the rest of proc.* without reads: [paths]; proc.pipe; stdin(); cig.run_id(); fs.modified_ms (a time, not the bytes); time.now_ms, time.now_iso and time.stamp with no until given; any builtin a recording does not know; a read that failed for any reason other than the file not being there; and, on Windows, a path that is not UTF-8."
+fix = "declare what the program reads: proc.run(cmd, args, {reads: [paths]}); for a clock, give pass.issue an until; otherwise take the call out of the work, or do not issue a pass for it"
+no = "these-are-mine"
+arises = ["run", "dry-run", "light"]
+tags = ["kernel"]
+since = "1.20.0"
+related = ["E730", "E732", "E733", "E734"]
+[[code.cause]]
+why = "a proc.* call inside the work has no reads list, so what the program opened cannot be seen"
+probe = "source-line"
+remedy = "add reads: [the files and folders it looks at] to the call; reads: true alone keeps its old meaning (a hop that only reads) and declares nothing"
+[[code.cause]]
+why = "the work asks for something that is different every time: stdin(), cig.run_id(), time.now_ms with no until"
+probe = "source-line"
+remedy = "move the call out of the work and pass its value in through the subject; for a clock, give pass.issue an until so the pass expires"
+[[code.cause]]
+why = "a read inside the work failed for a reason other than the file being absent (permission denied, a bad path)"
+probe = "path-permissions"
+remedy = "fix the read; a file that is simply not there is fine, it is recorded as absent"
+[[code.cause]]
+why = "on Windows, a path or name the work used is not UTF-8"
+probe = "none"
+remedy = "use a path that is valid UTF-8, or do not issue a pass for this work"
+
+[[code]]
+code = "E732"
+title = "the work reads a variable from outside it"
+meaning = "The work given to pass.issue uses a value the recording cannot vouch for: a variable of the function around it, one a closure captured before the work began, a global that is not a constant (a roll, or a stick that is computed or changed anywhere), or args. The pass is looked up by its subject, so a value the work depends on that is not in the subject would let the pass be reused when that value is different. Constant sticks (literals, and lists and maps of them, never changed) and pulls may be read. The work may not change a variable outside it either. pass.recording() is true inside a work, so a cache can step aside there. The message names the variable and the line."
+fix = "put the value in the subject, and read it from the argument the work is called with: pass.issue(\"check\", {n: n}, pack(s) => s.n + 1)"
+no = "these-are-mine"
+arises = ["run", "dry-run", "light"]
+tags = ["kernel"]
+since = "1.20.0"
+related = ["E731", "E733"]
+[[code.cause]]
+why = "the work names a roll, a stick or a parameter of the function it sits in"
+probe = "source-line"
+remedy = "add it to the subject map and read it from the work's argument, so the pass is keyed on it"
+[[code.cause]]
+why = "the work uses a global or a pulled name whose value changes between runs"
+probe = "source-line"
+remedy = "put what it holds in the subject, or read it inside the work, where the recorder sees it"
+
+[[code]]
+code = "E733"
+title = "the work changed the world"
+meaning = "A burn happened inside the work given to pass.issue. A pass vouches for something that was looked at; work that changes the world cannot be skipped by a later lookup, so it cannot be vouched for."
+fix = "keep the burn outside: do the checking in pass.issue, then burn { } on what it returned"
+no = "these-are-mine"
+arises = ["run", "dry-run", "light"]
+tags = ["kernel"]
+since = "1.20.0"
+related = ["E701", "E731", "E732"]
+[[code.cause]]
+why = "an fs write, an env set or another burn sits inside the work"
+probe = "source-line"
+remedy = "move it out; use the pass's result to decide whether to burn"
+[[code.cause]]
+why = "the work calls a pull that burns, or a hop that is declared as changing things"
+probe = "source-line"
+remedy = "call it outside pass.issue, after the pass is found or issued"
+
+[[code]]
+code = "E734"
+title = "an input changed while the work ran"
+meaning = "The work read the same thing twice and got two different answers, so there is no one state to vouch for. No pass was issued. The message names the input and what differed."
+fix = "run it again when nothing else is writing; if the same input is read more than once, read it once and keep the value"
+no = "depends"
+arises = ["run", "light"]
+tags = ["kernel"]
+since = "1.20.0"
+related = ["E730", "E731"]
+[[code.cause]]
+why = "another program, or a watcher, changed a file while the work was reading it"
+probe = "file-hash"
+remedy = "stop the writer, or run the work when it is quiet, then run it again"
+
+[[code]]
+code = "E735"
+title = "a pass is already spent"
+meaning = "A pass with a once caveat was used before, or a pass with max n was used n times. The use is recorded in the ledger (a pass-spend line), and narrowing the pass further does not give it a new spend. The message says which caveat and, when it is known, which run used it."
+fix = "ask for a new pass; cig pass log shows where this one was spent"
+no = "these-are-mine"
+arises = ["run", "any"]
+tags = ["kernel"]
+since = "1.20.0"
+related = ["E730", "E737"]
+[[code.cause]]
+why = "the pass was issued with once and has been used"
+probe = "none"
+remedy = "cig pass log shows the run that used it; issue another pass if another use is meant"
+[[code.cause]]
+why = "the pass was issued with max n and has been used n times"
+probe = "none"
+remedy = "cig pass log shows each use; issue another pass if more are meant"
+[[code.cause]]
+why = "the pass is a narrowing of one that was spent (a caveat appended after once keeps the original's spend)"
+probe = "none"
+remedy = "narrowing never adds uses; go back to whoever issued the original"
+
+[[code]]
+code = "E736"
+title = "not a pass"
+meaning = "The bytes given as a pass do not decode. Decoding is strict, so a token cut short, one with extra bytes after it, an unknown version, an unknown kind, input or caveat, an input list that is not sorted, or a path that is not absolute is refused as a whole; nothing is read past the first problem."
+fix = "copy the whole token (it starts with cigpass1.), or ask for it again; a token from a newer cig needs cig update"
+no = "cant-see-any"
+arises = ["run", "any"]
+tags = ["kernel"]
+since = "1.20.0"
+related = ["E730", "E738"]
+[[code.cause]]
+why = "the token was cut or changed on the way (a line wrap, a missing end, a stray space)"
+probe = "none"
+remedy = "pass it as a file (cig pass verify <file>), or copy it again in one piece"
+[[code.cause]]
+why = "the pass was made by a newer cig, and uses a version, kind, input or caveat this one does not know"
+probe = "none"
+remedy = "cig update; an unknown caveat is never ignored, because ignoring it would widen the pass"
+[[code.cause]]
+why = "the file is not a pass"
+probe = "file-hash"
+remedy = "check the path; cig pass list shows the passes this machine holds"
+
+[[code]]
+code = "E737"
+title = "a pass needs a discharge"
+meaning = "The pass carries a needs caveat, such as needs human-yes, and nothing given with it discharges it. The discharge is a second pass of that kind, about this pass's root id. A human-yes is signed only by a human authority this machine trusts: an Ed25519 key in /etc/cigscript/authority.pub, a file root owns, installed by an administrator, whose private key sits behind the platform's own authentication; it must expire within the hour. No variable, flag or other file stands in for it. On a machine with no authority installed, needs human-yes cannot be met."
+fix = "ask for the discharge (for human-yes, the approval the gate shows); then give both: the pass and its discharge"
+no = "dont-have-any"
+arises = ["run", "any"]
+tags = ["kernel"]
+since = "1.20.0"
+related = ["E730", "E735"]
+[[code.cause]]
+why = "the person has not approved yet, so no discharge exists"
+probe = "none"
+remedy = "approve it where the gate asks; the discharge is made after that, and cannot be made before"
+[[code.cause]]
+why = "a discharge was given but it is for a different pass, or has failed to verify itself"
+probe = "none"
+remedy = "cig pass show <discharge> says why; a discharge only fits the pass whose root id it names"
+
+[[code]]
+code = "E738"
+title = "the signer is not trusted here"
+meaning = "A shareable pass was signed by a key that is not trusted here for its kind, so the signature was never trusted. Nothing was read from the pass beyond the key. Allowed signers use the OpenSSH format cigcompile verify --allowed-signers reads; each key is trusted only for the kinds its namespaces option names (namespaces=\"cigpass-check,cigpass-program\"), and a line without one allows no pass. Approvals, verdicts, rules, doctor, trial and run passes never come from another machine at all."
+fix = "on the machine that signed, cig pass key --kinds check,program prints the line to add; add it to the allowed signers file (cig config pass_allowed_signers <file>), or pass --allowed-signers <file> for one command"
+no = "never-heard-of-you"
+arises = ["run", "any"]
+tags = ["kernel"]
+since = "1.20.0"
+related = ["E730", "E736"]
+[[code.cause]]
+why = "the signer's key has not been added to the allowed signers file"
+probe = "path-exists"
+remedy = "ask the signer for the line cig pass key prints, and add it to the file"
+[[code.cause]]
+why = "the allowed signers file is not where cig looks (the default is the allowed_signers file in the cig home)"
+probe = "path-exists"
+remedy = "cig config pass_allowed_signers <file>, or --allowed-signers <file>"
+[[code.cause]]
+why = "the signer ran cig tin rekey, so its key is a new one"
+probe = "none"
+remedy = "a rekey changes the signing key; add the new line from cig pass key and drop the old one"
+
+[[code]]
+code = "E739"
+title = "the pass state cannot be trusted"
+meaning = "The pass state (each kind's epoch, the spends and the revocations) is folded from the ledger and kept in a cache beside the passes, MAC'd under a subkey of the tin's key (a cig tin rekey starts a new one, folded again from the re-signed ledger) and pinned to the ledger's length and last line. Each local pass also carries the ledger's length when it was made, so a ledger deleted or cut below that refuses it. cig refuses it when the cache fails its MAC, when the ledger is shorter than the cache expects (cut, or an older copy put back), or when the line the cache was read at is another one. A missing cache is rebuilt from the ledger, never reset, so deleting it never brings a revoked pass back. While refused, every pass is invalid. A whole keys folder put back from an older copy cannot be told apart here: cig tin head is the anchor to keep elsewhere."
+fix = "a cache that fails its MAC: cig pass gc folds the state again from the ledger, after checking the ledger's chain; a ledger cut short or replaced: cig runs --verify says what is missing"
+no = "these-are-mine"
+arises = ["run", "any"]
+tags = ["kernel"]
+since = "1.20.0"
+related = ["E721", "E720", "E730"]
+[[code.cause]]
+why = "the passes folder or a file in it is owned by another user, is group- or world-writable, or is a symlink"
+probe = "path-permissions"
+remedy = "made under sudo: chown it back to yourself; not yours: move it aside, it holds nothing of yours, and cig makes a new one"
+[[code.cause]]
+why = "the cache was edited or written by something else, or the ledger was cut or put back from an older copy"
+probe = "path-exists"
+remedy = "cig pass gc rebuilds the cache from the ledger; for the ledger itself, cig runs --verify and cig tin verify --head say what changed"
+
+[[code]]
 code = "E750"
 title = "literal path outside the pack"
 meaning = "A write names a literal path that sits outside the script's declared pack (its scope), so the checker refuses it before anything runs."
@@ -2331,6 +2549,28 @@ probe = "none"
 remedy = "cig update, or cig versions add <version> so unburn can hand the run to it"
 
 # --- internal (E9xx) ---
+
+[[code]]
+code = "E809"
+title = "cannot read this caveat"
+meaning = "A caveat given to pass.narrow, cig pass narrow or pass.check is not one of the forms cig knows, or its value does not parse. The message quotes the text and says which part it could not read. A caveat is never guessed at: a misread one could widen what a pass allows."
+fix = "write one of: within <path>, until <time>, for <span>, boxed, network none, network <host,host>, args <one pattern per argument> [...], cig >= <version>, build <id>, agent <name>, once, max <n>, needs <kind>"
+no = "none"
+arises = ["any"]
+since = "1.20.0"
+related = ["E800", "E736"]
+[[code.cause]]
+why = "a typo in the keyword, or a form cig does not have"
+probe = "none"
+remedy = "the keywords are listed in the fix; a time is until 2026-11-14T00:00:00Z, a span is for 2h"
+[[code.cause]]
+why = "the value does not parse: a time not written like 2026-11-14T00:00:00Z, a span with no unit, max with no whole number, a version that is not a number"
+probe = "none"
+remedy = "until 2026-11-14T00:00:00Z, for 2h, max 20, cig >= 1.20.0"
+[[code.cause]]
+why = "a caveat with spaces was split by the shell into several arguments"
+probe = "none"
+remedy = "quote each caveat: cig pass narrow <id> \"within ~/work/site\" \"for 2h\""
 
 [[code]]
 code = "E870"

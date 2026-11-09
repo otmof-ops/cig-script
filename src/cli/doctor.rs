@@ -437,7 +437,7 @@ pub fn doctor(ctx: &Ctx, fix: bool) -> i32 {
     // The box's primitives (#106), each tried on its own, so a box that
     // cannot be made says which part is missing.
     outln!("  box");
-    for (name, ok, says) in box_primitives() {
+    for (name, ok, says) in box_primitives_remembered() {
         outln!("    {:<13} {}  {}", name, yes_no(ctx, ok), ctx.dim(&says));
     }
     if problems.is_empty() {
@@ -560,6 +560,80 @@ fn path_line(dir: &Path) -> Option<(PathBuf, String)> {
 /// network namespace (`network: "off"` and `"registry"`), a PID namespace
 /// (`pidns`) and overlayfs (the layer). Each namespace is tried in a child
 /// that unshares it and execs `true`; overlayfs is the box's own check.
+/// `box_primitives`, remembered as a doctor pass (cig-script#186): the
+/// probe makes namespaces, so its answer is kept while the kernel, its
+/// namespace settings, its file systems and mounts, the boot, the
+/// variables the probe reads, who runs it under what confinement, and this
+/// cig stay the same, for a day at most. Only on a machine that already has
+/// a key: doctor never makes one.
+fn box_primitives_remembered() -> Vec<(&'static str, bool, String)> {
+    const NAMES: &[&str] = &[
+        "user ns",
+        "mount ns",
+        "network ns",
+        "pid ns",
+        "overlayfs",
+        "box",
+    ];
+    let files: Vec<&std::path::Path> = [
+        "/proc/sys/kernel/osrelease",
+        "/proc/sys/kernel/random/boot_id",
+        "/proc/sys/kernel/apparmor_restrict_unprivileged_userns",
+        "/proc/sys/kernel/apparmor_restrict_unprivileged_unconfined",
+        "/proc/sys/kernel/unprivileged_userns_clone",
+        "/proc/sys/user/max_user_namespaces",
+        "/proc/sys/user/max_mnt_namespaces",
+        "/proc/sys/user/max_net_namespaces",
+        "/proc/sys/user/max_pid_namespaces",
+        "/proc/filesystems",
+        "/proc/self/mountinfo",
+        "/sys/module/overlay",
+    ]
+    .iter()
+    .map(std::path::Path::new)
+    .collect();
+    // What the answer depends on in this process rather than in a file: who
+    // it runs as, its seccomp and no_new_privs state and its AppArmor
+    // profile. A doctor run in a sandbox and one in a plain shell ask
+    // different questions.
+    let mut subject = b"box-primitives".to_vec();
+    #[cfg(unix)]
+    {
+        // SAFETY: getuid has no preconditions.
+        let uid = unsafe { libc::getuid() };
+        subject.extend_from_slice(format!("\0uid={uid}").as_bytes());
+    }
+    if let Ok(status) = std::fs::read_to_string("/proc/self/status") {
+        for line in status.lines() {
+            if line.starts_with("Seccomp") || line.starts_with("NoNewPrivs") {
+                subject.push(0);
+                subject.extend_from_slice(line.as_bytes());
+            }
+        }
+    }
+    if let Ok(profile) = std::fs::read_to_string("/proc/self/attr/current") {
+        subject.extend_from_slice(b"\0apparmor=");
+        subject.extend_from_slice(profile.trim().as_bytes());
+    }
+    let answer: Vec<(String, bool, String)> = crate::pass::remembered(
+        "doctor",
+        &subject,
+        &files,
+        &["CIG_INTERNAL_NO_BOX", "CIGSCRIPT_HOME", "HOME", "PATH"],
+        24 * 3_600_000,
+        || {
+            box_primitives()
+                .into_iter()
+                .map(|(n, ok, says)| (n.to_string(), ok, says))
+                .collect()
+        },
+    );
+    answer
+        .into_iter()
+        .filter_map(|(n, ok, says)| NAMES.iter().find(|k| **k == n).map(|k| (*k, ok, says)))
+        .collect()
+}
+
 fn box_primitives() -> Vec<(&'static str, bool, String)> {
     #[cfg(target_os = "linux")]
     {

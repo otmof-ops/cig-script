@@ -494,7 +494,7 @@ fn append(line: &Line) -> io::Result<()> {
 
 /// A blocking exclusive advisory lock on `lock_path`. The file is created
 /// if it does not exist.
-fn exclusive_lock(path: &Path) -> io::Result<fs::File> {
+pub(crate) fn exclusive_lock(path: &Path) -> io::Result<fs::File> {
     #[cfg(unix)]
     {
         use std::os::unix::io::AsRawFd;

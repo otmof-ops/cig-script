@@ -71,6 +71,41 @@ enum Encoding {
     Latin1,
 }
 
+/// What a hop with `clean_env` keeps of cig's environment (and what a
+/// pass's recording records for a hop inside its work).
+const CLEAN_ENV_KEYS: &[&str] = &[
+    "PATH",
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "SHELL",
+    "TMPDIR",
+    "TERM",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "TZ",
+    "SYSTEMROOT",
+    "USERPROFILE",
+    "APPDATA",
+    "COMSPEC",
+    "PATHEXT",
+    "TEMP",
+    "TMP",
+    "LOCALAPPDATA",
+    "WINDIR",
+    "SYSTEMDRIVE",
+    "PROGRAMDATA",
+    "PROGRAMFILES",
+    "PROGRAMFILES(X86)",
+    "HOMEDRIVE",
+    "HOMEPATH",
+    "PROCESSOR_ARCHITECTURE",
+    "NUMBER_OF_PROCESSORS",
+    "OS",
+];
+
+#[derive(Clone)]
 struct Options {
     cwd: Option<PathBuf>,
     env: Vec<(String, String)>,
@@ -102,6 +137,14 @@ struct Options {
     /// The hop only reads (a check, a lookup): it is not journaled as a
     /// change. What it does change in the pack is still seen and journaled.
     reads: bool,
+    /// `reads: [paths]`: what the hop reads, declared, so a pass's recording
+    /// can rest on it (cig-script#186).
+    read_paths: Option<Vec<String>>,
+    /// `env_reads: [names]`: variables the hop's result depends on, passed
+    /// to it and recorded when it runs inside a pass's work.
+    env_reads: Vec<String>,
+    /// Inside a pass's work: exactly these variables reach the child.
+    rec_env: Option<Vec<String>>,
 }
 
 impl Options {
@@ -130,6 +173,9 @@ impl Options {
             box_spec: crate::burn::overlay::BoxSpec::default(),
             stream: false,
             reads: false,
+            read_paths: None,
+            env_reads: Vec::new(),
+            rec_env: None,
         };
         let Some(opts) = opt_map(a, index, name, s)? else {
             return Ok(o);
@@ -241,7 +287,40 @@ impl Options {
                 }
                 ("header", v) => o.header = v.truthy(),
                 ("stream", v) => o.stream = v.truthy(),
+                ("reads", Value::List(items)) => {
+                    let mut paths = Vec::new();
+                    for item in items.borrow().iter() {
+                        match item {
+                            Value::Str(p) => paths.push(p.to_string()),
+                            other => {
+                                return Err(type_error(format!(
+                                    "{name}: `reads` takes true, or a list of the paths the hop reads (got {})",
+                                    other.type_name()
+                                ))
+                                .at(s))
+                            }
+                        }
+                    }
+                    o.reads = true;
+                    o.read_paths = Some(paths);
+                }
                 ("reads", v) => o.reads = v.truthy(),
+                ("env_reads", Value::List(items)) => {
+                    for item in items.borrow().iter() {
+                        match item {
+                            Value::Str(n) if !n.is_empty() && !n.contains('=') => {
+                                o.env_reads.push(n.to_string())
+                            }
+                            other => {
+                                return Err(type_error(format!(
+                                    "{name}: `env_reads` takes a list of variable names (got {})",
+                                    other.type_name()
+                                ))
+                                .at(s))
+                            }
+                        }
+                    }
+                }
                 ("sep", Value::Str(c)) => {
                     let mut chars = c.chars();
                     match (chars.next(), chars.next()) {
@@ -264,7 +343,7 @@ impl Options {
                 (other, _) => {
                     return Err(runtime(format!("{name}: unknown option `{other}`"))
                         .at(s)
-                        .with_hint("use one of cwd, env, clean_env, timeout_ms, grace_ms, stdin, check, ok, encoding, header, sep, touches, touches_sealed, skip, box"))
+                        .with_hint("use one of cwd, env, clean_env, timeout_ms, grace_ms, stdin, check, ok, encoding, header, sep, touches, touches_sealed, skip, box, reads, env_reads"))
                 }
             }
         }
@@ -780,39 +859,16 @@ fn command(
     if let Some(dir) = &o.cwd {
         c.current_dir(dir);
     }
-    if o.clean_env {
+    if let Some(keys) = &o.rec_env {
         c.env_clear();
-        for key in [
-            "PATH",
-            "HOME",
-            "USER",
-            "LOGNAME",
-            "SHELL",
-            "TMPDIR",
-            "TERM",
-            "LANG",
-            "LC_ALL",
-            "LC_CTYPE",
-            "TZ",
-            "SYSTEMROOT",
-            "USERPROFILE",
-            "APPDATA",
-            "COMSPEC",
-            "PATHEXT",
-            "TEMP",
-            "TMP",
-            "LOCALAPPDATA",
-            "WINDIR",
-            "SYSTEMDRIVE",
-            "PROGRAMDATA",
-            "PROGRAMFILES",
-            "PROGRAMFILES(X86)",
-            "HOMEDRIVE",
-            "HOMEPATH",
-            "PROCESSOR_ARCHITECTURE",
-            "NUMBER_OF_PROCESSORS",
-            "OS",
-        ] {
+        for key in keys {
+            if let Some(v) = std::env::var_os(key) {
+                c.env(key, v);
+            }
+        }
+    } else if o.clean_env {
+        c.env_clear();
+        for key in CLEAN_ENV_KEYS {
             if let Some(v) = std::env::var_os(key) {
                 c.env(key, v);
             }
@@ -2030,6 +2086,27 @@ fn hop(
     o: &Options,
     s: Span,
 ) -> Result<Option<(Raw, String, String)>, Diagnostic> {
+    if !i.recording() {
+        return hop_run(i, name, cmd, args, o, s);
+    }
+    let recorded = rec_hop(i, name, cmd, o);
+    let out = hop_run(i, name, cmd, args, &recorded, s);
+    // What the hop declared it reads, seen again once it has run: a file
+    // that changed while it ran gives two answers, and no pass.
+    if let Some(paths) = &recorded.read_paths {
+        rec_declared(i, paths);
+    }
+    out
+}
+
+fn hop_run(
+    i: &mut Interp,
+    name: &str,
+    cmd: &str,
+    args: &[String],
+    o: &Options,
+    s: Span,
+) -> Result<Option<(Raw, String, String)>, Diagnostic> {
     let op = Op::Proc {
         cmd: cmd.to_string(),
         args: args.to_vec(),
@@ -2887,6 +2964,11 @@ fn hop_value(raw: &Raw, out: &str, err: &str) -> Value {
 /// stdin, no shell, one process group, one timeout. Every stage must exit
 /// 0 (the last one honours `ok`); a failure names the stage.
 fn pipe(i: &mut Interp, a: &[Value], s: Span) -> Result<Value, Diagnostic> {
+    if let Some(r) = i.recorder() {
+        r.open_world(
+            "`proc.pipe` ran inside a pass's work, and its stages are not recorded".to_string(),
+        );
+    }
     let stages: Vec<(String, Vec<String>)> = match a.first() {
         Some(Value::List(l)) => {
             let mut out = Vec::new();
@@ -3211,8 +3293,11 @@ fn pipe(i: &mut Interp, a: &[Value], s: Span) -> Result<Value, Diagnostic> {
     Ok(Value::map(m))
 }
 
-fn which(_: &mut Interp, a: &[Value], s: Span) -> Result<Value, Diagnostic> {
+fn which(i: &mut Interp, a: &[Value], s: Span) -> Result<Value, Diagnostic> {
     let name = expect_str(a, 0, "proc.which", s)?;
+    if i.recording() {
+        rec_resolution(i, name);
+    }
     // Exactly what proc.run would start: a path against the current
     // directory, a bare name on PATH (with PATHEXT on Windows). A path is
     // answered as it was spelled, unless PATHEXT completed its name.
@@ -3228,6 +3313,193 @@ fn which(_: &mut Interp, a: &[Value], s: Span) -> Result<Value, Diagnostic> {
         }
         None => Value::Null,
     })
+}
+
+/// A hop inside a pass's work (cig-script#186). Without `reads: [..]` a
+/// recording cannot see what the program depends on, so the pass will not
+/// be issued. With them, the declared paths, the program, PATH and the
+/// child's environment are recorded; the child gets only the variables
+/// `clean_env` keeps, each recorded; the pass says its inputs include a
+/// declaration.
+fn rec_hop(i: &mut Interp, name: &str, cmd: &str, o: &Options) -> Options {
+    let Some(paths) = o.read_paths.clone() else {
+        if let Some(r) = i.recorder() {
+            r.open_world(format!(
+                "`{name}` ran `{cmd}` without `reads: [..]`, so what it read is unknown"
+            ));
+        }
+        return o.clone();
+    };
+    rec_declared(i, &paths);
+    rec_resolution(i, cmd);
+    let cwd_relative = o.cwd.as_deref().is_none_or(|c| !c.is_absolute());
+    let cwd = std::env::current_dir().ok();
+    let mut keys: Vec<String> = REC_ENV_KEYS.iter().map(|k| k.to_string()).collect();
+    for k in &o.env_reads {
+        if !keys.contains(k) {
+            keys.push(k.clone());
+        }
+    }
+    if let Some(r) = i.recorder() {
+        for key in &keys {
+            let v = std::env::var_os(key);
+            r.env(key.as_bytes(), v.as_ref().map(|v| v.as_encoded_bytes()));
+        }
+        if cwd_relative {
+            r.env(
+                b":cwd",
+                cwd.as_ref()
+                    .and_then(|c| cig_pass::path_bytes(c))
+                    .as_deref(),
+            );
+        }
+        r.declared_reads();
+    }
+    let mut out = o.clone();
+    out.rec_env = Some(keys);
+    out
+}
+
+/// The variables a hop inside a pass's work gets (and the pass records):
+/// a small fixed set, plus what `env_reads` names.
+#[cfg(unix)]
+const REC_ENV_KEYS: &[&str] = &["PATH", "HOME", "LANG", "LC_ALL", "TZ", "TMPDIR"];
+#[cfg(not(unix))]
+const REC_ENV_KEYS: &[&str] = &[
+    "PATH",
+    "HOME",
+    "LANG",
+    "LC_ALL",
+    "TZ",
+    "TMPDIR",
+    "SYSTEMROOT",
+    "WINDIR",
+    "PATHEXT",
+    "TEMP",
+    "TMP",
+    "USERPROFILE",
+    "COMSPEC",
+];
+
+/// The most entries a folder in `reads: [..]` may hold, all told.
+const MAX_DECLARED: usize = 10_000;
+
+/// Record what a hop declares it reads: a file by its bytes; a folder by
+/// every file and folder under it (its listing at each level, each file's
+/// bytes), so an edit inside it is caught; a missing path as absent.
+fn rec_declared(i: &mut Interp, paths: &[String]) {
+    for raw in paths {
+        let abs = super::fs::rec_abs(i, std::path::Path::new(raw));
+        let Some(r) = i.recorder() else { return };
+        match std::fs::metadata(&abs) {
+            Ok(md) if md.is_dir() => {
+                let mut seen = 0usize;
+                for entry in walkdir::WalkDir::new(&abs)
+                    .follow_links(false)
+                    .sort_by_file_name()
+                {
+                    seen += 1;
+                    if seen > MAX_DECLARED {
+                        r.open_world(format!(
+                            "{} holds more than {MAX_DECLARED} entries: name the files the hop reads",
+                            abs.display()
+                        ));
+                        break;
+                    }
+                    let entry = match entry {
+                        Ok(e) => e,
+                        Err(e) => {
+                            r.open_world(format!("{} could not be walked ({e})", abs.display()));
+                            break;
+                        }
+                    };
+                    let ft = entry.file_type();
+                    if ft.is_dir() {
+                        match cig_pass::list_dir(entry.path()) {
+                            Ok(entries) => r.dir_listed(entry.path(), &entries),
+                            Err(e) => r.open_world(format!(
+                                "{} could not be listed ({e})",
+                                entry.path().display()
+                            )),
+                        }
+                    } else if ft.is_file() {
+                        if let Err(e) = r.file_seen(entry.path()) {
+                            r.open_world(format!(
+                                "{} could not be read ({e})",
+                                entry.path().display()
+                            ));
+                        }
+                    }
+                }
+            }
+            Ok(_) => {
+                if let Err(e) = r.file_seen(&abs) {
+                    r.open_world(format!("{} could not be read ({e})", abs.display()));
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => r.absent(&abs),
+            Err(e) => r.open_world(format!("{} could not be looked at ({e})", abs.display())),
+        }
+    }
+}
+
+/// What resolving a program name read, recorded for a pass (cig-script#186):
+/// PATH (and PATHEXT on Windows), every candidate before the one found
+/// (absent, or something that would not start), and the program found.
+pub(crate) fn rec_resolution(i: &mut Interp, name: &str) {
+    use std::path::Path;
+    let found = resolve_program(name, None);
+    let is_path = name.contains('/') || name.contains(std::path::MAIN_SEPARATOR);
+    if is_path {
+        let abs = super::fs::rec_abs(i, Path::new(name));
+        if let Some(r) = i.recorder() {
+            match &found {
+                Some(p) => {
+                    if let Err(e) = r.file_seen(p) {
+                        r.open_world(format!("{} could not be read ({e})", p.display()));
+                    }
+                }
+                None => r.absent(&abs),
+            }
+        }
+        return;
+    }
+    let path = std::env::var_os("PATH");
+    let Some(r) = i.recorder() else {
+        return;
+    };
+    r.env(b"PATH", path.as_ref().map(|p| p.as_encoded_bytes()));
+    #[cfg(windows)]
+    {
+        let ext = std::env::var_os("PATHEXT");
+        r.env(b"PATHEXT", ext.as_ref().map(|p| p.as_encoded_bytes()));
+    }
+    let dirs: Vec<std::path::PathBuf> = path
+        .as_ref()
+        .map(|p| std::env::split_paths(p).collect())
+        .unwrap_or_default();
+    for d in dirs {
+        if !d.is_absolute() {
+            r.open_world(format!("PATH holds a relative folder ({})", d.display()));
+            return;
+        }
+        let cand = d.join(name);
+        if found.as_deref() == Some(cand.as_path()) {
+            if let Err(e) = r.file_seen(&cand) {
+                r.open_world(format!("{} could not be read ({e})", cand.display()));
+            }
+            return;
+        }
+        // Not this one: it must stay so (a file there that does not start
+        // is recorded as absent, so a pass over it is never reused).
+        r.absent(&cand);
+    }
+    if let Some(p) = found {
+        // Found somewhere PATH does not list (a system folder): record it.
+        if let Err(e) = r.file_seen(&p) {
+            r.open_world(format!("{} could not be read ({e})", p.display()));
+        }
+    }
 }
 
 fn cigscript_burn(msg: String) -> Diagnostic {

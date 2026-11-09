@@ -25,6 +25,7 @@ pub mod doctor;
 pub mod errors;
 pub mod humidor;
 pub mod interp;
+pub mod pass;
 pub mod pin;
 pub mod program;
 pub mod repro;
