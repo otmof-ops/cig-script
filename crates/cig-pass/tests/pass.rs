@@ -888,9 +888,18 @@ fn racy_mtime_hashes() {
     assert!(verify(&future, &ctx()).is_err());
     // Control: not racy (issued an hour after the mtime) and the stat
     // matches, so the stat is trusted: the stat cache's contract, and the
-    // reason the racy rule exists.
+    // reason the racy rule exists. Only where identity is trusted at all:
+    // on a file system that is not a known local disk one (a container's
+    // overlay) every file is hashed.
     let calm = record_stale(mtime_ms + 3_600_000);
-    verify(&calm, &ctx()).expect("identity equal and not racy trusts the stat");
+    if !cig_pass::always_hash(&f) {
+        verify(&calm, &ctx()).expect("identity equal and not racy trusts the stat");
+    } else {
+        assert!(
+            verify(&calm, &ctx()).is_err(),
+            "hashed where identity is not trusted"
+        );
+    }
 }
 
 #[test]
@@ -922,7 +931,9 @@ fn file_input_boundary_is_two_seconds() {
         "1.999 s is racy"
     );
     #[cfg(unix)]
-    verify(&stale(mtime_ms + 2_500), &ctx()).expect("2.5 s is not");
+    if !cig_pass::always_hash(&f) {
+        verify(&stale(mtime_ms + 2_500), &ctx()).expect("2.5 s is not");
+    }
 }
 
 #[test]
