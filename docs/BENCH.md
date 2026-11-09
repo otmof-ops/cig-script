@@ -52,6 +52,9 @@ env     = { EXTRA = "value" }                    # optional per-case overrides
 - **Reserved keys are accepted and ignored** (`[bench].build`,
   `[bench].watch`, a case's `config`, `gate` and `score`) so a manifest
   written for a later step still parses today.
+- **A Windows path goes in single quotes.** TOML reads a backslash in
+  double quotes as an escape, so write `'C:\tools\cig.exe'` (a literal
+  string), or use forward slashes.
 - **Paths are relative to the manifest.** `stdin` and `expect.stdout`
   resolve against the folder that holds `bench.toml`; `run` and the
   rest resolve against that folder as the working directory.

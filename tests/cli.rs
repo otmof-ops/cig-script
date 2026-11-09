@@ -13471,7 +13471,7 @@ warmup = 1
 [[case]]
 name = "hello"
 group = "start-up"
-run = ["{cig}", "run", "fixtures/hello.cig"]
+run = ['{cig}', "run", "fixtures/hello.cig"]
 expect = {{ exit = 0, stdout = "fixtures/hello.out" }}
 "#,
             cig = cig_bin().display()
@@ -13509,7 +13509,7 @@ per = 1
 warmup = 1
 [[case]]
 name = "says_hello"
-run = ["{cig}", "run", "fixtures/hello.cig"]
+run = ['{cig}', "run", "fixtures/hello.cig"]
 expect = {{ exit = 0, stdout = "fixtures/wrong.out" }}
 "#,
             cig = cig_bin().display()
