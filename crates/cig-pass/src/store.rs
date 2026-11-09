@@ -57,8 +57,10 @@ pub const MAX_BODY: usize = 4 * 1024 * 1024;
 /// fixed fields at their longest).
 pub const MAX_ENCODED: usize = MAX_BODY - 336;
 /// Kinds that never count against the budget and are never evicted by a
-/// flood of other kinds; they have a quota of their own.
-pub const EXEMPT_KINDS: [&str; 3] = ["approval", "human-yes", "revoked"];
+/// flood of other kinds; they have a quota of their own. `rules` is here
+/// because a list held by one must not lose its pass to a burst of
+/// verdicts.
+pub const EXEMPT_KINDS: [&str; 4] = ["approval", "human-yes", "revoked", "rules"];
 /// The default size of the exempt kinds' own quota.
 pub const EXEMPT_QUOTA: u64 = 4 * 1024 * 1024;
 

@@ -55,8 +55,9 @@ take turns (#186).
 - **Doctor asks the kernel once a day** (#186). The box check makes
   namespaces to see what the kernel allows; its answer is now a `doctor`
   pass over the kernel's release, the boot, its namespace settings, its
-  file systems and mounts and the variables the check reads, held for a
-  day at most. Doctor remembers only on a machine that already has a key:
+  file systems and mounts, the variables the check reads and who runs it
+  under what confinement (uid, seccomp, no_new_privs, AppArmor), held for
+  a day at most. Doctor remembers only on a machine that already has a key:
   looking never makes one.
 - **CI carries passes between jobs** (#186): one job checks the examples
   under passes and exports them, the next verifies them against its key.

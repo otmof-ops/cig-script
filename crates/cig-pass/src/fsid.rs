@@ -230,12 +230,13 @@ pub fn mono_now() -> Option<Mono> {
     }
 }
 
-/// Must this path's file always be hashed, whatever its identity says?
-/// Network and FUSE file systems cache attributes, so a stat there can be
-/// stale; on pseudo file systems (`/proc`, `/sys` and their kin) a file's
-/// times do not move when its contents do, so a sysctl written or a module
-/// loaded leaves the identity as it was. Linux reads the file system's
-/// type; elsewhere identity alone is trusted only where
+/// Must this path's file always be hashed, whatever its identity says? On
+/// Linux a file's identity (its stat) is trusted only on a known local disk
+/// file system, whose times move when its bytes do. Everything else is
+/// hashed: network and FUSE file systems cache attributes, pseudo file
+/// systems (`/proc`, `/sys` and their kin) leave a file's times as they
+/// were when a setting is written, and a file system not listed here is
+/// not assumed to behave. Elsewhere identity is trusted only where
 /// `identity_is_enough` says.
 pub fn always_hash(path: &Path) -> bool {
     #[cfg(target_os = "linux")]
@@ -251,31 +252,23 @@ pub fn always_hash(path: &Path) -> bool {
         if rc != 0 {
             return true;
         }
-        const ALWAYS: &[u32] = &[
-            0x6969,      // NFS
-            0x517B,      // SMB
-            0xFF53_4D42, // CIFS
-            0xFE53_4D42, // SMB2
-            0x6573_5546, // FUSE
-            0x0102_1997, // 9P
-            0x0BD0_0BD0, // Lustre
-            0x5346_414F, // AFS
-            0x9FA0,      // proc
-            0x6265_6572, // sysfs
-            0x0027_E0EB, // cgroup
-            0x6367_7270, // cgroup2
-            0x6462_6720, // debugfs
-            0x7472_6163, // tracefs
-            0x7363_6673, // securityfs
-            0x6265_6570, // configfs
-            0xDE5E_81E4, // efivarfs
-            0xCAFE_4A11, // bpf
+        const LOCAL_DISK: &[u32] = &[
+            0xEF53,      // ext2, ext3, ext4
+            0x5846_5342, // XFS
+            0x9123_683E, // Btrfs
+            0xF2F5_2010, // F2FS
+            0x0102_1994, // tmpfs
+            0x2FC1_2FC1, // ZFS
+            0xCA45_1A4E, // bcachefs
+            0x3153_464A, // JFS
+            0x5265_4973, // ReiserFS
+            0x3434,      // NILFS2
         ];
         // The magic is 32 bits; `f_type` is wider or signed on some
         // targets, so compare its low 32 bits.
         #[allow(clippy::unnecessary_cast)]
         let t = st.f_type as u32;
-        ALWAYS.contains(&t)
+        !LOCAL_DISK.contains(&t)
     }
     #[cfg(not(target_os = "linux"))]
     {

@@ -107,9 +107,10 @@ version.
 
 **A file that changed as it was read** (written within two seconds of the
 read) is always hashed when the pass is checked, whatever its size and times
-say. So is every file on a network or FUSE file system, whose times can be
-cached, and every file under `/proc`, `/sys` and their kin, whose times do
-not move when a setting is written.
+say. On Linux, so is every file that is not on a known local disk file
+system (ext4, XFS, Btrfs, F2FS, tmpfs, ZFS and the like): a network or
+FUSE file system can cache a file's times, and under `/proc`, `/sys` and
+their kin the times do not move when a setting is written.
 
 **Hops.** A program the work runs cannot be seen into, so it must say what
 it reads: `proc.run(cmd, args, {reads: ["package.json", "src"]})`, inside a
@@ -269,7 +270,7 @@ cache never brings a revoked pass back.
 | the pass state | `<keys>/passes/marks-<key id>`: a cache of the ledger's pass lines, MAC'd and pinned to the ledger's length; `cig pass gc` folds it again |
 | allowed signers | `<keys>/allowed_signers`, or `cig config pass_allowed_signers <file>` |
 | the human authority | `/etc/cigscript/authority.pub` (root's) |
-| the budget | `cig config pass_budget 128MB` (default 64 MB; approvals, human-yes and revocation lists have their own 4 MB and are never pushed out by others) |
+| the budget | `cig config pass_budget 128MB` (default 64 MB; approvals, rules, human-yes and revocation lists have their own 4 MB and are never pushed out by others) |
 
 ## What a pass can and cannot protect against
 

@@ -930,7 +930,7 @@ pub fn check_artifact_pass(
         ));
     }
     let signers = read_signers(allowed_signers.unwrap_or(&allowed_signers_path()));
-    let own = match open_existing() {
+    let own = match open_existing()? {
         Some((keys, marks)) => {
             let mut ctx = CigCtx::new(&keys, &marks, None);
             ctx.signers = signers.clone();
@@ -1001,16 +1001,26 @@ pub fn check_parcel_pass(
 
 // ----- remembered answers ------------------------------------------------------------
 
-/// This machine's pass key and state, only when both are already here: a
-/// key kept somewhere and the keys folder made. Looking (`cig doctor`)
-/// remembers through this, so it never makes a key or the folder.
-pub fn open_existing() -> Option<(Keys, Marks)> {
-    if seal::peek_keeper().is_none() || !seal::keys_dir().is_dir() {
-        return None;
+/// This machine's pass key and state when they are already here, without
+/// making either: `Ok(None)` when there is no keys folder (no pass was made
+/// or revoked here, and the OS keyring is not asked), the key and state
+/// when they open, and an error when the folder is here but they do not
+/// (a key gone missing, a folder opened up, a state cache put back), so a
+/// caller never falls back to a check that cannot see what was revoked.
+/// Looking (`cig doctor`, checking an artifact's pass) goes through this.
+pub fn open_existing() -> Result<Option<(Keys, Marks)>, String> {
+    if !seal::keys_dir().is_dir() {
+        return Ok(None);
     }
-    let keys = Keys::load().ok()?;
-    let marks = state(&keys).ok()?;
-    Some((keys, marks))
+    if seal::peek_keeper().is_none() {
+        return Err(format!(
+            "the keys folder {} is here but no key is: cig doctor says where it went",
+            seal::keys_dir().display()
+        ));
+    }
+    let keys = Keys::load()?;
+    let marks = state(&keys)?;
+    Ok(Some((keys, marks)))
 }
 
 /// An answer worth remembering while the files and variables it depends on
@@ -1032,7 +1042,7 @@ where
     T: serde::Serialize + serde::de::DeserializeOwned,
     F: FnOnce() -> T,
 {
-    let Some((keys, marks)) = open_existing() else {
+    let Ok(Some((keys, marks))) = open_existing() else {
         return compute();
     };
     {
@@ -1198,6 +1208,18 @@ mod tests {
             "checking a pass made a key folder at {}",
             seal::keys_dir().display()
         );
+        // A keys folder that is here with no key in it is not a machine
+        // without passes: the check is refused rather than made blind to
+        // what was revoked here.
+        std::fs::create_dir_all(seal::keys_dir()).unwrap();
+        let refused = check_artifact_pass(
+            &back,
+            "program",
+            &[("program_sha256", "abc123", why)],
+            Some(&trusted),
+        )
+        .unwrap_err();
+        assert!(refused.contains("no key"), "{refused}");
         match old_home {
             Some(v) => std::env::set_var("CIGSCRIPT_HOME", v),
             None => std::env::remove_var("CIGSCRIPT_HOME"),

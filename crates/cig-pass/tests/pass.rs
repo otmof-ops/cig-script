@@ -1301,7 +1301,7 @@ fn a_pass_is_never_bigger_than_the_limits() {
 
 /// A file on a pseudo file system is hashed at every check: writing a
 /// sysctl leaves its file's times as they were, so its identity says
-/// nothing. An ordinary file is not.
+/// nothing. A file on a known local disk file system is not.
 #[cfg(target_os = "linux")]
 #[test]
 fn files_under_proc_and_sys_are_always_hashed() {
@@ -1315,20 +1315,35 @@ fn files_under_proc_and_sys_are_always_hashed() {
     let d = tmp();
     let f = d.path().join("plain");
     fs::write(&f, "x").unwrap();
-    let on_network = {
-        // A temporary folder on NFS or FUSE is hashed too; only assert the
-        // ordinary case where the folder is an ordinary one.
-        let mounts = fs::read_to_string("/proc/self/mounts").unwrap_or_default();
-        mounts.lines().any(|l| {
-            let mut w = l.split_whitespace();
-            let (_, at, ty) = (w.next(), w.next().unwrap_or(""), w.next().unwrap_or(""));
-            (ty.starts_with("nfs") || ty.starts_with("fuse") || ty == "9p")
-                && d.path().starts_with(at)
-                && at != "/"
-        })
-    };
-    if !on_network {
-        assert!(!cig_pass::always_hash(&f));
+    // The file system the temporary folder is on: the longest mount point
+    // above it. Identity is trusted on a local disk one, never elsewhere
+    // (a container's overlay, a network share).
+    let mounts = fs::read_to_string("/proc/self/mounts").unwrap_or_default();
+    let mut best: (usize, String) = (0, String::new());
+    for l in mounts.lines() {
+        let mut w = l.split_whitespace();
+        let (_, at, ty) = (w.next(), w.next().unwrap_or(""), w.next().unwrap_or(""));
+        if d.path().starts_with(at) && at.len() >= best.0 {
+            best = (at.len(), ty.to_string());
+        }
+    }
+    let local = [
+        "ext4", "ext3", "ext2", "xfs", "btrfs", "f2fs", "tmpfs", "zfs",
+    ];
+    if local.contains(&best.1.as_str()) {
+        assert!(
+            !cig_pass::always_hash(&f),
+            "{} is on {}",
+            f.display(),
+            best.1
+        );
+    } else if !best.1.is_empty() {
+        assert!(
+            cig_pass::always_hash(&f),
+            "{} is on {}",
+            f.display(),
+            best.1
+        );
     }
 }
 

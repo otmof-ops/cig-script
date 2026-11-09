@@ -563,8 +563,9 @@ fn path_line(dir: &Path) -> Option<(PathBuf, String)> {
 /// `box_primitives`, remembered as a doctor pass (cig-script#186): the
 /// probe makes namespaces, so its answer is kept while the kernel, its
 /// namespace settings, its file systems and mounts, the boot, the
-/// variables the probe reads and this cig stay the same, for a day at
-/// most. Only on a machine that already has a key: doctor never makes one.
+/// variables the probe reads, who runs it under what confinement, and this
+/// cig stay the same, for a day at most. Only on a machine that already has
+/// a key: doctor never makes one.
 fn box_primitives_remembered() -> Vec<(&'static str, bool, String)> {
     const NAMES: &[&str] = &[
         "user ns",
@@ -591,11 +592,34 @@ fn box_primitives_remembered() -> Vec<(&'static str, bool, String)> {
     .iter()
     .map(std::path::Path::new)
     .collect();
+    // What the answer depends on in this process rather than in a file: who
+    // it runs as, its seccomp and no_new_privs state and its AppArmor
+    // profile. A doctor run in a sandbox and one in a plain shell ask
+    // different questions.
+    let mut subject = b"box-primitives".to_vec();
+    #[cfg(unix)]
+    {
+        // SAFETY: getuid has no preconditions.
+        let uid = unsafe { libc::getuid() };
+        subject.extend_from_slice(format!("\0uid={uid}").as_bytes());
+    }
+    if let Ok(status) = std::fs::read_to_string("/proc/self/status") {
+        for line in status.lines() {
+            if line.starts_with("Seccomp") || line.starts_with("NoNewPrivs") {
+                subject.push(0);
+                subject.extend_from_slice(line.as_bytes());
+            }
+        }
+    }
+    if let Ok(profile) = std::fs::read_to_string("/proc/self/attr/current") {
+        subject.extend_from_slice(b"\0apparmor=");
+        subject.extend_from_slice(profile.trim().as_bytes());
+    }
     let answer: Vec<(String, bool, String)> = crate::pass::remembered(
         "doctor",
-        b"box-primitives",
+        &subject,
         &files,
-        &["CIG_INTERNAL_NO_BOX", "CIGSCRIPT_HOME", "HOME"],
+        &["CIG_INTERNAL_NO_BOX", "CIGSCRIPT_HOME", "HOME", "PATH"],
         24 * 3_600_000,
         || {
             box_primitives()
