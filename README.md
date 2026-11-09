@@ -571,6 +571,7 @@ usage or environment problem, `70` `cig` itself crashed.
 - [docs/BURN.md](docs/BURN.md): effects, modes, the journal, rollback, and what it can't undo and says so.
 - [docs/PROGRAMS.md](docs/PROGRAMS.md): compiled programs: a script appended to the `cig` that runs it, its command line, and what differs from `cig run`.
 - [docs/SCIENCE.md](docs/SCIENCE.md): CigScript in the lab.
+- [docs/BENCH.md](docs/BENCH.md): `cig bench` and the `bench/bench.toml` manifest: samples in batches, medians, p10 to p90, CV and peak RSS.
 - [docs/STDLIB.md](docs/STDLIB.md): every function with its arity and effect (generated).
 - [docs/ERRORS.md](docs/ERRORS.md): every error code, its kind of no, what to type next, its causes (generated from the registry).
 - [docs/DESIGN.md](docs/DESIGN.md): why it looks like this, the tone, what came before, and the roadmap.
