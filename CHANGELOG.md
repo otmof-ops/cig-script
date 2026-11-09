@@ -23,6 +23,24 @@ project follows semantic versioning.
   read-only (as 1.10.0 onwards), and `tin_guard = on` refuses with
   `E712` as before. No new setting: the hide is what `tin_guard`
   already asks for.
+- **Quick at ten thousand runs** (#149). `cig runs` reads a compact
+  **run index** (one JSONL file under the cig home, kept in step as
+  runs start, finish, are pruned, forgotten or unburned) instead of
+  opening every run folder. At ten thousand runs the listing lands in
+  about 80 ms, under the 200 ms target, measured. Writers hold an
+  advisory lock on `runs-index.lock`, so two concurrent runs never
+  interleave; a hand-edited or hand-deleted `run.json` is caught on a
+  cheap stat (same (mtime, size) as the index wrote, or the record is
+  re-read); a torn tail from a crashed append is a cache miss, so the
+  next listing rebuilds the view from the folders and says so once.
+  `cig runs --verify` with no id now checks every run's chain head
+  against the ledger (no journal opened); `--deep` walks each journal's
+  full chain as `cig runs <id> --verify` does, and is opt-in because it
+  is slower. E704 attribution keeps the one-pass-per-path, first-twenty-
+  named behaviour from #128. New tests: `runs_index_survives_a_crash`,
+  `runs_list_equals_a_folder_scan_for_a_mixed_history`, and
+  `runs_index_is_consistent_under_two_concurrent_runs`.
+
 - **A key type that wipes itself** (#105). The 32-byte master key (and the
   HKDF subkeys derived from it) live in a type that is not `Copy`, so a
   move leaves no stack copy behind, and whose `Drop` zeros the bytes

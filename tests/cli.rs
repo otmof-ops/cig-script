@@ -13208,3 +13208,245 @@ fn unparcel_and_prune_refuse_when_the_key_lock_cannot_be_had() {
     assert!(!out.status.success() && err.contains("E802"), "{err}");
     assert_eq!(a.runs().len(), 1, "no run went");
 }
+
+// ----- #149: the run index --------------------------------------------------
+
+/// A crash mid-append leaves the index with a torn tail line. The next
+/// `cig runs` reads the file, catches the tear, rebuilds the view from
+/// the run folders, and shows every run — the same list as before the
+/// corruption, byte for byte in `--json`.
+#[test]
+fn runs_index_survives_a_crash() {
+    let sb = Sandbox::new();
+    sb.write("a.cig", "exhale 1\n");
+    sb.write("b.cig", "exhale 2\n");
+    sb.write("c.cig", "exhale 3\n");
+    for s in ["a.cig", "b.cig", "c.cig"] {
+        sb.run_ok(&["run", s]);
+    }
+    let before: Vec<String> = sb
+        .runs()
+        .iter()
+        .map(|r| r["id"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(before.len(), 3);
+    // Tear the tail of the index: append half of a JSON line with no
+    // closing brace and no newline (what a `write_all` killed mid-call
+    // leaves behind).
+    let p = sb.home().join("runs-index.jsonl");
+    let mut text = fs::read_to_string(&p).unwrap();
+    text.push_str("{\"op\":\"set\",\"id\":\"torn-tail-only");
+    fs::write(&p, &text).unwrap();
+    // The next listing rebuilds and says so. The view itself is right.
+    let out = sb.cig(&["--json", "runs"]);
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(
+        stderr.contains("runs index was torn"),
+        "the rebuild note should fire once: {stderr}"
+    );
+    let after: Vec<String> = serde_json::from_slice::<Vec<serde_json::Value>>(&out.stdout)
+        .unwrap()
+        .iter()
+        .map(|r| r["id"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(before, after, "the rebuilt view is the same list");
+    // A second call reads the (now rebuilt) index without saying so
+    // again, and the file ends on a newline (no torn tail).
+    let out = sb.cig(&["--json", "runs"]);
+    assert!(
+        !String::from_utf8_lossy(&out.stderr).contains("runs index was torn"),
+        "the note fires once per process"
+    );
+    assert!(fs::read_to_string(&p).unwrap().ends_with('\n'));
+}
+
+/// `cig runs` reads the index, but the listing must match what a full
+/// folder scan would produce for a history that holds the real shapes:
+/// a pinned run, a pruned run, an interrupted run, and an unburned run.
+#[cfg(unix)]
+#[test]
+fn runs_list_equals_a_folder_scan_for_a_mixed_history() {
+    let sb = Sandbox::new();
+    sb.write("pin.cig", "exhale 1\n");
+    sb.write("prn.cig", "exhale 2\n");
+    sb.write("int.cig", "exhale 3\n");
+    sb.write("unb.cig", "burn {\n  fs.write_text(\"u.txt\", \"1\")\n}\n");
+    sb.run_ok(&["run", "prn.cig"]);
+    sb.run_ok(&["run", "pin.cig"]);
+    let pin_id = sb.runs().iter().find(|r| r["script"] == "pin.cig").unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    sb.run_ok(&["runs", "--pin", &pin_id]);
+    sb.run_ok(&["run", "int.cig"]);
+    sb.run_ok(&["run", "unb.cig"]);
+    let unb_id = sb.runs().iter().find(|r| r["script"] == "unb.cig").unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    sb.run_ok(&["unburn", &unb_id]);
+    // Forge an `interrupted` state on int.cig by hand (its process is
+    // gone; the record still says `running`).
+    let int_id = sb.runs().iter().find(|r| r["script"] == "int.cig").unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let rec_path = sb.home().join("runs").join(&int_id).join("run.json");
+    let mut rec: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&rec_path).unwrap()).unwrap();
+    rec["status"] = serde_json::json!("running");
+    rec["finished"] = serde_json::Value::Null;
+    rec["pid"] = serde_json::json!(2_147_483_647u32);
+    fs::write(&rec_path, serde_json::to_string(&rec).unwrap()).unwrap();
+    // Prune everything past the newest 3 (unb, int, pin): that drops
+    // prn.cig's run. The pinned run is NOT pruned.
+    sb.run_ok(&["runs", "--prune", "3"]);
+    // The listing the index gives.
+    let from_index: Vec<(String, String, String)> = sb
+        .runs()
+        .iter()
+        .map(|r| {
+            (
+                r["id"].as_str().unwrap().to_string(),
+                r["status"].as_str().unwrap().to_string(),
+                r["script"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    // The listing a folder scan gives: throw the index away and read
+    // again. The rebuild walks the folders.
+    fs::remove_file(sb.home().join("runs-index.jsonl")).unwrap();
+    let from_scan: Vec<(String, String, String)> = sb
+        .runs()
+        .iter()
+        .map(|r| {
+            (
+                r["id"].as_str().unwrap().to_string(),
+                r["status"].as_str().unwrap().to_string(),
+                r["script"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        from_index, from_scan,
+        "the index and a folder scan disagree: index={from_index:?} scan={from_scan:?}"
+    );
+    // Sanity: the expected mix is there (pinned, interrupted, unburned;
+    // no prn, which was pruned).
+    assert!(from_index
+        .iter()
+        .any(|(_, s, sc)| s == "unburned" && sc == "unb.cig"));
+    assert!(from_index
+        .iter()
+        .any(|(_, s, sc)| s == "interrupted" && sc == "int.cig"));
+    assert!(from_index.iter().any(|(_, _, sc)| sc == "pin.cig"));
+    assert!(!from_index.iter().any(|(_, _, sc)| sc == "prn.cig"));
+}
+
+/// Two runs writing to the index in parallel do not tear it, and both
+/// are listed when they finish. Serial writes under the index lock are
+/// what keeps this true.
+#[cfg(unix)]
+#[test]
+fn runs_index_is_consistent_under_two_concurrent_runs() {
+    let sb = Sandbox::new();
+    sb.write("a.cig", "exhale \"a\"\n");
+    sb.write("b.cig", "exhale \"b\"\n");
+    // Each run lays down a run.json and appends two lines to the index
+    // (begin + finish). Parallel runs contend on the index lock.
+    let a = Command::new(cig_bin())
+        .args(["run", "a.cig"])
+        .current_dir(sb.path())
+        .env("CIGSCRIPT_HOME", sb.home())
+        .env("NO_COLOR", "1")
+        .env("CIG_SEAL_KEY", "file")
+        .env("CIG_INTERNAL_TRACKER_DIR", sb.path().join("tracker"))
+        .env_remove("CI")
+        .env("CIG_UPDATE_MANIFEST", sb.path().join("no-releases.json"))
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn a");
+    let b = Command::new(cig_bin())
+        .args(["run", "b.cig"])
+        .current_dir(sb.path())
+        .env("CIGSCRIPT_HOME", sb.home())
+        .env("NO_COLOR", "1")
+        .env("CIG_SEAL_KEY", "file")
+        .env("CIG_INTERNAL_TRACKER_DIR", sb.path().join("tracker"))
+        .env_remove("CI")
+        .env("CIG_UPDATE_MANIFEST", sb.path().join("no-releases.json"))
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn b");
+    assert!(a.wait_with_output().unwrap().status.success());
+    assert!(b.wait_with_output().unwrap().status.success());
+    // The index file ends on a newline (no torn append) and holds both
+    // runs. `cig runs` lists both, with no rebuild note.
+    let text = fs::read_to_string(sb.home().join("runs-index.jsonl")).unwrap();
+    assert!(
+        text.ends_with('\n'),
+        "the index has a torn tail: ...{:?}",
+        text.chars().rev().take(20).collect::<String>()
+    );
+    let out = sb.cig(&["--json", "runs"]);
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(
+        !stderr.contains("torn"),
+        "the index was torn after two concurrent runs: {stderr}"
+    );
+    let scripts: Vec<String> = serde_json::from_slice::<Vec<serde_json::Value>>(&out.stdout)
+        .unwrap()
+        .iter()
+        .map(|r| r["script"].as_str().unwrap().to_string())
+        .collect();
+    assert!(
+        scripts.iter().any(|s| s == "a.cig") && scripts.iter().any(|s| s == "b.cig"),
+        "both runs should be listed: {scripts:?}"
+    );
+}
+
+/// #149: `cig runs --verify` with no run checks every run's chain head
+/// against the ledger without opening a journal; `--deep` walks each
+/// journal too. A line edited inside a journal keeps the recorded heads
+/// agreeing, so only `--deep` finds it.
+#[test]
+fn runs_verify_checks_every_head_and_deep_walks_every_journal() {
+    let sb = Sandbox::new();
+    for k in 1..=3 {
+        sb.write(
+            &format!("s{k}.cig"),
+            &format!("burn {{\n  fs.write_text(\"f{k}.txt\", \"{k}\")\n  fs.write_text(\"g{k}.txt\", \"{k}\")\n}}\n"),
+        );
+        sb.run_ok(&["run", &format!("s{k}.cig")]);
+    }
+    let heads: serde_json::Value =
+        serde_json::from_str(&sb.run_ok(&["--json", "runs", "--verify"])).unwrap();
+    assert_eq!(heads["checked"], 3, "{heads}");
+    assert_eq!(heads["ok"], true, "{heads}");
+    assert_eq!(heads["deep"], false, "{heads}");
+    let deep: serde_json::Value =
+        serde_json::from_str(&sb.run_ok(&["--json", "runs", "--verify", "--deep"])).unwrap();
+    assert_eq!(deep["ok"], true, "{deep}");
+    // Edit a line in the middle of the oldest run's journal.
+    let oldest = sb.runs().last().unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let journal = sb.home().join("runs").join(&oldest).join("journal.jsonl");
+    let text = fs::read_to_string(&journal).unwrap();
+    let edited = text.replacen("f1.txt", "f9.txt", 1);
+    assert_ne!(text, edited, "the journal names the file");
+    fs::write(&journal, edited).unwrap();
+    let heads = sb.cig(&["--json", "runs", "--verify"]);
+    let heads: serde_json::Value = serde_json::from_slice(&heads.stdout).unwrap();
+    assert_eq!(heads["ok"], true, "heads alone cannot see inside: {heads}");
+    let deep = sb.cig(&["--json", "runs", "--verify", "--deep"]);
+    let deep_json: serde_json::Value = serde_json::from_slice(&deep.stdout).unwrap();
+    assert_eq!(deep_json["ok"], false, "{deep_json}");
+    assert!(
+        deep_json["problems"].to_string().contains(&oldest),
+        "{deep_json}"
+    );
+}

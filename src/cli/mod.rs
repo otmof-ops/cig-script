@@ -106,9 +106,12 @@ pub enum Command {
         /// Delete run records older than the newest N.
         #[arg(long, value_name = "N")]
         prune: Option<usize>,
-        /// With an id: walk the journal's hash chain, compare its head with the record, and check every snapshot and tin object it needs.
-        #[arg(long, requires = "id")]
+        /// With an id: walk the journal's hash chain, compare its head with the record, and check every snapshot and tin object it needs. Without one (#149): compare each run's chain head with the ledger (the whole history).
+        #[arg(long)]
         verify: bool,
+        /// With --verify and no id: walk each run's full journal chain (slower; `--verify` alone just checks the heads).
+        #[arg(long, requires = "verify")]
+        deep: bool,
         /// Stop noting that this run (listed in the ledger) is missing from runs/: it was removed on purpose.
         #[arg(long, value_name = "ID")]
         forget: Option<String>,
@@ -493,6 +496,7 @@ fn dispatch(ctx: Ctx, command: Command) -> i32 {
             id,
             prune,
             verify,
+            deep,
             forget,
             pin,
             unpin,
@@ -501,7 +505,7 @@ fn dispatch(ctx: Ctx, command: Command) -> i32 {
             _ if pruned => runs::pruned(&ctx),
             (Some(id), _) => runs::pin(&ctx, &id, true),
             (None, Some(id)) => runs::pin(&ctx, &id, false),
-            _ => runs::runs(&ctx, id, prune, verify, forget),
+            _ => runs::runs(&ctx, id, prune, verify, deep, forget),
         },
         Command::Unburn {
             id,

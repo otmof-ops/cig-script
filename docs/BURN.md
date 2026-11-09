@@ -543,6 +543,19 @@ went on purpose, from the ledger, newest first: when, how (`pruned`, or
 `forgotten` by `--forget`, or `budget` when `history_budget` made the
 choice) and the status each last had, so a missing run is explained.
 
+**Quick at ten thousand runs (1.19.0).** `cig runs` reads a compact
+**run index** (one JSONL file beside the home's run folders), kept in
+step as runs start, finish, are pruned, forgotten or unburned, instead
+of opening every run folder. Writers serialise on `runs-index.lock`, so
+two concurrent runs never interleave; a hand-edited or hand-deleted
+`run.json` is caught on a cheap stat; and a torn tail from a crashed
+append is a cache miss, so the next listing rebuilds the view from the
+folders and says so once. `cig runs --verify` with no id checks each
+run's chain head against the ledger (no journal is opened); `--deep`
+walks each journal's full chain as `cig runs <id> --verify` does, and
+is opt-in because it is slower. E704 attribution keeps the one-pass-
+per-path, first-twenty-named behaviour (#128).
+
 `history_budget` caps the history as it grows, the run records and the
 tin. It is off by default so nothing is pruned on upgrade; `cig doctor`
 shows the history's size and suggests a value (about 5% of the free space,

@@ -12,6 +12,7 @@ pub fn runs(
     id: Option<String>,
     prune: Option<usize>,
     verify: bool,
+    deep: bool,
     forget: Option<String>,
 ) -> i32 {
     if let Some(keep) = prune {
@@ -43,6 +44,7 @@ pub fn runs(
     };
     match id {
         Some(id) => show(ctx, &id, &all, verify),
+        None if verify => verify_all(ctx, &all, deep),
         None => {
             if ctx.json {
                 let listed: Vec<serde_json::Value> = all
@@ -119,6 +121,99 @@ pub fn runs(
             }
             exit::OK
         }
+    }
+}
+
+/// `cig runs --verify` with no id (#149): a quick check across the whole
+/// history. Each run's recorded `journal_head` is compared with what the
+/// ledger kept for it (the chain's head at the last `run`/`unburn`/`origin`
+/// line for that id), so the sweep is bounded by reads per run rather
+/// than journal lines. With `--deep`, each journal's own chain is walked
+/// too (slower; the path the `<id> --verify` call takes, for every run).
+fn verify_all(ctx: &Ctx, all: &[RunRecord], deep: bool) -> i32 {
+    let ledger = crate::burn::ledger::load().ok();
+    let mut checked = 0usize;
+    let mut problems: Vec<String> = Vec::new();
+    for r in all {
+        checked += 1;
+        if deep {
+            // Walk the journal and compare it with the record, as the
+            // `<id> --verify` path does. Reads the journal: slow at ten
+            // thousand runs, which is why `--deep` is opt-in.
+            let Ok(j) = Journal::load(&r.dir()) else {
+                problems.push(format!("{}: the journal cannot be read", r.id));
+                continue;
+            };
+            let v = verify_run(r, &j);
+            if !v.ok {
+                problems.push(format!(
+                    "{}: {}",
+                    r.id,
+                    v.verdict.unwrap_or_else(|| "not verified".to_string())
+                ));
+            }
+        } else {
+            // Heads only: the ledger's record of what this run's journal
+            // ended at, against the record's `journal_head`. No journal
+            // is opened.
+            let ledger_head = ledger
+                .as_ref()
+                .and_then(|l| crate::burn::ledger::last_record_of(l, &r.id))
+                .map(|line| line.head.clone());
+            match (&r.journal_head, ledger_head) {
+                (Some(rh), Some(lh)) if *rh != lh => {
+                    problems.push(format!(
+                        "{}: the record's chain head is not the ledger's head for this run (it was cut short, or an older copy stood in for it)",
+                        r.id
+                    ));
+                }
+                (None, Some(lh)) if !lh.is_empty() => {
+                    problems.push(format!(
+                        "{}: the ledger has a head for this run but the record has none",
+                        r.id
+                    ));
+                }
+                _ => {}
+            }
+        }
+    }
+    if ctx.json {
+        outln!(
+            "{}",
+            serde_json::json!({
+                "checked": checked,
+                "deep": deep,
+                "problems": problems,
+                "ok": problems.is_empty(),
+            })
+        );
+    } else {
+        outln!(
+            "{} {} run{} ({})",
+            if problems.is_empty() {
+                ctx.green("ok:")
+            } else {
+                ctx.red("problems:")
+            },
+            checked,
+            if checked == 1 { "" } else { "s" },
+            if deep {
+                "chains walked"
+            } else {
+                "heads checked against the ledger"
+            }
+        );
+        for p in &problems {
+            outln!("  {}", ctx.red(p));
+        }
+        if !deep {
+            outln!("  --deep walks each journal's chain (slower).");
+        }
+    }
+    if problems.is_empty() {
+        exit::OK
+    } else {
+        exit::SCRIPT_ERROR
     }
 }
 
@@ -898,6 +993,10 @@ fn remove_run(r: &runs::RunRecord, how: &str) -> bool {
     }
     if crate::burn::overlay::remove_tree_force(&r.dir()).is_ok() {
         let _ = crate::burn::ledger::append("pruned", &r.id, "", how, 0);
+        // The run folder is gone: drop it from the index too (#149),
+        // so the missing-run note never fires against this id and the
+        // next `cig runs` does not see it.
+        crate::burn::runs_index::remove(&r.id);
         return true;
     }
     false
@@ -1131,10 +1230,9 @@ fn prune_runs(ctx: &Ctx, keep: usize) -> i32 {
     exit::OK
 }
 
-/// The marker a pinned run's folder holds (#149): retention and `--prune`
-/// keep the run whatever they say. A file, not a field, so the run's record
-/// keeps its format and older cigs read it as before.
-pub const PIN_FILE: &str = "pinned";
+/// The marker a pinned run's folder holds: moved to `burn::runs` so the
+/// run index (#149) can see it without pulling in the CLI.
+pub use crate::burn::runs::PIN_FILE;
 
 pub fn is_pinned(r: &runs::RunRecord) -> bool {
     r.dir().join(PIN_FILE).exists()
@@ -1174,6 +1272,9 @@ pub fn pin(ctx: &Ctx, id: &str, on: bool) -> i32 {
         );
         return exit::USAGE;
     }
+    // Keep the run index's `pinned` flag in step (#149): the next
+    // `cig runs` reads it without opening every run folder to check.
+    crate::burn::runs_index::upsert(&rec);
     if ctx.json {
         outln!("{}", serde_json::json!({"run": rec.id, "pinned": on}));
     } else if on {
