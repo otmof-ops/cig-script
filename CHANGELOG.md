@@ -3,8 +3,20 @@
 All notable changes to CigScript. The format follows Keep a Changelog; the
 project follows semantic versioning.
 
-## Unreleased
+## 1.19.0 — 2026-11-09
 
+The tin kept further from what it protects: hidden from boxed hops, a key
+that rotates and wipes itself, parcels that can carry it, and a keys
+folder that is private and checked; hops that read only what changed; a
+history that stays quick as it grows, with a whole-history verify that
+reads every journal; `cig bench`, one benchmark tool for the family;
+installers that tell a missing file from a failed download.
+
+- **The installers tell a missing file from a failed download.**
+  `install.sh` and `install.ps1` called a release asset missing whenever
+  its download failed. A 404 is now "missing"; any other failure names
+  the HTTP code and says to try again, and `install.ps1` tries each
+  download three times before it gives up.
 - **The keys folder is private, and checked** (#176). With `CIGSCRIPT_HOME`
   under a shared parent (`/tmp`, `/var/tmp`, `/dev/shm`), the keys folder
   landed at `<parent>/.cigscript-keys`, one folder for every user on the
