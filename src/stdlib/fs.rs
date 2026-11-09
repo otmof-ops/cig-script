@@ -42,6 +42,52 @@ fn path_arg(a: &[Value], i: usize, name: &str, s: Span) -> Result<PathBuf, Diagn
     Ok(PathBuf::from(p))
 }
 
+/// The path a pass's recording names (cig-script#186): absolute, and a
+/// relative one records the working folder it was resolved against.
+pub(crate) fn rec_abs(i: &mut Interp, p: &Path) -> PathBuf {
+    if p.is_absolute() {
+        return p.to_path_buf();
+    }
+    let cwd = std::env::current_dir().unwrap_or_default();
+    if let Some(r) = i.recorder() {
+        r.env(b":cwd", cig_pass::path_bytes(&cwd).as_deref());
+    }
+    cwd.join(p)
+}
+
+/// Read a file for a pass's work: the recorder reads it, so what it
+/// records is exactly what the work got.
+pub(crate) fn rec_read(
+    i: &mut Interp,
+    name: &str,
+    p: &Path,
+    s: Span,
+) -> Result<Vec<u8>, Diagnostic> {
+    let abs = rec_abs(i, p);
+    check_read_size(name, &abs, s)?;
+    let r = i.recorder().expect("recording");
+    r.read_file(&abs).map_err(|e| io_err(name, p, e, s))
+}
+
+/// What is at a path, recorded: a presence (following links) or an
+/// absence. A link that leads nowhere is recorded as something that can
+/// never verify, so a pass over it is never reused.
+fn rec_presence(i: &mut Interp, p: &Path) {
+    let abs = rec_abs(i, p);
+    let seen = fs::metadata(&abs);
+    let dangling = seen.is_err() && fs::symlink_metadata(&abs).is_ok();
+    if let Some(r) = i.recorder() {
+        match seen {
+            Ok(md) if md.is_file() => r.present(&abs, cig_pass::PresentKind::File),
+            Ok(md) if md.is_dir() => r.present(&abs, cig_pass::PresentKind::Dir),
+            Ok(_) => r.present(&abs, cig_pass::PresentKind::Other),
+            Err(_) if dangling => r.present(&abs, cig_pass::PresentKind::Other),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => r.absent(&abs),
+            Err(e) => r.open_world(format!("{} could not be looked at ({e})", abs.display())),
+        }
+    }
+}
+
 /// Refuse a copy or move whose destination is the source itself (the copy
 /// would truncate the file to nothing) or lies inside it (the copy would
 /// have to copy its own output).
@@ -193,6 +239,17 @@ fn read_text(i: &mut Interp, a: &[Value], s: Span) -> Result<Value, Diagnostic> 
     if let Some(t) = ghost_text(i, "fs.read_text", &p, s)? {
         return Ok(Value::str(t));
     }
+    if i.recording() {
+        let bytes = rec_read(i, "fs.read_text", &p, s)?;
+        return String::from_utf8(bytes).map(Value::str).map_err(|e| {
+            io_err(
+                "fs.read_text",
+                &p,
+                std::io::Error::new(std::io::ErrorKind::InvalidData, e),
+                s,
+            )
+        });
+    }
     check_read_size("fs.read_text", &p, s)?;
     fs::read_to_string(&p)
         .map(Value::str)
@@ -203,6 +260,17 @@ fn read_lines(i: &mut Interp, a: &[Value], s: Span) -> Result<Value, Diagnostic>
     let p = path_arg(a, 0, "fs.read_lines", s)?;
     let text = match ghost_text(i, "fs.read_lines", &p, s)? {
         Some(t) => t,
+        None if i.recording() => {
+            let bytes = rec_read(i, "fs.read_lines", &p, s)?;
+            String::from_utf8(bytes).map_err(|e| {
+                io_err(
+                    "fs.read_lines",
+                    &p,
+                    std::io::Error::new(std::io::ErrorKind::InvalidData, e),
+                    s,
+                )
+            })?
+        }
         None => {
             check_read_size("fs.read_lines", &p, s)?;
             fs::read_to_string(&p).map_err(|e| io_err("fs.read_lines", &p, e, s))?
@@ -216,6 +284,9 @@ fn exists(i: &mut Interp, a: &[Value], s: Span) -> Result<Value, Diagnostic> {
     if let Some(kind) = ghost_kind(i, &p) {
         return Ok(Value::Bool(kind.is_some()));
     }
+    if i.recording() {
+        rec_presence(i, &p);
+    }
     // A dangling symlink exists as far as `fs.rm` and `fs.mv` are concerned.
     Ok(Value::Bool(fs::symlink_metadata(&p).is_ok()))
 }
@@ -225,6 +296,9 @@ fn is_file(i: &mut Interp, a: &[Value], s: Span) -> Result<Value, Diagnostic> {
     if let Some(kind) = ghost_kind(i, &p) {
         return Ok(Value::Bool(kind == Some(false)));
     }
+    if i.recording() {
+        rec_presence(i, &p);
+    }
     Ok(Value::Bool(p.is_file()))
 }
 
@@ -233,6 +307,9 @@ fn is_dir(i: &mut Interp, a: &[Value], s: Span) -> Result<Value, Diagnostic> {
     if let Some(kind) = ghost_kind(i, &p) {
         return Ok(Value::Bool(kind == Some(true)));
     }
+    if i.recording() {
+        rec_presence(i, &p);
+    }
     Ok(Value::Bool(p.is_dir()))
 }
 
@@ -240,6 +317,10 @@ fn size(i: &mut Interp, a: &[Value], s: Span) -> Result<Value, Diagnostic> {
     let p = path_arg(a, 0, "fs.size", s)?;
     if let Some(b) = ghost_read(i, "fs.size", &p, s)? {
         return Ok(Value::Int(b.len() as i64));
+    }
+    if i.recording() {
+        // A size is the bytes' length: recorded as the bytes.
+        return rec_read(i, "fs.size", &p, s).map(|b| Value::Int(b.len() as i64));
     }
     fs::metadata(&p)
         .map(|m| Value::Int(m.len() as i64))
@@ -292,6 +373,45 @@ fn list(i: &mut Interp, a: &[Value], s: Span) -> Result<Value, Diagnostic> {
             return Ok(Value::list(shown));
         }
     }
+    if i.recording() {
+        let abs = rec_abs(i, &p);
+        let mut names = Vec::new();
+        let mut entries = Vec::new();
+        let rd = match fs::read_dir(&p) {
+            Ok(rd) => rd,
+            Err(e) => {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    if let Some(r) = i.recorder() {
+                        r.absent(&abs);
+                    }
+                }
+                return Err(io_err("fs.list", &p, e, s));
+            }
+        };
+        for e in rd {
+            let e = e.map_err(|e| io_err("fs.list", &p, e, s))?;
+            let ft = e.file_type().map_err(|e| io_err("fs.list", &p, e, s))?;
+            match cig_pass::path_bytes(Path::new(&e.file_name())) {
+                Some(n) => entries.push((n, cig_pass::EntryType::of(&ft))),
+                None => {
+                    if let Some(r) = i.recorder() {
+                        r.open_world(format!("{} holds a name that is not UTF-8", abs.display()));
+                    }
+                }
+            }
+            names.push(e.path());
+        }
+        if let Some(r) = i.recorder() {
+            r.dir_listed(&abs, &entries);
+        }
+        names.sort();
+        return Ok(Value::list(
+            names
+                .into_iter()
+                .map(|n| Value::str(n.to_string_lossy()))
+                .collect(),
+        ));
+    }
     let mut names: Vec<PathBuf> = fs::read_dir(&p)
         .map_err(|e| io_err("fs.list", &p, e, s))?
         .filter_map(|e| e.ok().map(|e| e.path()))
@@ -330,8 +450,12 @@ fn with_dot(dot: bool, p: PathBuf) -> PathBuf {
 fn glob(i: &mut Interp, a: &[Value], s: Span) -> Result<Value, Diagnostic> {
     let written = expect_str(a, 0, "fs.glob", s)?;
     let (dot, pattern) = split_dot(written);
-    let mut paths =
-        glob_paths(pattern).map_err(|e| runtime(format!("fs.glob: {e}")).code("E508").at(s))?;
+    let mut paths = if i.recording() && i.ghost().is_none() {
+        glob_paths_recorded(i, pattern)
+            .map_err(|e| runtime(format!("fs.glob: {e}")).code("E508").at(s))?
+    } else {
+        glob_paths(pattern).map_err(|e| runtime(format!("fs.glob: {e}")).code("E508").at(s))?
+    };
     if let Some(g) = i.ghost() {
         if !g.is_empty() {
             let matcher = globset::GlobBuilder::new(pattern)
@@ -418,6 +542,98 @@ pub(crate) fn glob_paths(pattern: &str) -> Result<Vec<PathBuf>, String> {
     Ok(out)
 }
 
+/// `glob_paths`, recording every folder the walk listed (its names and
+/// their types, from the same walk), and the walk's root when it is not
+/// there.
+fn glob_paths_recorded(i: &mut Interp, pattern: &str) -> Result<Vec<PathBuf>, String> {
+    use std::collections::BTreeMap;
+    let matcher = globset::GlobBuilder::new(pattern)
+        .literal_separator(true)
+        .build()
+        .map_err(|e| e.to_string())?
+        .compile_matcher();
+    let root = literal_prefix(pattern);
+    let depth = if pattern.contains("**") || pattern.contains('{') {
+        usize::MAX
+    } else {
+        Path::new(pattern)
+            .components()
+            .count()
+            .saturating_sub(root.components().count())
+    };
+    let walk_root = if root.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        root
+    };
+    let abs_root = rec_abs(i, &walk_root);
+    let mut listed: BTreeMap<PathBuf, Vec<(Vec<u8>, cig_pass::EntryType)>> = BTreeMap::new();
+    let mut out = Vec::new();
+    let mut open_world: Option<String> = None;
+    for entry in walkdir::WalkDir::new(&abs_root)
+        .min_depth(0)
+        .max_depth(depth)
+        .follow_links(false)
+        .sort_by_file_name()
+    {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(e) => {
+                if e.depth() == 0
+                    && e.io_error().map(|x| x.kind()) == Some(std::io::ErrorKind::NotFound)
+                {
+                    if let Some(r) = i.recorder() {
+                        r.absent(&abs_root);
+                    }
+                } else if open_world.is_none() {
+                    open_world = Some(format!(
+                        "a folder under {} could not be listed ({e})",
+                        abs_root.display()
+                    ));
+                }
+                continue;
+            }
+        };
+        let ft = entry.file_type();
+        if entry.depth() < depth && ft.is_dir() {
+            listed.entry(entry.path().to_path_buf()).or_default();
+        }
+        if entry.depth() > 0 {
+            if let (Some(parent), Some(name)) = (
+                entry.path().parent(),
+                cig_pass::path_bytes(Path::new(entry.file_name())),
+            ) {
+                listed
+                    .entry(parent.to_path_buf())
+                    .or_default()
+                    .push((name, cig_pass::EntryType::of(&ft)));
+            }
+        }
+        let rel = entry
+            .path()
+            .strip_prefix(&abs_root)
+            .map(|r| walk_root.join(r))
+            .unwrap_or_else(|_| entry.path().to_path_buf());
+        let candidate = rel.strip_prefix(".").unwrap_or(&rel).to_path_buf();
+        if candidate.as_os_str().is_empty() {
+            continue;
+        }
+        if matcher.is_match(&candidate) {
+            out.push(candidate);
+        }
+    }
+    if let Some(r) = i.recorder() {
+        for (dir, entries) in &listed {
+            r.dir_listed(dir, entries);
+        }
+        if let Some(w) = open_world {
+            r.open_world(w);
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
 fn literal_prefix(pattern: &str) -> PathBuf {
     let mut prefix = PathBuf::new();
     for part in Path::new(pattern).components() {
@@ -434,13 +650,28 @@ fn literal_prefix(pattern: &str) -> PathBuf {
     prefix
 }
 
-fn cwd(_: &mut Interp, _: &[Value], s: Span) -> Result<Value, Diagnostic> {
+fn cwd(i: &mut Interp, _: &[Value], s: Span) -> Result<Value, Diagnostic> {
+    if i.recording() {
+        let c = std::env::current_dir().ok();
+        if let Some(r) = i.recorder() {
+            r.env(
+                b":cwd",
+                c.as_ref().and_then(|c| cig_pass::path_bytes(c)).as_deref(),
+            );
+        }
+    }
     std::env::current_dir()
         .map(|p| Value::str(p.to_string_lossy()))
         .map_err(|e| runtime(format!("fs.cwd: {e}")).at(s))
 }
 
-fn home(_: &mut Interp, _: &[Value], _: Span) -> Result<Value, Diagnostic> {
+fn home(i: &mut Interp, _: &[Value], _: Span) -> Result<Value, Diagnostic> {
+    if let Some(r) = i.recorder() {
+        for name in ["HOME", "USERPROFILE"] {
+            let v = std::env::var_os(name);
+            r.env(name.as_bytes(), v.as_ref().map(|v| v.as_encoded_bytes()));
+        }
+    }
     let home = std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(|h| h.to_string_lossy().to_string());

@@ -14,6 +14,27 @@ pub type Env = Rc<Scope>;
 pub struct Scope {
     vars: RefCell<Vars>,
     parent: Option<Env>,
+    /// When the scope was made, in order: a pass's recording refuses a read
+    /// of any scope made before its work began (cig-script#186).
+    serial: u64,
+}
+
+thread_local! {
+    static NEXT_SERIAL: std::cell::Cell<u64> = const { std::cell::Cell::new(1) };
+}
+
+fn take_serial() -> u64 {
+    NEXT_SERIAL.with(|c| {
+        let v = c.get();
+        c.set(v + 1);
+        v
+    })
+}
+
+/// The serial the next scope will be given: every scope made from now on
+/// has a serial at least this.
+pub fn next_serial() -> u64 {
+    NEXT_SERIAL.with(|c| c.get())
 }
 
 struct Slot {
@@ -132,6 +153,7 @@ impl Scope {
         Rc::new(Scope {
             vars: RefCell::new(Vars::Small(Vec::new())),
             parent: None,
+            serial: take_serial(),
         })
     }
 
@@ -139,7 +161,13 @@ impl Scope {
         Rc::new(Scope {
             vars: RefCell::new(Vars::Small(Vec::new())),
             parent: Some(parent.clone()),
+            serial: take_serial(),
         })
+    }
+
+    /// When this scope was made (see `next_serial`).
+    pub fn serial(&self) -> u64 {
+        self.serial
     }
 
     /// Declare a name in this scope. Returns `false` if it already exists here.
@@ -155,6 +183,29 @@ impl Scope {
     /// Declare or overwrite, used by the prelude and the REPL.
     pub fn force_declare(&self, name: &str, value: Value, mutable: bool) {
         self.vars.borrow_mut().put(name, Slot { value, mutable });
+    }
+
+    /// A name's value, the serial of the scope that holds it, and whether it
+    /// is mutable (`roll`).
+    pub fn get_traced(&self, name: &str) -> Option<(Value, u64, bool)> {
+        let mut scope = self;
+        loop {
+            if let Some(slot) = scope.vars.borrow().get(name) {
+                return Some((slot.value.clone(), scope.serial, slot.mutable));
+            }
+            scope = scope.parent.as_deref()?;
+        }
+    }
+
+    /// The serial of the scope that holds a name.
+    pub fn owner_serial(&self, name: &str) -> Option<u64> {
+        let mut scope = self;
+        loop {
+            if scope.vars.borrow().get(name).is_some() {
+                return Some(scope.serial);
+            }
+            scope = scope.parent.as_deref()?;
+        }
     }
 
     pub fn get(&self, name: &str) -> Option<Value> {

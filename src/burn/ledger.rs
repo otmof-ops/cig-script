@@ -448,7 +448,51 @@ fn tail_for_append() -> Result<Option<Tail>, String> {
     }))
 }
 
+/// Held while lines are appended: one writer at a time, so two processes
+/// never chain a line onto the same head. Before this lock two runs that
+/// appended at once forked the chain, and `cig runs --verify` called the
+/// ledger broken from there (cig-pass review, C2).
+pub struct Guard {
+    _file: fs::File,
+}
+
+/// Take the ledger's lock (blocking): `<keys>/ledger.lock`, ours and 0600.
+pub fn lock() -> Result<Guard, String> {
+    super::seal::hold_shared_rekey_lock()?;
+    let dir = super::seal::ensure_keys_dir()?;
+    let p = dir.join("ledger.lock");
+    {
+        let mut opts = fs::OpenOptions::new();
+        opts.create(true).truncate(false).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        }
+        opts.open(&p)
+            .map_err(|e| format!("cannot make the ledger's lock {}: {e}", p.display()))?;
+    }
+    super::seal::check_private_state_file(&p)?;
+    let f = super::runs_index::exclusive_lock(&p)
+        .map_err(|e| format!("cannot lock the ledger: {e}"))?;
+    Ok(Guard { _file: f })
+}
+
 pub fn append(kind: &str, run: &str, head: &str, status: &str, lines: u64) -> Result<(), String> {
+    let g = lock()?;
+    append_locked(&g, kind, run, head, status, lines)
+}
+
+/// `append`, for a caller that holds the lock (a spend: check, then
+/// append, as one step).
+pub fn append_locked(
+    _held: &Guard,
+    kind: &str,
+    run: &str,
+    head: &str,
+    status: &str,
+    lines: u64,
+) -> Result<(), String> {
     let tail = match tail_for_append()? {
         Some(t) => t,
         None => {
@@ -525,4 +569,116 @@ pub fn is_let_go(loaded: &Loaded, run: &str) -> bool {
         .find(|l| l.run == run)
         .map(|l| l.kind == "pruned" || l.kind == "forgotten")
         .unwrap_or(false)
+}
+
+/// Where the ledger ended when something read it: the last line's `seq`,
+/// the bytes up to the end of that line, and its MAC.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Pos {
+    pub seq: u64,
+    pub byte_len: u64,
+    pub head: String,
+}
+
+impl Pos {
+    /// An empty ledger.
+    pub fn start() -> Pos {
+        Pos {
+            seq: 0,
+            byte_len: 0,
+            head: SEED.to_string(),
+        }
+    }
+}
+
+/// What the ledger holds after a position read earlier.
+#[derive(Debug)]
+pub enum Since {
+    /// The lines after it (verified, chained from its head) and where the
+    /// ledger ends now.
+    Lines(Vec<Line>, Pos),
+    /// The ledger is shorter than it was: cut, or an older copy.
+    Shorter,
+    /// The line at that position is not the one read there: replaced.
+    Swapped,
+}
+
+/// The lines appended after `pos`, each verified to chain from the one
+/// before it, starting from `pos.head`. Reads only what is new, plus the
+/// line `pos` ends on. A torn last line (an append that crashed) is left
+/// for the next read.
+pub fn since(pos: &Pos) -> Result<Since, String> {
+    use std::io::{Read, Seek, SeekFrom};
+    super::seal::hold_shared_rekey_lock()?;
+    let p = path();
+    super::seal::check_private_state_file(&p)?;
+    let mut f = match fs::File::open(&p) {
+        Ok(f) => f,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            return Ok(if pos.byte_len == 0 {
+                Since::Lines(Vec::new(), pos.clone())
+            } else {
+                Since::Shorter
+            })
+        }
+        Err(e) => return Err(format!("cannot read the ledger: {e}")),
+    };
+    let len = f.metadata().map_err(|e| e.to_string())?.len();
+    if len < pos.byte_len {
+        return Ok(Since::Shorter);
+    }
+    if pos.byte_len > 0 {
+        let start = pos.byte_len.saturating_sub(64 * 1024);
+        f.seek(SeekFrom::Start(start)).map_err(|e| e.to_string())?;
+        let mut buf = vec![0u8; (pos.byte_len - start) as usize];
+        f.read_exact(&mut buf).map_err(|e| e.to_string())?;
+        if buf.last() != Some(&b'\n') {
+            return Ok(Since::Swapped);
+        }
+        let body = &buf[..buf.len() - 1];
+        let line_start = body.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
+        if start > 0 && line_start == 0 {
+            return Ok(Since::Swapped);
+        }
+        let last = std::str::from_utf8(&body[line_start..]).map_err(|e| e.to_string())?;
+        match serde_json::from_str::<Line>(last) {
+            Ok(l) if l.mac == pos.head && l.seq == pos.seq => {}
+            _ => return Ok(Since::Swapped),
+        }
+    }
+    f.seek(SeekFrom::Start(pos.byte_len))
+        .map_err(|e| e.to_string())?;
+    let mut rest = Vec::new();
+    f.read_to_end(&mut rest).map_err(|e| e.to_string())?;
+    let complete = rest.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
+    let text = std::str::from_utf8(&rest[..complete]).map_err(|e| e.to_string())?;
+    let keys = candidate_keys();
+    let mut prev = pos.head.clone();
+    let mut out = Vec::new();
+    let mut seq = pos.seq;
+    for raw in text.lines().filter(|l| !l.trim().is_empty()) {
+        let line: Line = serde_json::from_str(raw)
+            .map_err(|_| "the ledger has a line that does not read".to_string())?;
+        let body = body_of(raw);
+        if !keys
+            .iter()
+            .any(|k| mac_hex(k, &prev, body.as_bytes()) == line.mac)
+        {
+            return Err(format!(
+                "the ledger's chain is broken at line {} (cig runs --verify says more)",
+                line.seq
+            ));
+        }
+        prev = line.mac.clone();
+        seq = line.seq;
+        out.push(line);
+    }
+    Ok(Since::Lines(
+        out,
+        Pos {
+            seq,
+            byte_len: pos.byte_len + complete as u64,
+            head: prev,
+        },
+    ))
 }

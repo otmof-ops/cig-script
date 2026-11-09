@@ -109,8 +109,11 @@ fn is_abs(_: &mut Interp, a: &[Value], s: Span) -> Result<Value, Diagnostic> {
     ))
 }
 
-fn abs(_: &mut Interp, a: &[Value], s: Span) -> Result<Value, Diagnostic> {
+fn abs(i: &mut Interp, a: &[Value], s: Span) -> Result<Value, Diagnostic> {
     let p = Path::new(expect_str(a, 0, "path.abs", s)?);
+    if i.recording() && !p.is_absolute() {
+        let _ = super::fs::rec_abs(i, p);
+    }
     let joined = if p.is_absolute() {
         p.to_path_buf()
     } else {

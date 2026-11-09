@@ -124,6 +124,10 @@ fn load(i: &mut Interp, a: &[Value], s: Span) -> Result<Value, Diagnostic> {
     let p = expect_str(a, 0, "json.load", s)?;
     let text = match super::fs::ghost_text(i, "json.load", std::path::Path::new(p), s)? {
         Some(t) => t,
+        None if i.recording() => {
+            let b = super::fs::rec_read(i, "json.load", std::path::Path::new(p), s)?;
+            String::from_utf8_lossy(&b).into_owned()
+        }
         None => {
             super::fs::check_read_size("json.load", std::path::Path::new(p), s)?;
             std::fs::read_to_string(p).map_err(|e| {

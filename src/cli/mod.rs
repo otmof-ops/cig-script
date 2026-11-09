@@ -22,6 +22,7 @@ mod explain;
 mod forward;
 mod language;
 mod parcel;
+mod pass;
 mod pin;
 mod repl;
 mod report;
@@ -263,6 +264,11 @@ pub enum Command {
     /// The forwarder inside a boxed hop's network namespace (started by cig itself).
     #[command(hide = true, name = "internal-forward")]
     InternalForward { sock: std::path::PathBuf, port: u16 },
+    /// Passes: what was already checked, for exactly which inputs; list, show, verify, narrow, revoke, export, import.
+    Pass {
+        #[command(subcommand)]
+        command: Option<pass::PassCommand>,
+    },
     /// The tin: the before-bytes of files hops may change; du, verify, gc.
     Tin {
         #[command(subcommand)]
@@ -613,6 +619,7 @@ fn dispatch(ctx: Ctx, command: Command) -> i32 {
         Command::Pin { file, to } => pin::pin_cmd(&ctx, &file, to),
         Command::Box { command } => boxcmd::box_cmd(&ctx, command),
         Command::InternalForward { sock, port } => forward::forward(&sock, port),
+        Command::Pass { command } => pass::pass_cmd(&ctx, command),
         Command::Tin { command } => tin::tin_cmd(&ctx, command),
         Command::Parcel { id, out, with_key } => parcel::parcel(&ctx, &id, out, with_key),
         Command::Unparcel {

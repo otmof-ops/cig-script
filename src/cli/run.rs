@@ -445,6 +445,7 @@ fn run_source_inner(
     });
     let mut interp = Interp::new(kernel);
     interp.script_name = Some(name.clone());
+    interp.script_path = std::path::absolute(&args.file).ok();
     interp.set_args(&args.args);
     if let Some(n) = args.max_steps {
         interp.set_max_steps(n);

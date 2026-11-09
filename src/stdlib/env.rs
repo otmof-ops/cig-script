@@ -20,21 +20,35 @@ pub static TABLE: &[Builtin] = &[
     b("env.unset", Effect::Env, 1, Some(1), unset),
 ];
 
-fn get(_: &mut Interp, a: &[Value], s: Span) -> Result<Value, Diagnostic> {
+/// A variable the work read, recorded (cig-script#186).
+fn rec_var(i: &mut Interp, key: &str) {
+    if let Some(r) = i.recorder() {
+        let v = std::env::var_os(key);
+        r.env(key.as_bytes(), v.as_ref().map(|v| v.as_encoded_bytes()));
+    }
+}
+
+fn get(i: &mut Interp, a: &[Value], s: Span) -> Result<Value, Diagnostic> {
     let key = expect_str(a, 0, "env.get", s)?;
+    rec_var(i, key);
     Ok(match std::env::var(key) {
         Ok(v) => Value::str(v),
         Err(_) => a.get(1).cloned().unwrap_or(Value::Null),
     })
 }
 
-fn has(_: &mut Interp, a: &[Value], s: Span) -> Result<Value, Diagnostic> {
-    Ok(Value::Bool(
-        std::env::var_os(expect_str(a, 0, "env.has", s)?).is_some(),
-    ))
+fn has(i: &mut Interp, a: &[Value], s: Span) -> Result<Value, Diagnostic> {
+    let key = expect_str(a, 0, "env.has", s)?;
+    rec_var(i, key);
+    Ok(Value::Bool(std::env::var_os(key).is_some()))
 }
 
-fn all(_: &mut Interp, _: &[Value], _: Span) -> Result<Value, Diagnostic> {
+fn all(i: &mut Interp, _: &[Value], _: Span) -> Result<Value, Diagnostic> {
+    if let Some(r) = i.recorder() {
+        for (k, v) in std::env::vars_os() {
+            r.env(k.as_encoded_bytes(), Some(v.as_encoded_bytes()));
+        }
+    }
     let mut vars: Vec<(String, String)> = std::env::vars().collect();
     vars.sort();
     let mut m = IndexMap::with_capacity(vars.len());

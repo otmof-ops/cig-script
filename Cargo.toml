@@ -11,6 +11,10 @@ keywords = ["scripting", "language", "automation", "rollback", "dry-run"]
 categories = ["command-line-utilities", "development-tools"]
 default-run = "cig"
 
+[workspace]
+members = [".", "crates/cig-pass"]
+exclude = ["crates/cig-pass/fuzz"]
+
 [lib]
 name = "cigscript"
 path = "src/lib.rs"
@@ -43,6 +47,8 @@ argon2 = { version = "0.5", default-features = false, features = ["alloc"] }
 keyring = { version = "3.6", default-features = false, features = ["apple-native", "windows-native", "async-secret-service", "async-io", "crypto-rust"] }
 tar = "0.4"
 flate2 = "1"
+cig-pass = { path = "crates/cig-pass", version = "0.1.0" }
+blake3 = { version = "1", features = ["pure"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

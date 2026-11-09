@@ -24,13 +24,13 @@ jobs:
         with:
           components: clippy, rustfmt
       - run: cargo fmt --all --check
-      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo clippy --workspace --all-targets -- -D warnings
       # The box needs unprivileged user namespaces, which Ubuntu's AppArmor
       # restricts by default; the tests fall back and say so where it
       # cannot be lifted.
       - if: runner.os == 'Linux'
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
-      - run: cargo test
+      - run: cargo test --workspace
       # Release inlining changes which frames a backtrace keeps, and the
       # crash tests read them: run the suite once as users run cig.
       - if: matrix.os == 'ubuntu-latest'
@@ -69,7 +69,7 @@ jobs:
       - run: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
       - run: |
           . "$HOME/.cargo/env"
-          cargo test
+          cargo test --workspace
       - run: |
           . "$HOME/.cargo/env"
           cargo build --release
@@ -90,7 +90,7 @@ jobs:
           usesh: true
           prepare: pkg install -y rust bash python3 git
           run: |
-            cargo test
+            cargo test --workspace
             cargo build --release
             CIG="$PWD/target/release/cig" bash tests/portability/probe.sh | tee probe.txt
             ! grep -q '^FAIL' probe.txt

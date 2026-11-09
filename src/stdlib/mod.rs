@@ -19,6 +19,7 @@ pub mod json;
 mod log;
 mod math;
 mod methods;
+mod pass;
 mod path;
 mod proc;
 mod text;
@@ -76,6 +77,7 @@ pub fn prelude() -> Vec<(&'static str, Value)> {
     out.push(("time", module("time", time::TABLE, &[])));
     out.push(("hash", module("hash", hash::TABLE, &[])));
     out.push(("cig", module("cig", cig::TABLE, &[])));
+    out.push(("pass", module("pass", pass::TABLE, &[])));
     out.push((
         "math",
         module(

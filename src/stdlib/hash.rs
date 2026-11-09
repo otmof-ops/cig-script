@@ -26,6 +26,10 @@ fn sha256_file(i: &mut Interp, a: &[Value], s: Span) -> Result<Value, Diagnostic
     if let Some(bytes) = super::fs::ghost_read(i, "hash.sha256_file", std::path::Path::new(p), s)? {
         return Ok(Value::str(hex::encode(Sha256::digest(&bytes))));
     }
+    if i.recording() {
+        let bytes = super::fs::rec_read(i, "hash.sha256_file", std::path::Path::new(p), s)?;
+        return Ok(Value::str(hex::encode(Sha256::digest(&bytes))));
+    }
     crate::burn::journal::sha256_file(std::path::Path::new(p))
         .map(Value::str)
         .map_err(|e| {
