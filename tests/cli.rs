@@ -3531,8 +3531,16 @@ fn identical_plans_run_on_the_new_version() {
         .unwrap();
     assert_eq!(run["trial"]["same"], true, "{run}");
     assert_eq!(run["trial"]["compared"][0], "1.0.0");
-    // Plans that differ hand the run to the proved version.
-    sb.write("plan.json", &plan.replace("write ", "write elsewhere/"));
+    // The same trial again, with nothing it read changed: remembered as a
+    // trial pass, and no dry run is made (cig-script#186).
+    let out = sb.cig(&["run", "s.cig"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    assert!(stderr.contains("remembered"), "{stderr}");
+    // Plans that differ hand the run to the proved version. The proved cig
+    // is another binary now, so the remembered trial no longer holds.
+    let plan2 = sb.write("plan2.json", &plan.replace("write ", "write elsewhere/"));
+    shelf_fake_with_plan(&sb, "1.0.0", &plan2);
     let out = sb.cig(&["run", "s.cig"]);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(

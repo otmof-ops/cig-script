@@ -32,6 +32,9 @@ pub(crate) struct RecFrame {
     pub clock: bool,
     /// Globals already recorded in this work, by name.
     pub globals: std::collections::HashMap<String, [u8; 32]>,
+    /// The work is a dry run (a trial): its writes change only the ghost,
+    /// so they are part of the plan, not changes to the world.
+    pub simulated: bool,
 }
 
 impl RecFrame {
@@ -41,6 +44,15 @@ impl RecFrame {
             barrier,
             clock,
             globals: std::collections::HashMap::new(),
+            simulated: false,
+        }
+    }
+
+    /// A frame for a dry run's whole program (the trial).
+    pub fn simulated(barrier: u64) -> RecFrame {
+        RecFrame {
+            simulated: true,
+            ..RecFrame::new(barrier, false)
         }
     }
 }
@@ -259,7 +271,9 @@ impl Interp {
     /// (the pass will not be issued); world changes are refused.
     pub(crate) fn recording_admits(&mut self, b: &Builtin, span: Span) -> Result<(), Diagnostic> {
         let clock = self.recs.last().is_some_and(|f| f.clock);
+        let simulated = self.recs.last().is_some_and(|f| f.simulated);
         match class_of(b) {
+            Class::Refused if simulated => Ok(()),
             Class::Recorded | Class::Pure => Ok(()),
             Class::Clock if clock => Ok(()),
             Class::Clock => {

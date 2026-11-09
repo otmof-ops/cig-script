@@ -450,7 +450,7 @@ fn with_dot(dot: bool, p: PathBuf) -> PathBuf {
 fn glob(i: &mut Interp, a: &[Value], s: Span) -> Result<Value, Diagnostic> {
     let written = expect_str(a, 0, "fs.glob", s)?;
     let (dot, pattern) = split_dot(written);
-    let mut paths = if i.recording() && i.ghost().is_none() {
+    let mut paths = if i.recording() {
         glob_paths_recorded(i, pattern)
             .map_err(|e| runtime(format!("fs.glob: {e}")).code("E508").at(s))?
     } else {
