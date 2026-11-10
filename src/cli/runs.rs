@@ -2442,7 +2442,7 @@ fn hand_back(ctx: &Ctx, rec: &RunRecord, e: &std::io::Error) -> i32 {
             "  = hint: cig versions add {v} puts that cig in the humidor; cig unburn {} then hands the run to it",
             rec.id
         ),
-        None => eprintln!("  = hint: the record does not say which cig wrote it; cig update to the newest release and try again"),
+        None => eprintln!("  = hint: the record does not say which cig wrote it; ciginstaller update to the newest release and try again"),
     }
     eprintln!("  = explain: cig explain E808");
     exit::USAGE

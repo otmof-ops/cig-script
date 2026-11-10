@@ -1,178 +1,52 @@
 // SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
 // SPDX-License-Identifier: Apache-2.0
 
-//! `cig update`: check for and install a newer release.
+//! The commands that moved to `ciginstaller`: `cig update`, `cig uninstall`
+//! and `cig doctor` with no run. Each is a stub that hands over (see
+//! [`crate::installer`]) and passes the installer's exit code through.
 
 use super::{exit, Ctx};
-use crate::config::Config;
-use crate::update::{self, Version};
-use std::cmp::Ordering;
+use crate::installer;
 
+/// `cig update [--check]` is `ciginstaller update [--check]`. A product
+/// version is not something the installer takes: updates come by carton, so
+/// `--to` and `--allow-downgrade` are explained, not run.
 pub fn update(ctx: &Ctx, check_only: bool, allow_downgrade: bool, to: Option<String>) -> i32 {
-    let cfg = Config::load();
-    let repo = cfg.get("issues_repo");
-    let prerelease = cfg.get("update_channel") == "prerelease";
-    let current = Version::current();
-
-    let release = match &to {
-        Some(tag) => match update::find(&repo, tag) {
-            Ok(r) => r,
-            Err(e) => return fail(ctx, &e),
-        },
-        None => match update::latest(&repo, prerelease) {
-            Ok(r) => r,
-            Err(e) => return fail(ctx, &e),
-        },
-    };
-    let Some(target) = release.version() else {
+    if to.is_some() || allow_downgrade {
         eprintln!(
-            "{} release {} has no parsable version",
-            ctx.red("error[E806 usage]:"),
-            release.tag
+            "{} updates come by carton now, not by cig version",
+            ctx.red("error[E800 usage]:")
         );
+        eprintln!("  = hint: `ciginstaller carton list` shows the cartons, then `ciginstaller update --to <carton>` moves to one (an older one is a downgrade)");
+        eprintln!("  = hint: `ciginstaller update --check` says whether a newer carton exists");
         return exit::USAGE;
-    };
-    let _ = update::write_cache(&release);
-    let ordering = target.cmp(&current);
-    // Close the loop: a bug this machine reported, fixed in a release.
-    let fixed = crate::ashtray::announce_fixed(&cfg, &update::releases(&repo).unwrap_or_default());
-
+    }
+    let mut args = vec!["update"];
+    if check_only {
+        args.push("--check");
+    }
     if ctx.json {
-        outln!(
-            "{}",
-            serde_json::json!({
-                "current": current.to_string(),
-                "latest": target.to_string(),
-                "tag": release.tag,
-                "url": release.url,
-                "newer": ordering == Ordering::Greater,
-                "checked_only": check_only,
-                "fixed_reports": fixed,
-            })
-        );
-        if check_only {
-            return exit::OK;
-        }
-    } else {
-        for line in &fixed {
-            eprintln!("{} {line}", ctx.green("fixed:"));
-        }
-        match ordering {
-            Ordering::Greater => eprintln!(
-                "{} {current} -> {target}  {}",
-                ctx.bold("update available:"),
-                ctx.dim(&release.url)
-            ),
-            Ordering::Equal => eprintln!(
-                "{} {current} is the newest release",
-                ctx.green("up to date:")
-            ),
-            Ordering::Less => eprintln!(
-                "{} you run {current}, the newest release is {target}",
-                ctx.yellow("ahead:")
-            ),
-        }
-        if check_only {
-            return exit::OK;
-        }
+        args.push("--json");
     }
-
-    if ordering == Ordering::Equal {
-        return exit::OK;
-    }
-    if ordering == Ordering::Less && !allow_downgrade {
-        eprintln!(
-            "{} refusing to downgrade from {current} to {target}",
-            ctx.red("error[E806 usage]:")
-        );
-        eprintln!("  = hint: pass --allow-downgrade if you really want {target}");
-        eprintln!("  = explain: cig explain E806");
-        return exit::USAGE;
-    }
-
-    let name = update::asset_name(&target);
-    let Some(asset) = release.asset(&name) else {
-        eprintln!(
-            "{} release {} has no asset named {name} for this platform; build from source with `cargo install --git https://github.com/{repo} --tag {}`",
-            ctx.red("error[E806 usage]:"),
-            release.tag,
-            release.tag
-        );
-        return exit::USAGE;
-    };
-    let Some(sidecar) = release.asset(&format!("{name}.sha256")) else {
-        eprintln!("{} release {} ships no checksum for {name}; refusing to install an unverifiable binary", ctx.red("error[E806 usage]:"), release.tag);
-        return exit::USAGE;
-    };
-
-    let tmp = crate::burn::runs::home_dir().join("tmp");
-    if let Err(e) = std::fs::create_dir_all(&tmp) {
-        eprintln!(
-            "{} cannot create {}: {e}",
-            ctx.red("error[E802 usage]:"),
-            tmp.display()
-        );
-        return exit::USAGE;
-    }
-    let bin = tmp.join(&name);
-    let sum = tmp.join(format!("{name}.sha256"));
-    eprintln!("downloading {name} ...");
-    if let Err(e) =
-        update::download(&asset.url, &bin).and_then(|()| update::download(&sidecar.url, &sum))
-    {
-        eprintln!("{} {e}", ctx.red("error[E806 usage]:"));
-        let _ = std::fs::remove_file(&bin);
-        return exit::USAGE;
-    }
-    let sidecar_text = std::fs::read_to_string(&sum).unwrap_or_default();
-    if let Err(e) = update::verify_sha256(&bin, &sidecar_text) {
-        eprintln!("{} {e}", ctx.red("error[E806 usage]:"));
-        let _ = std::fs::remove_file(&bin);
-        return exit::USAGE;
-    }
-    if crate::humidor::attest(&repo, &bin) {
-        eprintln!(
-            "{} the checksum matches and the build attestation names {repo}'s release workflow",
-            ctx.green("attested:")
-        );
-    } else {
-        eprintln!(
-            "{} sha256 matches the published checksum (integrity, not authorship: see SECURITY.md; `gh` would also check the build attestation)",
-            ctx.green("verified:")
-        );
-    }
-    match update::install(&bin) {
-        Ok(path) => {
-            let _ = std::fs::remove_file(&bin);
-            let _ = std::fs::remove_file(&sum);
-            eprintln!(
-                "{} {} is now {target} ({})",
-                ctx.green("updated:"),
-                path.display(),
-                release.tag
-            );
-            exit::OK
-        }
-        Err(e) => {
-            eprintln!("{} {e}", ctx.red("error[E806 usage]:"));
-            eprintln!(
-                "the verified binary is at {}; copy it into place yourself",
-                bin.display()
-            );
-            exit::USAGE
-        }
-    }
+    installer::run("cig update", &args)
 }
 
-/// An update failure with its code: E805 when there is no transport at all,
-/// E806 for everything the transport then failed to do.
-fn fail(ctx: &Ctx, e: &str) -> i32 {
-    let code = if e.starts_with(update::NO_TOOL) {
-        "E805"
-    } else {
-        "E806"
-    };
-    eprintln!("{} {e}", ctx.red(&format!("error[{code} usage]:")));
-    eprintln!("  = explain: cig explain {code}");
-    exit::USAGE
+/// `cig uninstall [args]` is `ciginstaller uninstall cig [args]`.
+pub fn uninstall_stub(ctx: &Ctx, extra: &[String]) -> i32 {
+    let mut args: Vec<&str> = vec!["uninstall", "cig"];
+    args.extend(extra.iter().map(String::as_str));
+    if ctx.json {
+        args.push("--json");
+    }
+    installer::run("cig uninstall", &args)
+}
+
+/// `cig doctor` and `cig doctor --fix` are `ciginstaller doctor --tools`.
+/// It calls back into `cig __doctor --json` for what only cig can check.
+pub fn doctor_stub(ctx: &Ctx, _fix: bool) -> i32 {
+    let mut args = vec!["doctor", "--tools"];
+    if ctx.json {
+        args.push("--json");
+    }
+    installer::run("cig doctor", &args)
 }

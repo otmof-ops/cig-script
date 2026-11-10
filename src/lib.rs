@@ -24,6 +24,7 @@ pub mod diagnostics;
 pub mod doctor;
 pub mod errors;
 pub mod humidor;
+pub mod installer;
 pub mod interp;
 pub mod pass;
 pub mod pin;

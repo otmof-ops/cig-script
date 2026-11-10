@@ -164,8 +164,8 @@ E800-E849  the command line and the environment
   E802  state directory unavailable        usage
   E803  no such run                        usage
   E804  no such chain                      usage
-  E805  network tool missing               usage
-  E806  update failed                      usage
+  E805  network tool missing (retired)     usage
+  E806  update failed (retired)            usage
   E807  pinned version not available       usage
   E808  record from a newer cig            usage
   E809  cannot read this caveat            usage
@@ -1698,12 +1698,12 @@ E711 a newer journal format  (burn, kernel family, since 1.9.0)
 
   This run's journal was written in a format newer than this cig reads (format 3 is signed, from 1.9.0). An older cig refuses it by its number rather than misreading it.
 
-  what to type next: cig update, or run the cig that wrote it (cig use <version>)
+  what to type next: `ciginstaller update`, or run the cig that wrote it (cig use <version>)
 
   known causes, ranked; doctor checks them in this order
   1. the run was made by a newer cig than this one
      probe: none; a suggestion, not a finding
-     remedy: cig update; or cig use <version> to run the cig that wrote it
+     remedy: `ciginstaller update`; or cig use <version> to run the cig that wrote it
 
   arises in: unburn, runs  ·  related: E808  ·  tags: kernel
 
@@ -2050,7 +2050,7 @@ E736 not a pass  (burn, kernel family, since 1.20.0)
 
   The bytes given as a pass do not decode. Decoding is strict, so a token cut short, one with extra bytes after it, an unknown version, an unknown kind, input or caveat, an input list that is not sorted, or a path that is not absolute is refused as a whole; nothing is read past the first problem.
 
-  what to type next: copy the whole token (it starts with cigpass1.), or ask for it again; a token from a newer cig needs cig update
+  what to type next: copy the whole token (it starts with cigpass1.), or ask for it again; a token from a newer cig needs `ciginstaller update`
 
   known causes, ranked; doctor checks them in this order
   1. the token was cut or changed on the way (a line wrap, a missing end, a stray space)
@@ -2058,7 +2058,7 @@ E736 not a pass  (burn, kernel family, since 1.20.0)
      remedy: pass it as a file (cig pass verify <file>), or copy it again in one piece
   2. the pass was made by a newer cig, and uses a version, kind, input or caveat this one does not know
      probe: none; a suggestion, not a finding
-     remedy: cig update; an unknown caveat is never ignored, because ignoring it would widen the pass
+     remedy: `ciginstaller update`; an unknown caveat is never ignored, because ignoring it would widen the pass
   3. the file is not a pass
      probe: file-hash (the current hash of a file against the hash the journal recorded)
      remedy: check the path; cig pass list shows the passes this machine holds
@@ -2476,42 +2476,44 @@ E804 no such chain  (usage, usage family, since 1.0.0)
   arises in: light
 
 ======== E805 ========
-E805 network tool missing  (usage, usage family, since 1.0.0)
+E805 network tool missing (retired)  (usage, usage family, since 1.0.0)
+  retired: kept so old run records still decode; never emitted again
 
   kind of no: don't have any over here  (nobody's: right place, right you, nothing there; 404 from the server's side; an empty result)
 
-  Neither `gh` nor `curl` is available for the update or report.
+  Retired in 1.21.0: `cig update` no longer fetches anything, because the installer does. Kept so old run records still decode.
 
-  what to type next: install curl or gh; `cig doctor --fix` offers to
+  what to type next: `ciginstaller update`; if the installer is missing, `cig update` says how to get it
 
   known causes, ranked; doctor checks them in this order
   1. neither gh nor curl is on PATH
      probe: network-tools (whether gh and curl are on PATH)
-     remedy: install curl from any package manager, or gh; `cig doctor --fix` offers to
+     remedy: the installer carries its own HTTPS client: `ciginstaller update`
 
-  arises in: update
+  arises in: update  ·  related: E806
 
 ======== E806 ========
-E806 update failed  (usage, usage family, since 1.0.0)
+E806 update failed (retired)  (usage, usage family, since 1.0.0)
+  retired: kept so old run records still decode; never emitted again
 
   kind of no: one of the four; the message says which  (read the operating-system reason in the message; ENOENT, EACCES, ENOSPC and friends, each mapped in the causes below)
 
-  The release could not be fetched, verified or installed.
+  Retired in 1.21.0: updates are the installer's, and it reports its own failures. Kept so old run records still decode.
 
-  what to type next: the message says which step; retry, or install from the releases page
+  what to type next: `ciginstaller update`, or `ciginstaller doctor --tools` to see what is wrong
 
   known causes, ranked; doctor checks them in this order
   1. no network, or the release host refused
      probe: none; a suggestion, not a finding
-     remedy: retry; `cig update --check` shows what it can reach
+     remedy: retry `ciginstaller update --check`, which shows what it can reach
   2. the checksum did not match: nothing was installed
      probe: release-manifest (the cached release manifest and the checksum file for the asset)
-     remedy: retry once; report it if it repeats, since a mismatch means the download is not what was published
+     remedy: retry once; the installer refuses a mismatch, so nothing was changed
   3. the install directory is not writable, or is group-writable (refused for safety)
      probe: path-permissions (mode bits and owner of the path, or of its nearest existing ancestor)
-     remedy: chown or chmod the directory holding cig, or install to a directory only you can write
+     remedy: `ciginstaller doctor` names the directory and the fix
 
-  arises in: update
+  arises in: update  ·  related: E805
 
 ======== E807 ========
 E807 pinned version not available  (usage, usage family, since 1.2.0)
@@ -2547,7 +2549,7 @@ E808 record from a newer cig  (usage, usage family, since 1.2.0)
   known causes, ranked; doctor checks them in this order
   1. cig was downgraded after the run was made
      probe: none; a suggestion, not a finding
-     remedy: cig update, or cig versions add <version> so unburn can hand the run to it
+     remedy: `ciginstaller update`, or cig versions add <version> so unburn can hand the run to it
 
   arises in: unburn, runs  ·  related: E807
 
@@ -3062,7 +3064,7 @@ E898 a rehearsal that could not see  (usage, finding family, since 1.13.0)
   known causes, ranked; doctor checks them in this order
   1. the rehearsal's box reports writes, not reads or refused connections (CigScript #106)
      probe: none; a suggestion, not a finding
-     remedy: cig update once the box gains the watch; a new cig voids kept verdicts
+     remedy: `ciginstaller update` once the box gains the watch; a new cig voids kept verdicts
 
   arises in: run  ·  related: E871, E872
 
@@ -3127,7 +3129,7 @@ E902 tripwire  (internal, internal family, since 1.7.0)
   known causes, ranked; doctor checks them in this order
   1. a restored path is not as the journal recorded it, the journal does not read back as written, a tin object or an applied box file does not hash as it should
      probe: crash-reports (the crash reports saved under the state directory)
-     remedy: `cig crash list` shows the report; it carries an anonymised repro when one reproduced in a sandbox, and the fix is announced on `cig update --check`
+     remedy: `cig crash list` shows the report; it carries an anonymised repro when one reproduced in a sandbox, and the fix is announced on `ciginstaller update --check`
 
   arises in: any
 
@@ -3154,12 +3156,12 @@ E1001 no runtime for the target  (usage, build family, since 1.15.0)
 
   A program is its script appended to the cig of the compiler's own version, built for the target. That cig could not be found.
 
-  what to type next: give it with --runtime path/to/cig, or install the cig of that version on this machine (cig update)
+  what to type next: give it with --runtime path/to/cig, or install the cig of that version on this machine (`ciginstaller update`)
 
   known causes, ranked; doctor checks them in this order
   1. no cig of the compiler's version is installed here or on PATH
      probe: on-path (each directory on PATH, looking for the program named in the message)
-     remedy: install it (cig update), or pass the binary with --runtime
+     remedy: install it (`ciginstaller update`), or pass the binary with --runtime
   2. the target is another machine's and its cig was never fetched
      probe: none; a suggestion, not a finding
      remedy: download that cig release asset, check its sha256, and pass it with --runtime
@@ -3280,7 +3282,7 @@ E1008 the runtime would tie programs to this machine's libc  (usage, build famil
      remedy: cigcompile fetch while online, or cargo build --release --target x86_64-unknown-linux-musl
   2. the cig on PATH was built from source rather than installed from the release
      probe: on-path (each directory on PATH, looking for the program named in the message)
-     remedy: cig update installs the static release; or pass a static cig with --runtime
+     remedy: `ciginstaller update` installs the static release; or pass a static cig with --runtime
 
   arises in: compile  ·  tags: compiler
 

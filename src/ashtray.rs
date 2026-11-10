@@ -366,7 +366,7 @@ pub fn announce_fixed(cfg: &Config, releases: &[crate::update::Release]) -> Vec<
             let headline = crash::truncate(r.headline(), 60);
             lines.push(if v > current {
                 format!(
-                    "a bug you reported (#{}, {headline}) is fixed in {v}: cig update",
+                    "a bug you reported (#{}, {headline}) is fixed in {v}: ciginstaller update",
                     issue.number
                 )
             } else {

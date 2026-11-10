@@ -1,43 +1,95 @@
 // SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
 // SPDX-License-Identifier: Apache-2.0
 
-//! `cig doctor`: is the installation healthy, and what is missing?
-//! `--fix` offers to repair what it can, asking before each change.
+//! `cig __doctor`: the checks only cig can make, for `ciginstaller doctor
+//! --tools` to show beside its own (the installer owns PATH, packages and
+//! releases). `cig doctor` with no run is a stub for the installer; with a
+//! run, `cig doctor <run>` is the diagnosis engine, here too.
 
 use super::{exit, Ctx};
 use crate::burn::runs;
 use crate::config::Config;
+use crate::crash;
 use crate::diagnostics::{Diagnostic, Kind};
 use crate::doctor::{self, Diagnosis};
 use crate::errors::lookup_no;
-use crate::{crash, update};
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
-struct Tool {
-    name: &'static str,
-    enables: &'static str,
-    present: bool,
+/// One thing `__doctor` found wrong: the check it belongs to, the sentence
+/// that says it, why it matters, and what to type next.
+struct Problem {
+    check: &'static str,
+    said: String,
+    because: &'static str,
+    fix: Option<String>,
 }
 
-pub fn doctor(ctx: &Ctx, fix: bool) -> i32 {
+fn problem(check: &'static str, said: String, because: &'static str, fix: Option<&str>) -> Problem {
+    Problem {
+        check,
+        said,
+        because,
+        fix: fix.map(str::to_string),
+    }
+}
+
+/// One finding in the installer doctor's own shape (contract 1.7).
+fn finding(
+    check: &str,
+    severity: &str,
+    found: String,
+    because: &str,
+    fix: Option<String>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "check": check,
+        "severity": severity,
+        "found": found,
+        "because": because,
+        "fix": fix,
+    })
+}
+
+/// `cig __doctor [--json] [--fix]`: the checks only cig can make, the
+/// product half of `ciginstaller doctor --tools`. It looks at run records,
+/// interrupted runs, the ledger, the ashtray, the tin and its key, the tin
+/// guard, the box and the history budget. It never calls `ciginstaller`
+/// (the installer calls this, so a call back would loop), never looks at
+/// PATH, packages or releases (those are the installer's), and in `--json`
+/// prints the installer doctor's finding shape. `--fix` offers the one
+/// repair that is cig's own, rolling back an interrupted run, and asks
+/// before it.
+pub fn product_doctor(ctx: &Ctx, fix: bool) -> i32 {
     let home = runs::home_dir();
-    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("cig"));
-    let exe_dir = exe.parent().map(Path::to_path_buf);
-    let on_path = std::env::var_os("PATH")
-        .map(|p| {
-            std::env::split_paths(&p)
-                .any(|d| d.join("cig").is_file() || d.join("cig.exe").is_file())
-        })
-        .unwrap_or(false);
     let writable = check_writable(&home);
-    let all_runs = runs::list().unwrap_or_default();
+    let mut all_runs = runs::list().unwrap_or_default();
+    let mut interrupted: Vec<String> = interrupted_ids(&all_runs);
+
+    // ----- --fix: every change is proposed and needs a y -----------------------
+    if fix && !interrupted.is_empty() {
+        if !io::stdin().is_terminal() {
+            eprintln!("--fix needs a terminal to ask questions");
+            return exit::USAGE;
+        }
+        let mut fixed = 0;
+        for id in &interrupted {
+            if ask(&format!(
+                "run {id} was interrupted mid-burn; roll back what it burned with `cig unburn {id}`?"
+            )) {
+                let code = super::runs::unburn(ctx, id, false, false, false);
+                if code == exit::OK {
+                    fixed += 1;
+                }
+            }
+        }
+        eprintln!("{fixed} fix{} applied", if fixed == 1 { "" } else { "es" });
+        // What is left is what the report below shows.
+        all_runs = runs::list().unwrap_or_default();
+        interrupted = interrupted_ids(&all_runs);
+    }
+
     let run_count = all_runs.len();
-    let interrupted: Vec<String> = all_runs
-        .iter()
-        .filter(|r| r.is_interrupted() && r.burns > 0)
-        .map(|r| r.id.clone())
-        .collect();
     let run_bytes = dir_size(&runs::runs_dir());
     let crashes = crash::list().unwrap_or_default();
     let unsent = crashes
@@ -48,36 +100,22 @@ pub fn doctor(ctx: &Ctx, fix: bool) -> i32 {
         .iter()
         .filter(|c| c.issue.is_none() && c.queue.last_error.is_some())
         .count();
-    let tools = vec![
-        Tool {
-            name: "curl",
-            enables: "cig update, crash reports without gh",
-            present: update::has_tool("curl"),
-        },
-        Tool {
-            name: "gh",
-            enables: "crash reports and updates from private repositories",
-            present: update::has_tool("gh"),
-        },
-        Tool {
-            name: "git",
-            enables: "the examples that shell out to git",
-            present: update::has_tool("git"),
-        },
-    ];
     let cfg = Config::load();
-    let update_cache = update::read_cache();
-    let newer = update::cached_newer();
 
-    let mut problems: Vec<String> = Vec::new();
+    let mut problems: Vec<Problem> = Vec::new();
     // The tin key's lock lives in the keys directory (#105): where that
     // path is taken by something that is not a directory, a run refuses
     // before it burns (E802). Looked at, never made: doctor makes no key.
     let keys = crate::burn::seal::keys_dir();
     if std::fs::symlink_metadata(&keys).is_ok_and(|m| !m.is_dir()) {
-        problems.push(format!(
-            "the keys directory {} is not a directory, so a run cannot lock the tin's key and refuses before it burns [E802]",
-            keys.display()
+        problems.push(problem(
+            "keys-dir",
+            format!(
+                "the keys directory {} is not a directory, so a run cannot lock the tin's key and refuses before it burns [E802]",
+                keys.display()
+            ),
+            "a run refuses before it burns while the keys path is not a directory",
+            Some("cig explain E802"),
         ));
     }
     // StrictModes: owner and mode of the keys folder and the files in
@@ -87,7 +125,12 @@ pub fn doctor(ctx: &Ctx, fix: bool) -> i32 {
     #[cfg(unix)]
     if std::fs::symlink_metadata(&keys).is_ok() {
         if let Err(e) = crate::burn::seal::check_keys_dir(&keys) {
-            problems.push(e);
+            problems.push(problem(
+                "keys-dir",
+                e,
+                "a run refuses to use a keys folder that is not ours and private (E721)",
+                Some("cig explain E721"),
+            ));
         }
     }
     #[cfg(unix)]
@@ -98,7 +141,12 @@ pub fn doctor(ctx: &Ctx, fix: bool) -> i32 {
             if let Err(e) =
                 crate::burn::seal::check_private_key_file(&crate::burn::seal::key_path())
             {
-                problems.push(e);
+                problems.push(problem(
+                    "key-file",
+                    e,
+                    "a key file that others can read is not a secret",
+                    Some("cig explain E721"),
+                ));
             }
         }
         // The ledger and the lock hold no secret: one that is ours and too
@@ -107,44 +155,48 @@ pub fn doctor(ctx: &Ctx, fix: bool) -> i32 {
         // changes nothing.
         for name in ["ledger.jsonl", "rekey.lock"] {
             if let Some(e) = crate::burn::seal::state_file_problem(&keys.join(name)) {
-                problems.push(e);
+                problems.push(problem(
+                    "keys-state-file",
+                    e,
+                    "a run refuses a state file that is another user's, a link, or not a file",
+                    Some("cig explain E721"),
+                ));
             }
         }
     }
     if let Err(e) = &writable {
-        problems.push(format!(
-            "state directory {} is not writable: {e}",
-            home.display()
-        ));
-    }
-    if !on_path {
-        problems
-            .push("`cig` is not on PATH, so `#!/usr/bin/env cig` scripts cannot run".to_string());
-    }
-    if !tools[0].present && !tools[1].present {
-        problems.push("neither curl nor gh is installed: `cig update` and crash reporting cannot reach GitHub".to_string());
-    }
-    if let Some(n) = &newer {
-        problems.push(format!(
-            "a newer release is available: {} (you run {}); run `cig update`",
-            n.latest, n.current
+        problems.push(problem(
+            "state-dir",
+            format!("state directory {} is not writable: {e}", home.display()),
+            "runs cannot be recorded or undone",
+            Some("set CIGSCRIPT_HOME to a writable location"),
         ));
     }
     if unsent > 0 {
-        problems.push(format!(
-            "{unsent} report{} of cig's own bugs not filed yet{}; `cig crash list`",
-            if unsent == 1 { "" } else { "s" },
-            if failing > 0 {
-                format!(" ({failing} tried and failed, waiting for a retry)")
-            } else {
-                String::new()
-            }
+        problems.push(problem(
+            "ashtray",
+            format!(
+                "{unsent} report{} of cig's own bugs not filed yet{}; `cig crash list`",
+                if unsent == 1 { "" } else { "s" },
+                if failing > 0 {
+                    format!(" ({failing} tried and failed, waiting for a retry)")
+                } else {
+                    String::new()
+                }
+            ),
+            "reports wait in the ashtray until you say they may go",
+            Some("cig crash list"),
         ));
     }
     if run_bytes > 1 << 30 {
-        problems.push(format!(
-            "run records use {} MB; `cig runs --prune 50` frees space",
-            run_bytes >> 20
+        problems.push(problem(
+            "runs-size",
+            format!(
+                "run records use {} MB; `cig runs --prune 50` frees space",
+                run_bytes >> 20
+            ),
+            "run records grow until pruned",
+            Some("cig runs --prune 50"),
         ));
     }
     // The disk budget (#149): off is the default. When it is off, doctor
@@ -165,8 +217,13 @@ pub fn doctor(ctx: &Ctx, fix: bool) -> i32 {
     let over = budget.is_some_and(|b| history > b);
 
     for id in &interrupted {
-        problems.push(format!(
-            "run {id} was interrupted mid-burn: its process is gone and its journal is intact [E706]; `cig unburn {id}` puts things back, `cig runs {id}` shows what it burned"
+        problems.push(problem(
+            "interrupted-run",
+            format!(
+                "run {id} was interrupted mid-burn: its process is gone and its journal is intact [E706]; `cig unburn {id}` puts things back, `cig runs {id}` shows what it burned"
+            ),
+            "its process is gone with the work half done",
+            Some(&format!("cig unburn {id}")),
         ));
     }
 
@@ -182,9 +239,14 @@ pub fn doctor(ctx: &Ctx, fix: bool) -> i32 {
     };
     if let Some(state) = ledger_problem {
         let p = crate::burn::ledger::path();
-        problems.push(format!(
-            "the ledger is {state} ({}): `cig runs --verify` cannot judge chain heads without it [E709]",
-            crate::crash::tilde(&p)
+        problems.push(problem(
+            "ledger",
+            format!(
+                "the ledger is {state} ({}): `cig runs --verify` cannot judge chain heads without it [E709]",
+                crate::crash::tilde(&p)
+            ),
+            "chain heads cannot be judged without it",
+            Some("cig explain E709"),
         ));
     }
 
@@ -197,52 +259,50 @@ pub fn doctor(ctx: &Ctx, fix: bool) -> i32 {
         _ => None,
     };
     if let Some((lines, live)) = index_oversize {
-        problems.push(format!(
-            "the run index has {lines} lines but only {live} live run{}; `cig runs --reindex` compacts it (#178)",
-            if live == 1 { "" } else { "s" }
+        problems.push(problem(
+            "run-index",
+            format!(
+                "the run index has {lines} lines but only {live} live run{}; `cig runs --reindex` compacts it (#178)",
+                if live == 1 { "" } else { "s" }
+            ),
+            "every run pays to read the index",
+            Some("cig runs --reindex"),
         ));
     }
 
     if ctx.json {
-        let ledger_state = match ledger_presence {
-            crate::burn::ledger::Presence::Present => "present",
-            crate::burn::ledger::Presence::Empty => "empty",
-            crate::burn::ledger::Presence::Missing => "missing",
-        };
+        let findings = json_findings(
+            &home,
+            &cfg,
+            &problems,
+            &Facts {
+                run_count,
+                run_bytes,
+                history,
+                over,
+                suggestion,
+                ledger: match ledger_presence {
+                    crate::burn::ledger::Presence::Present => "present",
+                    crate::burn::ledger::Presence::Empty => "empty",
+                    crate::burn::ledger::Presence::Missing => "missing",
+                },
+                index_lines,
+                index_live,
+                crashes: crashes.len(),
+            },
+        );
         let obj = serde_json::json!({
+            "tool": "cig",
             "version": crate::VERSION,
-            "executable": exe,
-            "on_path": on_path,
-            "state_dir": home,
-            "state_dir_writable": writable.is_ok(),
-            "runs": run_count,
-            "runs_bytes": run_bytes,
-            "history_bytes": history,
-            "history_budget": cfg.get("history_budget"),
-            "history_over_budget": over,
-            "history_budget_suggested": suggestion,
-            "interrupted_runs": interrupted,
-            "ledger": ledger_state,
-            "runs_index_lines": index_lines,
-            "runs_index_live": index_live,
-            "crash_reports": crashes.len(),
-            "crash_reports_unsent": unsent,
-            "tools": tools.iter().map(|t| serde_json::json!({"name": t.name, "present": t.present})).collect::<Vec<_>>(),
-            "config": {"crash_reports": cfg.get("crash_reports"), "issues_repo": cfg.get("issues_repo"), "update_channel": cfg.get("update_channel")},
-            "update": update_cache,
-            "problems": problems,
+            "findings": findings,
         });
         outln!("{}", serde_json::to_string_pretty(&obj).unwrap_or_default());
-        return if problems.is_empty() {
-            exit::OK
-        } else {
-            exit::SCRIPT_ERROR
-        };
+        // The findings carry the verdict; a reader needs the JSON, not a
+        // failing exit.
+        return exit::OK;
     }
 
     outln!("cig {}", crate::VERSION);
-    outln!("  executable    {}", exe.display());
-    outln!("  on PATH       {}", yes_no(ctx, on_path));
     outln!(
         "  state dir     {}  {}",
         home.display(),
@@ -327,41 +387,6 @@ pub fn doctor(ctx: &Ctx, fix: bool) -> i32 {
             String::new()
         }
     );
-    outln!(
-        "  config        reports={}  issues_repo={}  update_channel={}",
-        match crash::consent(&cfg) {
-            crash::Consent::Ask => "ask",
-            crash::Consent::Always => "always",
-            crash::Consent::Never => "never",
-        },
-        cfg.get("issues_repo"),
-        cfg.get("update_channel")
-    );
-    match &update_cache {
-        Some(c) => outln!(
-            "  update        latest known {} (checked {}){}",
-            c.latest,
-            c.checked_at,
-            if newer.is_some() {
-                ctx.yellow("  newer than this build")
-            } else {
-                String::new()
-            }
-        ),
-        None => outln!(
-            "  update        {}",
-            ctx.dim("not checked yet: cig update --check")
-        ),
-    }
-    outln!("  tools");
-    for t in &tools {
-        outln!(
-            "    {:<6} {}  {}",
-            t.name,
-            yes_no(ctx, t.present),
-            ctx.dim(t.enables)
-        );
-    }
     // The tin's protection, in one block: who can read it, where the key
     // is, and whether a hop can read it out of cig's memory.
     outln!("  tin");
@@ -445,86 +470,15 @@ pub fn doctor(ctx: &Ctx, fix: bool) -> i32 {
         return exit::OK;
     }
     for p in &problems {
-        outln!("{} {p}", ctx.yellow("problem:"));
+        outln!("{} {}", ctx.yellow("problem:"), p.said);
     }
-    if !fix {
+    if !fix && !interrupted.is_empty() {
         outln!(
             "{}",
-            ctx.dim("cig doctor --fix offers to repair what it can")
+            ctx.dim("cig __doctor --fix offers to roll back what it can")
         );
-        return exit::SCRIPT_ERROR;
     }
-
-    // ----- --fix: every change is proposed and needs a y -----------------------
-    if !io::stdin().is_terminal() {
-        eprintln!("--fix needs a terminal to ask questions");
-        return exit::USAGE;
-    }
-    let mut fixed = 0;
-    for id in &interrupted {
-        if ask(&format!(
-            "run {id} was interrupted mid-burn; roll back what it burned with `cig unburn {id}`?"
-        )) {
-            let code = super::runs::unburn(ctx, id, false, false, false);
-            if code == exit::OK {
-                fixed += 1;
-            }
-        }
-    }
-    if !on_path {
-        if let Some(dir) = &exe_dir {
-            if let Some((rc, line)) = path_line(dir) {
-                if ask(&format!("append `{line}` to {}?", rc.display())) {
-                    match append_line(&rc, &line) {
-                        Ok(()) => {
-                            eprintln!(
-                                "{} added; open a new shell to pick it up",
-                                ctx.green("done:")
-                            );
-                            fixed += 1;
-                        }
-                        Err(e) => eprintln!("{} {e}", ctx.red("failed:")),
-                    }
-                }
-            }
-        }
-    }
-    for t in tools.iter().filter(|t| !t.present) {
-        if let Some(cmd) = install_command(t.name) {
-            let shown = cmd.join(" ");
-            eprintln!(
-                "{} {} is missing; it enables {}",
-                ctx.yellow("missing:"),
-                t.name,
-                t.enables
-            );
-            if ask(&format!("run `{shown}` now?")) {
-                let status = std::process::Command::new(&cmd[0]).args(&cmd[1..]).status();
-                match status {
-                    Ok(s) if s.success() => {
-                        eprintln!("{} {} installed", ctx.green("done:"), t.name);
-                        fixed += 1;
-                    }
-                    Ok(s) => eprintln!("{} exited with {s}", ctx.red("failed:")),
-                    Err(e) => eprintln!("{} could not run it: {e}", ctx.red("failed:")),
-                }
-            }
-        } else {
-            eprintln!(
-                "{} {} is missing and no package manager was recognised; install it by hand",
-                ctx.yellow("missing:"),
-                t.name
-            );
-        }
-    }
-    if newer.is_some() && ask("run `cig update` now?") {
-        let code = super::update::update(ctx, false, false, None);
-        if code == exit::OK {
-            fixed += 1;
-        }
-    }
-    eprintln!("{fixed} fix{} applied", if fixed == 1 { "" } else { "es" });
-    exit::OK
+    exit::SCRIPT_ERROR
 }
 
 fn ask(question: &str) -> bool {
@@ -533,25 +487,6 @@ fn ask(question: &str) -> bool {
     let mut line = String::new();
     let _ = io::stdin().lock().read_line(&mut line);
     matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes")
-}
-
-/// The shell rc file and the line that would put `dir` on PATH.
-fn path_line(dir: &Path) -> Option<(PathBuf, String)> {
-    let home = std::env::var_os("HOME").map(PathBuf::from)?;
-    let shell = std::env::var("SHELL").unwrap_or_default();
-    let shown = crash::tilde(dir).replace('~', "$HOME");
-    if shell.ends_with("fish") {
-        return Some((
-            home.join(".config/fish/config.fish"),
-            format!("fish_add_path {shown}"),
-        ));
-    }
-    let rc = if shell.ends_with("zsh") {
-        ".zshrc"
-    } else {
-        ".bashrc"
-    };
-    Some((home.join(rc), format!("export PATH=\"{shown}:$PATH\"")))
 }
 
 /// Can the tin guard be made here: user and mount namespaces for this
@@ -575,6 +510,20 @@ fn box_primitives_remembered() -> Vec<(&'static str, bool, String)> {
         "overlayfs",
         "box",
     ];
+    // A test hook: no namespace is made, for a run of this check that is
+    // about the shape of the answer and not about the machine.
+    if std::env::var_os("CIG_INTERNAL_NO_NS_PROBE").is_some() {
+        return NAMES
+            .iter()
+            .map(|n| {
+                (
+                    *n,
+                    false,
+                    "not probed: CIG_INTERNAL_NO_NS_PROBE is set".to_string(),
+                )
+            })
+            .collect();
+    }
     let files: Vec<&std::path::Path> = [
         "/proc/sys/kernel/osrelease",
         "/proc/sys/kernel/random/boot_id",
@@ -711,6 +660,12 @@ fn box_primitives() -> Vec<(&'static str, bool, String)> {
 }
 
 fn guard_status() -> (bool, String) {
+    if std::env::var_os("CIG_INTERNAL_NO_NS_PROBE").is_some() {
+        return (
+            false,
+            "not probed: CIG_INTERNAL_NO_NS_PROBE is set".to_string(),
+        );
+    }
     let setting = crate::burn::overlay::guard_setting();
     if setting == "off" {
         return (
@@ -765,71 +720,6 @@ fn guard_status() -> (bool, String) {
             ),
         )
     }
-}
-
-fn append_line(rc: &Path, line: &str) -> io::Result<()> {
-    if let Ok(existing) = std::fs::read_to_string(rc) {
-        if existing.lines().any(|l| l.trim() == line) {
-            return Ok(());
-        }
-    }
-    let mut f = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(rc)?;
-    writeln!(f, "\n# added by cig doctor --fix\n{line}")
-}
-
-/// The exact package-manager command for a tool, or none if unrecognised.
-/// Shown in full and run only after a `y`; sudo is part of the command the
-/// user sees, never something added silently.
-fn install_command(tool: &str) -> Option<Vec<String>> {
-    let has = |m: &str| update::has_tool(m);
-    let pkg = match tool {
-        "gh" => "gh",
-        "curl" => "curl",
-        "git" => "git",
-        _ => return None,
-    };
-    let cmd: Vec<&str> = if has("apt-get") {
-        vec!["sudo", "apt-get", "install", "-y", pkg]
-    } else if has("dnf") {
-        vec!["sudo", "dnf", "install", "-y", pkg]
-    } else if has("pacman") {
-        vec![
-            "sudo",
-            "pacman",
-            "-S",
-            "--noconfirm",
-            if pkg == "gh" { "github-cli" } else { pkg },
-        ]
-    } else if has("zypper") {
-        vec!["sudo", "zypper", "install", "-y", pkg]
-    } else if has("apk") {
-        vec![
-            "sudo",
-            "apk",
-            "add",
-            if pkg == "gh" { "github-cli" } else { pkg },
-        ]
-    } else if has("brew") {
-        vec!["brew", "install", pkg]
-    } else if has("winget") {
-        vec![
-            "winget",
-            "install",
-            if pkg == "gh" {
-                "GitHub.cli"
-            } else if pkg == "git" {
-                "Git.Git"
-            } else {
-                "cURL.cURL"
-            },
-        ]
-    } else {
-        return None;
-    };
-    Some(cmd.into_iter().map(String::from).collect())
 }
 
 fn yes_no(ctx: &Ctx, v: bool) -> String {
@@ -1127,4 +1017,260 @@ pub fn rediagnose(ctx: &Ctx, id: &str) -> i32 {
         ),
     }
     exit::OK
+}
+
+/// What `json_findings` reports besides the problems.
+struct Facts {
+    run_count: usize,
+    run_bytes: u64,
+    history: u64,
+    over: bool,
+    suggestion: Option<u64>,
+    ledger: &'static str,
+    index_lines: Option<usize>,
+    index_live: Option<usize>,
+    crashes: usize,
+}
+
+/// The ids of runs whose process is gone with burns on the journal.
+fn interrupted_ids(all_runs: &[runs::RunRecord]) -> Vec<String> {
+    all_runs
+        .iter()
+        .filter(|r| r.is_interrupted() && r.burns > 0)
+        .map(|r| r.id.clone())
+        .collect()
+}
+
+/// The `findings` array of `__doctor --json`: every check once, as `ok`,
+/// `note` (true but worth knowing) or `action` (something to do), in the
+/// installer doctor's shape. A check that has a problem reports the problem
+/// and no `ok` beside it.
+fn json_findings(
+    home: &Path,
+    cfg: &Config,
+    problems: &[Problem],
+    facts: &Facts,
+) -> Vec<serde_json::Value> {
+    let mut out: Vec<serde_json::Value> = Vec::new();
+    let has = |check: &str| problems.iter().any(|p| p.check == check);
+    let mut ok = |check: &str, found: String, because: &str| {
+        if !has(check) {
+            out.push(finding(check, "ok", found, because, None));
+        }
+    };
+    ok(
+        "state-dir",
+        format!("{} is writable", crate::crash::tilde(home)),
+        "runs are recorded and can be undone",
+    );
+    ok(
+        "runs",
+        format!(
+            "{} recorded, {}",
+            facts.run_count,
+            human_bytes(facts.run_bytes)
+        ),
+        "run records are the undo history",
+    );
+    if !has("interrupted-run") {
+        ok(
+            "interrupted-run",
+            "no run was interrupted mid-burn".to_string(),
+            "an interrupted run leaves work half done",
+        );
+    }
+    ok(
+        "ledger",
+        format!("the ledger is {}", facts.ledger),
+        "chain heads are judged against it",
+    );
+    ok(
+        "run-index",
+        match (facts.index_lines, facts.index_live) {
+            (Some(l), Some(v)) => format!("{l} lines for {v} live runs"),
+            _ => "not built yet".to_string(),
+        },
+        "every run reads the index",
+    );
+    ok(
+        "ashtray",
+        format!("{} reports saved, none waiting", facts.crashes),
+        "reports wait until you say they may go",
+    );
+    ok(
+        "keys-dir",
+        crate::crash::tilde(&crate::burn::seal::keys_dir()),
+        "the tin's key lives there",
+    );
+    ok(
+        "key-file",
+        "the key file is private, or the key is not in a file".to_string(),
+        "a key file that others can read is not a secret",
+    );
+    ok(
+        "keys-state-file",
+        "the ledger and the lock are ours".to_string(),
+        "a run refuses another user's state file",
+    );
+    ok(
+        "runs-size",
+        format!("run records use {}", human_bytes(facts.run_bytes)),
+        "run records grow until pruned",
+    );
+    let budget = cfg.get("history_budget");
+    match (&facts.suggestion, facts.over) {
+        (Some(bytes), _) => out.push(finding(
+            "history-budget",
+            "note",
+            format!(
+                "{} bytes of history ({}), budget off",
+                facts.history,
+                human_bytes(facts.history)
+            ),
+            "the history grows for ever without a budget",
+            Some(format!("cig config history_budget {}", human_bytes(*bytes))),
+        )),
+        (None, true) => out.push(finding(
+            "history-budget",
+            "note",
+            format!(
+                "{} bytes of history ({}) is over the budget {budget}",
+                facts.history,
+                human_bytes(facts.history)
+            ),
+            "what is left is pinned, held for approval, or younger than history_keep",
+            None,
+        )),
+        (None, false) => out.push(finding(
+            "history-budget",
+            "ok",
+            format!(
+                "{} bytes of history ({}), budget {budget}",
+                facts.history,
+                human_bytes(facts.history)
+            ),
+            "the history stays inside its budget",
+            None,
+        )),
+    }
+
+    // The tin's protection: who can read it, where the key is, and whether
+    // a hop can read it out of cig's memory. Looked at, never made.
+    {
+        use crate::burn::{seal, tin};
+        let private = home_is_private(home);
+        out.push(finding(
+            "tin-private",
+            if private { "ok" } else { "note" },
+            format!(
+                "{} is {}",
+                crate::crash::tilde(home),
+                if private {
+                    "private"
+                } else {
+                    "readable by others"
+                }
+            ),
+            "the tin holds the before-bytes of files",
+            (!private).then(|| format!("chmod 700 {}", crate::crash::tilde(home))),
+        ));
+        let keeper = match seal::peek_keeper() {
+            Some(seal::Keeper::Keyring) => "the OS keyring".to_string(),
+            Some(seal::Keeper::File) => {
+                format!("a key file at {}", crate::crash::tilde(&seal::key_path()))
+            }
+            Some(seal::Keeper::Descriptor) => "handed over on a descriptor".to_string(),
+            None => "not made yet; made on the first sealed object".to_string(),
+        };
+        out.push(finding(
+            "tin-key",
+            "ok",
+            format!("the key is {keeper}"),
+            "sealed objects open only with it",
+            None,
+        ));
+        let keys_line = keys_dir_line(&seal::keys_dir());
+        out.push(finding(
+            "tin-key-folder",
+            if matches!(
+                keys_line.state.as_str(),
+                "private" | "not made yet" | "present"
+            ) {
+                "ok"
+            } else {
+                "note"
+            },
+            format!("{}  {}", keys_line.state, keys_line.detail),
+            "a strict-mode run refuses a keys folder that is not ours and private",
+            None,
+        ));
+        let apart = !seal::key_path().starts_with(tin::dir());
+        out.push(finding(
+            "tin-key-apart",
+            if apart { "ok" } else { "note" },
+            format!(
+                "the key is {} the tin",
+                if apart { "outside" } else { "inside" }
+            ),
+            "a copy of the tin should not take the key",
+            None,
+        ));
+        let debug_allowed = std::env::var_os("CIG_ALLOW_DEBUG").is_some();
+        let in_memory_safe = !debug_allowed && cfg!(any(target_os = "linux", target_os = "macos"));
+        out.push(finding(
+            "tin-key-memory",
+            if in_memory_safe { "ok" } else { "note" },
+            if debug_allowed {
+                "CIG_ALLOW_DEBUG=1: a debugger can read the key (E715)".to_string()
+            } else if in_memory_safe {
+                "a hop cannot read the key out of cig".to_string()
+            } else {
+                "this platform cannot stop a hop reading the key out of cig".to_string()
+            },
+            "a hop is untrusted code",
+            debug_allowed.then(|| "unset CIG_ALLOW_DEBUG".to_string()),
+        ));
+        let (guard_ok, guard_text) = guard_status();
+        out.push(finding(
+            "tin-guard",
+            if guard_ok { "ok" } else { "note" },
+            guard_text,
+            "the guard keeps a hop from changing the tin or reading the key",
+            None,
+        ));
+        if seal::has_sealed()
+            && !seal::was_exported()
+            && !seal::key_was_given()
+            && cfg.get("key_reminder") != "off"
+        {
+            out.push(finding(
+                "tin-key-backup",
+                "note",
+                "sealed objects exist and the key was never exported".to_string(),
+                "a restored backup cannot open your secrets without the key",
+                Some("cig tin key export".to_string()),
+            ));
+        }
+    }
+    // The box's primitives (#106), each tried on its own, so a box that
+    // cannot be made says which part is missing.
+    for (name, available, says) in box_primitives_remembered() {
+        out.push(finding(
+            &format!("box-{}", name.replace(' ', "-")),
+            if available { "ok" } else { "note" },
+            says,
+            "a boxed hop needs it",
+            None,
+        ));
+    }
+    for p in problems {
+        out.push(finding(
+            p.check,
+            "action",
+            p.said.clone(),
+            p.because,
+            p.fix.clone(),
+        ));
+    }
+    out
 }

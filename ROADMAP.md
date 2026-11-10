@@ -41,7 +41,7 @@ rows; the words settled in LEXICON.md as planned.
 
 Done in 1.7.0: the tool reports its own bugs (#101): tripwires after the work, the
 ashtray, a verified anonymised repro from the journal, one issue per bug with live stats,
-the fix announced on `cig update --check`, and one pipeline for the family.
+the fix announced after `ciginstaller update`, and one pipeline for the family.
 
 Done in 1.2.0 instead of waiting: the tin for whole files (`touches`, `cig tin`, `.cigignore`;
 cig-orchestrator #18 steps 1 to 4 and 8), the pin, the humidor and the trial (#22), crash
