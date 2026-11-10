@@ -295,10 +295,11 @@ pub fn install_hook() {
                     }
                 }
                 eprintln!(
-                    "\nDon't see any cigarettes.\nerror[E901 internal]: cig crashed: {}\n  --> {}\n  = crash report saved to {}\n  = explain: cig explain E901",
+                    "\nDon't see any cigarettes.\nerror[E901 internal]: cig crashed: {}\n  --> {}\n  = crash report saved to {}\n  = {}\n  = explain: cig explain E901",
                     truncate(&report.panic_message, 200),
                     report.panic_location,
-                    path.display()
+                    path.display(),
+                    crate::installer::report_line(&crate::config::Config::load().get("issues_repo"))
                 );
             }
             Err(e) => {

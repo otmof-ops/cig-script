@@ -361,6 +361,8 @@ fn the_internal_entries_are_hidden_from_help() {
     fs::create_dir_all(&empty).unwrap();
     let help = text(&sb.cig(&["--help"], &empty, true).stdout);
     assert!(!help.contains("__doctor"), "{help}");
+    assert!(!help.contains("__crash"), "{help}");
+    assert!(!help.contains("report-bundle"), "{help}");
     let help = text(&sb.cig(&["crash", "--help"], &empty, true).stdout);
     assert!(!help.contains("announce-fixed"), "{help}");
 }
@@ -374,4 +376,141 @@ fn announce_fixed_says_nothing_when_nothing_was_filed() {
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(v["fixed_reports"].as_array().map(Vec::len), Some(0), "{v}");
+}
+
+// ----- crash and report (phase F3) ---------------------------------------------
+
+/// One pair of tests per stub: a fake installer gets the mapped arguments and
+/// its exit code passes through; with none there are two lines and 127.
+macro_rules! stub_pair {
+    ($with:ident, $without:ident, $what:expr, $command:expr, $argv:expr, $mapped:expr) => {
+        #[cfg(unix)]
+        #[test]
+        fn $with() {
+            let sb = Sandbox::new();
+            let bin = sb.path().join("bin");
+            let log = sb.fake_installer(&bin, 9);
+            let out = sb.cig(&$argv, &bin, true);
+            assert_eq!(out.status.code(), Some(9), "{}", text(&out.stderr));
+            assert!(text(&out.stdout).contains("fake-installer-ran"));
+            assert_eq!(args_of(&log), $mapped);
+        }
+
+        #[test]
+        fn $without() {
+            let sb = Sandbox::new();
+            let empty = sb.path().join("empty");
+            fs::create_dir_all(&empty).unwrap();
+            let out = sb.cig(&$argv, &empty, true);
+            assert_missing_message(&out, $what, $command);
+        }
+    };
+}
+
+stub_pair!(
+    crash_list_hands_over_to_the_installer,
+    crash_list_without_the_installer_says_so_and_exits_127,
+    "cig crash list",
+    "ciginstaller crash list",
+    ["crash", "list"],
+    ["crash", "list"]
+);
+stub_pair!(
+    crash_list_forwards_json,
+    crash_list_json_without_the_installer_exits_127,
+    "cig crash list",
+    "ciginstaller crash list --json",
+    ["--json", "crash", "list"],
+    ["crash", "list", "--json"]
+);
+stub_pair!(
+    crash_show_hands_over_to_the_installer,
+    crash_show_without_the_installer_says_so_and_exits_127,
+    "cig crash show",
+    "ciginstaller crash show abc",
+    ["crash", "show", "abc"],
+    ["crash", "show", "abc"]
+);
+stub_pair!(
+    crash_send_hands_over_to_the_installer,
+    crash_send_without_the_installer_says_so_and_exits_127,
+    "cig crash send",
+    "ciginstaller crash send abc",
+    ["crash", "send", "abc"],
+    ["crash", "send", "abc"]
+);
+stub_pair!(
+    crash_delete_hands_over_to_the_installer,
+    crash_delete_without_the_installer_says_so_and_exits_127,
+    "cig crash delete",
+    "ciginstaller crash delete --all",
+    ["crash", "delete", "--all"],
+    ["crash", "delete", "--all"]
+);
+stub_pair!(
+    report_with_no_run_starts_the_bug_report_for_cig,
+    report_with_no_run_without_the_installer_says_so_and_exits_127,
+    "cig report",
+    "ciginstaller bug cig",
+    ["report"],
+    ["bug", "cig"]
+);
+stub_pair!(
+    report_of_a_run_names_the_run_and_the_part,
+    report_of_a_run_without_the_installer_says_so_and_exits_127,
+    "cig report",
+    "ciginstaller bug --run r1 --part cig",
+    ["report", "r1"],
+    ["bug", "--run", "r1", "--part", "cig"]
+);
+stub_pair!(
+    report_send_forwards_send,
+    report_send_without_the_installer_says_so_and_exits_127,
+    "cig report",
+    "ciginstaller bug --run r1 --part cig --send",
+    ["report", "r1", "--send"],
+    ["bug", "--run", "r1", "--part", "cig", "--send"]
+);
+stub_pair!(
+    report_out_writes_the_bundle_alone,
+    report_out_without_the_installer_says_so_and_exits_127,
+    "cig report",
+    "ciginstaller report r1 --cig --out b.json",
+    ["report", "r1", "--out", "b.json"],
+    ["report", "r1", "--cig", "--out", "b.json"]
+);
+
+#[test]
+fn crash_flush_submit_and_announce_fixed_never_call_the_installer() {
+    // capture and the local queue work without it: with one that fails the
+    // test if it runs, the native subcommands still answer
+    let sb = Sandbox::new();
+    let empty = sb.path().join("empty");
+    fs::create_dir_all(&empty).unwrap();
+    let out = sb.cig(&["--json", "crash", "announce-fixed"], &empty, true);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let out = sb.cig(&["crash", "flush", "--quiet"], &empty, true);
+    assert_ne!(out.status.code(), Some(127), "{}", text(&out.stderr));
+}
+
+#[test]
+fn report_out_needs_a_run() {
+    let sb = Sandbox::new();
+    let empty = sb.path().join("empty");
+    fs::create_dir_all(&empty).unwrap();
+    let out = sb.cig(&["report", "--out", "b.json"], &empty, true);
+    assert_eq!(out.status.code(), Some(3), "{}", text(&out.stderr));
+}
+
+#[cfg(unix)]
+#[test]
+fn the_json_report_of_a_run_stays_native_for_older_installers() {
+    // an installer from before report-bundle calls `cig --json report <run>`;
+    // handing that back to the installer would loop
+    let sb = Sandbox::new();
+    let bin = sb.path().join("bin");
+    let log = sb.fake_installer(&bin, 0);
+    let out = sb.cig(&["--json", "report", "zzz"], &bin, true);
+    assert_eq!(out.status.code(), Some(3), "{}", text(&out.stderr));
+    assert!(!log.exists(), "the installer must not have been run");
 }

@@ -2977,8 +2977,8 @@ internal: a bug in CigScript itself.
 
 | code | title | kind of no | what to type next |
 |---|---|---|---|
-| [`E900`](#e900-internal-error) | internal error | not one of the four | please report it: `cig crash send` after the crash, or file an issue with the script |
-| [`E901`](#e901-crash) | crash | not one of the four | `cig crash list` then `cig crash send <id>`, or say yes at the prompt |
+| [`E900`](#e900-internal-error) | internal error | not one of the four | please report it: `ciginstaller bug cig` (or file an issue at https://github.com/otmof-ops/cig-script/issues/new with the script) |
+| [`E901`](#e901-crash) | crash | not one of the four | `ciginstaller bug cig`, or `cig crash list` then `cig crash send <id>` (both run `ciginstaller crash`), or say yes at the prompt; the issues page https://github.com/otmof-ops/cig-script/issues/new works without the installer |
 | [`E902`](#e902-tripwire) | tripwire | not one of the four | nothing in your script: `cig crash show <id>` reads the report, `cig crash send <id>` files it, `cig config reports always` lets cig file its own bugs |
 
 ### E900 internal error
@@ -2989,11 +2989,11 @@ internal: a bug in CigScript itself.
 
 CigScript hit a condition it believes impossible.
 
-**What to type next:** please report it: `cig crash send` after the crash, or file an issue with the script
+**What to type next:** please report it: `ciginstaller bug cig` (or file an issue at https://github.com/otmof-ops/cig-script/issues/new with the script)
 
 **Known causes**, ranked; doctor checks them in this order:
 
-1. a bug in CigScript; nothing you wrote should be able to cause this (no probe; a suggestion, not a finding). **Remedy:** file an issue with the script and the message; the crash pipeline makes this one command
+1. a bug in CigScript; nothing you wrote should be able to cause this (no probe; a suggestion, not a finding). **Remedy:** `ciginstaller bug cig` writes it up with the evidence and shows exactly what would be sent; without the installer, file an issue with the script and the message
 
 
 ### E901 crash
@@ -3004,7 +3004,7 @@ CigScript hit a condition it believes impossible.
 
 CigScript panicked. A crash report was written locally.
 
-**What to type next:** `cig crash list` then `cig crash send <id>`, or say yes at the prompt
+**What to type next:** `ciginstaller bug cig`, or `cig crash list` then `cig crash send <id>` (both run `ciginstaller crash`), or say yes at the prompt; the issues page https://github.com/otmof-ops/cig-script/issues/new works without the installer
 
 **Known causes**, ranked; doctor checks them in this order:
 

@@ -3092,12 +3092,12 @@ E900 internal error  (internal, internal family, since 1.0.0)
 
   CigScript hit a condition it believes impossible.
 
-  what to type next: please report it: `cig crash send` after the crash, or file an issue with the script
+  what to type next: please report it: `ciginstaller bug cig` (or file an issue at https://github.com/otmof-ops/cig-script/issues/new with the script)
 
   known causes, ranked; doctor checks them in this order
   1. a bug in CigScript; nothing you wrote should be able to cause this
      probe: none; a suggestion, not a finding
-     remedy: file an issue with the script and the message; the crash pipeline makes this one command
+     remedy: `ciginstaller bug cig` writes it up with the evidence and shows exactly what would be sent; without the installer, file an issue with the script and the message
 
   arises in: any
 
@@ -3108,7 +3108,7 @@ E901 crash  (internal, internal family, since 1.0.0)
 
   CigScript panicked. A crash report was written locally.
 
-  what to type next: `cig crash list` then `cig crash send <id>`, or say yes at the prompt
+  what to type next: `ciginstaller bug cig`, or `cig crash list` then `cig crash send <id>` (both run `ciginstaller crash`), or say yes at the prompt; the issues page https://github.com/otmof-ops/cig-script/issues/new works without the installer
 
   known causes, ranked; doctor checks them in this order
   1. CigScript panicked; a redacted report was written under the state directory

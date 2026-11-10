@@ -9,9 +9,10 @@ body:
     attributes:
       value: |
         Nobody's on trial. A good report has four things; the rest is optional.
-        `cig report <run>` bundles most of it, redacted (home paths become `~`,
-        secret-shaped values are removed, file contents are never included).
-        Read the bundle before you attach it.
+        `ciginstaller bug cig` writes most of it up for you, redacted (home paths
+        become `~`, secret-shaped values are removed, file contents are never
+        included), and shows exactly what would be sent first; `cig report <run>`
+        is the short way in for a run. Read it before you attach it.
   - type: textarea
     id: script
     attributes:
@@ -39,13 +40,14 @@ body:
     id: actual
     attributes:
       label: What actually happened
-      description: What you expected, what you found, and the run id from `cig runs`. Attach `cig report <run>` if you can.
+      description: What you expected, what you found, and the run id from `cig runs`. Paste the output of `ciginstaller bug cig` (or `cig report <run>`) if you can.
     validations:
       required: true
   - type: input
     id: version
     attributes:
-      label: cig --version and platform
+      label: ciginstaller status (or cig --version) and platform
+      description: Paste the output of `ciginstaller status`; without the installer, `cig --version`.
       placeholder: cig 1.0.0, Linux x86_64
   - type: markdown
     attributes:

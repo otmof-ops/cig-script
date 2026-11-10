@@ -271,7 +271,7 @@ per step; the journal records the effects.
 
 Beside `runs/`, the state directory holds `ashtray/` (every report cig made
 about its own bugs, yours until you send them; `crashes/` from before 1.7.0
-is read too), `reports/` (`cig report <run>` bundles), `humidor/`
+is read too), `reports/` (bundles written by `cig report-bundle <run> --out`), `humidor/`
 (every other version of cig kept for pinned scripts and old journals, one
 directory per version with `index.json` beside them; see `cig versions`),
 `tin/` (below) and `update-check.json`.

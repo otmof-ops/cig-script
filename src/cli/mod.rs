@@ -209,21 +209,39 @@ pub enum Command {
         #[arg(long)]
         unset: bool,
     },
-    /// Crash reports: list, show, send, delete; nothing leaves without a yes.
+    /// Crash reports: `list`, `show`, `send` and `delete` are `ciginstaller crash ...`; `flush` and `submit` stay cig's.
     Crash {
         #[command(subcommand)]
         command: Option<crash::CrashCommand>,
     },
-    /// Bundle a run for a bug report: plan, journal, diagnostic and doctor's diagnosis, redacted (reproducible report).
+    /// The ashtray as cig keeps it, with no installer: the same subcommands as `crash`, run here (what the installer calls, and what the tests drive).
+    #[command(hide = true, name = "__crash")]
+    InternalCrash {
+        #[command(subcommand)]
+        command: Option<crash::CrashCommand>,
+    },
+    /// Report a bug: a stub for `ciginstaller bug cig` (no run) or `ciginstaller bug --run <run> --part cig`; `--out FILE` is `ciginstaller report <run> --cig --out FILE`.
     Report {
-        /// The run id, or a unique prefix of it.
-        id: String,
-        /// Write here instead of ~/.cigscript/reports/<id>.json; `-` prints to stdout.
+        /// The run id, or a unique prefix of it; none starts the bug report with no run.
+        id: Option<String>,
+        /// Write the bundle alone to this file (`ciginstaller report`) for you to read; `-` prints it to stdout.
         #[arg(long)]
         out: Option<PathBuf>,
-        /// File the bundle on the issue tracker through the ashtray, as a crash report is filed.
+        /// File the report through the installer's issues route, under your `reports` consent.
         #[arg(long, conflicts_with = "out")]
         send: bool,
+    },
+    /// A run's bundle as JSON on stdout, for `ciginstaller report` and `bug`; nothing is written or sent.
+    #[command(hide = true, name = "report-bundle")]
+    ReportBundle {
+        /// The run id, or a unique prefix of it.
+        id: String,
+        /// Write the bundle to this file instead (the old `cig report <run>`).
+        #[arg(long, conflicts_with = "queue")]
+        out: Option<PathBuf>,
+        /// Queue the bundle in the ashtray as a report of kind `report` and settle it under the consent (the old `cig report <run> --send`).
+        #[arg(long)]
+        queue: bool,
     },
     /// The humidor: every version of cig kept for pinned scripts and old journals; list, add, remove, prune.
     Versions {
@@ -501,7 +519,9 @@ pub fn main() -> i32 {
     // try in the same breath would only spend a retry.
     let flush_after = !matches!(
         cli.command,
-        Command::Crash { .. } | Command::Report { send: true, .. }
+        Command::Crash { .. }
+            | Command::InternalCrash { .. }
+            | Command::ReportBundle { queue: true, .. }
     );
     let code = dispatch(ctx, cli.command);
     // What the ashtray holds goes in the background, after the work: a run
@@ -626,8 +646,10 @@ fn dispatch(ctx: Ctx, command: Command) -> i32 {
         Command::Language => language::language(&ctx),
         Command::Explain { code, schema } => explain::explain(&ctx, code, schema),
         Command::Config { key, value, unset } => config::config(&ctx, key, value, unset),
-        Command::Crash { command } => crash::crash(&ctx, command),
-        Command::Report { id, out, send } => report::report(&ctx, &id, out, send),
+        Command::Crash { command } => crash::crash_stub(&ctx, command),
+        Command::InternalCrash { command } => crash::crash(&ctx, command),
+        Command::Report { id, out, send } => report::report(&ctx, id.as_deref(), out, send),
+        Command::ReportBundle { id, out, queue } => report::bundle_cmd(&ctx, &id, out, queue),
         Command::Update {
             check,
             allow_downgrade,

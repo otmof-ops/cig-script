@@ -180,8 +180,8 @@ own bugs, never yours: a crash, an internal error, or a tripwire that found one
 of its promises broken after the work, each written to the ashtray with an
 anonymised repro built from the journal and proved in a sandbox, filed as one
 issue per bug when you have said yes once, and the fix announced back by
-`ciginstaller update`. `cig report <run> --send` files a run that went wrong
-*without* crashing the same way.
+`ciginstaller update`. `ciginstaller bug cig` (or `cig report <run>`, the short
+way in) reports a run that went wrong *without* crashing the same way.
 
 **The pack and the compensation, two halves of one feature.** `pack {
 "./build" }` at the top of a script declares the scope every write must stay
@@ -224,7 +224,7 @@ talking about.
 
 And at the command line: `cig run --dry-run` is *the plan*, `cig unburn` is
 *put it back*, `cig runs` is *the lab notebook*, `cig doctor` is *the one that
-points*, `cig report` is *the bundle you attach*. The full field guide, with
+points*, `cig report` is *the way into the bug report*. The full field guide, with
 the frequently muttered questions, is [docs/SMOKE.md](docs/SMOKE.md). Health
 note: CigScript contains 0 mg nicotine and the only thing it's bad for is
 running scripts you haven't read.
@@ -374,16 +374,20 @@ ashtray. After every run the tripwires check its promises (each restored path
 re-hashed against the journal, the journal read back, the tin and the box
 sampled) and a broken one becomes a report too, with an anonymised repro built
 from the journal and proved in a sandbox. `cig crash list` shows what is
-saved and what went; say yes once (`reports = always`) and reports of cig's
+saved and what went (a stub for `ciginstaller crash list`); say yes once (`reports = always`) and reports of cig's
 own bugs go straight to this repo, one issue per bug (redacted; `cig crash
 show` prints exactly what travels). Your script's failures are never reported.
+To report a bug by hand, `ciginstaller status` and `ciginstaller bug cig` write
+it up with the evidence and show exactly what would be sent first; the issues
+page works without the installer.
 [docs/REPORTS.md](docs/REPORTS.md) has the whole pipeline.
 
 **When it's wrong without crashing** (the dangerous kind: exit 0, "file
 restored", wrong file): `cig runs` for the run id, then `cig report <run>
---send` files the script's hash, the plan, the journal, the diagnostic and
-doctor's diagnosis as one redacted issue; `cig report <run>` writes the same
-to a file to attach to [a cheat
+--send` (which runs `ciginstaller bug --run <run> --part cig --send`) files the
+script's hash, the plan, the journal, the diagnostic and doctor's diagnosis as
+one redacted issue; `cig report <run> --out FILE` (`ciginstaller report <run>
+--cig --out FILE`) writes the bundle alone to a file to attach to [a cheat
 issue](https://github.com/otmof-ops/cig-script/issues/new?template=cheat.yml)
 with the script, the command, what the plan said, and what happened.
 
@@ -522,9 +526,9 @@ for.
 | a boxed hop's run dies in the hop, leaving overlayfs's unreadable work directory under the record | `cig unburn` removes the layers with the rollback, and the record prunes | 1.6.2 | `the_layers_an_interrupted_boxed_hop_left_go_with_the_unburn` |
 | the same, and nobody unburns the dead run | the next `cig run`, of anything, sweeps the layers of every run that is not alive | 1.6.2 | `the_layers_a_dead_run_left_are_swept_when_the_next_run_starts` |
 | a boxed hop starts a `cig run` whose state directory is inside the box, with a boxed hop of its own | the inner plan says before the run that the box cannot be made here, naming the overlay its layers would sit on; the inner hop runs on the tin (`E763`) and the outer box applies the lot (Linux) | 1.6.3 | `a_box_inside_a_box_is_refused_in_the_plan_with_the_reason` |
-| `cig report <run> --send` | the bundle is filed as an issue through the ashtray, labelled `report`, with the live stats block; an explicit `reports = never` sends nothing | 1.7.0 | `report_send_files_the_bundle` |
+| `cig report-bundle <run> --queue` (what `cig report <run> --send` ran before it became a stub for `ciginstaller bug`) | the bundle is filed as an issue through the ashtray, labelled `report`, with the live stats block; an explicit `reports = never` sends nothing | 1.7.0 | `report_send_files_the_bundle` |
 | a report is sent while the network is down | it waits in the ashtray with the reason; the next `cig run` of anything sends it in the background, the run itself never waiting | 1.7.0 | `a_report_made_offline_is_sent_on_the_next_run` |
-| `cig report --send` under `CI` with nothing set | refused, `never` by default there so no pipeline files public issues by surprise; `cig config reports always` holds under CI | 1.7.0 | `ci_never_files_without_the_setting` |
+| `cig report-bundle <run> --queue` under `CI` with nothing set | refused, `never` by default there so no pipeline files public issues by surprise; `cig config reports always` holds under CI | 1.7.0 | `ci_never_files_without_the_setting` |
 | the script coughs, divides by zero, adds a string to a number | nothing reported: the script's failures are the script's; an internal error (`E900`) is cig's and is filed, labelled `internal` | 1.7.0 | `a_cough_in_the_users_script_is_never_reported` |
 | the rollback puts a file back with one mode bit wrong (a fault injected for the test) | the rollback tripwire re-hashes and re-checks every restored path, trips, queues a report (`E902`) and the run's outcome stays what it was | 1.7.0 | `a_rollback_that_restores_the_wrong_mode_trips` |
 | the pack holds `books/Clients-Private/Ledger-2026.txt` with account numbers when a tripwire trips | the repro built from the journal names `root0/D1/F1.txt`, generated bytes of the same size, a stub for the hop; neither the issue nor the report carries a name, a byte or a path of yours; the shrinker keeps what still trips | 1.7.0 | `a_repro_contains_no_user_path_or_content` |
@@ -555,7 +559,8 @@ Add a row. The rules for reporting one are in
 | `cig runs [id] [--prune N]` / `cig unburn <id> [--dry-run] [--force]` | run records; put one back |
 | `cig explain [code] [--schema]` | the page for an error code: which kind of no, what to type next, the ranked causes; the JSON Schema for a diagnostic |
 | `cig doctor [run]` | a stored run's error diagnosed again, read-only; with no run it is `ciginstaller doctor --tools`, the health of the installation |
-| `cig report <run> [--out file\|--send]` | one file for a bug report, every path in it a placeholder: plan, journal, diagnostic, diagnosis, install facts; `--send` files it through the ashtray |
+| `cig report [run] [--out file\|--send]` | the short way into `ciginstaller bug`: no run is `bug cig`, a run is `bug --run <run> --part cig [--send]`, `--out FILE` is `ciginstaller report <run> --cig --out FILE` (the bundle alone: every path a placeholder, plan, journal, diagnostic, diagnosis, install facts) |
+| `cig crash list\|show\|send\|delete` | stubs for `ciginstaller crash ...` with the same arguments; `cig crash flush` and `submit` stay cig's |
 | `cig update [--check]` | a stub for `ciginstaller update [--check]`; the installer says which bugs you reported are fixed once it has updated cig |
 | `cig uninstall` | a stub for `ciginstaller uninstall cig`; your `~/.cigscript` data stays |
 | `cig crash [list\|show\|send\|flush\|submit\|delete]` | the ashtray: every report cig made about its own bugs (crashes, internal errors, tripwires), under your control; `flush` sends what is waiting, `submit` takes a report from another tool of the family |

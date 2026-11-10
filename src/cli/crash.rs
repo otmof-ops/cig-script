@@ -81,6 +81,31 @@ fn announce_fixed(ctx: &Ctx) -> i32 {
     exit::OK
 }
 
+/// `cig crash`: `list`, `show`, `send` and `delete` are `ciginstaller crash`
+/// with the same arguments; `flush`, `submit` and `announce-fixed` stay here,
+/// because capture and the local queue must work without the installer.
+pub fn crash_stub(ctx: &Ctx, cmd: Option<CrashCommand>) -> i32 {
+    let mut args: Vec<String> = vec!["crash".to_string()];
+    match cmd.unwrap_or(CrashCommand::List) {
+        CrashCommand::List => args.push("list".into()),
+        CrashCommand::Show { id } => args.extend(["show".to_string(), id]),
+        CrashCommand::Send { id } => args.extend(["send".to_string(), id]),
+        CrashCommand::Delete { id, all } => {
+            args.push("delete".into());
+            args.extend(id);
+            if all {
+                args.push("--all".into());
+            }
+        }
+        other => return crash(ctx, Some(other)),
+    }
+    if ctx.json {
+        args.push("--json".into());
+    }
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    crate::installer::run(&format!("cig crash {}", args[1]), &refs)
+}
+
 pub fn crash(ctx: &Ctx, cmd: Option<CrashCommand>) -> i32 {
     match cmd.unwrap_or(CrashCommand::List) {
         CrashCommand::AnnounceFixed => announce_fixed(ctx),
@@ -585,6 +610,7 @@ pub fn after_crash(ctx: &Ctx) {
                     "To file it: cig crash show {}   then   cig crash send {}",
                     report.id, report.id
                 );
+                eprintln!("Or {}", crate::installer::report_line(&repo));
                 return;
             }
             eprintln!();

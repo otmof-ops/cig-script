@@ -57,7 +57,7 @@ fetching. What cig's own downloads (the humidor) trust is below.
   be the defence, and signing (minisign or Sigstore) is on the roadmap. Until
   then, treat an update as "as trustworthy as the GitHub account".
 - Nothing else: `cig` makes no network request unless you run `cig crash
-  send`, `cig report --send` or `cig versions add`; updating is the
+  send`, `cig report --send` (both hand over to `ciginstaller`, which sends under the same `reports` consent) or `cig versions add`; updating is the
   installer's.
 
 ## What the humidor trusts
