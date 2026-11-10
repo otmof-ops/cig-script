@@ -144,9 +144,9 @@ fresh; printf 'exhale 1\n' > s.cig
 ( unset CIGSCRIPT_HOME; "$CIG" run s.cig >/dev/null 2>&1; "$CIG" runs >runs.txt 2>&1; echo $? > code.txt )
 [ "$(code)" = 0 ] && result "default state directory works" PASS || result "default state directory works" FAIL "$(tr '\r\n' '  ' < runs.txt | cut -c1-120)"
 
-# 20 doctor runs
-fresh; run doctor
-grep -q "state dir" out.txt && result "cig doctor runs" PASS "exit $(code)" || result "cig doctor runs" FAIL "$(last)"
+# 20 cig's own self-check runs (what ciginstaller doctor --tools reads; cig doctor hands over to it)
+fresh; run __doctor
+grep -q "state dir" out.txt && result "cig __doctor runs" PASS "exit $(code)" || result "cig __doctor runs" FAIL "$(last)"
 
 # 21 the tin: a hop's edits and deletes come back (touches)
 fresh; echo original > keep.txt; echo doomed > gone.txt

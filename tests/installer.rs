@@ -75,6 +75,8 @@ fn text(b: &[u8]) -> String {
     String::from_utf8_lossy(b).to_string()
 }
 
+// only the unix tests drive a fake ciginstaller that logs its arguments
+#[cfg(unix)]
 fn args_of(log: &Path) -> Vec<String> {
     fs::read_to_string(log)
         .unwrap_or_default()
