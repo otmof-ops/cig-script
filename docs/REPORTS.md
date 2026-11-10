@@ -28,7 +28,7 @@ the tool notices its own bug (a crash, an internal error, a tripwire)
 | an internal error (`E900`: a condition cig believes impossible) | cig's | yes, kind `internal` |
 | a tripwire (`E902`, below) | cig's | yes, kind `tripwire` |
 | `cough`, a runtime or type error in the script, a hop that failed, a usage error | the script's or the person's | never |
-| a run bundled with `cig report <run> --send` | the person's choice | yes, kind `report` |
+| a run reported with `cig report <run> --send` (`ciginstaller bug`) | the person's choice | yes, kind `report` |
 
 ## Tripwires
 
@@ -81,13 +81,39 @@ a run's background flush and a `cig crash send` typed meanwhile never file
 the same report twice.
 
 ```
-cig crash list                 the ashtray
-cig crash show <id>            exactly what would be sent
-cig crash send <id>            file this one now (a yes for it alone)
+cig crash list                 the ashtray               (ciginstaller crash list)
+cig crash show <id>            exactly what would be sent (ciginstaller crash show)
+cig crash send <id>            file this one now          (ciginstaller crash send)
+cig crash delete <id> | --all                             (ciginstaller crash delete)
 cig crash flush                send everything waiting and due
-cig crash delete <id> | --all
-cig report <run> --send        file a run's bundle the same way
+cig report                     ciginstaller bug cig
+cig report <run> [--send]      ciginstaller bug --run <run> --part cig [--send]
+cig report <run> --out FILE    ciginstaller report <run> --cig --out FILE
 ```
+
+`ciginstaller bug` is the one way to report anything in the family; the
+commands above are the short way in, and each hands over to it, passing its
+exit code through. With no installer on the machine each says so in two lines
+and exits 127, and the repository's issues page works without it. Capture
+does not need the installer: the panic hook, the ashtray, `cig crash flush`,
+`cig crash submit` (what `cigo` and `cigar` call) and the queue that goes with
+the next run all stay in cig. Two hidden entries serve the installer and the
+local queue: `cig report-bundle <run> --json` prints a run's bundle on stdout
+(nothing written, nothing sent; exit 3 for an unknown run), and `cig __crash`
+is the ashtray's own list, show, send and delete with no installer.
+
+### The bundle and its `repro`
+
+`cig report-bundle <run> --json` is the bundle `ciginstaller bug` and
+`ciginstaller report` read for a cig run: the run record, the journal, the
+diagnostic, doctor's diagnosis and the install facts, every path a
+placeholder. It carries a top-level `repro` object: the script and what it
+looks for, and `verified`, which is `true` only when the repro was run again
+in a sandbox on this machine as the bundle was made and reproduced the same
+finding. Otherwise `verified` is `false` and `why` says so: the run ended in
+nothing cig can look for again (a cheat that exited 0 has no crash, internal
+error or tripwire to check), the repro did not reproduce, or it could not be
+verified. The installer attaches a repro only when `verified` is `true`.
 
 ## The repro
 

@@ -27,31 +27,110 @@ pub fn reports_dir() -> PathBuf {
     runs::home_dir().join("reports")
 }
 
-pub fn report(ctx: &Ctx, id: &str, out: Option<PathBuf>, send: bool) -> i32 {
-    let rec = match runs::find(id) {
-        Ok(Some(r)) => r,
+/// `cig report [run] [--out FILE|-] [--send]`: the short way into
+/// `ciginstaller bug` (#29). `cig report` is `ciginstaller bug cig`;
+/// `cig report <run>` is `ciginstaller bug --run <run> --part cig`, with
+/// `--send` forwarded; `--out FILE` is `ciginstaller report <run> --cig
+/// --out FILE`, the bundle alone. Two forms stay native because an
+/// installer older than this one calls them for the bundle, and a stub
+/// there would hand the call straight back: `cig --json report <run>` and
+/// `--out -`, both the bundle on stdout.
+pub fn report(ctx: &Ctx, id: Option<&str>, out: Option<PathBuf>, send: bool) -> i32 {
+    let Some(id) = id else {
+        if out.is_some() {
+            eprintln!(
+                "{} `--out` needs a run: `cig report <run> --out FILE`; `cig runs` lists them",
+                ctx.red("error[E800 usage]:")
+            );
+            return exit::USAGE;
+        }
+        let mut args = vec!["bug", "cig"];
+        if send {
+            args.push("--send");
+        }
+        return crate::installer::run("cig report", &args);
+    };
+    let to_stdout = ctx.json || out.as_deref() == Some(Path::new("-"));
+    if to_stdout && !send {
+        return print_bundle(ctx, id);
+    }
+    if let Some(file) = out {
+        let file = file.to_string_lossy().to_string();
+        return crate::installer::run(
+            "cig report",
+            &["report", id, "--cig", "--out", file.as_str()],
+        );
+    }
+    let mut args = vec!["bug", "--run", id, "--part", "cig"];
+    if send {
+        args.push("--send");
+    }
+    crate::installer::run("cig report", &args)
+}
+
+fn find_run(ctx: &Ctx, id: &str) -> Result<runs::RunRecord, i32> {
+    match runs::find(id) {
+        Ok(Some(r)) => Ok(r),
         Ok(None) => {
             eprintln!("{} no run matches `{id}`", ctx.red("error[E803 usage]:"));
             eprintln!("  = hint: `cig runs` lists them; give more of the id if it is ambiguous");
             eprintln!("  = explain: cig explain E803");
-            return exit::USAGE;
+            Err(exit::USAGE)
         }
         Err(e) => {
             eprintln!("{} {e}", ctx.red("error[E803 usage]:"));
-            return exit::USAGE;
+            Err(exit::USAGE)
         }
+    }
+}
+
+/// The bundle on stdout, with the `repro` object. Writes nothing, sends
+/// nothing; an unknown run is exit 3.
+fn print_bundle(ctx: &Ctx, id: &str) -> i32 {
+    let rec = match find_run(ctx, id) {
+        Ok(r) => r,
+        Err(code) => return code,
+    };
+    let (mut bundle, _) = bundle(&rec);
+    bundle["repro"] = repro_of_run(&rec);
+    outln!(
+        "{}",
+        serde_json::to_string_pretty(&bundle).unwrap_or_default()
+    );
+    exit::OK
+}
+
+/// `cig report-bundle <run> [--out FILE|--queue]` (hidden). With neither, the
+/// bundle with its `repro` on stdout (`--json` is accepted and the same). `--out` writes the
+/// bundle to a file and `--queue` files it through the ashtray, as
+/// `cig report` did before the installer took the front of it; both are
+/// what the local queue needs when there is no installer.
+pub fn bundle_cmd(ctx: &Ctx, id: &str, out: Option<PathBuf>, queue: bool) -> i32 {
+    if out.is_none() && !queue {
+        return print_bundle(ctx, id);
+    }
+    if ctx.json {
+        eprintln!(
+            "{} `--json` prints the bundle and nothing else; it does not combine with `--out` or `--queue`",
+            ctx.red("error[E800 usage]:")
+        );
+        return exit::USAGE;
+    }
+    let rec = match find_run(ctx, id) {
+        Ok(r) => r,
+        Err(code) => return code,
     };
     let (bundle, mapping) = bundle(&rec);
-    if send {
+    if queue {
         return send_bundle(ctx, &rec, bundle, mapping);
     }
     let text = serde_json::to_string_pretty(&bundle).unwrap_or_default();
-    let to_stdout = ctx.json || out.as_deref() == Some(Path::new("-"));
-    if to_stdout {
+    let out = out.unwrap_or_else(|| reports_dir().join(format!("{}.json", rec.id)));
+    if out == Path::new("-") {
         outln!("{text}");
         return exit::OK;
     }
-    let path = out.unwrap_or_else(|| reports_dir().join(format!("{}.json", rec.id)));
+    let path = out;
     if let Some(parent) = path.parent() {
         if let Err(e) = std::fs::create_dir_all(parent) {
             eprintln!(
@@ -83,6 +162,75 @@ pub fn report(ctx: &Ctx, id: &str, out: Option<PathBuf>, send: bool) -> i32 {
         crate::config::Config::load().get("issues_repo")
     );
     exit::OK
+}
+
+/// The `repro` object a bundle carries. The repro is the one the run's own
+/// ashtray report built (a crash, an internal error, a tripwire), or one
+/// built from the journal of a run that ended in an internal error; either
+/// is run again now in a scratch sandbox, and only a repro that reproduces
+/// here is `verified: true`.
+fn repro_of_run(rec: &runs::RunRecord) -> serde_json::Value {
+    let scratch = crate::crash::ashtray_dir().join(format!("repro-bundle-{}", rec.id));
+    repro_object(repro_to_run_again(rec), |x| {
+        crate::repro::verify_and_shrink(x, &scratch);
+        let _ = std::fs::remove_dir_all(&scratch);
+    })
+}
+
+/// The repro to run again for a run, or why there is none.
+fn repro_to_run_again(rec: &runs::RunRecord) -> Result<crate::repro::Repro, String> {
+    use crate::crash::Kind;
+    let stored = crate::crash::list()
+        .unwrap_or_default()
+        .into_iter()
+        .find_map(|c| {
+            (c.active_run_id.as_deref() == Some(rec.id.as_str()) && c.kind != Kind::Report)
+                .then_some(c.repro)
+                .flatten()
+        });
+    if let Some(x) = stored {
+        return Ok(x);
+    }
+    let internal = rec
+        .diagnostic
+        .as_ref()
+        .and_then(|d| d.get("code"))
+        .and_then(|c| c.as_str())
+        == Some("E900");
+    if !internal {
+        return Err("the run ended in nothing cig can look for again: only a crash, an internal error or a tripwire gives a repro something to check".to_string());
+    }
+    let journal =
+        Journal::load(&rec.dir()).map_err(|_| "the run's journal cannot be read".to_string())?;
+    crate::repro::build(rec, &journal, "internal", "an internal error (E900)")
+        .map(|(x, _)| x)
+        .ok_or_else(|| "the run's journal has nothing to build a repro from".to_string())
+}
+
+/// The object itself: `verify` runs the repro again and sets `verified`.
+/// `Err(why)` is a run that has nothing to run again.
+fn repro_object(
+    found: Result<crate::repro::Repro, String>,
+    verify: impl FnOnce(&mut crate::repro::Repro),
+) -> serde_json::Value {
+    match found {
+        Err(why) => serde_json::json!({"script": null, "verified": false, "why": why}),
+        Ok(mut x) => {
+            x.verified = false;
+            x.note.clear();
+            verify(&mut x);
+            let why = if x.verified {
+                "it reproduced in a sandbox on this machine when this bundle was made".to_string()
+            } else if x.note.is_empty() {
+                "it was not verified on this machine".to_string()
+            } else {
+                x.note.clone()
+            };
+            let mut v = serde_json::to_value(&x).unwrap_or_default();
+            v["why"] = serde_json::Value::String(why);
+            v
+        }
+    }
 }
 
 /// `--send`: the bundle joins the ashtray as a report of kind `report` and
@@ -351,4 +499,43 @@ fn bundle(rec: &runs::RunRecord) -> (serde_json::Value, Mapping) {
         "note": "Anonymised like a crash report: every path is a placeholder (root0/d1/f2.txt; out/ for one outside the pack), the command line keeps only the words cig knows, secret-shaped values are removed, file contents are never included. Read it before you send it.",
     });
     (bundle, m)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::repro::Repro;
+
+    fn repro() -> Repro {
+        Repro {
+            script: "fs.write_text(\"root0/a\", \"x\")\n".into(),
+            seeds: Vec::new(),
+            stubs: Vec::new(),
+            ops: 1,
+            verified: true,
+            expect: "an internal error (E900)".into(),
+            check: "internal".into(),
+            note: "stale".into(),
+        }
+    }
+
+    #[test]
+    fn a_repro_is_verified_only_when_it_reproduces_when_the_bundle_is_made() {
+        // a stored `verified: true` proves nothing now: it is run again, and
+        // what the run again says is what the bundle says
+        let yes = repro_object(Ok(repro()), |x| x.verified = true);
+        assert_eq!(yes["verified"], true, "{yes}");
+        assert!(yes["script"].as_str().unwrap().contains("fs.write_text"));
+        assert!(yes["why"].as_str().unwrap().contains("reproduced"), "{yes}");
+        let no = repro_object(Ok(repro()), |x| {
+            x.verified = false;
+            x.note = "It did not reproduce in the sandbox, so it is not attached.".into();
+        });
+        assert_eq!(no["verified"], false, "{no}");
+        assert!(no["why"].as_str().unwrap().contains("did not reproduce"));
+        let none = repro_object(Err("no journal".into()), |_| panic!("nothing to run"));
+        assert_eq!(none["verified"], false);
+        assert!(none["script"].is_null());
+        assert_eq!(none["why"], "no journal");
+    }
 }

@@ -3029,20 +3029,20 @@ remedy = "cigo doctor shows the guard block"
 code = "E900"
 title = "internal error"
 meaning = "CigScript hit a condition it believes impossible."
-fix = "please report it: `cig crash send` after the crash, or file an issue with the script"
+fix = "please report it: `ciginstaller bug cig` (or file an issue at https://github.com/otmof-ops/cig-script/issues/new with the script)"
 no = "none"
 arises = ["any"]
 since = "1.0.0"
 [[code.cause]]
 why = "a bug in CigScript; nothing you wrote should be able to cause this"
 probe = "none"
-remedy = "file an issue with the script and the message; the crash pipeline makes this one command"
+remedy = "`ciginstaller bug cig` writes it up with the evidence and shows exactly what would be sent; without the installer, file an issue with the script and the message"
 
 [[code]]
 code = "E901"
 title = "crash"
 meaning = "CigScript panicked. A crash report was written locally."
-fix = "`cig crash list` then `cig crash send <id>`, or say yes at the prompt"
+fix = "`ciginstaller bug cig`, or `cig crash list` then `cig crash send <id>` (both run `ciginstaller crash`), or say yes at the prompt; the issues page https://github.com/otmof-ops/cig-script/issues/new works without the installer"
 no = "none"
 arises = ["any"]
 since = "1.0.0"

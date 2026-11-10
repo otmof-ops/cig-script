@@ -5,6 +5,26 @@ project follows semantic versioning.
 
 ## Unreleased
 
+- **Reports run through `ciginstaller`.** `cig crash list|show|send|delete`
+  are stubs for `ciginstaller crash ...` with the same arguments; `cig crash
+  flush`, `submit` and `announce-fixed` stay, because capture and the local
+  queue work without the installer. `cig report` is the short way into
+  `ciginstaller bug`: `cig report` is `bug cig`, `cig report <run> [--send]`
+  is `bug --run <run> --part cig [--send]`, `cig report <run> --out FILE` is
+  `ciginstaller report <run> --cig --out FILE`. `cig report <run>` no longer
+  writes `~/.cigscript/reports/<id>.json` by itself. `cig --json report <run>`
+  and `--out -` still print the bundle. A stub with no installer says so in two
+  lines and exits 127.
+- **`cig report-bundle <run> --json`** (hidden) prints a run's bundle on stdout
+  for the installer, writing and sending nothing (exit 3 for an unknown run).
+  The bundle gains a top-level `repro`: the script, and `verified: true` only
+  when it reproduced in a sandbox on this machine as the bundle was made,
+  otherwise `false` with `why`. `cig __crash` (hidden) is the ashtray's own
+  list, show, send and delete.
+- **"Please report it" names `ciginstaller bug cig`** (E900, E901, the crash
+  notice) with the issues page as the fallback; the cheat issue template asks
+  for `ciginstaller status` and the `ciginstaller bug cig` output.
+
 cig is installed, updated, removed and checked by `ciginstaller`; cig keeps
 only what it alone can know.
 

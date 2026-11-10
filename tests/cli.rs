@@ -682,7 +682,7 @@ fn a_panic_writes_a_redacted_crash_report_and_never_sends_without_consent() {
     );
     assert!(stderr.contains("cig crash send"), "{stderr}");
     let reports: serde_json::Value =
-        serde_json::from_str(&sb.run_ok(&["--json", "crash", "list"])).unwrap();
+        serde_json::from_str(&sb.run_ok(&["--json", "__crash", "list"])).unwrap();
     assert_eq!(reports.as_array().unwrap().len(), 1);
     let r = &reports[0];
     assert_eq!(r["sent"], serde_json::Value::Null);
@@ -694,7 +694,7 @@ fn a_panic_writes_a_redacted_crash_report_and_never_sends_without_consent() {
         .unwrap()
         .starts_with("src/cli/mod.rs"));
     let id = r["id"].as_str().unwrap().to_string();
-    let shown = sb.run_ok(&["crash", "show", &id]);
+    let shown = sb.run_ok(&["__crash", "show", &id]);
     assert!(shown.contains("\"fingerprint\""));
     // never mode: no prompt, no send, report stays local.
     sb.run_ok(&["config", "crash_reports", "never"]);
@@ -708,8 +708,8 @@ fn a_panic_writes_a_redacted_crash_report_and_never_sends_without_consent() {
         .output()
         .unwrap();
     assert!(String::from_utf8_lossy(&out.stderr).contains("crash_reports is \"never\""));
-    sb.run_ok(&["crash", "delete", "--all"]);
-    assert_eq!(sb.run_ok(&["--json", "crash", "list"]).trim(), "[]");
+    sb.run_ok(&["__crash", "delete", "--all"]);
+    assert_eq!(sb.run_ok(&["--json", "__crash", "list"]).trim(), "[]");
 }
 
 #[test]
@@ -1609,7 +1609,9 @@ fn report_bundles_a_run_redacted() {
     let id = sb.runs()[0]["id"].as_str().unwrap().to_string();
     let base = corpus_env(&sb);
     let envs: Vec<(&str, &str)> = base.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
-    let out = sb.cig_env(&["report", &id], &envs);
+    let file = sb.home().join("reports").join(format!("{id}.json"));
+    let file_arg = file.to_string_lossy().to_string();
+    let out = sb.cig_env(&["report-bundle", &id, "--out", &file_arg], &envs);
     assert!(
         out.status.success(),
         "{}",
@@ -1620,7 +1622,6 @@ fn report_bundles_a_run_redacted() {
         printed.starts_with("~/home/reports/"),
         "the path is printed with ~ for HOME: {printed}"
     );
-    let file = sb.home().join("reports").join(format!("{id}.json"));
     let bundle: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
     assert_eq!(bundle["kind"], "cigscript-report");
@@ -1652,8 +1653,53 @@ fn report_bundles_a_run_redacted() {
     let out = sb.cig_env(&["--json", "report", &id], &envs);
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(v["run"]["id"], id);
-    let err = sb.run_err(&["report", "zzz"], 3);
+    let err = sb.run_err(&["report-bundle", "zzz"], 3);
     assert!(err.contains("error[E803 usage]"), "{err}");
+}
+
+#[test]
+#[cfg(unix)]
+fn report_bundle_prints_the_bundle_with_a_repro_and_writes_and_sends_nothing() {
+    let sb = Sandbox::new();
+    run_corpus(&sb, "e551-not-on-path.cig", &[]);
+    let id = sb.runs()[0]["id"].as_str().unwrap().to_string();
+    let base = corpus_env(&sb);
+    let envs: Vec<(&str, &str)> = base.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    let out = sb.cig_env(&["report-bundle", &id, "--json"], &envs);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let bundle: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(bundle["kind"], "cigscript-report");
+    assert_eq!(bundle["run"]["id"], id);
+    // A run that ended in a cheat has no crash, internal error or tripwire
+    // for a repro to look for: the object says so and is not verified.
+    assert_eq!(bundle["repro"]["verified"], false, "{}", bundle["repro"]);
+    assert!(bundle["repro"]["script"].is_null());
+    assert!(
+        bundle["repro"]["why"]
+            .as_str()
+            .unwrap()
+            .contains("nothing cig can look for"),
+        "{}",
+        bundle["repro"]
+    );
+    // Nothing was written and nothing queued.
+    assert!(!sb.home().join("reports").exists());
+    assert_eq!(sb.run_ok(&["--json", "__crash", "list"]).trim(), "[]");
+    // The same bundle through the older call the installer falls back to.
+    let again = sb.cig_env(&["--json", "report", &id], &envs);
+    let v: serde_json::Value = serde_json::from_slice(&again.stdout).unwrap();
+    assert_eq!(v["repro"]["verified"], false);
+    // `--json` does not combine with writing or queueing.
+    let err = sb.run_err(&["--json", "report-bundle", &id, "--queue"], 3);
+    assert!(err.contains("E800"), "{err}");
+    // An unknown run is exit 3, with nothing on stdout.
+    let out = sb.cig_env(&["report-bundle", "zzz", "--json"], &envs);
+    assert_eq!(out.status.code(), Some(3));
+    assert!(out.stdout.is_empty());
 }
 
 // ----- the Hammer update: the step budget and finally -------------------------
@@ -2788,11 +2834,11 @@ fn crash_send_honours_never() {
     sb.write("s.cig", "exhale 1\n");
     let out = sb.cig_env(&["run", "s.cig"], &[("CIG_INTERNAL_PANIC", "1")]);
     assert_eq!(out.status.code(), Some(70));
-    let listed = sb.run_ok(&["--json", "crash", "list"]);
+    let listed = sb.run_ok(&["--json", "__crash", "list"]);
     let v: Vec<serde_json::Value> = serde_json::from_str(&listed).unwrap();
     let id = v[0]["id"].as_str().unwrap().to_string();
     sb.run_ok(&["config", "crash_reports", "never"]);
-    let err = sb.run_err(&["crash", "send", &id], 3);
+    let err = sb.run_err(&["__crash", "send", &id], 3);
     assert!(
         err.contains("error[E800 usage]: crash_reports is \"never\""),
         "{err}"
@@ -2943,7 +2989,7 @@ fn a_release_crash_report_names_the_function_that_panicked() {
     let out = sb.cig_env(&["run", "x.cig"], &[("CIG_INTERNAL_PANIC", "eval")]);
     assert_eq!(out.status.code(), Some(70));
     let list: Vec<serde_json::Value> =
-        serde_json::from_str(&sb.run_ok(&["--json", "crash", "list"])).unwrap();
+        serde_json::from_str(&sb.run_ok(&["--json", "__crash", "list"])).unwrap();
     let report = &list[0];
     assert!(
         report["panic_location"]
@@ -2994,7 +3040,7 @@ fn a_panic_mid_run_offers_to_put_its_burns_back() {
     assert!(!sb.exists("b.txt"), "b.txt was written after the crash");
     assert_eq!(sb.read("old.txt"), "old\n");
     let list: Vec<serde_json::Value> =
-        serde_json::from_str(&sb.run_ok(&["--json", "crash", "list"])).unwrap();
+        serde_json::from_str(&sb.run_ok(&["--json", "__crash", "list"])).unwrap();
     assert_eq!(list[0]["rolled_back"], serde_json::Value::Bool(true));
     assert!(list[0]["active_run_id"].is_string(), "{}", list[0]);
 }
@@ -3013,7 +3059,7 @@ fn without_a_terminal_the_crash_names_the_unburn_command() {
     );
     assert!(sb.exists("a.txt"), "nothing was asked, so nothing moves");
     let list: Vec<serde_json::Value> =
-        serde_json::from_str(&sb.run_ok(&["--json", "crash", "list"])).unwrap();
+        serde_json::from_str(&sb.run_ok(&["--json", "__crash", "list"])).unwrap();
     assert_eq!(list[0]["rolled_back"], serde_json::Value::Bool(false));
     // The command it named works, and puts the files back.
     sb.run_ok(&["unburn", &id]);
@@ -9424,7 +9470,7 @@ fn wait_filed(sb: &Sandbox, n: usize) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
     loop {
         let v: serde_json::Value =
-            serde_json::from_str(&sb.run_ok(&["--json", "crash", "list"])).unwrap();
+            serde_json::from_str(&sb.run_ok(&["--json", "__crash", "list"])).unwrap();
         let filed = v
             .as_array()
             .map(|a| a.iter().filter(|r| r["issue"].is_object()).count())
@@ -9465,7 +9511,7 @@ fn report_send_files_the_bundle() {
     let tracker = sb.path().join("tracker");
     let t = tracker.to_string_lossy().to_string();
     let out = sb.cig_env(
-        &["report", &id, "--send"],
+        &["report-bundle", &id, "--queue"],
         &[("CIG_INTERNAL_TRACKER_DIR", &t)],
     );
     let err = String::from_utf8_lossy(&out.stderr).to_string();
@@ -9488,12 +9534,12 @@ fn report_send_files_the_bundle() {
         .unwrap()
         .iter()
         .any(|l| l == "report"));
-    let list = sb.run_ok(&["crash", "list"]);
+    let list = sb.run_ok(&["__crash", "list"]);
     assert!(list.contains("report") && list.contains("filed"), "{list}");
     // An explicit never sends nothing, whatever was typed.
     sb.run_ok(&["config", "reports", "never"]);
     let out = sb.cig_env(
-        &["report", &id, "--send"],
+        &["report-bundle", &id, "--queue"],
         &[("CIG_INTERNAL_TRACKER_DIR", &t)],
     );
     assert_eq!(out.status.code(), Some(3));
@@ -9509,7 +9555,7 @@ fn a_report_made_offline_is_sent_on_the_next_run() {
     let t = tracker.to_string_lossy().to_string();
     // Offline: the send fails, the report waits with the reason written on it.
     let out = sb.cig_env(
-        &["report", &id, "--send"],
+        &["report-bundle", &id, "--queue"],
         &[
             ("CIG_INTERNAL_TRACKER_DIR", &t),
             ("CIG_INTERNAL_OFFLINE", "1"),
@@ -9521,7 +9567,7 @@ fn a_report_made_offline_is_sent_on_the_next_run() {
         "{err}"
     );
     assert!(!tracker.exists());
-    let list = sb.run_ok(&["crash", "list"]);
+    let list = sb.run_ok(&["__crash", "list"]);
     assert!(
         list.contains("failed: the network")
             && list.contains("last try: the network is unreachable"),
@@ -9541,7 +9587,7 @@ fn a_report_made_offline_is_sent_on_the_next_run() {
     while std::time::Instant::now() < deadline {
         if issue.exists()
             && sb
-                .run_ok(&["--json", "crash", "list"])
+                .run_ok(&["--json", "__crash", "list"])
                 .contains("\"issue\"")
         {
             break;
@@ -9552,7 +9598,7 @@ fn a_report_made_offline_is_sent_on_the_next_run() {
         issue.exists(),
         "the background flush did not file the report"
     );
-    let list = sb.run_ok(&["crash", "list"]);
+    let list = sb.run_ok(&["__crash", "list"]);
     assert!(list.contains("filed"), "{list}");
     // Nothing left to send.
     let out = sb.cig_env(
@@ -9572,7 +9618,7 @@ fn ci_never_files_without_the_setting() {
     let t = tracker.to_string_lossy().to_string();
     // Under CI with nothing set: never, and the message says what would change it.
     let out = sb.cig_env(
-        &["report", &id, "--send"],
+        &["report-bundle", &id, "--queue"],
         &[("CIG_INTERNAL_TRACKER_DIR", &t), ("CI", "true")],
     );
     assert_eq!(out.status.code(), Some(3));
@@ -9582,11 +9628,11 @@ fn ci_never_files_without_the_setting() {
         "{err}"
     );
     assert!(!tracker.exists());
-    assert_eq!(sb.run_ok(&["--json", "crash", "list"]).trim(), "[]");
+    assert_eq!(sb.run_ok(&["--json", "__crash", "list"]).trim(), "[]");
     // The setting, made explicit, holds under CI.
     sb.run_ok(&["config", "reports", "always"]);
     let out = sb.cig_env(
-        &["report", &id, "--send"],
+        &["report-bundle", &id, "--queue"],
         &[("CIG_INTERNAL_TRACKER_DIR", &t), ("CI", "true")],
     );
     assert!(
@@ -9599,7 +9645,7 @@ fn ci_never_files_without_the_setting() {
     sb.run_ok(&["config", "reports", "--unset"]);
     sb.run_ok(&["config", "crash_reports", "never"]);
     let out = sb.cig_env(
-        &["report", &id, "--send"],
+        &["report-bundle", &id, "--queue"],
         &[("CIG_INTERNAL_TRACKER_DIR", &t)],
     );
     assert_eq!(out.status.code(), Some(3));
@@ -9649,7 +9695,7 @@ fn a_damaged_object_from_an_earlier_run_trips_the_next_burn() {
         "{err}"
     );
     let reports: serde_json::Value =
-        serde_json::from_str(&sb.run_ok(&["--json", "crash", "list"])).unwrap();
+        serde_json::from_str(&sb.run_ok(&["--json", "__crash", "list"])).unwrap();
     assert!(
         reports[0]["title"]
             .as_str()
@@ -9689,7 +9735,7 @@ fn a_rollback_that_restores_the_wrong_mode_trips() {
     );
     assert_eq!(sb.read("p/f.txt"), "before\n");
     let reports: serde_json::Value =
-        serde_json::from_str(&sb.run_ok(&["--json", "crash", "list"])).unwrap();
+        serde_json::from_str(&sb.run_ok(&["--json", "__crash", "list"])).unwrap();
     let r = &reports[0];
     assert_eq!(r["kind"], "tripwire", "{r}");
     assert!(
@@ -9719,11 +9765,11 @@ fn a_rollback_that_restores_the_wrong_mode_trips() {
         .iter()
         .any(|l| l == "tripwire"));
     // The same run without the fault trips nothing.
-    sb.run_ok(&["crash", "delete", "--all"]);
+    sb.run_ok(&["__crash", "delete", "--all"]);
     let out = sb.cig_env(&["run", "s.cig"], &[("CIG_INTERNAL_TRACKER_DIR", &t)]);
     let err = String::from_utf8_lossy(&out.stderr).to_string();
     assert!(!err.contains("tripwire:"), "{err}");
-    assert_eq!(sb.run_ok(&["--json", "crash", "list"]).trim(), "[]");
+    assert_eq!(sb.run_ok(&["--json", "__crash", "list"]).trim(), "[]");
 }
 
 #[test]
@@ -9748,7 +9794,7 @@ fn a_cough_in_the_users_script_is_never_reported() {
             "{script}: {err}"
         );
     }
-    assert_eq!(sb.run_ok(&["--json", "crash", "list"]).trim(), "[]");
+    assert_eq!(sb.run_ok(&["--json", "__crash", "list"]).trim(), "[]");
     assert!(!tracker.exists());
     // An internal error is cig's own: reported, filed, labelled.
     let out = sb.cig_env(
@@ -9766,7 +9812,7 @@ fn a_cough_in_the_users_script_is_never_reported() {
         "{err}"
     );
     let reports: serde_json::Value =
-        serde_json::from_str(&sb.run_ok(&["--json", "crash", "list"])).unwrap();
+        serde_json::from_str(&sb.run_ok(&["--json", "__crash", "list"])).unwrap();
     assert_eq!(reports.as_array().unwrap().len(), 1);
     assert_eq!(reports[0]["kind"], "internal");
     let issue = tracker.join("otmof-ops__cig-script/1.json");
@@ -9815,7 +9861,7 @@ fn a_repro_contains_no_user_path_or_content() {
     while std::time::Instant::now() < deadline {
         if issue.exists()
             && sb
-                .run_ok(&["--json", "crash", "list"])
+                .run_ok(&["--json", "__crash", "list"])
                 .contains("\"issue\"")
         {
             break;
@@ -9824,7 +9870,7 @@ fn a_repro_contains_no_user_path_or_content() {
     }
     assert!(issue.exists(), "the report was not filed");
     let filed = fs::read_to_string(&issue).unwrap();
-    let report = sb.run_ok(&["--json", "crash", "list"]);
+    let report = sb.run_ok(&["--json", "__crash", "list"]);
     let v: serde_json::Value = serde_json::from_str(&report).unwrap();
     let r = &v[0];
     assert_eq!(r["repro"]["verified"], true, "{r}");
@@ -9896,7 +9942,7 @@ fn an_unverified_repro_is_not_attached() {
     while std::time::Instant::now() < deadline {
         if issue.exists()
             && sb
-                .run_ok(&["--json", "crash", "list"])
+                .run_ok(&["--json", "__crash", "list"])
                 .contains("\"issue\"")
         {
             break;
@@ -9905,7 +9951,7 @@ fn an_unverified_repro_is_not_attached() {
     }
     assert!(issue.exists(), "the report was not filed");
     let v: serde_json::Value =
-        serde_json::from_str(&sb.run_ok(&["--json", "crash", "list"])).unwrap();
+        serde_json::from_str(&sb.run_ok(&["--json", "__crash", "list"])).unwrap();
     let r = &v[0];
     assert_eq!(r["repro"]["verified"], false, "{r}");
     assert!(
@@ -9967,7 +10013,7 @@ fn a_second_report_updates_the_stats_not_a_comment() {
         "{again}"
     );
     assert!(!tracker.join("otmof-ops__cig-script/2.json").exists());
-    let list = sb.run_ok(&["--json", "crash", "list"]);
+    let list = sb.run_ok(&["--json", "__crash", "list"]);
     let v: serde_json::Value = serde_json::from_str(&list).unwrap();
     assert_eq!(v.as_array().unwrap().len(), 2);
     assert!(
@@ -9991,7 +10037,7 @@ fn a_fixed_report_is_announced_by_crash_announce_fixed() {
     let tracker = sb.path().join("tracker");
     let t = tracker.to_string_lossy().to_string();
     let out = sb.cig_env(
-        &["report", &id, "--send"],
+        &["report-bundle", &id, "--queue"],
         &[("CIG_INTERNAL_TRACKER_DIR", &t)],
     );
     assert!(
@@ -10032,7 +10078,7 @@ fn a_fixed_report_is_announced_by_crash_announce_fixed() {
         "{err}"
     );
     let v: serde_json::Value =
-        serde_json::from_str(&sb.run_ok(&["--json", "crash", "list"])).unwrap();
+        serde_json::from_str(&sb.run_ok(&["--json", "__crash", "list"])).unwrap();
     assert_eq!(v[0]["fixed_in"], "99.0.0", "{v}");
     assert_eq!(v[0]["announced"], true, "{v}");
     // Said once.
@@ -10167,7 +10213,7 @@ fn a_report_never_contains_a_path_component_of_the_users_folder() {
     let id = sb.runs()[0]["id"].as_str().unwrap().to_string();
     let out = sb.cig_in(
         project,
-        &["report", &id, "--send"],
+        &["report-bundle", &id, "--queue"],
         &[("CIG_INTERNAL_TRACKER_DIR", &t)],
     );
     assert!(
@@ -10214,11 +10260,11 @@ fn a_report_never_contains_a_path_component_of_the_users_folder() {
     for f in &filed {
         assert_no_marker(&fs::read_to_string(f).unwrap(), &f.display().to_string());
     }
-    let listed = sb.run_ok(&["--json", "crash", "list"]);
+    let listed = sb.run_ok(&["--json", "__crash", "list"]);
     assert_no_marker(&listed, "cig crash list");
     let list: Vec<serde_json::Value> = serde_json::from_str(&listed).unwrap();
     for r in &list {
-        let shown = sb.run_ok(&["crash", "show", r["id"].as_str().unwrap()]);
+        let shown = sb.run_ok(&["__crash", "show", r["id"].as_str().unwrap()]);
         assert_no_marker(&shown, "cig crash show");
     }
     // The shape stays for the maintainer: the pack root, the depth, the
@@ -10305,7 +10351,7 @@ fn a_crash_report_cwd_is_a_placeholder() {
     );
     assert_eq!(out.status.code(), Some(70));
     let list: Vec<serde_json::Value> =
-        serde_json::from_str(&sb.run_ok(&["--json", "crash", "list"])).unwrap();
+        serde_json::from_str(&sb.run_ok(&["--json", "__crash", "list"])).unwrap();
     let r = &list[0];
     // The shape of the working directory, not its names: under home, two
     // levels, the first with a capital letter.
@@ -10315,7 +10361,7 @@ fn a_crash_report_cwd_is_a_placeholder() {
         serde_json::json!(["cig", "run", "<script>"]),
         "{r}"
     );
-    let shown = sb.run_ok(&["crash", "show", r["id"].as_str().unwrap()]);
+    let shown = sb.run_ok(&["__crash", "show", r["id"].as_str().unwrap()]);
     assert_no_marker(&shown, "cig crash show");
     assert!(
         !shown.contains(sb.path().to_str().unwrap()),
@@ -10348,7 +10394,7 @@ fn a_path_touched_twice_does_not_trip_the_rollback_tripwire() {
     assert_eq!(sb.read("p/keep.txt"), "v1\n");
     assert!(!sb.exists("p/d") && !sb.exists("p/h"));
     assert!(!err.contains("tripwire:"), "{err}");
-    assert_eq!(sb.run_ok(&["--json", "crash", "list"]).trim(), "[]");
+    assert_eq!(sb.run_ok(&["--json", "__crash", "list"]).trim(), "[]");
     assert!(!tracker.exists());
 }
 
@@ -10383,7 +10429,7 @@ fn cig_unburn_runs_the_rollback_tripwire() {
     );
     assert_eq!(sb.read("p/f.txt"), "before\n");
     let reports: Vec<serde_json::Value> =
-        serde_json::from_str(&sb.run_ok(&["--json", "crash", "list"])).unwrap();
+        serde_json::from_str(&sb.run_ok(&["--json", "__crash", "list"])).unwrap();
     let r = &reports[0];
     assert_eq!(r["kind"], "tripwire", "{r}");
     assert_eq!(r["active_run_id"], id, "{r}");
@@ -10397,7 +10443,7 @@ fn cig_unburn_runs_the_rollback_tripwire() {
     );
     wait_filed(&sb, 1);
     // The same unburn without the fault trips nothing.
-    sb.run_ok(&["crash", "delete", "--all"]);
+    sb.run_ok(&["__crash", "delete", "--all"]);
     sb.run_ok(&["run", "s.cig"]);
     let second = sb.runs().iter().find(|r| r["status"] == "ok").unwrap()["id"]
         .as_str()
@@ -10406,7 +10452,7 @@ fn cig_unburn_runs_the_rollback_tripwire() {
     let out = sb.cig_env(&["unburn", &second], &[("CIG_INTERNAL_TRACKER_DIR", &t)]);
     assert!(out.status.success());
     assert!(!String::from_utf8_lossy(&out.stderr).contains("tripwire:"));
-    assert_eq!(sb.run_ok(&["--json", "crash", "list"]).trim(), "[]");
+    assert_eq!(sb.run_ok(&["--json", "__crash", "list"]).trim(), "[]");
 }
 
 #[test]
@@ -10416,7 +10462,7 @@ fn a_typed_flush_sends_a_report_waiting_for_its_retry_time() {
     let tracker = sb.path().join("tracker");
     let t = tracker.to_string_lossy().to_string();
     let out = sb.cig_env(
-        &["report", &id, "--send"],
+        &["report-bundle", &id, "--queue"],
         &[
             ("CIG_INTERNAL_TRACKER_DIR", &t),
             ("CIG_INTERNAL_OFFLINE", "1"),
@@ -10434,7 +10480,7 @@ fn a_typed_flush_sends_a_report_waiting_for_its_retry_time() {
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(v["failed"].as_array().map(Vec::len), Some(1), "{v}");
     let list: Vec<serde_json::Value> =
-        serde_json::from_str(&sb.run_ok(&["--json", "crash", "list"])).unwrap();
+        serde_json::from_str(&sb.run_ok(&["--json", "__crash", "list"])).unwrap();
     assert_eq!(list[0]["queue"]["attempts"], 2, "{}", list[0]);
     assert!(list[0]["queue"]["next_try"].is_string(), "{}", list[0]);
     // The background's pass honours the backoff; the typed one is a
@@ -10473,7 +10519,7 @@ fn a_report_with_many_mismatches_lists_twenty_five_and_counts_the_rest() {
     let out = sb.cig_env(&["run", "s.cig"], &[("CIG_INTERNAL_FAULT", "restore-mode")]);
     assert_eq!(out.status.code(), Some(1));
     let reports: Vec<serde_json::Value> =
-        serde_json::from_str(&sb.run_ok(&["--json", "crash", "list"])).unwrap();
+        serde_json::from_str(&sb.run_ok(&["--json", "__crash", "list"])).unwrap();
     let r = &reports[0];
     let found = &r["details"]["found"];
     assert_eq!(found["checked"], 60, "{found}");
@@ -10511,7 +10557,7 @@ fn a_relative_link_target_stays_relative_in_the_repro() {
         PathBuf::from("one.txt")
     );
     let reports: Vec<serde_json::Value> =
-        serde_json::from_str(&sb.run_ok(&["--json", "crash", "list"])).unwrap();
+        serde_json::from_str(&sb.run_ok(&["--json", "__crash", "list"])).unwrap();
     let seeds = reports[0]["repro"]["seeds"].as_array().unwrap().clone();
     let link = seeds.iter().find(|s| s["kind"] == "link").unwrap();
     let target = link["target"].as_str().unwrap();
@@ -10909,11 +10955,11 @@ fn a_journal_cut_short_is_reported_as_a_ledger_tripwire() {
     forget_head(&sb, &id);
     let dry = sb.cig(&["unburn", &id, "--dry-run"]);
     assert!(!String::from_utf8_lossy(&dry.stderr).contains("tripwire:"));
-    assert_eq!(sb.run_ok(&["--json", "crash", "list"]).trim(), "[]");
+    assert_eq!(sb.run_ok(&["--json", "__crash", "list"]).trim(), "[]");
     let err = sb.run_err(&["unburn", &id], 1);
     assert!(err.contains("error[E709 burn]:"), "{err}");
     assert!(err.contains("tripwire: cig noticed"), "{err}");
-    let listed = sb.run_ok(&["--json", "crash", "list"]);
+    let listed = sb.run_ok(&["--json", "__crash", "list"]);
     let reports: serde_json::Value = serde_json::from_str(&listed).unwrap();
     let r = &reports[0];
     assert_eq!(r["kind"], "tripwire", "{r}");
@@ -10990,7 +11036,7 @@ fn the_key_is_in_no_record_report_or_log() {
     forget_head(&sb, &ids[1]);
     run(&["unburn", &ids[1]], &[]);
     run(&["unburn", &ids[0]], &[]);
-    run(&["--json", "crash", "list"], &[]);
+    run(&["--json", "__crash", "list"], &[]);
     assert!(
         said.contains("tripwire: cig noticed") && said.contains("crash report saved"),
         "the reports were not made: {said}"

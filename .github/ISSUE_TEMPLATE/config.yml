@@ -8,3 +8,6 @@ contact_links:
   - name: The wall
     url: https://github.com/otmof-ops/cig-script#the-wall
     about: Every cheat tried so far and what happened, each row backed by a test.
+  - name: Report a bug from the terminal
+    url: https://github.com/otmof-ops/cig-installer#install
+    about: Run `ciginstaller status` and `ciginstaller bug cig`; it writes the report up with the evidence and shows exactly what would be sent before anything leaves.
