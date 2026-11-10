@@ -1709,7 +1709,7 @@ remedy = "cig runs --forget <id> records that it is gone on purpose"
 code = "E711"
 title = "a newer journal format"
 meaning = "This run's journal was written in a format newer than this cig reads (format 3 is signed, from 1.9.0). An older cig refuses it by its number rather than misreading it."
-fix = "cig update, or run the cig that wrote it (cig use <version>)"
+fix = "`ciginstaller update`, or run the cig that wrote it (cig use <version>)"
 no = "cant-see-any"
 arises = ["unburn", "runs"]
 tags = ["kernel"]
@@ -1718,7 +1718,7 @@ related = ["E808"]
 [[code.cause]]
 why = "the run was made by a newer cig than this one"
 probe = "none"
-remedy = "cig update; or cig use <version> to run the cig that wrote it"
+remedy = "`ciginstaller update`; or cig use <version> to run the cig that wrote it"
 
 [[code]]
 code = "E712"
@@ -2064,7 +2064,7 @@ remedy = "narrowing never adds uses; go back to whoever issued the original"
 code = "E736"
 title = "not a pass"
 meaning = "The bytes given as a pass do not decode. Decoding is strict, so a token cut short, one with extra bytes after it, an unknown version, an unknown kind, input or caveat, an input list that is not sorted, or a path that is not absolute is refused as a whole; nothing is read past the first problem."
-fix = "copy the whole token (it starts with cigpass1.), or ask for it again; a token from a newer cig needs cig update"
+fix = "copy the whole token (it starts with cigpass1.), or ask for it again; a token from a newer cig needs `ciginstaller update`"
 no = "cant-see-any"
 arises = ["run", "any"]
 tags = ["kernel"]
@@ -2077,7 +2077,7 @@ remedy = "pass it as a file (cig pass verify <file>), or copy it again in one pi
 [[code.cause]]
 why = "the pass was made by a newer cig, and uses a version, kind, input or caveat this one does not know"
 probe = "none"
-remedy = "cig update; an unknown caveat is never ignored, because ignoring it would widen the pass"
+remedy = "`ciginstaller update`; an unknown caveat is never ignored, because ignoring it would widen the pass"
 [[code.cause]]
 why = "the file is not a pass"
 probe = "file-hash"
@@ -2480,37 +2480,41 @@ remedy = "`cig chains <file>` lists them"
 
 [[code]]
 code = "E805"
-title = "network tool missing"
-meaning = "Neither `gh` nor `curl` is available for the update or report."
-fix = "install curl or gh; `cig doctor --fix` offers to"
+title = "network tool missing (retired)"
+meaning = "Retired in 1.21.0: `cig update` no longer fetches anything, because the installer does. Kept so old run records still decode."
+fix = "`ciginstaller update`; if the installer is missing, `cig update` says how to get it"
 no = "dont-have-any"
 arises = ["update"]
 since = "1.0.0"
+retired = true
+related = ["E806"]
 [[code.cause]]
 why = "neither gh nor curl is on PATH"
 probe = "network-tools"
-remedy = "install curl from any package manager, or gh; `cig doctor --fix` offers to"
+remedy = "the installer carries its own HTTPS client: `ciginstaller update`"
 
 [[code]]
 code = "E806"
-title = "update failed"
-meaning = "The release could not be fetched, verified or installed."
-fix = "the message says which step; retry, or install from the releases page"
+title = "update failed (retired)"
+meaning = "Retired in 1.21.0: updates are the installer's, and it reports its own failures. Kept so old run records still decode."
+fix = "`ciginstaller update`, or `ciginstaller doctor --tools` to see what is wrong"
 no = "depends"
 arises = ["update"]
 since = "1.0.0"
+retired = true
+related = ["E805"]
 [[code.cause]]
 why = "no network, or the release host refused"
 probe = "none"
-remedy = "retry; `cig update --check` shows what it can reach"
+remedy = "retry `ciginstaller update --check`, which shows what it can reach"
 [[code.cause]]
 why = "the checksum did not match: nothing was installed"
 probe = "release-manifest"
-remedy = "retry once; report it if it repeats, since a mismatch means the download is not what was published"
+remedy = "retry once; the installer refuses a mismatch, so nothing was changed"
 [[code.cause]]
 why = "the install directory is not writable, or is group-writable (refused for safety)"
 probe = "path-permissions"
-remedy = "chown or chmod the directory holding cig, or install to a directory only you can write"
+remedy = "`ciginstaller doctor` names the directory and the fix"
 
 [[code]]
 code = "E807"
@@ -2546,7 +2550,7 @@ related = ["E807"]
 [[code.cause]]
 why = "cig was downgraded after the run was made"
 probe = "none"
-remedy = "cig update, or cig versions add <version> so unburn can hand the run to it"
+remedy = "`ciginstaller update`, or cig versions add <version> so unburn can hand the run to it"
 
 # --- internal (E9xx) ---
 
@@ -3004,7 +3008,7 @@ related = ["E871", "E872"]
 [[code.cause]]
 why = "the rehearsal's box reports writes, not reads or refused connections (CigScript #106)"
 probe = "none"
-remedy = "cig update once the box gains the watch; a new cig voids kept verdicts"
+remedy = "`ciginstaller update` once the box gains the watch; a new cig voids kept verdicts"
 
 [[code]]
 code = "E899"
@@ -3058,7 +3062,7 @@ since = "1.7.0"
 [[code.cause]]
 why = "a restored path is not as the journal recorded it, the journal does not read back as written, a tin object or an applied box file does not hash as it should"
 probe = "crash-reports"
-remedy = "`cig crash list` shows the report; it carries an anonymised repro when one reproduced in a sandbox, and the fix is announced on `cig update --check`"
+remedy = "`cig crash list` shows the report; it carries an anonymised repro when one reproduced in a sandbox, and the fix is announced on `ciginstaller update --check`"
 
 # ----- E1000-E1049: cigcompile (emitted by cigcompile, registered here so
 # `cig explain` knows them) ------------------------------------------------
@@ -3081,7 +3085,7 @@ remedy = "check the path, then give the script itself"
 code = "E1001"
 title = "no runtime for the target"
 meaning = "A program is its script appended to the cig of the compiler's own version, built for the target. That cig could not be found."
-fix = "give it with --runtime path/to/cig, or install the cig of that version on this machine (cig update)"
+fix = "give it with --runtime path/to/cig, or install the cig of that version on this machine (`ciginstaller update`)"
 no = "cant-see-any"
 arises = ["compile"]
 tags = ["compiler"]
@@ -3089,7 +3093,7 @@ since = "1.15.0"
 [[code.cause]]
 why = "no cig of the compiler's version is installed here or on PATH"
 probe = "on-path"
-remedy = "install it (cig update), or pass the binary with --runtime"
+remedy = "install it (`ciginstaller update`), or pass the binary with --runtime"
 [[code.cause]]
 why = "the target is another machine's and its cig was never fetched"
 probe = "none"
@@ -3202,7 +3206,7 @@ remedy = "cigcompile fetch while online, or cargo build --release --target x86_6
 [[code.cause]]
 why = "the cig on PATH was built from source rather than installed from the release"
 probe = "on-path"
-remedy = "cig update installs the static release; or pass a static cig with --runtime"
+remedy = "`ciginstaller update` installs the static release; or pass a static cig with --runtime"
 
 [[code]]
 code = "E1009"

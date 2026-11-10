@@ -1,20 +1,22 @@
 // SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
 // SPDX-License-Identifier: Apache-2.0
 
-//! Self-update from GitHub releases, through `gh` or `curl`.
+//! Release versions and the release listing, through `gh` or `curl`.
+//!
+//! Updating cig is `ciginstaller`'s job now (`cig update` is a stub for it),
+//! so nothing here replaces the running binary. What stays is what the
+//! humidor, pins and the crash tracker read: version parsing and order, the
+//! release list, the asset names the installer's manifest also reads, the
+//! download and checksum check the humidor uses to keep an older cig.
 //!
 //! What this trusts: TLS to github.com and the SHA-256 sidecar published
 //! with the release. The sidecar proves the download is intact, not who
 //! built it; signed releases are on the roadmap and `SECURITY.md` says so.
-//! Downgrades are refused unless asked for, the download is verified on the
-//! exact file that gets installed, and the running binary is replaced with
-//! a rename so there is never a half-written `cig`.
 
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::fs;
-use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 pub const DEFAULT_REPO: &str = "otmof-ops/cig-script";
@@ -84,7 +86,7 @@ pub fn asset_name(version: &Version) -> String {
     format!("cig-v{version}-{os}-{}{ext}", std::env::consts::ARCH)
 }
 
-/// The message every "no transport" failure starts with; the CLI maps it to E805.
+/// The message every "no transport" failure starts with.
 pub const NO_TOOL: &str = "neither `gh` nor `curl` is installed";
 
 pub fn has_tool(name: &str) -> bool {
@@ -194,7 +196,7 @@ fn releases_json(repo: &str) -> Result<String, String> {
         }
         return Ok(String::from_utf8_lossy(&out.stdout).to_string());
     }
-    Err(format!("{NO_TOOL}; `cig doctor --fix` can install curl"))
+    Err(format!("{NO_TOOL}; install curl or gh"))
 }
 
 fn pick(json: &str, prerelease_ok: bool) -> Result<Release, String> {
@@ -252,46 +254,6 @@ pub fn released(repo: &str) -> Result<Vec<Version>, String> {
         })
         .filter_map(|i| Version::parse(i["tag_name"].as_str().unwrap_or("")))
         .collect())
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct CheckCache {
-    pub checked_at: String,
-    pub current: String,
-    pub latest: String,
-    pub url: String,
-}
-
-pub fn cache_path() -> PathBuf {
-    crate::burn::runs::home_dir().join("update-check.json")
-}
-
-pub fn write_cache(rel: &Release) -> io::Result<()> {
-    let c = CheckCache {
-        checked_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-        current: crate::VERSION.to_string(),
-        latest: rel.version().map(|v| v.to_string()).unwrap_or_default(),
-        url: rel.url.clone(),
-    };
-    if let Some(p) = cache_path().parent() {
-        fs::create_dir_all(p)?;
-    }
-    fs::write(
-        cache_path(),
-        serde_json::to_string_pretty(&c).unwrap_or_default(),
-    )
-}
-
-pub fn read_cache() -> Option<CheckCache> {
-    let text = fs::read_to_string(cache_path()).ok()?;
-    serde_json::from_str(&text).ok()
-}
-
-/// True when the cache says a newer version than the running one exists.
-pub fn cached_newer() -> Option<CheckCache> {
-    let c = read_cache()?;
-    let latest = Version::parse(&c.latest)?;
-    (latest > Version::current()).then_some(c)
 }
 
 pub fn compare(latest: &Version) -> Ordering {
@@ -380,77 +342,7 @@ pub fn verify_sha256(file: &Path, sidecar_text: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Refuse to install into a directory another user could write to.
-pub fn check_install_dir(dir: &Path) -> Result<(), String> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        let meta = fs::metadata(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-        let mode = meta.mode();
-        if mode & 0o022 != 0 {
-            return Err(format!(
-                "{} is group- or world-writable; refusing to install there",
-                dir.display()
-            ));
-        }
-        let uid = unsafe_geteuid();
-        if let Some(uid) = uid {
-            if meta.uid() != uid && meta.uid() != 0 {
-                return Err(format!(
-                    "{} is owned by another user; refusing to install there",
-                    dir.display()
-                ));
-            }
-        }
-    }
-    let probe = dir.join(".cig-write-probe");
-    fs::write(&probe, b"").map_err(|e| format!("{} is not writable: {e}", dir.display()))?;
-    let _ = fs::remove_file(&probe);
-    Ok(())
-}
-
-#[cfg(unix)]
-fn unsafe_geteuid() -> Option<u32> {
-    // Avoid a libc dependency: read our own uid from /proc when available.
-    let status = fs::read_to_string("/proc/self/status").ok()?;
-    let line = status.lines().find(|l| l.starts_with("Uid:"))?;
-    line.split_whitespace().nth(2)?.parse().ok()
-}
-
-/// Replace the running executable with `new_binary`, atomically.
-pub fn install(new_binary: &Path) -> Result<PathBuf, String> {
-    if crate::program::running() {
-        return Err("a compiled program never replaces itself with cig".to_string());
-    }
-    let current = std::env::current_exe().map_err(|e| e.to_string())?;
-    let current = fs::canonicalize(&current).unwrap_or(current);
-    let dir = current
-        .parent()
-        .ok_or("cannot find the install directory")?;
-    check_install_dir(dir)?;
-    let staged = dir.join(".cig.new");
-    fs::copy(new_binary, &staged).map_err(|e| format!("staging into {}: {e}", dir.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&staged, fs::Permissions::from_mode(0o755))
-            .map_err(|e| e.to_string())?;
-    }
-    if cfg!(windows) {
-        let old = dir.join("cig.exe.old");
-        let _ = fs::remove_file(&old);
-        fs::rename(&current, &old)
-            .map_err(|e| format!("cannot move the running binary aside: {e}"))?;
-        fs::rename(&staged, &current)
-            .map_err(|e| format!("cannot move the new binary into place: {e}"))?;
-    } else {
-        fs::rename(&staged, &current)
-            .map_err(|e| format!("cannot replace {}: {e}", current.display()))?;
-    }
-    Ok(current)
-}
-
-/// Remove a leftover `cig.exe.old` from a previous Windows update.
+/// Remove a `cig.exe.old` that an update before the installer left behind.
 pub fn cleanup_old() {
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {

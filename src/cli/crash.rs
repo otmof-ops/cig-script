@@ -50,6 +50,9 @@ pub enum CrashCommand {
         #[arg(long)]
         now: bool,
     },
+    /// Say which reports this machine filed were fixed in a release (run by `ciginstaller update` after it changed cig).
+    #[command(hide = true, name = "announce-fixed")]
+    AnnounceFixed,
     /// Delete a report, or all of them.
     Delete {
         /// Report id or unique prefix.
@@ -60,8 +63,27 @@ pub enum CrashCommand {
     },
 }
 
+/// Close the loop on a bug this machine reported, fixed in a release. It
+/// used to ride on `cig update`; the installer updates now and calls this
+/// after an update that changed cig. A failure here is the installer's to
+/// ignore, so it never reports one: no tracker, no network, nothing to say.
+fn announce_fixed(ctx: &Ctx) -> i32 {
+    let cfg = Config::load();
+    let repo = cfg.get("issues_repo");
+    let fixed = ashtray::announce_fixed(&cfg, &crate::update::releases(&repo).unwrap_or_default());
+    if ctx.json {
+        outln!("{}", serde_json::json!({ "fixed_reports": fixed }));
+    } else {
+        for line in &fixed {
+            eprintln!("{} {line}", ctx.green("fixed:"));
+        }
+    }
+    exit::OK
+}
+
 pub fn crash(ctx: &Ctx, cmd: Option<CrashCommand>) -> i32 {
     match cmd.unwrap_or(CrashCommand::List) {
+        CrashCommand::AnnounceFixed => announce_fixed(ctx),
         CrashCommand::List => list(ctx),
         CrashCommand::Show { id } => match find(ctx, &id) {
             Some(r) => {

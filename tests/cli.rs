@@ -502,14 +502,36 @@ fn args_reach_the_script() {
 }
 
 #[test]
-fn language_and_doctor_work_in_json() {
+fn language_and_product_doctor_work_in_json() {
     let sb = Sandbox::new();
     let v: serde_json::Value = serde_json::from_str(&sb.run_ok(&["--json", "language"])).unwrap();
     assert!(v["library"].as_array().unwrap().len() > 10);
-    let out = sb.cig(&["--json", "doctor"]);
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(v["state_dir_writable"], true);
-    assert_eq!(v["runs"], 0);
+    let f = doctor_finding(&sb, "state-dir");
+    assert_eq!(f["severity"], "ok", "{f}");
+    let f = doctor_finding(&sb, "runs");
+    assert!(
+        f["found"].as_str().unwrap().starts_with("0 recorded"),
+        "{f}"
+    );
+}
+
+/// `cig __doctor --json`, with no namespace probed: every finding.
+fn doctor_findings(sb: &Sandbox) -> Vec<serde_json::Value> {
+    let out = sb.cig_env(
+        &["--json", "__doctor"],
+        &[("CIG_INTERNAL_NO_NS_PROBE", "1")],
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout)
+        .unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&out.stderr)));
+    v["findings"].as_array().unwrap().clone()
+}
+
+/// The first finding of a check.
+fn doctor_finding(sb: &Sandbox, check: &str) -> serde_json::Value {
+    doctor_findings(sb)
+        .into_iter()
+        .find(|f| f["check"] == check)
+        .unwrap_or_else(|| panic!("no finding for {check}"))
 }
 
 #[test]
@@ -691,87 +713,6 @@ fn a_panic_writes_a_redacted_crash_report_and_never_sends_without_consent() {
 }
 
 #[test]
-fn update_checks_verifies_and_installs_from_a_local_manifest() {
-    let sb = Sandbox::new();
-    let bin = PathBuf::from(env!("CARGO_BIN_EXE_cig"));
-    // A private, user-owned install dir (0755) holding a copy of the binary.
-    let inst = sb.path().join("inst");
-    fs::create_dir_all(&inst).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&inst, fs::Permissions::from_mode(0o755)).unwrap();
-    }
-    fs::copy(&bin, inst.join("cig")).unwrap();
-    // The "release": the same binary under a huge version, with its checksum.
-    let asset = sb.path().join("cig-v99.0.0-asset");
-    fs::copy(&bin, &asset).unwrap();
-    let sum = cigscript::burn::journal::sha256_file(&asset).unwrap();
-    sb.write("asset.sha256", &format!("{sum}  cig\n"));
-    let name = cigscript::update::asset_name(&cigscript::update::Version(99, 0, 0));
-    let manifest = serde_json::json!([{
-        "tag_name": "v99.0.0", "prerelease": false, "draft": false, "html_url": "https://example.invalid/r", "published_at": "",
-        "assets": [
-            {"name": name, "browser_download_url": format!("file://{}", asset.display())},
-            {"name": format!("{name}.sha256"), "browser_download_url": format!("file://{}", sb.path().join("asset.sha256").display())}
-        ]
-    }]);
-    sb.write("manifest.json", &manifest.to_string());
-    let run = |args: &[&str]| {
-        Command::new(inst.join("cig"))
-            .args(args)
-            .current_dir(sb.path())
-            .env("CIGSCRIPT_HOME", sb.home())
-            .env("NO_COLOR", "1")
-            .env("CIG_SEAL_KEY", "file")
-            .env("CIG_UPDATE_MANIFEST", sb.path().join("manifest.json"))
-            .output()
-            .unwrap()
-    };
-    let out = run(&["--json", "update", "--check"]);
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(v["latest"], "99.0.0");
-    assert_eq!(v["newer"], true);
-    assert!(sb.exists("home/update-check.json"));
-    // doctor reports the cached newer version
-    let d = String::from_utf8_lossy(&run(&["doctor"]).stdout).to_string();
-    assert!(d.contains("newer than this build"), "{d}");
-
-    let out = run(&["update"]);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(out.status.success(), "{stderr}");
-    assert!(
-        stderr.contains("verified: sha256 matches") && stderr.contains("updated:"),
-        "{stderr}"
-    );
-    assert!(!inst.join(".cig.new").exists());
-
-    // A corrupted checksum is refused and nothing is installed.
-    sb.write("asset.sha256", "deadbeef  cig\n");
-    let out = run(&["update"]);
-    assert_eq!(out.status.code(), Some(3));
-    assert!(String::from_utf8_lossy(&out.stderr).contains("checksum mismatch"));
-}
-
-#[test]
-fn installer_script_parses() {
-    let out = Command::new("sh")
-        .args(["-n", concat!(env!("CARGO_MANIFEST_DIR"), "/install.sh")])
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-}
-
-#[test]
 fn lab_examples_run_end_to_end() {
     let ex = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
     let sb = Sandbox::new();
@@ -856,10 +797,15 @@ fn interrupted_run_is_recognised_counted_from_the_journal_and_unburnable() {
     assert_eq!(runs[0]["status"], "interrupted", "{runs:?}");
     assert_eq!(runs[0]["burns"], 2, "counted from the journal: {runs:?}");
 
-    let doctor: serde_json::Value =
-        serde_json::from_slice(&sb.cig(&["--json", "doctor"]).stdout).unwrap();
-    assert_eq!(doctor["interrupted_runs"][0], id, "{doctor}");
-    let text = String::from_utf8_lossy(&sb.cig(&["doctor"]).stdout).to_string();
+    let f = doctor_finding(&sb, "interrupted-run");
+    assert_eq!(f["severity"], "action", "{f}");
+    assert!(f["found"].as_str().unwrap().contains(&id), "{f}");
+    assert_eq!(f["fix"], format!("cig unburn {id}"), "{f}");
+    let text = String::from_utf8_lossy(
+        &sb.cig_env(&["__doctor"], &[("CIG_INTERNAL_NO_NS_PROBE", "1")])
+            .stdout,
+    )
+    .to_string();
     assert!(
         text.contains("interrupted mid-burn") && text.contains("E706"),
         "{text}"
@@ -1249,16 +1195,6 @@ fn usage_layer_errors_carry_their_codes() {
     );
     let err = sb.run_err(&["unburn", "zzz"], 3);
     assert!(err.contains("error[E803 usage]"), "{err}");
-    // No transport at all is E805, distinct from a transport that failed (E806).
-    let out = sb.cig_env(
-        &["update", "--check"],
-        &[("PATH", ""), ("CIG_UPDATE_MANIFEST", "")],
-    );
-    let err = String::from_utf8_lossy(&out.stderr).to_string();
-    assert!(
-        err.contains("error[E805 usage]") && err.contains("neither `gh` nor `curl`"),
-        "{err}"
-    );
 }
 
 // ----- the Hammer update: doctor on the emit hook -----------------------------
@@ -6452,7 +6388,7 @@ fn doctor_reports_the_tin_without_making_a_key() {
     let sb = Sandbox::new();
     // Doctor's exit code reflects the machine (a tool missing, cig not on
     // PATH); the tin block is what this test is about.
-    let out = String::from_utf8_lossy(&sb.cig(&["doctor"]).stdout).to_string();
+    let out = String::from_utf8_lossy(&sb.cig(&["__doctor"]).stdout).to_string();
     assert!(out.contains("  tin"), "{out}");
     assert!(out.contains("not made yet"), "{out}");
     assert!(
@@ -9194,7 +9130,7 @@ fn a_key_handed_over_on_a_descriptor_seals_and_is_never_written() {
     );
     assert_eq!(sb.read(".env"), "SECRET=two");
     // Doctor names the keeper.
-    let out = cig_fd("3<key.hex", &["doctor", "--seal-key-fd", "3"]);
+    let out = cig_fd("3<key.hex", &["__doctor", "--seal-key-fd", "3"]);
     assert!(
         text(&out).contains("handed over on a descriptor"),
         "{}",
@@ -10049,7 +9985,7 @@ fn a_second_report_updates_the_stats_not_a_comment() {
 }
 
 #[test]
-fn a_fixed_report_is_announced_on_update_check() {
+fn a_fixed_report_is_announced_by_crash_announce_fixed() {
     let sb = Sandbox::new();
     let id = failed_run(&sb);
     let tracker = sb.path().join("tracker");
@@ -10086,11 +10022,13 @@ fn a_fixed_report_is_announced_on_update_check() {
         ("CIG_INTERNAL_TRACKER_DIR", &t[..]),
         ("CIG_UPDATE_MANIFEST", &m[..]),
     ];
-    let out = sb.cig_env(&["update", "--check"], &env);
+    let out = sb.cig_env(&["crash", "announce-fixed"], &env);
     let err = String::from_utf8_lossy(&out.stderr).to_string();
     assert!(out.status.success(), "{err}");
     assert!(
-        err.contains("fixed: a bug you reported (#1, boom) is fixed in 99.0.0: cig update"),
+        err.contains(
+            "fixed: a bug you reported (#1, boom) is fixed in 99.0.0: ciginstaller update"
+        ),
         "{err}"
     );
     let v: serde_json::Value =
@@ -10098,9 +10036,9 @@ fn a_fixed_report_is_announced_on_update_check() {
     assert_eq!(v[0]["fixed_in"], "99.0.0", "{v}");
     assert_eq!(v[0]["announced"], true, "{v}");
     // Said once.
-    let out = sb.cig_env(&["update", "--check"], &env);
+    let out = sb.cig_env(&["crash", "announce-fixed"], &env);
     assert!(!String::from_utf8_lossy(&out.stderr).contains("a bug you reported"));
-    let out = sb.cig_env(&["--json", "update", "--check"], &env);
+    let out = sb.cig_env(&["--json", "crash", "announce-fixed"], &env);
     let j: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(j["fixed_reports"].as_array().map(Vec::len), Some(0), "{j}");
 }
@@ -11041,7 +10979,7 @@ fn the_key_is_in_no_record_report_or_log() {
         .map(|r| r["id"].as_str().unwrap().to_string())
         .collect();
     run(&["runs", &ids[1], "--verify"], &[]);
-    run(&["doctor"], &[]);
+    run(&["__doctor"], &[]);
     run(&["tin", "verify"], &[]);
     run(&["run", "s.cig"], &[("CIG_INTERNAL_PANIC", "1")]);
     // A tripwire report: the ledger catches a journal cut short.
@@ -11104,7 +11042,7 @@ fn the_state_directory_is_kept_out_of_spotlight() {
 #[test]
 fn doctor_lists_the_box_primitives() {
     let sb = Sandbox::new();
-    let out = sb.cig(&["doctor"]);
+    let out = sb.cig(&["__doctor"]);
     let said = String::from_utf8_lossy(&out.stdout).to_string();
     assert!(said.contains("\n  box\n"), "{said}");
     if cfg!(target_os = "linux") {
@@ -11115,7 +11053,7 @@ fn doctor_lists_the_box_primitives() {
             );
         }
         // The box's own refusal reaches the overlayfs line, with its reason.
-        let no = sb.cig_env(&["doctor"], &[("CIG_INTERNAL_NO_BOX", "1")]);
+        let no = sb.cig_env(&["__doctor"], &[("CIG_INTERNAL_NO_BOX", "1")]);
         let said = String::from_utf8_lossy(&no.stdout).to_string();
         assert!(
             said.lines().any(|l| l.trim_start().starts_with("overlayfs")
@@ -11244,31 +11182,27 @@ fn history_budget_spares_pinned_runs() {
 fn doctor_reports_history_and_suggests_a_budget_when_off() {
     let sb = Sandbox::new();
     let _ids = four_runs(&sb);
-    let json: serde_json::Value = serde_json::from_str(&String::from_utf8_lossy(
-        &sb.cig(&["--json", "doctor"]).stdout,
-    ))
-    .unwrap();
-    assert_eq!(json["history_budget"], "off");
-    // A number of bytes between 1 GB and 20 GB, or null where free space
-    // cannot be measured here.
-    match &json["history_budget_suggested"] {
-        serde_json::Value::Number(n) => {
-            let bytes = n.as_u64().unwrap();
-            assert!(
-                (1 << 30..=20u64 * (1 << 30)).contains(&bytes),
-                "suggestion out of range: {bytes}"
-            );
-        }
-        serde_json::Value::Null => {}
-        other => panic!("unexpected suggestion: {other}"),
+    let f = doctor_finding(&sb, "history-budget");
+    assert!(f["found"].as_str().unwrap().ends_with("budget off"), "{f}");
+    // A whole number of GB between 1 and 20, in the fix, or no fix where
+    // free space cannot be measured here.
+    let suggested = f["fix"].as_str().map(|fix| {
+        let gb = fix
+            .strip_prefix("cig config history_budget ")
+            .and_then(|v| v.strip_suffix("GB"))
+            .unwrap_or_else(|| panic!("unexpected fix: {fix}"));
+        gb.parse::<u64>().unwrap()
+    });
+    if let Some(gb) = suggested {
+        assert!((1..=20).contains(&gb), "suggestion out of range: {gb}");
     }
     // The text output names the budget and, when off, the suggestion.
-    let text = String::from_utf8_lossy(&sb.cig(&["doctor"]).stdout).to_string();
+    let text = String::from_utf8_lossy(&sb.cig(&["__doctor"]).stdout).to_string();
     assert!(text.contains("history"), "{text}");
     assert!(text.contains("budget off"), "{text}");
     // The tip comes with a suggestion, where free space can be measured
     // (not on Windows today).
-    if json["history_budget_suggested"].is_number() {
+    if suggested.is_some() {
         assert!(text.contains("cig doctor suggests"), "no tip: {text}");
     }
     // The suggestion changes nothing on disk.
@@ -11277,16 +11211,10 @@ fn doctor_reports_history_and_suggests_a_budget_when_off() {
     assert_eq!(v["config"]["history_budget"]["explicit"], false);
     // With a budget set, doctor no longer suggests one.
     sb.run_ok(&["config", "history_budget", "2GB"]);
-    let json: serde_json::Value = serde_json::from_str(&String::from_utf8_lossy(
-        &sb.cig(&["--json", "doctor"]).stdout,
-    ))
-    .unwrap();
-    assert_eq!(json["history_budget"], "2GB");
-    assert!(
-        json["history_budget_suggested"].is_null(),
-        "still suggesting: {json}"
-    );
-    let text = String::from_utf8_lossy(&sb.cig(&["doctor"]).stdout).to_string();
+    let f = doctor_finding(&sb, "history-budget");
+    assert!(f["found"].as_str().unwrap().ends_with("budget 2GB"), "{f}");
+    assert!(f["fix"].is_null(), "still suggesting: {f}");
+    let text = String::from_utf8_lossy(&sb.cig(&["__doctor"]).stdout).to_string();
     assert!(
         !text.contains("cig doctor suggests"),
         "still tipping: {text}"
@@ -11329,25 +11257,33 @@ fn history_budget_counts_the_tin_and_collects_it() {
         .map(|r| r["id"].as_str().unwrap().to_string())
         .collect();
     ids.reverse();
-    let json: serde_json::Value = serde_json::from_str(&String::from_utf8_lossy(
-        &sb.cig(&["--json", "doctor"]).stdout,
-    ))
-    .unwrap();
-    let history = json["history_bytes"].as_u64().unwrap();
-    assert!(history >= 4 * size as u64, "the tin is counted: {json}");
+    // `<n> bytes of history (...)`: the number the budget measures.
+    let history_of = |sb: &Sandbox| -> u64 {
+        let f = doctor_finding(sb, "history-budget");
+        f["found"]
+            .as_str()
+            .unwrap()
+            .split(' ')
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap()
+    };
+    let history = history_of(&sb);
+    assert!(history >= 4 * size as u64, "the tin is counted: {history}");
     // A budget that one prune meets: the history less half an object.
     let budget = history - (size as u64) / 2;
     sb.run_ok(&["config", "history_budget", &budget.to_string()]);
     // The age floor holds by default: every run is seconds old.
     sb.run_ok(&["runs", "--prune", "100"]);
     assert_eq!(sb.runs().len(), 4, "history_keep spares young runs");
-    let json: serde_json::Value = serde_json::from_str(&String::from_utf8_lossy(
-        &sb.cig(&["--json", "doctor"]).stdout,
-    ))
-    .unwrap();
-    assert_eq!(json["history_over_budget"], true, "{json}");
+    let f = doctor_finding(&sb, "history-budget");
     assert!(
-        String::from_utf8_lossy(&sb.cig(&["doctor"]).stdout)
+        f["found"].as_str().unwrap().contains("over the budget"),
+        "{f}"
+    );
+    assert!(
+        String::from_utf8_lossy(&sb.cig(&["__doctor"]).stdout)
             .to_string()
             .contains("over it"),
         "doctor says so"
@@ -13192,7 +13128,7 @@ fn a_plain_run_refuses_before_it_burns_when_the_key_lock_cannot_be_had() {
     assert!(!err.contains("tripwire"), "refused before it burned: {err}");
     assert!(!sb.exists("plain.txt"), "nothing burned");
     assert!(sb.runs().is_empty(), "no run recorded");
-    let doctor = String::from_utf8_lossy(&sb.cig(&["doctor"]).stdout).into_owned();
+    let doctor = String::from_utf8_lossy(&sb.cig(&["__doctor"]).stdout).into_owned();
     assert!(doctor.contains("[E802]"), "{doctor}");
 }
 
@@ -13577,7 +13513,7 @@ fn verify_all_with_an_empty_ledger_is_not_ok() {
 fn doctor_says_the_ledger_is_gone() {
     let sb = Sandbox::new();
     // Fresh home, no runs. Nothing about a missing ledger.
-    let out = sb.cig(&["doctor"]);
+    let out = sb.cig(&["__doctor"]);
     let text =
         String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
     assert!(
@@ -13594,7 +13530,7 @@ fn doctor_says_the_ledger_is_gone() {
         .join(".cigscript-keys")
         .join("ledger.jsonl");
     fs::remove_file(&ledger).unwrap();
-    let out = sb.cig(&["doctor"]);
+    let out = sb.cig(&["__doctor"]);
     assert_eq!(out.status.code(), Some(1), "doctor should exit non-zero");
     let text =
         String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
@@ -14317,7 +14253,7 @@ fn doctor_says_where_the_key_is_and_who_owns_it() {
     use std::os::unix::fs::PermissionsExt;
     let sb = Sandbox::new();
     // No key has been made: doctor must not create one.
-    let out = String::from_utf8_lossy(&sb.cig(&["doctor"]).stdout).into_owned();
+    let out = String::from_utf8_lossy(&sb.cig(&["__doctor"]).stdout).into_owned();
     assert!(out.contains("key folder"), "{out}");
     assert!(
         !sb.path().join(".cigscript-keys").exists(),
@@ -14328,7 +14264,7 @@ fn doctor_says_where_the_key_is_and_who_owns_it() {
     let _ = sb.cig(&["run", "s.cig"]);
     let keys = sb.path().join(".cigscript-keys");
     fs::set_permissions(&keys, fs::Permissions::from_mode(0o777)).unwrap();
-    let doc = sb.cig(&["doctor"]);
+    let doc = sb.cig(&["__doctor"]);
     let stdout = String::from_utf8_lossy(&doc.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&doc.stderr).into_owned();
     assert!(

@@ -39,12 +39,12 @@ pub const KEYS: &[(&str, &str, &str)] = &[
     (
         "update_channel",
         "stable",
-        "which releases `cig update` considers: stable, or prerelease",
+        "which releases `ciginstaller update` considers: stable, or prerelease",
     ),
     (
         "update_notice",
         "true",
-        "mention a newer release on stderr after `cig doctor` or `cig update --check` found one",
+        "mention a newer release on stderr after `ciginstaller doctor` or `ciginstaller update --check` found one",
     ),
     (
         "watch_cap",

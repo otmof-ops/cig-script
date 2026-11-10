@@ -1349,7 +1349,7 @@ the burn kernel and its journal (write-ahead log).
 | [`E708`](#e708-signed-by-another-key) | signed by another key | one of the four; the message says which | cig unburn <id> --accept-unsigned, after reading that; cig tin key import for the sealed objects |
 | [`E709`](#e709-the-record-was-cut-short-or-swapped) | the record was cut short or swapped | these are MY ciggies | look at what changed the record; cig unburn <id> --force if you mean to restore from it anyway |
 | [`E710`](#e710-a-run-went-missing) | a run went missing | don't have any over here | cig runs --forget <id> if you removed it on purpose |
-| [`E711`](#e711-a-newer-journal-format) | a newer journal format | can't see any ciggies bro | cig update, or run the cig that wrote it (cig use <version>) |
+| [`E711`](#e711-a-newer-journal-format) | a newer journal format | can't see any ciggies bro | `ciginstaller update`, or run the cig that wrote it (cig use <version>) |
 | [`E712`](#e712-the-guard-is-not-available-here) | the guard is not available here | one of the four; the message says which | cig config tin_guard auto runs hops without it; cig doctor says what the system lacks |
 | [`E713`](#e713-the-inbox-held-something-that-is-not-a-run) | the inbox held something that is not a run | don't have any over here | nothing to do for the run; if a tool of yours wrote there, it was writing where a cig's state root would be (CIGSCRIPT_HOME inside the hop) |
 | [`E714`](#e714-a-child-run-is-unburned-through-its-parent-(retired)) | a child run is unburned through its parent (retired) | can't see any ciggies bro | cig unburn <child> works from 1.11.0; before it, cig unburn <parent> |
@@ -1362,7 +1362,7 @@ the burn kernel and its journal (write-ahead log).
 | [`E733`](#e733-the-work-changed-the-world) | the work changed the world | these are MY ciggies | keep the burn outside: do the checking in pass.issue, then burn { } on what it returned |
 | [`E734`](#e734-an-input-changed-while-the-work-ran) | an input changed while the work ran | one of the four; the message says which | run it again when nothing else is writing; if the same input is read more than once, read it once and keep the value |
 | [`E735`](#e735-a-pass-is-already-spent) | a pass is already spent | these are MY ciggies | ask for a new pass; cig pass log shows where this one was spent |
-| [`E736`](#e736-not-a-pass) | not a pass | can't see any ciggies bro | copy the whole token (it starts with cigpass1.), or ask for it again; a token from a newer cig needs cig update |
+| [`E736`](#e736-not-a-pass) | not a pass | can't see any ciggies bro | copy the whole token (it starts with cigpass1.), or ask for it again; a token from a newer cig needs `ciginstaller update` |
 | [`E737`](#e737-a-pass-needs-a-discharge) | a pass needs a discharge | don't have any over here | ask for the discharge (for human-yes, the approval the gate shows); then give both: the pass and its discharge |
 | [`E738`](#e738-the-signer-is-not-trusted-here) | the signer is not trusted here | never heard of you | on the machine that signed, cig pass key --kinds check,program prints the line to add; add it to the allowed signers file (cig config pass_allowed_signers <file>), or pass --allowed-signers <file> for one command |
 | [`E739`](#e739-the-pass-state-cannot-be-trusted) | the pass state cannot be trusted | these are MY ciggies | a cache that fails its MAC: cig pass gc folds the state again from the ledger, after checking the ledger's chain; a ledger cut short or replaced: cig runs --verify says what is missing |
@@ -1566,11 +1566,11 @@ Related: `E709`.
 
 This run's journal was written in a format newer than this cig reads (format 3 is signed, from 1.9.0). An older cig refuses it by its number rather than misreading it.
 
-**What to type next:** cig update, or run the cig that wrote it (cig use <version>)
+**What to type next:** `ciginstaller update`, or run the cig that wrote it (cig use <version>)
 
 **Known causes**, ranked; doctor checks them in this order:
 
-1. the run was made by a newer cig than this one (no probe; a suggestion, not a finding). **Remedy:** cig update; or cig use <version> to run the cig that wrote it
+1. the run was made by a newer cig than this one (no probe; a suggestion, not a finding). **Remedy:** `ciginstaller update`; or cig use <version> to run the cig that wrote it
 
 Related: `E808`.
 
@@ -1806,12 +1806,12 @@ Related: `E730`, `E737`.
 
 The bytes given as a pass do not decode. Decoding is strict, so a token cut short, one with extra bytes after it, an unknown version, an unknown kind, input or caveat, an input list that is not sorted, or a path that is not absolute is refused as a whole; nothing is read past the first problem.
 
-**What to type next:** copy the whole token (it starts with cigpass1.), or ask for it again; a token from a newer cig needs cig update
+**What to type next:** copy the whole token (it starts with cigpass1.), or ask for it again; a token from a newer cig needs `ciginstaller update`
 
 **Known causes**, ranked; doctor checks them in this order:
 
 1. the token was cut or changed on the way (a line wrap, a missing end, a stray space) (no probe; a suggestion, not a finding). **Remedy:** pass it as a file (cig pass verify <file>), or copy it again in one piece
-2. the pass was made by a newer cig, and uses a version, kind, input or caveat this one does not know (no probe; a suggestion, not a finding). **Remedy:** cig update; an unknown caveat is never ignored, because ignoring it would widen the pass
+2. the pass was made by a newer cig, and uses a version, kind, input or caveat this one does not know (no probe; a suggestion, not a finding). **Remedy:** `ciginstaller update`; an unknown caveat is never ignored, because ignoring it would widen the pass
 3. the file is not a pass (probe `file-hash`). **Remedy:** check the path; cig pass list shows the passes this machine holds
 
 Related: `E730`, `E738`.
@@ -2247,8 +2247,8 @@ the command line and the environment.
 | [`E802`](#e802-state-directory-unavailable) | state directory unavailable | these are MY ciggies | set CIGSCRIPT_HOME to a writable location; `cig doctor` shows which one is in use |
 | [`E803`](#e803-no-such-run) | no such run | can't see any ciggies bro | `cig runs` lists them; give more of the id if it is ambiguous |
 | [`E804`](#e804-no-such-chain) | no such chain | can't see any ciggies bro | `cig chains <file>` lists them |
-| [`E805`](#e805-network-tool-missing) | network tool missing | don't have any over here | install curl or gh; `cig doctor --fix` offers to |
-| [`E806`](#e806-update-failed) | update failed | one of the four; the message says which | the message says which step; retry, or install from the releases page |
+| [`E805`](#e805-network-tool-missing-(retired)) | network tool missing (retired) | don't have any over here | `ciginstaller update`; if the installer is missing, `cig update` says how to get it |
+| [`E806`](#e806-update-failed-(retired)) | update failed (retired) | one of the four; the message says which | `ciginstaller update`, or `ciginstaller doctor --tools` to see what is wrong |
 | [`E807`](#e807-pinned-version-not-available) | pinned version not available | don't have any over here | cig versions add <version> when online, or change the pin |
 | [`E808`](#e808-record-from-a-newer-cig) | record from a newer cig | don't have any over here | cig versions add <the version that wrote it>; cig unburn then hands the run to that version |
 | [`E809`](#e809-cannot-read-this-caveat) | cannot read this caveat | not one of the four | write one of: within <path>, until <time>, for <span>, boxed, network none, network <host,host>, args <one pattern per argument> [...], cig >= <version>, build <id>, agent <name>, once, max <n>, needs <kind> |
@@ -2335,36 +2335,40 @@ The script declares no chain by that name.
 1. the script declares no chain by that name (probe `chain-list`). **Remedy:** `cig chains <file>` lists them
 
 
-### E805 network tool missing
+### E805 network tool missing (retired)
 
-*usage · since 1.0.0 · arises in update*
+*usage · since 1.0.0 · arises in update · retired*
 
 **Kind of no:** don't have any over here (nobody's: right place, right you, nothing there; 404 from the server's side; an empty result).
 
-Neither `gh` nor `curl` is available for the update or report.
+Retired in 1.21.0: `cig update` no longer fetches anything, because the installer does. Kept so old run records still decode.
 
-**What to type next:** install curl or gh; `cig doctor --fix` offers to
+**What to type next:** `ciginstaller update`; if the installer is missing, `cig update` says how to get it
 
 **Known causes**, ranked; doctor checks them in this order:
 
-1. neither gh nor curl is on PATH (probe `network-tools`). **Remedy:** install curl from any package manager, or gh; `cig doctor --fix` offers to
+1. neither gh nor curl is on PATH (probe `network-tools`). **Remedy:** the installer carries its own HTTPS client: `ciginstaller update`
+
+Related: `E806`.
 
 
-### E806 update failed
+### E806 update failed (retired)
 
-*usage · since 1.0.0 · arises in update*
+*usage · since 1.0.0 · arises in update · retired*
 
 **Kind of no:** one of the four; the message says which (read the operating-system reason in the message; ENOENT, EACCES, ENOSPC and friends, each mapped in the causes below).
 
-The release could not be fetched, verified or installed.
+Retired in 1.21.0: updates are the installer's, and it reports its own failures. Kept so old run records still decode.
 
-**What to type next:** the message says which step; retry, or install from the releases page
+**What to type next:** `ciginstaller update`, or `ciginstaller doctor --tools` to see what is wrong
 
 **Known causes**, ranked; doctor checks them in this order:
 
-1. no network, or the release host refused (no probe; a suggestion, not a finding). **Remedy:** retry; `cig update --check` shows what it can reach
-2. the checksum did not match: nothing was installed (probe `release-manifest`). **Remedy:** retry once; report it if it repeats, since a mismatch means the download is not what was published
-3. the install directory is not writable, or is group-writable (refused for safety) (probe `path-permissions`). **Remedy:** chown or chmod the directory holding cig, or install to a directory only you can write
+1. no network, or the release host refused (no probe; a suggestion, not a finding). **Remedy:** retry `ciginstaller update --check`, which shows what it can reach
+2. the checksum did not match: nothing was installed (probe `release-manifest`). **Remedy:** retry once; the installer refuses a mismatch, so nothing was changed
+3. the install directory is not writable, or is group-writable (refused for safety) (probe `path-permissions`). **Remedy:** `ciginstaller doctor` names the directory and the fix
+
+Related: `E805`.
 
 
 ### E807 pinned version not available
@@ -2398,7 +2402,7 @@ A run record or journal was written in a format this cig does not read; it is ne
 
 **Known causes**, ranked; doctor checks them in this order:
 
-1. cig was downgraded after the run was made (no probe; a suggestion, not a finding). **Remedy:** cig update, or cig versions add <version> so unburn can hand the run to it
+1. cig was downgraded after the run was made (no probe; a suggestion, not a finding). **Remedy:** `ciginstaller update`, or cig versions add <version> so unburn can hand the run to it
 
 Related: `E807`.
 
@@ -2945,7 +2949,7 @@ A rehearsal found nothing, but the box it ran in does not report what the code r
 
 **Known causes**, ranked; doctor checks them in this order:
 
-1. the rehearsal's box reports writes, not reads or refused connections (CigScript #106) (no probe; a suggestion, not a finding). **Remedy:** cig update once the box gains the watch; a new cig voids kept verdicts
+1. the rehearsal's box reports writes, not reads or refused connections (CigScript #106) (no probe; a suggestion, not a finding). **Remedy:** `ciginstaller update` once the box gains the watch; a new cig voids kept verdicts
 
 Related: `E871`, `E872`.
 
@@ -3019,7 +3023,7 @@ After the work, cig checked one of its own promises (a restore, its journal, the
 
 **Known causes**, ranked; doctor checks them in this order:
 
-1. a restored path is not as the journal recorded it, the journal does not read back as written, a tin object or an applied box file does not hash as it should (probe `crash-reports`). **Remedy:** `cig crash list` shows the report; it carries an anonymised repro when one reproduced in a sandbox, and the fix is announced on `cig update --check`
+1. a restored path is not as the journal recorded it, the journal does not read back as written, a tin object or an applied box file does not hash as it should (probe `crash-reports`). **Remedy:** `cig crash list` shows the report; it carries an anonymised repro when one reproduced in a sandbox, and the fix is announced on `ciginstaller update --check`
 
 
 ## build (`E1000`–`E1099`)
@@ -3029,7 +3033,7 @@ building and running compiled programs: the path, the runtime, the target, and a
 | code | title | kind of no | what to type next |
 |---|---|---|---|
 | [`E1000`](#e1000-nothing-to-compile) | nothing to compile *(cigcompile)* | can't see any ciggies bro | name a `.cig` file, or a folder that holds them: cigcompile build tools/tidy.cig |
-| [`E1001`](#e1001-no-runtime-for-the-target) | no runtime for the target *(cigcompile)* | can't see any ciggies bro | give it with --runtime path/to/cig, or install the cig of that version on this machine (cig update) |
+| [`E1001`](#e1001-no-runtime-for-the-target) | no runtime for the target *(cigcompile)* | can't see any ciggies bro | give it with --runtime path/to/cig, or install the cig of that version on this machine (`ciginstaller update`) |
 | [`E1002`](#e1002-the-runtime-is-another-cig) | the runtime is another cig *(cigcompile)* | not one of the four | pass the cig of the compiler's version with --runtime, or use the cigcompile built for that cig |
 | [`E1003`](#e1003-the-script's-pin-is-not-met) | the script's pin is not met *(cigcompile)* | not one of the four | build with a cigcompile whose cig meets the pin, or move the pin once the script works on this cig |
 | [`E1004`](#e1004-the-program-cannot-be-written) | the program cannot be written *(cigcompile)* | one of the four; the message says which | write it somewhere you can with -o, or free the space the message names |
@@ -3068,11 +3072,11 @@ The path given to `cigcompile build` holds no CigScript program: no `.cig` file 
 
 A program is its script appended to the cig of the compiler's own version, built for the target. That cig could not be found.
 
-**What to type next:** give it with --runtime path/to/cig, or install the cig of that version on this machine (cig update)
+**What to type next:** give it with --runtime path/to/cig, or install the cig of that version on this machine (`ciginstaller update`)
 
 **Known causes**, ranked; doctor checks them in this order:
 
-1. no cig of the compiler's version is installed here or on PATH (probe `on-path`). **Remedy:** install it (cig update), or pass the binary with --runtime
+1. no cig of the compiler's version is installed here or on PATH (probe `on-path`). **Remedy:** install it (`ciginstaller update`), or pass the binary with --runtime
 2. the target is another machine's and its cig was never fetched (no probe; a suggestion, not a finding). **Remedy:** download that cig release asset, check its sha256, and pass it with --runtime
 
 
@@ -3182,7 +3186,7 @@ A Linux program runs anywhere because its runtime is static: cig's Linux release
 **Known causes**, ranked; doctor checks them in this order:
 
 1. cigcompile was built with a plain cargo build, so the cig-runtime beside it links this machine's glibc, and cig's release could not be fetched (CIGCOMPILE_OFFLINE, or no network) (no probe; a suggestion, not a finding). **Remedy:** cigcompile fetch while online, or cargo build --release --target x86_64-unknown-linux-musl
-2. the cig on PATH was built from source rather than installed from the release (probe `on-path`). **Remedy:** cig update installs the static release; or pass a static cig with --runtime
+2. the cig on PATH was built from source rather than installed from the release (probe `on-path`). **Remedy:** `ciginstaller update` installs the static release; or pass a static cig with --runtime
 
 
 ### E1009 a script whose name is not printable

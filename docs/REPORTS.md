@@ -17,7 +17,7 @@ the tool notices its own bug (a crash, an internal error, a tripwire)
  → builds an anonymised repro from the journal, verifies it reproduces, shrinks it
  → files a new issue or updates the existing one's stats block
  → the repro becomes a failing test → fix → release
- → the reporter's cig says "a bug you reported (#N) is fixed in X: cig update"
+ → the reporter's cig says "a bug you reported (#N) is fixed in X: ciginstaller update"
 ```
 
 ## Whose fault it is
@@ -139,10 +139,11 @@ smaller repro (which it pastes).
 
 ## Closing the loop
 
-A filed report remembers its issue. `cig update --check` (and `cig update`)
-asks the tracker whether the issue is closed and reads the releases' notes
+A filed report remembers its issue. `cig crash announce-fixed` (hidden; the
+installer runs it after an update that changed cig, and a failure there does
+not fail the update) asks the tracker whether the issue is closed and reads the releases' notes
 for the one that names it (`#N`); the first time that is known, one line
-says `a bug you reported (#N, what it was) is fixed in X: cig update`, or
+says `a bug you reported (#N, what it was) is fixed in X: ciginstaller update`, or
 `fixed in X, which you run`. Said once per report.
 
 ## One pipeline for the family

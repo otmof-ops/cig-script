@@ -3,7 +3,7 @@
 ## Supported versions
 
 Only the newest published release receives fixes. Please reproduce against it
-before reporting: `cig update --check` tells you whether you are on it.
+before reporting: `ciginstaller update --check` tells you whether you are on it.
 
 ## Reporting a vulnerability
 
@@ -26,7 +26,7 @@ tools for reading before lighting. Full detail in `docs/BURN.md`.
 
 `proc.run` never goes through a shell; arguments are passed as given, so there
 is nothing to inject into. The same holds for every place `cig` itself runs
-another program (`gh`, `curl`, package managers offered by `cig doctor --fix`).
+another program (`gh`, `curl`, package managers the installer's doctor names).
 
 ## What protects the tin
 
@@ -44,7 +44,10 @@ seals them. These protect it, and are on by default (#105, 1.8.0 to 1.15):
 - A process running as you can still delete the tin between runs, and on macOS and Windows during them. That is always caught (the ledger and `cig tin verify` say so) and never restored from. The vault that would stop it is #105's L7, not built.
 - Ordinary, non-secret before-copies are readable by you and what you run: they are your own files. `seal = all` encrypts them too.
 
-## What `cig update` trusts
+## What updating trusts
+
+`cig update` is a stub for `ciginstaller update`; the installer does the
+fetching. What cig's own downloads (the humidor) trust is below.
 
 - TLS to `github.com` and `api.github.com` (curl is invoked with `--proto
   =https --proto-redir =https --tlsv1.2`; `gh` uses its own stack).
@@ -52,17 +55,16 @@ seals them. These protect it, and are on by default (#105, 1.8.0 to 1.15):
   intact and identical to what CI published; it does not prove who built it.
   If the repository's GitHub account were compromised, a signed release would
   be the defence, and signing (minisign or Sigstore) is on the roadmap. Until
-  then, treat `cig update` as "as trustworthy as the GitHub account".
-- Nothing else: no downgrade without `--allow-downgrade`, no install into a
-  directory another user can write to, and the running binary is replaced with
-  a rename, never written in place. `cig` makes no network request unless you
-  run `cig update` or `cig crash send`.
+  then, treat an update as "as trustworthy as the GitHub account".
+- Nothing else: `cig` makes no network request unless you run `cig crash
+  send`, `cig report --send` or `cig versions add`; updating is the
+  installer's.
 
 ## What the humidor trusts
 
 `~/.cigscript/humidor/` holds other versions of cig, for scripts pinned to
 them (`# cig 1.1`) and for journals they wrote. A version arrives only through
-the path `cig update` takes: the release's asset for this platform and its
+the path an update takes: the release's asset for this platform and its
 `.sha256`, verified before the binary is kept, and never run from a failed
 check. Where `gh` is installed the binary is also checked against the
 repository's build attestation (`gh attestation verify`), which proves it
@@ -120,7 +122,7 @@ the report waits in the ashtray. Filed reports are public and permanent.
 One issue per bug: a repeat updates a stats block in the issue (count,
 versions, OSes, first and last seen, smallest repro), and comments only when
 it brings a new version, a new OS or a smaller repro. When the issue is
-closed and a release's notes name it, `cig update --check` tells the person
+closed and a release's notes name it, `ciginstaller update --check` tells the person
 who hit it, once.
 
 A crash in the middle of a run leaves its burns in place; the journal is
@@ -135,12 +137,15 @@ Another tool of the family (cig-orchestrator) hands its reports to cig with
 they join the ashtray under the same setting, redaction and routes, and go
 to the repository the tool named.
 
-## What `install.sh` trusts
+## What installing trusts
 
-Its own text. Download it, read it, then run it; the README shows the pinned
-form. It downloads a tagged release and its checksum over HTTPS, verifies
-before installing, installs into your home directory, never uses `sudo`, and
-asks before touching your shell configuration or running a package manager.
+`install.sh` and `install.ps1` only redirect to `ciginstaller` now; they
+download and install nothing. What installing trusts is the installer's own
+model, written in [its security page](https://github.com/otmof-ops/cig-installer/blob/main/SECURITY.md):
+a manifest, a checksum for every build, and a build attestation checked
+when `gh` is present. cig's own downloads are the humidor's (`cig versions
+add`), which checks the release's SHA-256 sidecar, and the attestation when
+`gh` is present.
 
 ## Passes (`cig pass`, the `cig-pass` crate)
 

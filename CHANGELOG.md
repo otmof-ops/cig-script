@@ -3,6 +3,30 @@
 All notable changes to CigScript. The format follows Keep a Changelog; the
 project follows semantic versioning.
 
+## Unreleased
+
+cig is installed, updated, removed and checked by `ciginstaller`; cig keeps
+only what it alone can know.
+
+- **`install.sh` and `install.ps1` redirect.** Each says `cig is installed
+  by ciginstaller now: ciginstaller install stick cig`, prints how to get
+  the installer, installs nothing and exits 1. They go in a later release.
+  Release assets, names and checksums are unchanged: the installer reads them.
+- **`cig update`, `cig uninstall` and `cig doctor` are stubs.** They run
+  `ciginstaller update [--check]`, `ciginstaller uninstall cig` and
+  `ciginstaller doctor --tools`, with its exit code; with no installer found
+  (on `PATH`, `$CIGSCRIPT_HOME/bin`, `~/.cigscript/bin`) they say so and exit
+  127. `--to` and `--allow-downgrade` are explained: updates come by carton.
+  `cig doctor <run>` is unchanged.
+- **Hidden entries for the installer.** `cig __doctor [--json] [--fix]` is
+  the product half of the doctor (run records, interrupted runs, the ledger,
+  the ashtray, the tin and its key, the guard, the box, the history budget)
+  in the installer doctor's finding shape; `cig crash announce-fixed` says
+  which reports you filed were fixed.
+- **Removed:** self-replace and the PATH and package-manager fixes. `E805`
+  and `E806` are retired (kept, never emitted); next-step text names
+  `ciginstaller update`.
+
 ## 1.20.0 — 2026-11-09
 
 Passes: one primitive for every "already checked" in the family, and the

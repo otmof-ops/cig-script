@@ -54,9 +54,9 @@ word yet: tell me what you'd call them and they get promoted.
 | **cig check** | Typos, sticks, effects: refuse before anything runs. | static analysis; lint; type check |
 | **cig unburn** | Put the world back the way it was, newest op first. | rollback; revert; restore |
 | **cig runs** | The lab notebook: every run, its status, how many burns, how many irreversible. | audit log; run history |
-| **cig doctor** | Looks the install over, tells you what it found, asks before it fixes anything. Soon: fires by itself when an error code does, and explains why it thinks the error appeared and exactly what to do. | diagnostics; health check; self-repair |
+| **cig doctor** | Hands the install check to the installer (`ciginstaller doctor --tools`); `cig doctor <run>` diagnoses one run's error and tells you what it found. Soon: fires by itself when an error code does, and explains why it thinks the error appeared and exactly what to do. | diagnostics; health check; self-repair |
 | **cig explain E503** | The long version of an error, in plain words. | error documentation; `--explain` |
-| **cig update** | Get the newer binary from the repo, verified. | self-update |
+| **cig update** | Hands over to `ciginstaller update`, which gets the newer build, verified. | self-update |
 | **Don't see any cigarettes.** | The first line of every error. Means: something you asked for isn't there, or isn't allowed here. | error banner |
 | **burned 4 ops (1 irreversible)** | The receipt at the end of a run. | run summary |
 | **ashtray** (the) | Where cig puts a report about its own bug (a crash, an internal error, a tripwire) before anything is sent, and where it stays once filed. `cig crash list` reads it; `cig crash flush` sends what is waiting; a run never waits on it. | local-first report queue; crash reporter spool |

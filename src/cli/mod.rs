@@ -168,13 +168,26 @@ pub enum Command {
         #[arg(long, short = 'y')]
         yes: bool,
     },
-    /// Look the install over, or diagnose a past run again; asks before it fixes anything (diagnostics).
+    /// Diagnose a past run again (a run id), or look the tools over (`ciginstaller doctor --tools`).
     Doctor {
-        /// Offer to repair what can be repaired, asking before each change.
+        /// Accepted, and the same stub: the installer's doctor names each fix (cig's own state fix is `cig __doctor --fix`).
         #[arg(long)]
         fix: bool,
         /// A run id (or prefix): diagnose that run's recorded error again, read-only.
         run: Option<String>,
+    },
+    /// The checks only cig can make, in the installer doctor's JSON shape (run by `ciginstaller doctor --tools`).
+    #[command(hide = true, name = "__doctor")]
+    InternalDoctor {
+        /// Offer to roll back interrupted runs, asking before each.
+        #[arg(long)]
+        fix: bool,
+    },
+    /// Remove cig: a stub for `ciginstaller uninstall cig`.
+    Uninstall {
+        /// Handed to `ciginstaller uninstall cig` as they are.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
     },
     /// The whole language and library on one screen (reference).
     Language,
@@ -277,15 +290,15 @@ pub enum Command {
         #[command(subcommand)]
         command: Option<tin::TinCommand>,
     },
-    /// Get the newer binary from the repo, verified before it is installed (self-update).
+    /// Update cig: a stub for `ciginstaller update` (updates come by carton).
     Update {
         /// Only report whether a newer release exists.
         #[arg(long)]
         check: bool,
-        /// Permit installing an older release.
+        /// Explained: a downgrade is `ciginstaller update --to <older carton>`.
         #[arg(long)]
         allow_downgrade: bool,
-        /// Install this release instead of the newest.
+        /// Explained: updates come by carton, `ciginstaller carton list` then `ciginstaller update --to <carton>`.
         #[arg(long, value_name = "VERSION")]
         to: Option<String>,
     },
@@ -606,8 +619,10 @@ fn dispatch(ctx: Ctx, command: Command) -> i32 {
         }
         Command::Doctor { fix, run } => match run {
             Some(id) => doctor::rediagnose(&ctx, &id),
-            None => doctor::doctor(&ctx, fix),
+            None => update::doctor_stub(&ctx, fix),
         },
+        Command::InternalDoctor { fix } => doctor::product_doctor(&ctx, fix),
+        Command::Uninstall { args } => update::uninstall_stub(&ctx, &args),
         Command::Language => language::language(&ctx),
         Command::Explain { code, schema } => explain::explain(&ctx, code, schema),
         Command::Config { key, value, unset } => config::config(&ctx, key, value, unset),

@@ -606,7 +606,7 @@ fn import_inner(file: &Path, mapping: &Mapping, scratch: &Path) -> Result<Import
     drop(manifest_text_bytes);
     if manifest.format > FORMAT {
         return Err(format!(
-            "the parcel is format {}, written by cig {}; this cig ({}) reads up to format {FORMAT}: cig update, or cig versions add {}",
+            "the parcel is format {}, written by cig {}; this cig ({}) reads up to format {FORMAT}: ciginstaller update, or cig versions add {}",
             manifest.format,
             manifest.cig,
             crate::VERSION,

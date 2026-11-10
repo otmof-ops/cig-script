@@ -50,6 +50,25 @@ nothing.
   what is already planned.
 - **Security problems:** do not open a public issue. See `SECURITY.md`.
 
+## Building from a checkout
+
+Users install cig with `ciginstaller` (`ciginstaller install stick cig`; the
+[README](README.md#install) has the details). The developer route is a build
+from a checkout, with a Rust toolchain (1.82 or newer):
+
+```sh
+cargo build --release          # target/release/cig, run it from there
+cargo install --path .         # or put it on your PATH from the checkout
+cargo install --git https://github.com/otmof-ops/cig-script --tag vX.Y.Z cigscript
+```
+
+A build from a checkout is not managed by the installer: `cig update`,
+`cig uninstall` and `cig doctor` hand over to `ciginstaller`, which does not
+know that binary, and `cargo uninstall cigscript` removes it. The root
+`install.sh` and `install.ps1` are redirects to the installer and install
+nothing. The installer calls `cig __doctor --json` for cig's own checks, and
+`cig __doctor` is how you run them from a checkout.
+
 ## The contributor agreement
 
 CigScript uses a Contributor License Agreement, not a DCO. Before a pull

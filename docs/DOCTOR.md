@@ -21,7 +21,7 @@ error[E551 runtime]: proc.run: could not start `kubectl`: no such file or direct
 ## The two rules
 
 **Doctor diagnoses; it never fixes.** A remedy is text. Anything that changes
-the world still goes through `cig doctor --fix`, which asks before each change,
+the world still goes through a fix that asks before each change (`cig __doctor --fix`, which `ciginstaller doctor` runs for cig's own state),
 and a fix that needs a burn shows up as a plan.
 
 **Doctor only claims what it verified.** The one sentence it is allowed:
