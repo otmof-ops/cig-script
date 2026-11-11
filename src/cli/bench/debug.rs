@@ -43,11 +43,15 @@ pub(super) struct Wants {
     pub(super) timings: bool,
     pub(super) stats: bool,
     pub(super) syscalls: bool,
+    /// `--profile`: a flamegraph of one extra run (perf).
+    pub(super) profile: bool,
+    /// `--repeat-until-slow`: rerun until a run is over p90 x 1.5.
+    pub(super) repeat: bool,
 }
 
 impl Wants {
     pub(super) fn any(&self) -> bool {
-        self.timings || self.stats || self.syscalls
+        self.timings || self.stats || self.syscalls || self.profile || self.repeat
     }
 }
 
@@ -147,11 +151,17 @@ pub struct Insight {
     pub timings: Option<Result<Breakdown, String>>,
     pub stats: Option<Result<Vec<Counter>, String>>,
     pub syscalls: Option<Result<SyscallReport, String>>,
+    pub profile: Option<Result<super::profile::Profile, String>>,
+    pub slow: Option<Result<super::profile::Slow, String>>,
 }
 
 impl Insight {
     pub fn is_empty(&self) -> bool {
-        self.timings.is_none() && self.stats.is_none() && self.syscalls.is_none()
+        self.timings.is_none()
+            && self.stats.is_none()
+            && self.syscalls.is_none()
+            && self.profile.is_none()
+            && self.slow.is_none()
     }
 }
 
@@ -173,82 +183,27 @@ impl Prepared<'_> {
         if wants.syscalls {
             out.syscalls = Some(self.syscall_run(median_ms));
         }
+        if wants.profile {
+            out.profile = Some(self.profile_run());
+        }
+        if wants.repeat {
+            out.slow = Some(self.repeat_until_slow());
+        }
         out
     }
 
     /// One run with the descriptor handed over; its lines read back.
-    #[cfg(unix)]
     fn phase_run(&self, wants: Wants) -> PhaseResult {
-        use std::os::unix::io::AsRawFd;
-        use std::os::unix::process::CommandExt;
-        let fail = |e: String| {
-            (
-                wants.timings.then(|| Err(e.clone())),
-                wants.stats.then_some(Err(e)),
-            )
-        };
-        let (side, case, defaults) = (self.side, self.case, self.defaults);
-        let home = self.work.join("timings-home");
-        let _ = std::fs::create_dir_all(&home);
-        let mut env = full_env(defaults, &case.env, &home);
-        if wants.timings {
-            env.insert(timings::TIMINGS_ENV.into(), FD.to_string().into());
-        }
-        if wants.stats {
-            env.insert(timings::STATS_ENV.into(), FD.to_string().into());
-        }
-        if let Err(e) = run_befores(side, case, &env) {
-            return fail(format!("not measured: `before` failed: {e}"));
-        }
-        let sink = self.work.join("timings.jsonl");
-        let file = match std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&sink)
-        {
-            Ok(f) => f,
-            Err(e) => return fail(format!("not measured: cannot make {}: {e}", sink.display())),
-        };
-        let argv = side.argv(&case.run);
-        let mut c = match build_command(&argv, &side.dir, &env, &side.dir, case.stdin.as_deref()) {
-            Ok(c) => c,
-            Err(e) => return fail(format!("not measured: {e}")),
-        };
-        let raw = file.as_raw_fd();
-        // SAFETY: between fork and exec only dup2 and fcntl run, both
-        // async-signal-safe; `raw` stays open in the parent until the child
-        // has ended.
-        unsafe {
-            c.pre_exec(move || {
-                if raw == FD {
-                    let flags = libc::fcntl(FD, libc::F_GETFD);
-                    libc::fcntl(FD, libc::F_SETFD, flags & !libc::FD_CLOEXEC);
-                } else if libc::dup2(raw, FD) < 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
-        let started = Instant::now();
-        let status = c.stdout(Stdio::null()).stderr(Stdio::null()).status();
-        let wall_ms = started.elapsed().as_secs_f64() * 1000.0;
-        drop(file);
-        match status {
-            Ok(s) if s.code() == case.expect.exit => {}
-            Ok(s) => {
-                return fail(format!(
-                    "not measured: the run ended with {} not {:?}",
-                    s.code()
-                        .map(|c| c.to_string())
-                        .unwrap_or_else(|| "a signal".into()),
-                    case.expect.exit
-                ))
+        let raw = self.phase_run_raw(wants.timings, wants.stats, "timings-home");
+        let (wall_ms, readings, unread) = match raw {
+            Ok(r) => r,
+            Err(e) => {
+                return (
+                    wants.timings.then(|| Err(e.clone())),
+                    wants.stats.then_some(Err(e)),
+                )
             }
-            Err(e) => return fail(format!("not measured: could not start: {e}")),
-        }
-        let text = std::fs::read_to_string(&sink).unwrap_or_default();
-        let _ = std::fs::remove_dir_all(&home);
-        let (readings, unread) = timings::parse(&text);
+        };
         let t = wants.timings.then(|| {
             Breakdown::of(wall_ms, &readings, unread.clone()).ok_or_else(|| {
                 format!(
@@ -298,13 +253,91 @@ impl Prepared<'_> {
         (t, s)
     }
 
+    /// One run with the descriptor handed over: its wall time in
+    /// milliseconds, what it wrote and the lines nobody could read. `Err` is
+    /// why the run could not be made.
+    #[cfg(unix)]
+    pub(super) fn phase_run_raw(
+        &self,
+        timings_on: bool,
+        stats_on: bool,
+        home_name: &str,
+    ) -> Result<(f64, Vec<Reading>, Vec<String>), String> {
+        use std::os::unix::io::AsRawFd;
+        use std::os::unix::process::CommandExt;
+        let (side, case, defaults) = (self.side, self.case, self.defaults);
+        let home = self.work.join(home_name);
+        let _ = std::fs::create_dir_all(&home);
+        let mut env = full_env(defaults, &case.env, &home);
+        if timings_on {
+            env.insert(timings::TIMINGS_ENV.into(), FD.to_string().into());
+        }
+        if stats_on {
+            env.insert(timings::STATS_ENV.into(), FD.to_string().into());
+        }
+        if let Err(e) = run_befores(side, case, &env) {
+            return Err(format!("not measured: `before` failed: {e}"));
+        }
+        let sink = self.work.join(format!("{home_name}.jsonl"));
+        let file = match std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&sink)
+        {
+            Ok(f) => f,
+            Err(e) => return Err(format!("not measured: cannot make {}: {e}", sink.display())),
+        };
+        let argv = side.argv(&case.run);
+        let mut c = match build_command(&argv, &side.dir, &env, &side.dir, case.stdin.as_deref()) {
+            Ok(c) => c,
+            Err(e) => return Err(format!("not measured: {e}")),
+        };
+        let raw = file.as_raw_fd();
+        // SAFETY: between fork and exec only dup2 and fcntl run, both
+        // async-signal-safe; `raw` stays open in the parent until the child
+        // has ended.
+        unsafe {
+            c.pre_exec(move || {
+                if raw == FD {
+                    let flags = libc::fcntl(FD, libc::F_GETFD);
+                    libc::fcntl(FD, libc::F_SETFD, flags & !libc::FD_CLOEXEC);
+                } else if libc::dup2(raw, FD) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let started = Instant::now();
+        let status = c.stdout(Stdio::null()).stderr(Stdio::null()).status();
+        let wall_ms = started.elapsed().as_secs_f64() * 1000.0;
+        drop(file);
+        match status {
+            Ok(s) if s.code() == case.expect.exit => {}
+            Ok(s) => {
+                return Err(format!(
+                    "not measured: the run ended with {} not {:?}",
+                    s.code()
+                        .map(|c| c.to_string())
+                        .unwrap_or_else(|| "a signal".into()),
+                    case.expect.exit
+                ))
+            }
+            Err(e) => return Err(format!("not measured: could not start: {e}")),
+        }
+        let text = std::fs::read_to_string(&sink).unwrap_or_default();
+        self.tidy(&home);
+        let (readings, unread) = timings::parse(&text);
+        Ok((wall_ms, readings, unread))
+    }
+
     #[cfg(not(unix))]
-    fn phase_run(&self, wants: Wants) -> PhaseResult {
-        let why = "not measured: handing a product a descriptor is Unix only".to_string();
-        (
-            wants.timings.then(|| Err(why.clone())),
-            wants.stats.then_some(Err(why)),
-        )
+    pub(super) fn phase_run_raw(
+        &self,
+        _timings_on: bool,
+        _stats_on: bool,
+        _home_name: &str,
+    ) -> Result<(f64, Vec<Reading>, Vec<String>), String> {
+        Err("not measured: handing a product a descriptor is Unix only".to_string())
     }
 
     fn syscall_run(&self, median_ms: f64) -> Result<SyscallReport, String> {
@@ -358,7 +391,7 @@ impl Prepared<'_> {
             ));
         }
         let summary = std::fs::read_to_string(&out).unwrap_or_default();
-        let _ = std::fs::remove_dir_all(&home);
+        self.tidy(&home);
         Ok((summary, wall_ms))
     }
 }
@@ -511,6 +544,7 @@ pub(super) fn print_text(name: &str, median_ms: Option<f64>, i: &Insight) {
             }
         }
     }
+    super::profile::print_text(name, i);
 }
 
 fn group(v: f64) -> String {
@@ -594,6 +628,7 @@ pub(super) fn print_markdown(name: &str, i: &Insight) {
         }
         None => {}
     }
+    super::profile::print_markdown(name, i);
 }
 
 /// The insight as the JSON a case carries under `debug`.
@@ -631,7 +666,13 @@ pub(super) fn to_json(i: &Insight) -> serde_json::Value {
             "thrash": r.thrash,
         }),
     });
-    serde_json::json!({ "timings": timings, "stats": stats, "syscalls": syscalls })
+    serde_json::json!({
+        "timings": timings,
+        "stats": stats,
+        "syscalls": syscalls,
+        "profile": i.profile.as_ref().map(super::profile::profile_json),
+        "repeat_until_slow": i.slow.as_ref().map(super::profile::slow_json),
+    })
 }
 
 #[cfg(test)]

@@ -22,11 +22,13 @@
 //! `--markdown`), step 2 (`--save` and `--against`: interleaved A/B and a
 //! Mann-Whitney verdict, in `bench/ab.rs`) and step 3 (`--watch`, in
 //! `bench/watch.rs`), step 4 (`--timings`, `--stats`, `--syscalls`, in
-//! `bench/debug.rs`), step 6 (`cig bench history`, in `bench/history.rs`) and
-//! step 7 (`--family`, `--with`, `--matrix`, in `bench/family.rs`). What is
-//! not: `--profile` and `--diff`, and the `gate` key. The manifest accepts
-//! and ignores the fields reserved for those (`gate`, `score`, `config`), so
-//! a manifest written for the whole feature still parses today.
+//! `bench/debug.rs`), step 6 (`cig bench history`, in `bench/history.rs`),
+//! step 7 (`--family`, `--with`, `--matrix`, in `bench/family.rs`) and step 8
+//! (`--profile` and `--repeat-until-slow` in `bench/profile.rs`, `--diff` in
+//! `bench/diff.rs`, `--keep` here), and #145's gates (`--gate` and the case
+//! key `gate`, in `bench/gate.rs`). The manifest accepts and ignores the
+//! fields reserved for what is still to come (`score`, `config`), so a
+//! manifest written for the whole feature still parses today.
 //! The manifest's `format` key is 1; a manifest in any other format is
 //! refused rather than guessed at.
 
@@ -40,9 +42,12 @@ use std::time::Instant;
 
 mod ab;
 mod debug;
+mod diff;
 mod family;
+mod gate;
 mod history;
 mod measures;
+mod profile;
 mod watch;
 
 use measures::{Kind, Metric};
@@ -79,6 +84,16 @@ pub struct Opts {
     pub stats: bool,
     /// Count each case's syscalls (an extra, untimed run under strace).
     pub syscalls: bool,
+    /// A sampling profile of each case as a flamegraph SVG (perf; one extra run).
+    pub profile: bool,
+    /// Compare this run's phases, counters and syscalls with a saved baseline's.
+    pub diff: Option<String>,
+    /// Keep the isolated homes and the work folders, and say where they are.
+    pub keep: bool,
+    /// Rerun each case until a run is over p90 x 1.5, and keep that run's profile.
+    pub repeat_until_slow: bool,
+    /// Gates that fail the run (`correctness`, `regression`, `disk`, `start-up`, `all`).
+    pub gate: Vec<String>,
     /// Run every product's suite (step 7).
     pub family: bool,
     /// `PRODUCT@VERSION-OR-PATH`: swap one product's binary.
@@ -96,16 +111,21 @@ pub fn history(
     manifest: Option<PathBuf>,
     file: Option<PathBuf>,
     branch: Option<String>,
+    series: Option<String>,
 ) -> i32 {
-    history::history(ctx, case, manifest, file, branch)
+    history::history(ctx, case, manifest, file, branch, series)
 }
 
 impl Opts {
     fn wants(&self) -> debug::Wants {
+        // A diff needs all three of the numbers it sets side by side.
+        let diffing = self.diff.is_some();
         debug::Wants {
-            timings: self.timings,
-            stats: self.stats,
-            syscalls: self.syscalls,
+            timings: self.timings || diffing,
+            stats: self.stats || diffing,
+            syscalls: self.syscalls || diffing,
+            profile: self.profile,
+            repeat: self.repeat_until_slow,
         }
     }
 }
@@ -119,11 +139,20 @@ struct Job<'a> {
     manifest_dir: &'a Path,
     defaults: &'a Defaults,
     cases: Vec<&'a Case>,
+    /// `--gate`: the gates that fail the run; empty when none was asked for.
+    gates: Vec<gate::Gate>,
 }
 
 /// Entry point for `cig bench`.
 pub fn bench(ctx: &Ctx, o: Opts) -> i32 {
     if o.family {
+        if o.keep || o.profile || o.diff.is_some() || o.repeat_until_slow || !o.gate.is_empty() {
+            eprintln!(
+                "{} `--keep`, `--profile`, `--diff`, `--repeat-until-slow` and `--gate` describe one suite: use them without `--family`",
+                ctx.red("error[E800 usage]:")
+            );
+            return exit::USAGE;
+        }
         return family::family(ctx, &o);
     }
     if !o.with.is_empty() || o.matrix.is_some() || !o.products.is_empty() {
@@ -170,6 +199,7 @@ pub fn bench(ctx: &Ctx, o: Opts) -> i32 {
         warmup: o.warmup.or(manifest.defaults.warmup).unwrap_or(1),
         env: manifest.defaults.env.clone(),
         home: manifest.bench.home,
+        keep: o.keep,
     };
     // No samples, or batches of nothing, would print a time that was never
     // measured.
@@ -206,6 +236,23 @@ pub fn bench(ctx: &Ctx, o: Opts) -> i32 {
             return exit::USAGE;
         }
     }
+    if let Some(name) = &o.diff {
+        if let Err(e) = ab::check_baseline_name(name) {
+            eprintln!("{} {e}", ctx.red("error[E800 usage]:"));
+            return exit::USAGE;
+        }
+    }
+    let gates = if o.gate.is_empty() {
+        Vec::new()
+    } else {
+        match gate::parse_selection(&o.gate) {
+            Ok(g) => g,
+            Err(e) => {
+                eprintln!("{} {e}", ctx.red("error[E800 usage]:"));
+                return exit::USAGE;
+            }
+        }
+    };
     let job = Job {
         ctx,
         opts: &o,
@@ -214,10 +261,18 @@ pub fn bench(ctx: &Ctx, o: Opts) -> i32 {
         manifest_dir: &manifest_dir,
         defaults: &defaults,
         cases,
+        gates,
     };
-    if o.wants().any() && (o.watch || o.against.is_some()) {
+    if (o.wants().any() || o.diff.is_some()) && (o.watch || o.against.is_some()) {
         eprintln!(
-            "{} `--timings`, `--stats` and `--syscalls` describe one run of one build: use them without `--against` and `--watch`",
+            "{} `--timings`, `--stats`, `--syscalls`, `--profile`, `--repeat-until-slow` and `--diff` describe one run of one build: use them without `--against` and `--watch`",
+            ctx.red("error[E800 usage]:")
+        );
+        return exit::USAGE;
+    }
+    if o.watch && (o.keep || !o.gate.is_empty()) {
+        eprintln!(
+            "{} `--keep` and `--gate` describe a finished run: use them without `--watch`",
             ctx.red("error[E800 usage]:")
         );
         return exit::USAGE;
@@ -247,17 +302,38 @@ pub fn bench(ctx: &Ctx, o: Opts) -> i32 {
         Some(spec) => ab::against(&job, spec, &scratch),
         None => {
             let side = ab::current_side(&job);
-            let rows = run_rows(&job, &side, &scratch);
+            let mut rows = run_rows(&job, &side, &scratch);
+            if let Some(name) = &o.diff {
+                if let Err(e) = ab::diff_rows(&job, name, &mut rows) {
+                    eprintln!("{} {e}", ctx.red("error[E800 usage]:"));
+                    let _ = std::fs::remove_dir_all(&scratch);
+                    return exit::USAGE;
+                }
+            }
             let conditions = Conditions::here();
+            let report =
+                (!job.gates.is_empty()).then(|| gate::evaluate_run(&job.cases, &rows, &job.gates));
             if ctx.json {
-                print_json(&manifest, &rows, &conditions);
+                print_json(&manifest, &rows, &conditions, report.as_ref());
             } else if o.markdown {
                 print_markdown(&manifest, &rows, &conditions);
+                if let Some(r) = &report {
+                    gate::print_markdown(r);
+                }
             } else {
                 print_table(&manifest, &rows, &conditions);
+                if let Some(r) = &report {
+                    gate::print_text(r);
+                }
             }
             report_failures(&rows);
             let mut code = exit_for(&rows);
+            if let Some(r) = &report {
+                gate::report_failures(r);
+                if r.failed() {
+                    code = exit::SCRIPT_ERROR;
+                }
+            }
             if let Some(name) = &o.save {
                 if let Err(e) = ab::save_baseline(&job, &side, name, &rows, &conditions) {
                     eprintln!("{} {e}", ctx.red("error[E800 usage]:"));
@@ -267,8 +343,81 @@ pub fn bench(ctx: &Ctx, o: Opts) -> i32 {
             code
         }
     };
-    let _ = std::fs::remove_dir_all(&scratch);
+    if o.keep {
+        report_kept(&job, &scratch);
+    } else {
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
     code
+}
+
+/// `--keep`: where the isolated homes and the work folders are, and how to
+/// rerun a case by hand in one.
+fn report_kept(job: &Job, scratch: &Path) {
+    eprintln!(
+        "bench: kept the isolated homes and work folders in {}",
+        scratch.display()
+    );
+    let pid = std::process::id();
+    let side = ab::current_side(job);
+    for case in &job.cases {
+        let safe: String = case
+            .name
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        let work = scratch.join(format!("case-{safe}-{}-{pid}", work_label(&side.label)));
+        if !work.is_dir() {
+            continue;
+        }
+        // The last home a sample of the case used, newest by name.
+        let mut homes: Vec<PathBuf> = std::fs::read_dir(&work)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.is_dir()
+                    && p.file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| n.starts_with("sample-") && n.ends_with("-home"))
+            })
+            .collect();
+        homes.sort_by_key(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .and_then(|n| {
+                    n.trim_start_matches("sample-")
+                        .trim_end_matches("-home")
+                        .parse::<usize>()
+                        .ok()
+                })
+                .unwrap_or(0)
+        });
+        eprintln!("bench: {}: {}", case.name, work.display());
+        if let Some(home) = homes.last() {
+            eprintln!(
+                "  rerun by hand: cd {} && HOME={h} CIGSCRIPT_HOME={h} {}",
+                job.manifest_dir.display(),
+                side.argv(&case.run).join(" "),
+                h = home.display()
+            );
+        }
+    }
+}
+
+/// The side label as `prepare` writes it into a work folder's name.
+fn work_label(label: &str) -> String {
+    label.replace(
+        |c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_',
+        "_",
+    )
 }
 
 /// Measure every selected case on one side, one after the other.
@@ -373,6 +522,8 @@ struct Defaults {
     warmup: usize,
     env: BTreeMap<String, String>,
     home: HomeMode,
+    /// `--keep`: leave the isolated homes and work folders where they are.
+    keep: bool,
 }
 
 #[derive(Debug)]
@@ -389,6 +540,10 @@ struct Case {
     /// checked against `expect.after_stdout`.
     after: Option<Vec<String>>,
     budget: Option<String>,
+    /// The gates this case takes part in (every case is under `correctness`).
+    gate: Vec<gate::Gate>,
+    /// What `main` had, for the `disk` gate: bytes per byte burned.
+    reference_disk: Option<f64>,
     /// This case's own batch size; wins over the defaults and `--per`.
     per: Option<usize>,
     /// Bytes one run burns: what `disk-per-byte` divides by.
@@ -438,7 +593,7 @@ fn parse_manifest(text: &str) -> Result<Manifest, String> {
         .as_table()
         .ok_or_else(|| "the manifest must be a TOML table".to_string())?;
     // A case's reserved fields: accepted and silently ignored in step 1.
-    let case_reserved: &[&str] = &["config", "gate", "score"];
+    let case_reserved: &[&str] = &["config", "score"];
     for (k, v) in root {
         match k.as_str() {
             "bench" | "defaults" | "case" => {}
@@ -532,6 +687,8 @@ fn parse_manifest(text: &str) -> Result<Manifest, String> {
                 before: Vec::new(),
                 after: None,
                 budget: None,
+                gate: Vec::new(),
+                reference_disk: None,
                 per: None,
                 burned: None,
                 ops: None,
@@ -581,6 +738,39 @@ fn parse_manifest(text: &str) -> Result<Manifest, String> {
                                 .to_string(),
                         );
                     }
+                    "gate" => case.gate = gate::parse_manifest(v, &format!("case #{}", i + 1))?,
+                    "reference" => {
+                        let t = v.as_table().ok_or_else(|| {
+                            format!(
+                                "case #{}: `reference` is a table, {{ \"disk-per-byte\" = 5.3 }}",
+                                i + 1
+                            )
+                        })?;
+                        for (rk, rv) in t {
+                            match rk.as_str() {
+                                "disk-per-byte" => {
+                                    let n = rv
+                                        .as_float()
+                                        .or_else(|| rv.as_integer().map(|n| n as f64))
+                                        .filter(|n| *n > 0.0)
+                                        .ok_or_else(|| {
+                                            format!(
+                                                "case #{}: `reference.disk-per-byte` is a number above 0",
+                                                i + 1
+                                            )
+                                        })?;
+                                    case.reference_disk = Some(n);
+                                }
+                                _ => {
+                                    return Err(unknown_key(
+                                        text,
+                                        &format!("case[{i}].reference.{rk}"),
+                                        rv,
+                                    ))
+                                }
+                            }
+                        }
+                    }
                     "env" => case.env = as_env(v, &format!("case #{} `env`", i + 1))?,
                     "watch" => case.watch = as_strings(v, &format!("case #{} `watch`", i + 1))?,
                     "measure" => {
@@ -618,6 +808,26 @@ fn parse_manifest(text: &str) -> Result<Manifest, String> {
             if kinds.contains(&Kind::DiskPerByte) && case.burned.is_none_or(|b| b == 0) {
                 return Err(format!(
                     "case {}: `disk-per-byte` needs `burned`, the bytes one run burns",
+                    case.name
+                ));
+            }
+            if case.gate.contains(&gate::Gate::Disk)
+                && (!kinds.contains(&Kind::DiskPerByte) || case.reference_disk.is_none())
+            {
+                return Err(format!(
+                    "case {}: the `disk` gate needs `measure = [\"disk-per-byte\"]` and `reference = {{ disk-per-byte = N }}`, what main had",
+                    case.name
+                ));
+            }
+            if case.gate.contains(&gate::Gate::StartUp)
+                && case
+                    .budget
+                    .as_deref()
+                    .and_then(gate::parse_budget_ms)
+                    .is_none()
+            {
+                return Err(format!(
+                    "case {}: the `start-up` gate needs a `budget` such as \"5 ms\"",
                     case.name
                 ));
             }
@@ -834,8 +1044,11 @@ struct Row {
     /// The kernel measures the case asked for (`tin-growth`, ...): reported
     /// next to the timing, never gated.
     metrics: Vec<Metric>,
-    /// What `--timings`, `--stats` and `--syscalls` found.
+    /// What `--timings`, `--stats`, `--syscalls`, `--profile` and
+    /// `--repeat-until-slow` found.
     insight: debug::Insight,
+    /// `--diff`: this run against a saved baseline's.
+    diff: Option<Result<diff::Diff, String>>,
 }
 
 fn run_case(
@@ -854,6 +1067,7 @@ fn run_case(
         outcome,
         metrics,
         insight,
+        diff: None,
     }
 }
 
@@ -874,7 +1088,16 @@ struct Prepared<'a> {
 
 impl Drop for Prepared<'_> {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.work);
+        self.tidy(&self.work);
+    }
+}
+
+impl Prepared<'_> {
+    /// Remove a folder this case made, unless `--keep` asked to see it.
+    fn tidy(&self, dir: &Path) {
+        if !self.defaults.keep {
+            let _ = std::fs::remove_dir_all(dir);
+        }
     }
 }
 
@@ -1019,7 +1242,7 @@ fn prepare<'a>(
             }
             Err(e) => return Err(Outcome::Absent(format!("could not run in warm-up: {e}"))),
         }
-        let _ = std::fs::remove_dir_all(&home);
+        p.tidy(&home);
     }
     Ok(p)
 }
@@ -1088,7 +1311,7 @@ impl Prepared<'_> {
             self.expect_after.as_deref(),
             &format!("sample {i}"),
         )?;
-        let _ = std::fs::remove_dir_all(&home);
+        self.tidy(&home);
         Ok((batch_ms / per as f64, batch_rss))
     }
 }
@@ -1630,14 +1853,17 @@ fn print_table(m: &Manifest, rows: &[Row], c: &Conditions) {
             }
         }
         outln!("");
-        outln!("Measures are reported, never gated.");
+        outln!("Measures are reported, never gated, unless `--gate disk` says otherwise.");
     }
     for r in rows {
         let median = match &r.outcome {
             Outcome::Timed(s) => Some(s.median_ms),
             _ => None,
         };
-        debug::print_text(&r.name, median, &r.insight);
+        match &r.diff {
+            Some(d) => diff::print_text(&r.name, d),
+            None => debug::print_text(&r.name, median, &r.insight),
+        }
     }
 }
 
@@ -1678,7 +1904,10 @@ fn print_markdown(m: &Manifest, rows: &[Row], c: &Conditions) {
         }
     }
     for r in rows {
-        debug::print_markdown(&r.name, &r.insight);
+        match &r.diff {
+            Some(d) => diff::print_markdown(&r.name, d),
+            None => debug::print_markdown(&r.name, &r.insight),
+        }
     }
 }
 
@@ -1732,6 +1961,9 @@ fn cases_json(rows: &[Row]) -> Vec<serde_json::Value> {
             if !r.insight.is_empty() {
                 case["debug"] = debug::to_json(&r.insight);
             }
+            if let Some(d) = &r.diff {
+                case["diff"] = diff::to_json(d);
+            }
             case
         })
         .collect()
@@ -1747,14 +1979,17 @@ fn conditions_json(c: &Conditions) -> serde_json::Value {
     })
 }
 
-fn print_json(m: &Manifest, rows: &[Row], c: &Conditions) {
-    let doc = serde_json::json!({
+fn print_json(m: &Manifest, rows: &[Row], c: &Conditions, gates: Option<&gate::Report>) {
+    let mut doc = serde_json::json!({
         "format": FORMAT,
         "product": m.bench.product,
         "cig_version": env!("CARGO_PKG_VERSION"),
         "conditions": conditions_json(c),
         "cases": cases_json(rows),
     });
+    if let Some(g) = gates {
+        doc["gates"] = gate::to_json(g);
+    }
     outln!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
 }
 
@@ -1823,11 +2058,37 @@ mod tests {
             [[case]]
             name = "a"
             run = ["true"]
-            gate = "+10%"
             score = "fixtures/score.cig"
             config = { hop_statcache = "on" }
         "#;
         parse_manifest(text).expect("reserved keys are accepted");
+    }
+
+    #[test]
+    fn manifest_gate_keys_parse_and_the_ones_that_cannot_work_are_refused() {
+        let case = |extra: &str| {
+            format!("[bench]\nproduct = \"cig\"\n[[case]]\nname = \"a\"\nrun = [\"true\"]\n{extra}")
+        };
+        let m = parse_manifest(&case(
+            "gate = [\"disk\", \"correctness\"]\nmeasure = [\"disk-per-byte\"]\nburned = 10\nreference = { disk-per-byte = 2.5 }\n",
+        ))
+        .expect("a disk gate with its measure and reference");
+        assert_eq!(
+            m.cases[0].gate,
+            vec![gate::Gate::Disk, gate::Gate::Correctness]
+        );
+        assert_eq!(m.cases[0].reference_disk, Some(2.5));
+        let m = parse_manifest(&case("gate = \"start-up\"\nbudget = \"5 ms\"\n")).unwrap();
+        assert_eq!(m.cases[0].gate, vec![gate::Gate::StartUp]);
+        // Each gate that cannot work is refused, naming what it needs.
+        let e = parse_manifest(&case("gate = [\"disk\"]\n")).unwrap_err();
+        assert!(e.contains("`disk` gate needs"), "{e}");
+        let e = parse_manifest(&case("gate = [\"start-up\"]\nbudget = \"soon\"\n")).unwrap_err();
+        assert!(e.contains("`start-up` gate needs a `budget`"), "{e}");
+        let e = parse_manifest(&case("gate = [\"speed\"]\n")).unwrap_err();
+        assert!(e.contains("correctness, regression, disk, start-up"), "{e}");
+        let e = parse_manifest(&case("reference = { disk-per-bite = 2 }\n")).unwrap_err();
+        assert!(e.contains("disk-per-bite"), "{e}");
     }
 
     #[test]
