@@ -62,6 +62,37 @@ struct Entry {
     off: u32,
     len: u32,
     seen: Seen,
+    /// What the same `lstat` said beyond `Seen` (inode, device, ctime), kept
+    /// so the stat cache can use the scan's stat instead of making its own
+    /// (#148). Never part of what two scans are compared on.
+    ident: Ident,
+}
+
+/// The part of one `lstat` that `Seen` leaves out. All zero where the
+/// platform has no stable identity (the stat cache is off there).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Ident {
+    dev: u64,
+    ino: u64,
+    ctime_ns: u64,
+}
+
+#[cfg(unix)]
+fn ident_of(m: &fs::Metadata) -> Ident {
+    use std::os::unix::fs::MetadataExt;
+    let ctime_ns = (m.ctime() as i128)
+        .saturating_mul(1_000_000_000)
+        .saturating_add(m.ctime_nsec() as i128);
+    Ident {
+        dev: m.dev(),
+        ino: m.ino(),
+        ctime_ns: if ctime_ns < 0 { 0 } else { ctime_ns as u64 },
+    }
+}
+
+#[cfg(not(unix))]
+fn ident_of(_: &fs::Metadata) -> Ident {
+    Ident::default()
 }
 
 /// One pass over a tree.
@@ -173,6 +204,24 @@ impl Scan {
         self.entries.iter().map(|e| (self.rel_of(e), &e.seen))
     }
 
+    /// Every file the scan saw, in path order, with the stat tuple the stat
+    /// cache keys on, taken from the scan's own `lstat` (no second one).
+    /// `None` for the tuple where the platform gives no identity.
+    pub fn iter_stat(
+        &self,
+    ) -> impl Iterator<Item = (&[u8], &Seen, Option<super::statcache::StatTuple>)> {
+        self.entries
+            .iter()
+            .map(|e| (self.rel_of(e), &e.seen, stat_tuple(&e.seen, &e.ident)))
+    }
+
+    /// The stat tuple the scan's `lstat` gave a regular file at this
+    /// absolute path, or `None` when the scan did not see a file there.
+    pub fn stat_of_path(&self, path: &Path) -> Option<super::statcache::StatTuple> {
+        let i = rel_bytes(&self.root, path).and_then(|r| self.index_of(&r))?;
+        stat_tuple(&self.entries[i].seen, &self.entries[i].ident)
+    }
+
     /// The absolute path of an entry's relative path.
     pub fn path(&self, rel: &[u8]) -> PathBuf {
         join_rel(&self.root, rel)
@@ -231,6 +280,58 @@ impl Scan {
     }
 }
 
+/// Did nothing at all change between these two scans of one root, down to
+/// each file's inode and ctime, and is nothing too new to tell? A file whose
+/// whole stat tuple reads as it did was not written to (a write moves its
+/// ctime), which is all the hash check after a hop looks for; this answers it
+/// for every file in one pass over the two arrays. Anything else (an entry
+/// made or gone, a tuple that moved, a time inside the racy margin of
+/// `started_ns`, a scan that stopped at the cap, a platform with no identity)
+/// is `false`, and the file-by-file check runs as it always did.
+pub(crate) fn same_stat(before: &Scan, after: &Scan, started_ns: u64) -> bool {
+    if !cfg!(unix)
+        || !before.complete
+        || !after.complete
+        || before.entries.len() != after.entries.len()
+    {
+        return false;
+    }
+    before.entries.iter().zip(&after.entries).all(|(b, a)| {
+        if b.seen != a.seen || b.ident != a.ident || before.rel_of(b) != after.rel_of(a) {
+            return false;
+        }
+        match &b.seen {
+            Seen::File { mtime, .. } => {
+                !super::statcache::is_racy(*mtime, started_ns)
+                    && !super::statcache::is_racy(b.ident.ctime_ns, started_ns)
+            }
+            _ => true,
+        }
+    })
+}
+
+/// The stat cache's tuple for a regular file from what a scan saw. The fields
+/// are the ones `statcache::stat_of` reads, from the same calls.
+#[cfg(unix)]
+fn stat_tuple(seen: &Seen, id: &Ident) -> Option<super::statcache::StatTuple> {
+    match seen {
+        Seen::File { mtime, len, mode } => Some(super::statcache::StatTuple {
+            dev: id.dev,
+            inode: id.ino,
+            size: *len,
+            mtime_ns: *mtime,
+            ctime_ns: id.ctime_ns,
+            mode: *mode,
+        }),
+        _ => None,
+    }
+}
+
+#[cfg(not(unix))]
+fn stat_tuple(_: &Seen, _: &Ident) -> Option<super::statcache::StatTuple> {
+    None
+}
+
 /// What a worker collected: its own arena and entries into it.
 struct Chunk {
     arena: Vec<u8>,
@@ -238,13 +339,14 @@ struct Chunk {
 }
 
 impl Chunk {
-    fn push(&mut self, rel: &[u8], seen: Seen) {
+    fn push(&mut self, rel: &[u8], seen: Seen, ident: Ident) {
         let off = self.arena.len() as u32;
         self.arena.extend_from_slice(rel);
         self.entries.push(Entry {
             off,
             len: rel.len() as u32,
             seen,
+            ident,
         });
     }
 }
@@ -256,6 +358,7 @@ fn look(
     chunk: &mut Chunk,
     dir_links: &mut Vec<(PathBuf, PathBuf)>,
 ) -> bool {
+    super::statcache::SCAN_LSTAT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let Ok(m) = fs::symlink_metadata(path) else {
         return false;
     };
@@ -276,7 +379,11 @@ fn look(
             }
             _ => None,
         };
-        chunk.push(rel, Seen::Link(Box::new(LinkSeen { target, through })));
+        chunk.push(
+            rel,
+            Seen::Link(Box::new(LinkSeen { target, through })),
+            Ident::default(),
+        );
         return false;
     }
     if ft.is_dir() {
@@ -286,6 +393,7 @@ fn look(
                 mode: mode_bits(&m),
                 mtime: mtime_of(&m),
             },
+            Ident::default(),
         );
         return true;
     }
@@ -297,6 +405,7 @@ fn look(
                 len: m.len(),
                 mode: mode_bits(&m),
             },
+            ident_of(&m),
         );
     }
     false
@@ -476,6 +585,7 @@ pub(crate) fn scan_skipping(
                 off: e.off + base,
                 len: e.len,
                 seen: e.seen,
+                ident: e.ident,
             });
         }
     }
@@ -564,6 +674,56 @@ impl<'a> Iterator for Merge<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #148: `same_stat` is the one-pass proof that no file was written to
+    /// between two scans: any moved tuple, entry made or gone, or time too
+    /// new to tell, says no.
+    #[cfg(unix)]
+    #[test]
+    fn same_stat_proves_a_quiet_tree_and_nothing_else() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        fs::create_dir_all(root.join("d")).unwrap();
+        for f in ["d/a.txt", "d/b.txt", "c.txt"] {
+            fs::write(root.join(f), f).unwrap();
+        }
+        let first = scan(root, 64, 1_000_000, None);
+        let second = scan(root, 64, 1_000_000, None);
+        let far = u64::MAX;
+        assert!(
+            same_stat(&first, &second, far),
+            "two scans of a quiet tree agree"
+        );
+        let now = super::super::statcache::now_ns();
+        assert!(
+            !same_stat(&first, &second, now),
+            "files written a moment ago are too new to vouch for"
+        );
+        // A same-size write that puts the time back still moves the ctime.
+        let a = root.join("d/a.txt");
+        let m = fs::metadata(&a).unwrap().modified().unwrap();
+        fs::write(&a, "d/a.txt").unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&a)
+            .unwrap()
+            .set_modified(m)
+            .unwrap();
+        let third = scan(root, 64, 1_000_000, None);
+        assert!(!same_stat(&first, &third, far), "a write moves the ctime");
+        fs::write(root.join("new.txt"), "n").unwrap();
+        let fourth = scan(root, 64, 1_000_000, None);
+        assert!(
+            !same_stat(&second, &fourth, far),
+            "an entry made is a change"
+        );
+        // The stat tuple a scan keeps is the one the cache reads itself.
+        let t = second.stat_of_path(&root.join("c.txt")).unwrap();
+        assert_eq!(
+            Some(t),
+            super::super::statcache::stat_of(&root.join("c.txt"))
+        );
+    }
 
     #[test]
     fn a_scan_is_sorted_complete_and_diffs_by_merge() {

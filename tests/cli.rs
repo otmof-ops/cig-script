@@ -12200,6 +12200,78 @@ fn an_unchanged_tree_is_not_read() {
     );
 }
 
+/// #148, the 100 ms hop: over an unchanged tree a hop asks the file system
+/// about each file once for the scan before and once for the scan after, and
+/// about nothing else: no second `lstat` by the stat cache, no `stat` of each
+/// tin object (the tin is listed a directory at a time), no `stat` for the
+/// hash check after the hop. Counted (`CIG_INTERNAL_HOP_STATS`), never timed:
+/// a regression here is a syscall per file, which is what the milliseconds
+/// were. 600 files is above the count at which the tin is listed.
+#[cfg(unix)]
+#[test]
+fn an_unchanged_hop_asks_each_file_once_per_scan() {
+    let sb = Sandbox::new();
+    let n = 600usize;
+    for i in 0..n {
+        sb.write(&format!("p/d{}/f{i}.txt", i % 10), &format!("file {i}\n"));
+    }
+    let pin = Command::new("sh")
+        .arg("-c")
+        .arg("find p -type f -exec touch -t 202001010000 {} +")
+        .current_dir(sb.path())
+        .status()
+        .unwrap();
+    assert!(pin.success());
+    assert!(sb
+        .cig_in("p", &["config", "hop_statcache", "on"], &[])
+        .status
+        .success());
+    sb.write(
+        "s.cig",
+        "pack { \".\" }\nburn {\n  proc.run(\"true\", [], {touches: [\"**\"]})\n  proc.run(\"true\", [], {touches: [\"**\"]})\n}\n",
+    );
+    let stats = sb.path().join("hop-stats");
+    let out = sb.cig_in(
+        "p",
+        &["run", "../s.cig"],
+        &[("CIG_INTERNAL_HOP_STATS", stats.to_str().unwrap())],
+    );
+    assert!(out.status.success(), "{out:?}");
+    let text = fs::read_to_string(&stats).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 4, "begin and end of two hops: {text}");
+    let field = |line: &str, key: &str| -> usize {
+        line.split_whitespace()
+            .find_map(|w| w.strip_prefix(key))
+            .and_then(|v| v.strip_prefix('='))
+            .and_then(|v| v.parse().ok())
+            .unwrap_or_else(|| panic!("no {key} in {line}"))
+    };
+    // The first hop stashes every file; the second is over an unchanged tree.
+    let (begin, end) = (lines[2], lines[3]);
+    assert!(
+        begin.starts_with("begin") && end.starts_with("end"),
+        "{text}"
+    );
+    for (line, what) in [(begin, "begin"), (end, "end")] {
+        assert_eq!(
+            field(line, "stat_of"),
+            0,
+            "{what}: the cache stats nothing itself: {text}"
+        );
+        assert_eq!(
+            field(line, "object_for"),
+            0,
+            "{what}: no tin object is asked alone: {text}"
+        );
+        let scanned = field(line, "scan_lstat");
+        assert!(
+            scanned <= n + 32,
+            "{what}: one lstat per entry per scan, not more ({scanned} for {n} files): {text}"
+        );
+    }
+}
+
 /// #148 `hop_watch`: a chain of hops over a tree the change watch can vouch
 /// for (one hop that changes nothing, one that changes a file, one that
 /// removes another) puts every file back exactly when the block coughs: what

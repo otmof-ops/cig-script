@@ -286,6 +286,49 @@ random-id policy, so no secret ever reaches the index. The cache is
 Unix-only until Rust stabilises Windows's own file-identity accessors
 (rust-lang/rust#63010).
 
+### What makes an unchanged hop cheap
+
+A hop over 10,000 files that nothing touched asks the file system one
+question per file per scan and nothing else. Measured on a 16-core machine
+(10,000 files of 10 KB in 100 folders, `hop_statcache on`, best of seven
+chains of 32 hops, the cost of one hop taken from the difference of two
+chain lengths so the process and the journal cancel; load average beside it):
+
+| | before (1.20.0) | now |
+|---|---|---|
+| `hop_watch off` | 228 ms (load 4), 223 ms (load 10) | 91 ms (load 5), 101 ms (load 10) |
+| `hop_watch on` | 145 ms (load 7), 157 ms (load 8) | 87 ms (load 6), 93 ms (load 10) |
+
+The hop's `statx` calls fell from 60,775 to 20,777 and, with the watch, the
+scans are skipped as before. Where the time went, and what removed it:
+
+- **One `lstat` per file per scan.** The scan keeps each regular file's
+  inode, device and ctime beside what it always kept, so the stat cache
+  compares against the scan's own stat instead of making a second one, and
+  the check after the hop reads the scan after instead of making two more.
+  A kept scan (the watch's) is never used this way: only the scan this hop
+  made is as fresh as its own stat.
+- **The tin is listed, not asked.** Each hit's object must still be in the
+  tin (a `cig tin gc` takes them); with 512 or more hits the directories
+  they fall in are read (a few hundred `getdents`) instead of one `stat` per
+  object. A name not found, a directory that cannot be read, or more names
+  than eight per hit makes it ask that one hash alone, as before.
+- **One pass proves nothing moved.** When the two scans agree on every stat
+  tuple, inode and ctime included, and no file is inside the racy margin of
+  the hop's start, no file was written to, and the per-file hash check after
+  the hop is not run. Any difference runs the check as it always did.
+- A run's `tin.pending` list is not written and synced again when the run
+  already holds the same list; the cache index is read into its map in one
+  pass; the cache is probed with the path's own bytes, not a copy.
+
+The 100 ms of the issue is met on a quiet machine and sits at it when other
+work loads all 16 cores. What is left of the 91 ms is the two scans (about 25 ms), the glob and seal
+test of each file (10), reading the cache (8), listing the tin (16) and
+building the hit list (14). None is a syscall per file any more. A regression
+to one is what `an_unchanged_hop_asks_each_file_once_per_scan` catches: it
+counts the file system questions a hop over 600 unchanged files asks
+(`CIG_INTERNAL_HOP_STATS`), never milliseconds.
+
 ### Big files, chunked and restored on every core
 
 A file of 16 MiB or more is cut into chunks on all cores at once. Each
