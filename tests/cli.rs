@@ -16449,7 +16449,15 @@ fn a_hop_goes_for_the_tin(boxed: bool) {
         "first.cig",
         "pack { \"./p\" }\nburn {\n  proc.run(\"sh\", [\"-c\", \"echo v2 > p/keep.txt\"], {touches: [\"*\"]})\n}\n",
     );
-    sb.run_ok(&["run", "first.cig"]);
+    let out = sb.cig(&["run", "first.cig"]);
+    let err = String::from_utf8_lossy(&out.stderr).to_string();
+    if !out.status.success() && err.contains("E712") && err.contains("cannot be made here") {
+        // The guard needs a user namespace; where the container refuses one
+        // (an unprivileged CI job running as root) there is nothing to prove.
+        eprintln!("the tin guard cannot be made here; skipped: {err}");
+        return;
+    }
+    assert!(out.status.success(), "{err}");
     let first = sb.runs()[0]["id"].as_str().unwrap().to_string();
     let tin_before = tree_bytes(&sb.home().join("tin"));
     let record_before = tree_bytes(&sb.home().join("runs").join(&first));
