@@ -1,0 +1,205 @@
+# SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
+# SPDX-License-Identifier: FSL-1.1-ALv2
+#
+# The family's one benchmark workflow (#179 step 6). Every repository that has
+# a `bench/bench.toml` calls it:
+#
+#   # .github/workflows/bench.yml in the calling repository
+#   on:
+#     pull_request:
+#     schedule:
+#       - cron: "17 2 * * *"
+#     workflow_dispatch:
+#   jobs:
+#     bench:
+#       uses: otmof-ops/cig-script/.github/workflows/bench.yml@main
+#       with:
+#         cig-version: "1.20.0"        # leave empty in cig-script itself: it builds its own cig
+#       permissions:
+#         contents: write              # the nightly appends to the bench-history branch
+#         pull-requests: write         # the PR comment
+#
+# Pull requests run the fast groups, A/B against the base branch on the same
+# runner (interleaved), and comment the Markdown table. Nightly (a schedule or
+# a manual run) runs the whole suite and appends one JSON line per run to
+# `history/<product>.jsonl` on the `bench-history` branch, which
+# `cig bench history <case>` reads. Heavy suites run nightly, never on a pull
+# request (DECISIONS 11).
+#
+# What fails a run: a case whose output is WRONG (`cig bench` exits 1), or a
+# suite that cannot be read or built. A timing never fails it: timings are
+# reported, never gated, on shared runners (#153); the table says what moved
+# and how sure the test is.
+name: bench
+
+on:
+  workflow_call:
+    inputs:
+      manifest:
+        description: The suite, relative to the repository root.
+        type: string
+        default: bench/bench.toml
+      mode:
+        description: "pr, nightly, or auto (a schedule or workflow_dispatch is nightly, anything else is pr)."
+        type: string
+        default: auto
+      fast-groups:
+        description: Space-separated groups a pull request runs; the rest are nightly.
+        type: string
+        default: start-up compute
+      cig-version:
+        description: The cig release to measure with (sha256 checked). Empty builds cig from this repository.
+        type: string
+        default: ""
+      history-branch:
+        description: The branch the nightly appends to.
+        type: string
+        default: bench-history
+
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    name: bench (${{ inputs.mode }})
+    runs-on: ubuntu-latest
+    # One writer at a time to the history branch.
+    concurrency:
+      group: bench-history-${{ github.repository }}
+      cancel-in-progress: false
+    env:
+      MANIFEST: ${{ inputs.manifest }}
+      FAST_GROUPS: ${{ inputs.fast-groups }}
+      CIG_VERSION: ${{ inputs.cig-version }}
+      HISTORY_BRANCH: ${{ inputs.history-branch }}
+      NO_COLOR: "1"
+      CIG_DOCTOR: "0"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Decide the mode
+        id: mode
+        run: |
+          mode="${{ inputs.mode }}"
+          if [ "$mode" = auto ]; then
+            case "${{ github.event_name }}" in
+              schedule|workflow_dispatch) mode=nightly ;;
+              *) mode=pr ;;
+            esac
+          fi
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: inputs.cig-version == ''
+
+      - name: Build cig from this repository
+        if: inputs.cig-version == ''
+        run: |
+          cargo build --release --locked
+          echo "$PWD/target/release" >> "$GITHUB_PATH"
+
+      - name: Install the cig release
+        if: inputs.cig-version != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          v="${CIG_VERSION#v}"
+          asset="cig-v${v}-linux-x86_64"
+          mkdir -p "$HOME/.cig-bench-bin"
+          cd "$HOME/.cig-bench-bin"
+          gh release download "v${v}" --repo otmof-ops/cig-script --pattern "${asset}" --pattern "${asset}.sha256"
+          # Nothing runs until the checksum matches.
+          want="$(awk '{print $1}' "${asset}.sha256")"
+          have="$(sha256sum "${asset}" | awk '{print $1}')"
+          [ "$want" = "$have" ] || { echo "sha256 of ${asset} does not match its checksum file"; exit 1; }
+          mv "${asset}" cig
+          chmod +x cig
+          echo "$PWD" >> "$GITHUB_PATH"
+
+      - name: Pull request, A/B against the base
+        if: steps.mode.outputs.mode == 'pr'
+        run: |
+          set -u
+          cig --version
+          : > bench-report.md
+          status=0
+          for g in $FAST_GROUPS; do
+            printf '### %s\n\n' "$g" >> bench-report.md
+            # B is this checkout; A is the base, built in a worktree with [bench].build.
+            cig bench "$MANIFEST" --group "$g" --against "origin/${{ github.base_ref }}" --markdown >> bench-report.md || status=$?
+            printf '\n' >> bench-report.md
+          done
+          cat bench-report.md >> "$GITHUB_STEP_SUMMARY"
+          echo "status=$status" >> "$GITHUB_ENV"
+
+      - name: Comment the table
+        if: steps.mode.outputs.mode == 'pr' && github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh pr comment "${{ github.event.pull_request.number }}" --edit-last --create-if-none --body-file bench-report.md \
+            || gh pr comment "${{ github.event.pull_request.number }}" --body-file bench-report.md
+
+      - name: Fail on a wrong answer
+        if: steps.mode.outputs.mode == 'pr'
+        run: |
+          # Exit 1 is a WRONG case or a case that could not be measured; exit 3
+          # is a suite or a build that cannot be used. Slower is never a failure.
+          [ "${status:-0}" = 0 ] || { echo "cig bench exited ${status}"; exit 1; }
+
+      - name: Nightly, the whole suite
+        if: steps.mode.outputs.mode == 'nightly'
+        run: |
+          set -u
+          cig --version
+          status=0
+          cig --json bench "$MANIFEST" > bench-run.json || status=$?
+          echo "status=$status" >> "$GITHUB_ENV"
+          # One line per run: the format `cig bench history` reads.
+          jq -c --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg commit "${{ github.sha }}" '
+            { format: 1, at: $at, commit: $commit, product: .product, cig_version: .cig_version,
+              machine: "\(.conditions.cpu), \(.conditions.cores) cores, \(.conditions.os) \(.conditions.kernel)",
+              cases: ( [ .cases[] | select(.outcome.state == "timed")
+                         | { key: .name, value: { group: .group, median_ms: .outcome.median_ms,
+                             p10_ms: .outcome.p10_ms, p90_ms: .outcome.p90_ms, cv: .outcome.cv,
+                             rss_bytes: .outcome.rss_bytes } } ] | from_entries ) }' bench-run.json > bench-line.json
+          product="$(jq -r .product bench-run.json)"
+          echo "PRODUCT=$product" >> "$GITHUB_ENV"
+          cat bench-line.json
+
+      - name: Nightly, append to the history branch
+        if: steps.mode.outputs.mode == 'nightly'
+        run: |
+          set -eu
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          for attempt in 1 2 3; do
+            rm -rf "$RUNNER_TEMP/hist"
+            if git ls-remote --exit-code --heads origin "$HISTORY_BRANCH" > /dev/null; then
+              git fetch origin "$HISTORY_BRANCH"
+              git worktree add "$RUNNER_TEMP/hist" "origin/$HISTORY_BRANCH"
+              git -C "$RUNNER_TEMP/hist" checkout -B "$HISTORY_BRANCH"
+            else
+              git worktree add --detach "$RUNNER_TEMP/hist"
+              git -C "$RUNNER_TEMP/hist" checkout --orphan "$HISTORY_BRANCH"
+              git -C "$RUNNER_TEMP/hist" rm -rf . > /dev/null 2>&1 || true
+            fi
+            mkdir -p "$RUNNER_TEMP/hist/history"
+            cat bench-line.json >> "$RUNNER_TEMP/hist/history/${PRODUCT}.jsonl"
+            git -C "$RUNNER_TEMP/hist" add history
+            git -C "$RUNNER_TEMP/hist" commit -m "bench: ${PRODUCT} ${{ github.sha }}"
+            if git -C "$RUNNER_TEMP/hist" push origin "HEAD:$HISTORY_BRANCH"; then
+              exit 0
+            fi
+            git worktree remove --force "$RUNNER_TEMP/hist"
+          done
+          echo "could not push to $HISTORY_BRANCH"
+          exit 1
+
+      - name: Nightly, fail on a wrong answer
+        if: steps.mode.outputs.mode == 'nightly'
+        run: |
+          [ "${status:-0}" = 0 ] || { echo "cig bench exited ${status}"; exit 1; }

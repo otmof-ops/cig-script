@@ -337,9 +337,9 @@ pub enum Command {
 
 #[derive(Args)]
 pub struct BenchArgs {
-    /// The manifest to read, as `cig bench bench/bench.toml`; default `bench/bench.toml`.
-    #[arg(value_name = "MANIFEST", conflicts_with = "manifest")]
-    pub path: Option<PathBuf>,
+    /// The manifest to read, as `cig bench bench/bench.toml`; default `bench/bench.toml`. `cig bench history [CASE]` reads a case's nightly history instead.
+    #[arg(value_name = "MANIFEST", conflicts_with = "manifest", num_args = 0..=2)]
+    pub path: Vec<PathBuf>,
     /// The manifest to read (the same as the argument).
     #[arg(long, value_name = "FILE")]
     pub manifest: Option<PathBuf>,
@@ -370,6 +370,33 @@ pub struct BenchArgs {
     /// Rerun the cases when a file in `[bench].watch` changes: a live table on a terminal, one line per case without one, JSON lines with `--json`. Keys: q, r, space.
     #[arg(long)]
     pub watch: bool,
+    /// Show where each case's time went by phase, from the product's own lines on the descriptor CIG_TIMINGS_FD names (an extra, untimed run).
+    #[arg(long)]
+    pub timings: bool,
+    /// Show each case's counters (allocations and bytes, from a cig built with the `bench-stats` feature; says so when it has none).
+    #[arg(long)]
+    pub stats: bool,
+    /// Count each case's syscalls with strace (Linux), the top ten by time, and flag an mmap/munmap thrash.
+    #[arg(long)]
+    pub syscalls: bool,
+    /// Run every product's suite (cig, cigo, cigcompile, cigar, ciginstaller) found through the installer's layout, `~/.config/cigscript/bench-family.toml` or `--product`.
+    #[arg(long)]
+    pub family: bool,
+    /// With `--family`: swap one product's binary for an A/B, as `cig@1.16.0` (cig releases are fetched and sha256-checked) or `cigo@./old/cigo`; repeatable.
+    #[arg(long, value_name = "PRODUCT@VERSION|PATH")]
+    pub with: Vec<String>,
+    /// With `--family`: run every suite once per value and print one column each, as `cig=1.16.0,1.18.0` or `cigo=./a,./b`.
+    #[arg(long, value_name = "PRODUCT=V1,V2")]
+    pub matrix: Option<String>,
+    /// With `history`: read this file (`history/<product>.jsonl`) instead of the history branch.
+    #[arg(long, value_name = "FILE")]
+    pub file: Option<PathBuf>,
+    /// With `history`: the branch the nightly workflow appends to (default `bench-history`).
+    #[arg(long, value_name = "BRANCH")]
+    pub branch: Option<String>,
+    /// With `--family`: where a product's checkout (or bench folder, or manifest) is, as `cigo=~/cig-orchestrator`; repeatable.
+    #[arg(long = "product", value_name = "NAME=PATH")]
+    pub products: Vec<String>,
 }
 
 #[derive(Args)]
@@ -397,6 +424,12 @@ pub struct RunArgs {
     /// Pin this run when it ends, so keep_runs, keep_days and the history budget keep it (the run before a migration or a release).
     #[arg(long)]
     pub pin: bool,
+    /// Write where the time went (lower, check, run, burn) as JSON lines to descriptor FD, to CIG_TIMINGS_FD, or to stderr (`--timings`, `--timings=9`).
+    #[arg(long, value_name = "FD", num_args = 0..=1, require_equals = true, default_missing_value = "")]
+    pub timings: Option<String>,
+    /// Write allocation counters as JSON lines the same way (needs a build with the `bench-stats` feature; says so when it has none).
+    #[arg(long, value_name = "FD", num_args = 0..=1, require_equals = true, default_missing_value = "")]
+    pub stats: Option<String>,
     /// Arguments passed to the script as `args`.
     #[arg(last = true)]
     pub args: Vec<String>,
@@ -457,6 +490,7 @@ fn known_words(cmd: &clap::Command, out: &mut Vec<String>) {
 /// runs, when one is there (see [`crate::program`]); anything else is a
 /// command. `src/main.rs` is only this.
 pub fn entry() -> i32 {
+    crate::timings::mark_entry();
     // The mark itself, not its length (a constant LTO folds): its bytes
     // stay in the binary for cigcompile to read.
     std::hint::black_box(crate::program::RUNTIME_MARK);
@@ -573,10 +607,33 @@ fn take_key_fd(ctx: &Ctx, fd: i32) -> Option<i32> {
 fn dispatch(ctx: Ctx, command: Command) -> i32 {
     match command {
         Command::Run(args) => run::run(&ctx, args, None),
+        Command::Bench(a) if a.path.first().is_some_and(|p| p.as_os_str() == "history") => {
+            if a.path.len() > 2 {
+                eprintln!(
+                    "{} `cig bench history` takes one case name",
+                    ctx.red("error[E800 usage]:")
+                );
+                return exit::USAGE;
+            }
+            bench::history(
+                &ctx,
+                a.path.get(1).and_then(|p| p.to_str()),
+                a.manifest,
+                a.file,
+                a.branch,
+            )
+        }
+        Command::Bench(a) if a.path.len() > 1 => {
+            eprintln!(
+                "{} `cig bench` takes one manifest",
+                ctx.red("error[E800 usage]:")
+            );
+            exit::USAGE
+        }
         Command::Bench(a) => bench::bench(
             &ctx,
             bench::Opts {
-                manifest: a.path.or(a.manifest),
+                manifest: a.path.into_iter().next().or(a.manifest),
                 only: a.only,
                 group: a.group,
                 samples: a.samples,
@@ -586,6 +643,13 @@ fn dispatch(ctx: Ctx, command: Command) -> i32 {
                 save: a.save,
                 against: a.against,
                 watch: a.watch,
+                timings: a.timings,
+                stats: a.stats,
+                syscalls: a.syscalls,
+                family: a.family,
+                with: a.with,
+                matrix: a.matrix,
+                products: a.products,
             },
         ),
         Command::Light(a) => run::run(
@@ -599,6 +663,8 @@ fn dispatch(ctx: Ctx, command: Command) -> i32 {
                 trial: a.trial,
                 no_trial: a.no_trial,
                 pin: false,
+                timings: None,
+                stats: None,
                 args: a.args,
             },
             Some(a.chain),

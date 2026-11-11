@@ -18,6 +18,45 @@ project follows semantic versioning.
 
 - **A box no longer refuses a hop because a path it covers has gone.** The box covers the session bus sockets in the runtime folder with /dev/null; when a login session ended between the plan and the mount (other work on the machine), the bind failed with ENOENT and the hop was refused (`covering a way to the key refused`, seen as `could not start: Operation not supported`). A cover whose target is gone has nothing left to hide, so it is skipped. Test: `contained_boxes_run_together_while_a_cover_path_comes_and_goes`.
 
+- **`cig bench --timings`, `--stats` and `--syscalls`, the timings line format,
+  `cig run --timings` and `--stats`** (#179 step 4). A product writes where its
+  time went to the descriptor named by `CIG_TIMINGS_FD`, one JSON line per phase
+  (`{"v":1,"product":"cig","phase":"check","ms":0.412}`; counters go to
+  `CIG_STATS_FD` as `{"v":1,"product":"cig","counter":"allocs","value":N}`),
+  and `cig bench --timings` shows each case's phases beside its wall time with
+  what is left over as `other`, so the breakdown adds up to the wall time of the
+  run it came from; phases that pass the wall by over 5% are flagged. cig writes
+  `start`, `lower`, `check`, `begin`, `run`, `burn` and `retain` when asked
+  (`cig run --timings[=FD]`, or the variable); with neither it reads no clock and
+  writes nothing. `--stats` reads allocation counts and bytes from a cig built
+  with `--features bench-stats` (a counting allocator, off in releases) and says
+  `not measured: built without the bench-stats feature` otherwise;
+  `cig run --stats[=FD]` says so on stderr. `--syscalls` counts every syscall in
+  one untimed run under `strace -c` (Linux; `not measured` with the reason
+  elsewhere), lists the top ten by time and flags an mmap/munmap thrash: at least
+  100 pairs and over 1,000 a second of the case's median (#153). All reported,
+  never gated. Tests: `bench_timings_add_up_to_the_wall_with_other`,
+  `bench_timings_and_stats_read_cig_itself`, `cig_run_writes_its_phases_when_asked_and_only_then`,
+  `syscalls_flags_thrash`, `syscalls_flags_a_real_mmap_loop`.
+- **`cig bench --family`, `--with` and `--matrix`** (#179 step 7). `--family` runs
+  every product's suite (cig, cigo, cigcompile, cigar, ciginstaller) found through
+  `--product NAME=PATH`, `~/.config/cigscript/bench-family.toml` or the installed
+  layout, in one report. `--with cigo@<path>` or `cig@1.16.0` swaps one product's
+  binary (a cig release is fetched and its sha256 checked first): every
+  product's binary goes first on the `PATH` of each command a suite runs, so
+  cigo's suite finds the cig it is meant to. `--matrix cig=1.16.0,1.18.0` runs
+  every suite once per value and prints a column each. Tests:
+  `family_with_swaps_one_product`, `family_matrix_has_a_column_per_value`,
+  `family_finds_installed_products_by_the_installers_layout`.
+- **The reusable benchmark workflow and `cig bench history`** (#179 step 6).
+  `.github/workflows/bench.yml` (`workflow_call`) runs the fast groups on a pull
+  request, A/B against the base on the same runner, and comments the table; the
+  nightly runs the whole suite and appends one JSON line to
+  `history/<product>.jsonl` on a `bench-history` branch. A wrong answer fails a
+  run; a timing never does. `cig bench history [CASE]` prints a case's medians as
+  a sparkline and a table, marking a change across machines. Test:
+  `bench_history_reads_a_file_and_the_branch`.
+
 - **cig's own benchmark suite and the kernel measures** (#179 step 5, #145).
   `bench/bench.toml` (`format = 1`) holds the start-up and compute programs of
   cigcompile's set, each with its `.expect` file, and a kernel set: burn and
