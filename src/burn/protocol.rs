@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: FSL-1.1-ALv2
 
 //! The burn protocol: a hop that knows what it changed says so, in JSON
 //! lines appended to the file `CIG_JOURNAL` names, and says how to undo it.

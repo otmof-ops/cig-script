@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: FSL-1.1-ALv2
 
 //! The run index (#149): one compact file under the cig home, updated as
 //! runs start, finish, are pruned, forgotten or unburned, so `cig runs` at

@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: FSL-1.1-ALv2
 exhale json.stringify({a: [1, 2.5, "x", null, true]}), json.parse('{"k": [1]}').k
 exhale json.stringify({a: 1}, true)
 exhale path.join("a", "b", "c.txt"), path.base("/x/y.tar.gz"), path.dir("/x/y"), path.ext("a.txt"), path.stem("a.txt")

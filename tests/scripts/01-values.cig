@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: FSL-1.1-ALv2
 # literals, arithmetic, strings, collections
 exhale 1 + 2 * 3, 7 / 2, 8 / 2, 7 % 3, -5, 2.5 * 2, 1_000 + 1
 exhale "a" + "b", "ab" * 3, "n=${1 + 1}", 'raw ${x}\n', "tab\there"

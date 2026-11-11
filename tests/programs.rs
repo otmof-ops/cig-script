@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: FSL-1.1-ALv2
 
 //! Compiled programs (src/program.rs, docs/PROGRAMS.md): a script appended
 //! to this `cig` runs as the program, through the same run as `cig run`.

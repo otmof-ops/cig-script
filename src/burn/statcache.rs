@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: FSL-1.1-ALv2
 
 //! The tin's stat cache (#148), off by default (`cig config hop_statcache
 //! on` turns it on). One index per pack, keyed by the hash of the pack's
