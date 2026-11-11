@@ -1056,11 +1056,13 @@ impl Journal {
     /// the rollback it describes, which already happened.
     ///
     /// Markers are not write-ahead: the rollback or compensation they
-    /// describe already happened on disk. One `fsync` at the end of the
-    /// batch is enough; a crash between writing a marker and the sync
-    /// loses the marker (the restore is redone on the next unburn) and
-    /// never writes wrong bytes. Batched because an unburn of N ops
-    /// writes N markers and the per-line sync cost dominates.
+    /// describe already happened, and the restored files and their
+    /// directories are synced before the batch is written. One `fsync` at
+    /// the end of the batch: a crash before it loses a suffix of the
+    /// markers, and the restores they stood for are redone by the next
+    /// unburn. That is safe only because `mark_restored` writes newest
+    /// first, the order the restores ran in. Batched because an unburn of
+    /// N ops writes N markers and the per-line sync cost dominates.
     fn append_markers(&mut self, markers: Vec<serde_json::Value>) {
         let count = markers.len();
         for (i, m) in markers.into_iter().enumerate() {
@@ -1876,6 +1878,20 @@ impl Journal {
                 }
             }
         }
+        // The restored files are synced as they are written; their
+        // directories (the renames) are synced once here, before any marker
+        // says the restore happened.
+        let mut dirs: std::collections::BTreeSet<PathBuf> = std::collections::BTreeSet::new();
+        for e in self.entries.iter().filter(|e| done.contains(&e.seq)) {
+            for b in &e.before {
+                if let Some(parent) = b.path.parent() {
+                    dirs.insert(parent.to_path_buf());
+                }
+            }
+        }
+        for d in &dirs {
+            let _ = sync_dir(d);
+        }
         self.mark_restored(&done);
         self.mark_took(took);
         report
@@ -1888,7 +1904,12 @@ impl Journal {
         }
         let mut markers = Vec::new();
         let seqs: std::collections::HashSet<u64> = seqs.iter().copied().collect();
-        for e in self.entries.iter_mut() {
+        // Newest first, the order the restores ran in: a crash part way
+        // through the batch keeps a prefix, so an older entry is never
+        // marked while a newer one on the same path is not (a re-run would
+        // put the newer entry's before-state back over the older one's and
+        // skip the older one).
+        for e in self.entries.iter_mut().rev() {
             if seqs.contains(&e.seq) && !e.restored {
                 e.restored = true;
                 markers.push(serde_json::json!({"seq": e.seq, "restored": true}));
@@ -3258,6 +3279,43 @@ mod tests {
         }
     }
     use std::collections::BTreeMap;
+
+    #[test]
+    fn restored_markers_are_written_newest_first() {
+        let _home = scratch_home();
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let run_dir = root.join("run");
+        let f = root.join("f.txt");
+        fs::write(&f, "v0").unwrap();
+        let mut j = Journal::open(Some(run_dir.clone())).unwrap();
+        for (seq, next) in [(1, "v1"), (2, "v2")] {
+            j.record(
+                seq,
+                Op::Write {
+                    path: f.clone(),
+                    sensitive: false,
+                },
+            )
+            .unwrap();
+            fs::write(&f, next).unwrap();
+        }
+        let mut loaded = Journal::load(&run_dir).unwrap();
+        let report = loaded.rollback();
+        assert!(report.clean(), "{report:?}");
+        assert_eq!(fs::read_to_string(&f).unwrap(), "v0");
+        // The markers come in the order the restores ran, newest first, so
+        // a crash that keeps only a prefix never marks the older entry
+        // alone (a re-run would then leave the file at v1).
+        let text = fs::read_to_string(run_dir.join("journal.jsonl")).unwrap();
+        let marked: Vec<u64> = text
+            .lines()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .filter(|v| v["restored"] == true)
+            .filter_map(|v| v["seq"].as_u64())
+            .collect();
+        assert_eq!(marked, vec![2, 1], "{text}");
+    }
 
     #[test]
     fn write_delete_move_roll_back() {
