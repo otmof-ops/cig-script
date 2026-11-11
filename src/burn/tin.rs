@@ -1504,8 +1504,9 @@ fn materialize_inner(snapshot: &Path, expect_sha256: &str, dest: &Path) -> io::R
         // read back: a corrupt tin never writes garbage.
         let (actual, _) = copy_hashing(snapshot, dest)?;
         // On disk before the compare passes: the marker that says the
-        // restore happened is written after this returns.
-        super::journal::full_sync_data(&fs::File::open(dest)?)?;
+        // restore happened is written after this returns. sync_file, since
+        // Windows flushes only through a handle opened for writing.
+        super::journal::sync_file(dest)?;
         if actual != expect_sha256 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -1519,7 +1520,7 @@ fn materialize_inner(snapshot: &Path, expect_sha256: &str, dest: &Path) -> io::R
         return Ok(());
     }
     fs::copy(snapshot, dest)?;
-    super::journal::full_sync_data(&fs::File::open(dest)?)?;
+    super::journal::sync_file(dest)?;
     #[cfg(unix)]
     fs::set_permissions(dest, fs::metadata(snapshot)?.permissions())?;
     Ok(())
