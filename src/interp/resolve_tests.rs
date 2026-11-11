@@ -120,6 +120,46 @@ fn a_later_declaration_still_shadows_a_closure_read() {
     assert_eq!(run(src, true), want);
 }
 
+/// A field read by the same node keeps giving the right answer as keys go
+/// from the map (the position the node remembered is no longer the key's),
+/// as other maps with other layouts come through it, and when the key is
+/// gone altogether.
+#[test]
+fn field_cache_survives_key_removal() {
+    let src = "\
+roll m = {a: 1, b: 2, c: 3}
+pull getc(x) { snuff x.c }
+roll seen = []
+for i in 0..4 {
+  seen.push(getc(m))
+  if i == 0 { m.remove(\"a\") }
+  if i == 1 { m.remove(\"b\") }
+  if i == 2 {
+    m.a = 9
+    m.c = 30
+  }
+}
+exhale seen
+exhale [getc({c: 1}), getc({a: 0, c: 2}), getc({a: 0, b: 0, c: 3}), getc({c: 4, a: 0})]
+pull getd(x) { snuff x.d }
+exhale [getd({d: 1, e: 2}), getd({e: 5, d: 6})]
+pull maybe(x) { snuff x?.c }
+roll g = {c: 1}
+roll one = maybe(g)
+g.remove(\"c\")
+exhale [one, maybe(g)]
+roll h = {p: 1, q: 2}
+h.q += 5
+h.remove(\"p\")
+h.q += 5
+h.p = 0
+exhale h
+";
+    let want = "[3, 3, 3, 30]\n[1, 2, 3, 4]\n[1, 6]\n[1, null]\n{q: 12, p: 0}\n";
+    assert_eq!(run(src, true), want);
+    assert_eq!(run(src, false), want);
+}
+
 mod counting {
     use std::alloc::{GlobalAlloc, Layout, System};
     use std::cell::Cell;
@@ -160,11 +200,11 @@ fn allocs_for(src: &str) -> u64 {
     counting::ALLOCS.with(|c| c.get()) - before
 }
 
-/// Scopes come from a pool with their name buffers: past the first few
-/// calls, a call (or a loop turn) makes the scope's one `Rc` and the
-/// argument list, and no slot array and no name `String`. Measured as the
-/// difference between a script that makes 2,000 more calls than another.
-/// Before the pool a call and a turn made nine.
+/// A call and a loop turn take their scope from the free list and the
+/// arguments go straight into it: past the first few calls nothing is
+/// allocated. Measured as the difference between a script that makes 2,000
+/// more calls than another, counting allocations, never time. Before the
+/// pool a call and a turn made nine; with it, three.
 #[test]
 fn no_allocation_per_call_in_steady_state() {
     let script = |n: u32| {
@@ -173,8 +213,17 @@ fn no_allocation_per_call_in_steady_state() {
         )
     };
     let (small, large) = (allocs_for(&script(100)), allocs_for(&script(2100)));
-    let per_turn = (large - small) as f64 / 2000.0;
+    let per_turn = (large as i64 - small as i64) as f64 / 2000.0;
     eprintln!("allocations per call + loop turn: {per_turn}");
-    // Per turn: the loop's scope Rc, the call's scope Rc and its argument list.
-    assert!(per_turn <= 3.0, "{per_turn} allocations per call and turn");
+    assert!(per_turn <= 0.01, "{per_turn} allocations per call and turn");
+    // Recursion too: fib(16) makes 3,193 calls, fib(10) makes 177.
+    let fib = |n: u32| {
+        format!(
+            "pull fib(n) {{\n  if n < 2 {{\n    snuff n\n  }}\n  snuff fib(n - 1) + fib(n - 2)\n}}\nexhale fib({n})\n"
+        )
+    };
+    let (small, large) = (allocs_for(&fib(10)), allocs_for(&fib(16)));
+    let per_call = (large as i64 - small as i64) as f64 / (3_193.0 - 177.0);
+    eprintln!("allocations per fib call: {per_call}");
+    assert!(per_call <= 0.01, "{per_call} allocations per fib call");
 }
