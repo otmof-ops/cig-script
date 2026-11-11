@@ -6,10 +6,9 @@
 //! in tests/cli.rs covers the terminal and the plain unattended case; the
 //! CI marker, a second account and a journal from a newer cig are here.
 
-use super::common::{text, Sandbox};
+use super::common::{guarded, text, Sandbox};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
-use std::process::Command;
 
 const SEAL: [(&str, &str); 1] = [("CIG_SEAL_KEY", "file")];
 
@@ -115,8 +114,8 @@ fn another_user_cannot_read_the_tin() {
         "the tin is not private"
     );
     let as_other = |args: &[&str]| {
-        Command::new("timeout")
-            .args(["30", "sudo", "-n", "-u", "nobody"])
+        guarded(30, "sudo")
+            .args(["-n", "-u", "nobody"])
             .args(args)
             .output()
             .unwrap()

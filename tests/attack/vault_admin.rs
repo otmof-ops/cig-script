@@ -5,16 +5,12 @@
 //! makes an account and a service and uses sudo, so it runs only in the VM;
 //! `--dry-run` runs nothing and runs everywhere.
 
-use super::common::{text, Sandbox};
+use super::common::{guarded, text, Sandbox};
 use super::vault::{ctl, ids, in_vm, project, uid, SEAL};
 use sha2::{Digest, Sha256};
-use std::process::Command;
 
 fn sh(script: &str) -> std::process::Output {
-    Command::new("timeout")
-        .args(["60", "sh", "-c", script])
-        .output()
-        .unwrap()
+    guarded(60, "sh").args(["-c", script]).output().unwrap()
 }
 
 fn vault_bin() -> String {

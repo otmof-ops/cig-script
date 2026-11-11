@@ -5,6 +5,29 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+/// `program` under a hard limit of `secs` seconds, through `timeout` (GNU
+/// coreutils, the BSDs) or `gtimeout` (coreutils on a Mac) where one is on
+/// PATH. A Mac with neither runs it unguarded, under the CI job's own limit.
+pub fn guarded(secs: u32, program: impl AsRef<std::ffi::OsStr>) -> Command {
+    match limiter() {
+        Some(t) => {
+            let mut c = Command::new(t);
+            c.arg(secs.to_string()).arg(program);
+            c
+        }
+        None => Command::new(program),
+    }
+}
+
+fn limiter() -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    ["timeout", "gtimeout"].iter().find_map(|name| {
+        std::env::split_paths(&path)
+            .map(|dir| dir.join(name))
+            .find(|p| p.is_file())
+    })
+}
+
 pub struct Sandbox {
     pub dir: tempfile::TempDir,
 }
@@ -47,10 +70,8 @@ impl Sandbox {
     /// The command `cig_with` runs, not yet started.
     pub fn command(&self, redirect: &str, env: &[(&str, &str)], args: &[&str]) -> Command {
         use std::os::unix::process::CommandExt;
-        let mut c = Command::new("timeout");
-        c.arg("120")
-            .arg("sh")
-            .arg("-c")
+        let mut c = guarded(120, "sh");
+        c.arg("-c")
             .arg(format!("exec \"$0\" \"$@\" {redirect}"))
             .arg(env!("CARGO_BIN_EXE_cig"))
             .args(args)
