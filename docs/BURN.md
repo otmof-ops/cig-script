@@ -136,12 +136,15 @@ it. Secrets stay sealed and directories are still copied into the run's own
 `runs/<id>/snapshots/` and unburns exactly as before: the restore reads either
 form.
 
-A finished run's journal is kept as `journal.jsonl.zst` (zstd, level 3). Its
-lines are unchanged; the chain is checked over the decompressed lines, so
+A finished run's journal stays at `journal.jsonl`: the layout a tool that
+reads a run's folder by name documents is unchanged. `CIG_JOURNAL_ZST=on`
+compresses it to `journal.jsonl.zst` (zstd, level 3): the lines are not
+rewritten, the chain is checked over the decompressed lines, so
 `cig runs --verify` judges it as it judges a plain file and a line edited
-inside the stream breaks the chain. `cig unburn` makes it plain, appends its
-marks, and compresses it again when it ends. `CIG_JOURNAL_ZST=off` keeps
-finished journals plain.
+inside the stream breaks the chain. `cig unburn` makes a compressed journal
+plain again, appends its marks, and leaves it in the form the setting asks
+for. A `.zst` journal written by an earlier cig is read without the
+setting turned back on.
 
 **The group sync, and the window it leaves.** The journal's write-ahead sync
 is per line, as always: an op's line is durable before the op runs. What

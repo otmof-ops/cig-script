@@ -22,11 +22,18 @@ pub const LEVEL: i32 = 3;
 pub const JOURNAL: &str = "journal.jsonl";
 pub const JOURNAL_ZST: &str = "journal.jsonl.zst";
 
-/// `CIG_JOURNAL_ZST=off` keeps finished journals plain.
+/// `CIG_JOURNAL_ZST=on` compresses a finished run's journal to
+/// `journal.jsonl.zst`; the default keeps it plain. Compression is opt-in
+/// so the on-disk layout stays the one `docs/BURN.md` documents, and so
+/// any tool that reads a run's folder by name finds the file it expects.
+/// The reader side is symmetric: `read_journal_text` returns either form,
+/// and `ensure_plain` makes the plain file again for a command that
+/// appends to it. A compressed journal written by an earlier cig is
+/// read, verified and unburned unchanged.
 pub fn zst_wanted() -> bool {
-    !matches!(
+    matches!(
         std::env::var("CIG_JOURNAL_ZST").as_deref(),
-        Ok("off") | Ok("0") | Ok("no")
+        Ok("on") | Ok("1") | Ok("yes")
     )
 }
 

@@ -8096,7 +8096,11 @@ fn a_format_1_journal_still_unburns() {
 fn a_hop_edit_to_a_large_file_stores_the_chunk_that_changed() {
     let sb = Sandbox::new();
     let mut x: u64 = 99;
-    let data: Vec<u8> = (0..(1usize << 20))
+    // A 3 MiB file sits above the chunk threshold (1 MiB and smaller
+    // files are kept as one tin object now: the bench measured
+    // chunking there as pure overhead with no edit to dedupe).
+    const SIZE: usize = 3 << 20;
+    let data: Vec<u8> = (0..SIZE)
         .map(|_| {
             x ^= x << 13;
             x ^= x >> 7;
@@ -8110,7 +8114,7 @@ fn a_hop_edit_to_a_large_file_stores_the_chunk_that_changed() {
         "s.cig",
         "pack { \"./p\" }\nburn {\n  proc.run(\"sh\", [\"-c\", 'printf X | dd of=big.bin bs=1 seek=$1 conv=notrunc 2>/dev/null', \"sh\", args[0]], {cwd: \"p\", touches: [\"**\"]})\n  cough \"boom\"\n}\n",
     );
-    let err = sb.run_err(&["run", "s.cig", "--", "500000"], 1);
+    let err = sb.run_err(&["run", "s.cig", "--", "1500000"], 1);
     assert_eq!(
         fs::read(sb.path().join("p/big.bin")).unwrap(),
         data,
@@ -8120,18 +8124,18 @@ fn a_hop_edit_to_a_large_file_stores_the_chunk_that_changed() {
     // The original and the hop's output (taken by the rollback) share every
     // chunk but the one the edit landed in.
     assert_eq!(du["recipes"], 2, "{du}");
-    assert_eq!(du["logical"], 2u64 << 20, "{du}");
+    assert_eq!(du["logical"], 2u64 * SIZE as u64, "{du}");
     let stored1 = du["stored"].as_u64().unwrap();
     assert!(
-        stored1 < (1 << 20) + 2 * 256 * 1024,
-        "two versions of 1 MiB stored in {stored1} bytes: {du}"
+        stored1 < (SIZE as u64) + 2 * 256 * 1024,
+        "two versions of {SIZE} bytes stored in {stored1} bytes: {du}"
     );
     // Another edit, another run: one more chunk.
-    sb.run_err(&["run", "s.cig", "--", "900000"], 1);
+    sb.run_err(&["run", "s.cig", "--", "2500000"], 1);
     assert_eq!(fs::read(sb.path().join("p/big.bin")).unwrap(), data);
     let du: serde_json::Value = serde_json::from_str(&sb.run_ok(&["--json", "tin", "du"])).unwrap();
     assert_eq!(du["recipes"], 3, "{du}");
-    assert_eq!(du["logical"], 3u64 << 20, "{du}");
+    assert_eq!(du["logical"], 3u64 * SIZE as u64, "{du}");
     let stored2 = du["stored"].as_u64().unwrap();
     assert!(
         stored2 - stored1 <= 2 * 256 * 1024,

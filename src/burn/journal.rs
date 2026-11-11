@@ -1003,7 +1003,11 @@ impl Journal {
     /// process asks for the key (`seal::key()`), so a `cig tin rekey`
     /// holding the exclusive lock cannot sign anything out from under a
     /// run that lives (SEC-004 H1). This method itself is lock-free.
-    fn append_line(&mut self, mut v: serde_json::Value) -> io::Result<()> {
+    fn append_line(&mut self, v: serde_json::Value) -> io::Result<()> {
+        self.append_line_inner(v, true)
+    }
+
+    fn append_line_inner(&mut self, mut v: serde_json::Value, sync: bool) -> io::Result<()> {
         // A finished run's journal may have been compressed under an open
         // handle: lines go to the plain file, made again from the stream.
         if let Some(dir) = &self.run_dir {
@@ -1040,7 +1044,9 @@ impl Journal {
         f.write_all(line.as_bytes())?;
         f.write_all(b"\n")?;
         f.flush()?;
-        full_sync_data(f)?;
+        if sync {
+            full_sync_data(f)?;
+        }
         self.head = link(self.mac_key.as_ref(), line.as_bytes());
         self.chain.lines += 1;
         Ok(())
@@ -1048,9 +1054,19 @@ impl Journal {
 
     /// Append marker lines; a marker that cannot be written is not fatal to
     /// the rollback it describes, which already happened.
+    ///
+    /// Markers are not write-ahead: the rollback or compensation they
+    /// describe already happened on disk. One `fsync` at the end of the
+    /// batch is enough; a crash between writing a marker and the sync
+    /// loses the marker (the restore is redone on the next unburn) and
+    /// never writes wrong bytes. Batched because an unburn of N ops
+    /// writes N markers and the per-line sync cost dominates.
     fn append_markers(&mut self, markers: Vec<serde_json::Value>) {
-        for m in markers {
-            let _ = self.append_line(m);
+        let count = markers.len();
+        for (i, m) in markers.into_iter().enumerate() {
+            // Sync once, after the last line of the batch.
+            let sync = i + 1 == count;
+            let _ = self.append_line_inner(m, sync);
         }
     }
 
