@@ -296,6 +296,8 @@ pub fn main(p: Program) -> i32 {
         trial: false,
         no_trial: true,
         pin: false,
+        timings: None,
+        stats: None,
         args: o.args,
     };
     let code = run::run_program(&ctx, args, &p, o.light);
