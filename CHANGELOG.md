@@ -5,6 +5,8 @@ project follows semantic versioning.
 
 ## Unreleased
 
+- **`cig runs adopt <dir>`: undo an installer update with `cig unburn`** (cig-installer#7). A committed `ciginstaller` transaction (`<home>/installer/txn/<id>`) becomes a run: each saved file is checked against its recorded sha256, every path is confined to the installer home the folder names, the snapshots go into the tin, the journal is written in cig's format (chained and signed), and its head goes into the ledger as an `origin` line. The ordinary `cig unburn <id>` then puts the home back byte for byte: mkdir, link, move, write, block and delete, and the `shim-index` flip as a write of the saved index. An open, cut-off or rolled-back transaction is `E716`, a changed or missing saved file `E717`, a path outside the home (or through a link, or with `..`) `E718`, a folder that is not a readable transaction `E719`. Store objects are left (they may be in use). Adopting twice is one run. `docs/BURN.md` has the section; tests in `tests/foreign.rs`.
+
 - **Listing runs no longer starts a process for every run that died** (cigo#119).
   A run left `running` by a process that is gone is now told to be
   `interrupted` once and the verdict is kept in the run index, where it was
