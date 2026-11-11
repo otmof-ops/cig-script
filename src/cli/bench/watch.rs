@@ -148,7 +148,7 @@ struct State {
     builds: usize,
 }
 
-fn spark(h: &VecDeque<f64>) -> String {
+pub(super) fn spark(h: &VecDeque<f64>) -> String {
     const BARS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
     let lo = h.iter().copied().fold(f64::INFINITY, f64::min);
     let hi = h.iter().copied().fold(f64::NEG_INFINITY, f64::max);

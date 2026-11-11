@@ -1142,6 +1142,67 @@ run's map too (`prior` in the manifest), so a run can go from A to B to C:
 C's import composes the maps, and a journal that names A's paths, and B's
 where B appended to it (an unburn, a give-back), reads through one map.
 
+## Adopting another tool's transaction
+
+`ciginstaller update` keeps its own write-ahead journal, under
+`<home>/installer/txn/<id>/`: `journal.jsonl` and the files it saved first
+under `saved/`. The installer never links cig's crates or keyring, so it
+cannot write a record cig would accept, and cig does not read its folder
+behind its back. You hand the folder over:
+
+    cig runs adopt <home>/installer/txn/<id>     # prints the run's id
+    cig unburn <id> --dry-run                    # what would be put back
+    cig unburn <id>
+
+Two steps, on purpose. Adopting writes only cig's own state directory (a run
+folder and a ledger line); the command that changes the installer's home is
+the ordinary `cig unburn`, with its dry run, its checks and its codes.
+
+Adoption refuses before it writes anything:
+
+- the transaction must have **committed**: its journal ends in a `commit`
+  line. One that is still open, was cut off mid-line, or was rolled back is
+  `E716`.
+- every saved file is checked against the sha256 the journal recorded. A
+  missing, replaced or edited one is `E717`, and so is a journal that names a
+  saved copy outside its own transaction.
+- every path is confined to the installer home the folder lives in (the
+  folder is `<home>/installer/txn/<id>`, and that names the home). A path
+  outside it, with a `..` in it, or reached through a link is `E718`, and the
+  whole transaction is refused: a profile file the installer edited in the
+  user's own home is the installer's to roll back (`ciginstaller rollback`).
+- a folder that is not a transaction, a journal that does not parse, or one in
+  a newer format than this cig reads is `E719`.
+
+What it writes: each saved file is copied into the run's `snapshots/`, and its
+hash is checked again on the copy; the journal is written by cig's own journal
+(chained, and signed under this machine's key like any run's); `run.json`
+names the origin (`imported.from`, and the transaction under
+`imported.foreign`); the journal's head goes into the ledger as an `origin`
+line under cig's own seal. `cig runs` lists the run as `ciginstaller: <label>
+[txn <id>]`, and `cig runs <id>` shows where it came from. Adopting the same
+transaction twice is one run: the second says `already adopted` and prints the
+same id.
+
+How the installer's ops become cig's, so the existing restore does them:
+
+| installer op | in the run | `cig unburn` |
+| --- | --- | --- |
+| `mkdir` | a mkdir | removes the folder |
+| `link` | a copy | removes the link, or puts back the file it replaced |
+| `write`, `block` | a write | puts back the saved bytes |
+| `delete` | a delete | puts back the file, folder tree or link |
+| `move` | a move | moves it back; a toolchain's `.partial-` directory flip removes what arrived, as the installer does |
+| `flip` | a write of `installer/shim-index` | puts back the saved index (or removes it, on a first install) |
+| `store` | (nothing) | an object is content addressed and may be in use by another receipt; it stays, and `ciginstaller gc` reclaims an unused one. The run's record counts them. |
+
+A file that replaced another is restored as a new file, never written in place:
+the installer's links share an inode with the store object, and writing the old
+bytes through one would change the object.
+
+Close the installer first: `cig unburn` does not take the installer's lock, so
+an `update` running at the same time would meet a home changing under it.
+
 ## What it can't undo, and says so
 
 The irreversible label is the honesty guarantee. It is the one thing that

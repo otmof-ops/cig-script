@@ -7,7 +7,12 @@
 # - start-up and compute: the programs of cigcompile's set, each checked
 #   against its .expect file before any time is shown;
 # - kernel: what a burn, an unburn, a restore and a hop cost, with the kernel
-#   measures reported next to the time (never gated, #153).
+#   measures reported next to the time.
+#
+# Gates (#145; `cig bench --gate LIST`): every case is under `correctness`.
+# `start-up` cases carry a `budget`, `disk` cases a `reference` (main's bytes
+# per byte burned). CI fails a pull request on `correctness` and `disk` only;
+# the timing gates are printed (#153).
 #
 # Every case runs against a scratch home. The kernel scripts write only
 # under $CIGSCRIPT_HOME/work, so nothing lands in this folder.
@@ -33,6 +38,8 @@ name   = "hello"
 group  = "start-up"
 run    = ["cig", "run", "compute/hello.cig"]
 per    = 20
+budget = "5 ms"         # #145's start-up gate; reported on shared runners, never failed (#153)
+gate   = ["start-up"]
 expect = { exit = 0, stdout = "compute/hello.expect" }
 
 [[case]]
@@ -55,6 +62,15 @@ group  = "start-up"
 run    = ["cig", "run", "compute/startup-10.cig"]
 per    = 20
 expect = { exit = 0, stdout = "compute/startup-10.expect" }
+
+[[case]]
+name   = "burn one write"
+group  = "start-up"
+run    = ["cig", "run", "kernel/burn-one.cig"]
+per    = 1             # a fresh home each run: the file is always new
+budget = "7 ms"        # #145's start-up gate for a one-write burn
+gate   = ["start-up"]
+expect = { exit = 0, stdout = "kernel/burn-one.expect" }
 
 [[case]]
 name   = "closures"
@@ -191,6 +207,8 @@ run    = ["cig", "run", "kernel/burn-small.cig"]
 per    = 1
 burned = 102400     # 100 files of 1,024 bytes
 ops    = 101        # a mkdir and 100 writes
+gate   = ["disk"]
+reference = { disk-per-byte = 5.28 }   # what main stores (1 KiB files in 4 KiB blocks on ext4); a change that raises it edits this line in review
 expect = { exit = 0, stdout = "kernel/burn-small.expect" }
 measure = ["wall", "rss", "tin-growth", "disk-per-byte", "fsyncs-per-op"]
 
@@ -201,6 +219,8 @@ run    = ["cig", "run", "kernel/burn-big.cig"]
 per    = 1
 burned = 16384000   # 1,000 files of 16,384 bytes
 ops    = 1001
+gate   = ["disk"]
+reference = { disk-per-byte = 1.06 }
 expect = { exit = 0, stdout = "kernel/burn-big.expect" }
 measure = ["wall", "rss", "tin-growth", "disk-per-byte", "fsyncs-per-op"]
 
@@ -234,6 +254,8 @@ before = ["cig", "run", "kernel/write-big.cig", "--", "a"]
 per    = 1
 burned = 33554432   # one file of 32 MiB
 ops    = 1
+gate   = ["disk"]
+reference = { disk-per-byte = 1.00 }
 expect = { exit = 0, stdout = "kernel/write-big-b.expect" }
 measure = ["wall", "rss", "tin-growth", "disk-per-byte", "fsyncs-per-op", "file:$CIGSCRIPT_HOME/work/big.bin"]
 

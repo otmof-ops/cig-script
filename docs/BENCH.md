@@ -5,14 +5,16 @@ cases in `bench/bench.toml`; `cig bench` reads that manifest, checks each
 case's output first, samples it in batches, and reports median, p10 to
 p90, CV and peak resident set in one of three formats.
 
-This page covers steps 1 to 3 and 5 of the issue (#179): the manifest, the
+This page covers steps 1 to 7 of the issue (#179): the manifest, the
 harness, `--json` and `--markdown`; `--save` and `--against` (A and B
-interleaved, with a significance test); `--watch`; and cig's own suite with
-the kernel measures (what a burn leaves on disk, how often it syncs). Later
-steps bring the debugging flags (`--timings`, `--stats`, `--syscalls`,
-`--profile`), the family runner (`--family`, `--with`, `--matrix`) and the
-reusable CI workflow. A manifest written with fields reserved for those steps still
-parses today: the reserved keys are accepted and ignored for now.
+interleaved, with a significance test); `--watch`; cig's own suite with
+the kernel measures (what a burn leaves on disk, how often it syncs); the
+debugging flags `--timings`, `--stats` and `--syscalls` with the timings line
+format; the family runner (`--family`, `--with`, `--matrix`); and the reusable
+CI workflow with `cig bench history`. `--profile` and `--diff` (step 8) come
+later. A manifest written with fields reserved for later steps still parses
+today: the reserved keys are accepted and ignored for now. The manifest's
+`format` is still 1; step 4 to 7 added no manifest key.
 
 ## The manifest
 
@@ -47,7 +49,9 @@ after   = ["cig", "run", "fixtures/check.cig"]   # once after each sample's batc
 per     = 1                                      # this case's own batch size
 burned  = 102400                                 # bytes one run burns (for disk-per-byte)
 ops     = 101                                    # operations one run performs (for fsyncs-per-op)
-budget  = "5 ms"                                 # reported; gating comes with step 6
+budget  = "5 ms"                                 # the `start-up` gate's limit (see "Gates")
+gate    = ["start-up"]                           # the gates this case takes part in
+reference = { disk-per-byte = 5.28 }             # what main stores, for the `disk` gate
 measure = ["wall", "rss", "tin-growth"]          # see "The kernel measures" below
 watch   = ["src/interp/**"]                      # --watch: only these changes rerun this case
 env     = { EXTRA = "value" }                    # optional per-case overrides
@@ -65,9 +69,8 @@ env     = { EXTRA = "value" }                    # optional per-case overrides
   format 1; any other value is refused, naming it, instead of being
   guessed at. Saved baselines carry the same `format`, and `--json`
   output does too.
-- **Reserved keys are accepted and ignored** (a case's `config`, `gate`
-  and `score`) so a manifest written for a later step still parses
-  today.
+- **Reserved keys are accepted and ignored** (a case's `config` and
+  `score`) so a manifest written for a later step still parses today.
 - **`build`, `binary` and `watch` are relative to the directory `cig
   bench` runs in** (the repository's root, normally), not to the manifest.
 - **A Windows path goes in single quotes.** TOML reads a backslash in
@@ -145,6 +148,11 @@ cig bench --against origin/main     # A/B against a git ref, built in a worktree
 cig bench --against v1.16.0         # A/B against a release (sha256 checked)
 cig bench --against ./old/cig       # A/B against another binary
 cig bench --watch                   # rerun when a watched file changes
+cig bench --profile                 # a flamegraph SVG of each case (perf)
+cig bench --diff main               # phases, counters and syscalls against a baseline's
+cig bench --keep                    # leave the isolated homes where they are
+cig bench --repeat-until-slow       # rerun a flaky case until a run is over p90 x 1.5
+cig bench --samples 1 --gate correctness,disk   # fail on these gates; print the rest
 ```
 
 ### Exit codes
@@ -158,7 +166,8 @@ cig bench --watch                   # rerun when a watched file changes
   build).
 
 A comparison that finds a regression still exits `0`: the verdict is in
-the report. Failing a build on one is the gate, which comes with step 6.
+the report. Failing a build on a gate is `--gate` (below): then `1` also means
+a gate named on the command line tripped.
 
 ### Example
 
@@ -409,15 +418,376 @@ from a file or a pipe no key is read, and the end of that input does not
 end the watch: it runs until it is killed, or its stdout closes.
 `--save` does not combine with `--watch`.
 
+## Where the time went: `--timings`, `--stats` and `--syscalls`
+
+Each flag takes **one extra run** of the case after its samples, never timed,
+so asking does not change a case's numbers. They describe one build: they do
+not combine with `--against` or `--watch`. All of it is reported, never gated
+(#153).
+
+```
+$ cig bench --timings
+timings: hello (one extra run, 94.4 ms; the case's median is 119.3 ms)
+  phase                                ms    wall
+  start                              6.76    7.2%
+  lower                              0.10    0.1%
+  check                              0.66    0.7%
+  begin                             41.48   43.9%
+  run                                0.05    0.0%
+  burn                              38.27   40.5%
+  retain                             0.07    0.1%
+  other                              7.06    7.5%
+  wall                              94.44  100.0%
+```
+
+(A debug build on a cold scratch home: the real numbers are yours to read.)
+
+### The timings line format, version 1
+
+A product writes its phases to the descriptor named by the environment
+variable `CIG_TIMINGS_FD`, one JSON object per line:
+
+```
+{"v":1,"product":"cig","phase":"check","ms":0.412}
+```
+
+| key | meaning |
+|---|---|
+| `v` | the format's version, `1`. A reader refuses a line whose `v` it does not know and says so; it never guesses |
+| `product` | who wrote it: `cig`, `cigo`, `cigcompile`, ... |
+| `phase` | a short name: lower-case letters, digits and `-` |
+| `ms` | milliseconds the phase took, a number |
+
+Rules, so that `cig`, `cigo` (cig-orchestrator#112) and `cigcompile`
+(cig-compile#68) write the same thing:
+
+- **Phases are flat and in the order they ended.** One line when a phase
+  ends. A phase written twice by the same product is one phase, the times
+  added. A phase that contains another is not allowed: the harness adds the
+  lines up, and a sum over the run's wall time by more than 5% is flagged
+  (`overlap`).
+- **What is not written is `other`.** The harness takes the run's wall time,
+  adds the phases, and shows the rest as `other`, so the breakdown always adds
+  up to the wall time. Process start-up and exit are in it. A product that
+  wants `other` small writes a `start` phase from the first instruction of
+  `main`.
+- **A reader ignores keys it does not know** (a later version 1 line may carry
+  more) and every line it cannot read is listed as `unread`.
+- **Write one line with one `write`.** A line is far under `PIPE_BUF`, so lines
+  from processes that share the descriptor never mix.
+- **Do not pass the variable on.** A product removes `CIG_TIMINGS_FD` and
+  `CIG_STATS_FD` from its own environment once read (cig does), so a child
+  process does not write the same phases a second time inside the parent's.
+- **A descriptor below 3, or one that is not open, is ignored**, never an
+  error: a stale variable must not break a run.
+- **Counters** go to `CIG_STATS_FD` (the same descriptor may be named by
+  both): `{"v":1,"product":"cig","counter":"allocs","value":3934}`; a counter
+  the product cannot give is `{"v":1,"product":"cig","counter":"allocs","unavailable":"built without the bench-stats feature"}`.
+- **Unix only.** A descriptor cannot be handed over the same way on Windows,
+  so `--timings` and `--stats` say `not measured` there. The harness hands
+  descriptor 9 (3 is the seal key's, `--seal-key-fd 3`).
+
+cig writes these phases when `cig run --timings[=FD]` is asked or the variable
+is set:
+
+| phase | what it covers |
+|---|---|
+| `start` | from the first instruction of `main` to the start of the run: arguments, configuration, reading the script |
+| `lower` | parsing the source into the program |
+| `check` | the static check (not written with `--no-check`) |
+| `begin` | the trial's plan comparison, the run's record and the kernel |
+| `run` | the interpreter, the script itself |
+| `burn` | what a run leaves behind once the program has ended: rollback, the record, the journal's head, the ledger, the report |
+| `retain` | `keep_runs`, `keep_days` and the history budget |
+
+`--timings` with no `=FD` and no variable writes the lines to stderr; `=FD`
+names a descriptor handed over as `9>file`. With neither the flag nor the
+variable cig reads no clock and writes nothing.
+
+### `--stats`: allocations
+
+`cig bench --stats` shows each case's counters. cig counts allocations and
+bytes through a counting allocator that wraps the one the platform uses
+(mimalloc on musl); it is behind the `bench-stats` cargo feature and **off in
+release builds**:
+
+```
+cargo build --features bench-stats
+```
+
+A cig built without it writes the `unavailable` line, and the harness shows
+`not measured: built without the bench-stats feature`; `cig run --stats` says
+the same on stderr. The counters are `allocs`, `alloc_bytes` and `frees`,
+since the process started.
+
+### `--syscalls`: where the system calls went
+
+One extra run goes under `strace -f -c`, the same way `fsyncs-per-op` counts
+syncs (one shared code path). The report is the total, and the top ten by
+time with their calls. **It flags an mmap/munmap thrash** (#153): at least 100
+mmap/munmap pairs and more than 1,000 a second of the case's own median wall
+time, in the report as `FLAG` and in `--json` as `thrash`. Linux with `strace`
+only; elsewhere, or where `ptrace` is forbidden, it is `not measured` and the
+reason is printed.
+
+In `--json` a case carries `debug.timings`, `debug.stats` and
+`debug.syscalls` (`measured`, and the numbers or the `note`).
+
+## Profiles, diffs and slow runs: `--profile`, `--diff`, `--keep`, `--repeat-until-slow`
+
+These are #179 step 8. Like `--timings` they take **extra runs** after a case's
+samples, never timed, and describe one build: they do not combine with
+`--against` or `--watch`. All of it is reported, never gated.
+
+### `--profile`: a flamegraph
+
+One extra run goes under `perf record -F 999 -g`. `perf script`'s text is
+folded into stacks and drawn as an SVG, one per case:
+`.cig-bench/profiles/<case>.svg` (next to the baselines; a name's odd
+characters become `_`). The table prints the file, the sample count and the
+five frames with the most samples of their own; `--json` has them as
+`debug.profile`. Open the SVG in a browser: each frame's title says its
+samples and share.
+
+```
+profile: fib: .cig-bench/profiles/fib.svg (83 samples at 999 Hz)
+    41.0%  Interp::eval
+    22.9%  Env::lookup
+```
+
+- **perf, or nothing.** Where `perf` is not installed or not allowed (a
+  container, `kernel.perf_event_paranoid`, no PMU) the answer is `not
+  measured: perf is not available here: <why>`. There is no second sampler;
+  a profile that is made up is worse than none. cig's own pull-level sampler
+  for scripts is otmof-ops/cig-compile#38's, not this flag's.
+- **Frames come from frame pointers** (`-g`): build the product with
+  `-C force-frame-pointers=yes` for deep stacks. A run too short to take a
+  sample with a call chain says so rather than drawing an empty picture.
+- Names in the drawing are text, never markup (`Vec<u8>::push` is escaped).
+
+### `--diff <baseline>`: where the extra milliseconds went
+
+Two runs' phases, counters and syscalls side by side, **most changed first**.
+The baseline's side is what `--save` kept, so save one with the numbers in it:
+
+```
+cig bench --save main --timings --stats --syscalls      # on main
+cig bench --diff main                                   # on the change
+```
+
+Whenever a debug flag is on, `--save` also writes each case's `insight` (its
+phases, counters, every syscall of the extra run and the median) into the
+baseline. `--diff` switches all three on for the current run. A baseline saved
+without them says so and how to save one, instead of an empty table.
+
+```
+diff: hello against baseline `main`
+  wall (median)                   83.10        720.40   +637.30 ms (+767%)
+  phases, ms (most changed first)
+                                  before         after   change
+    run                            60.10        690.00   +629.90 ms (+1048%)
+    burn                           10.20         12.00   +1.80 ms (+18%)
+```
+
+Sorting, in each table: phases by the milliseconds that moved; syscalls by
+the calls that moved, and (second table) by their time; counters by the share
+they moved, a counter that was not there before first. The plain table shows
+ten rows of each; `--json` (`diff` on each case) has them all.
+
+### `--keep`: look at what the case left
+
+By default the isolated homes and the work folders are removed as the run
+goes. `--keep` leaves them, and prints where (on stderr, so `--json` stays
+clean), with one line per case to rerun it by hand in its last sample's home:
+
+```
+bench: kept the isolated homes and work folders in /tmp/cig-bench-1234-9f3a...
+bench: hello: /tmp/cig-bench-1234-9f3a.../case-hello-cig-1234
+  rerun by hand: cd /src/cig/bench && HOME=.../sample-4-home CIGSCRIPT_HOME=.../sample-4-home cig run compute/hello.cig
+```
+
+Remove the folder when you are done: it holds tins and keys of throw-away
+homes. It does not combine with `--watch`.
+
+### `--repeat-until-slow`: catch a flaky run
+
+Reruns the case one invocation at a time, each under `perf` (or, where perf is
+not available, with the product's phases on its descriptor, see `--timings`)
+until a run takes more than **p90 x 1.5**, then keeps that run's profile or
+phases. The p90 comes from the first `max(samples, 10)` runs, taken the same
+way, so the threshold and the run it judges carry the same overhead. It stops
+after 200 reruns or 120 seconds and says so (`no run was over ...`). The slow
+run's drawing is `.cig-bench/profiles/<case>-slow.svg`; `--json` has
+`debug.repeat_until_slow` (`runs`, `threshold_ms`, `found.run`, `found.ms`,
+`found.profile` or `found.phases`).
+
+## Gates: what fails a run
+
+#145's gates, in the manifest and on the command line. Every case is under
+`correctness`; the others a case opts into with `gate = [...]`, and
+`regression` covers every case in a comparison.
+
+| gate | fails on | needs |
+|---|---|---|
+| `correctness` | an output that is not its `expect`, an `after` check that finds bytes not restored (every `unburn` case), a case that cannot run | |
+| `regression` | a case more than **5%** slower than the baseline (and significantly so: `slower`, p < 0.01), or the set's geometric mean more than **2%** slower | `--against` |
+| `disk` | bytes on disk per byte burned more than **10%** above the case's `reference` | `measure = ["disk-per-byte"]`, `burned`, `reference = { disk-per-byte = N }` |
+| `start-up` | the median over the case's `budget` (hello 5 ms, a one-write burn 7 ms) | `budget = "5 ms"` |
+
+`cig bench --gate correctness,disk` (or `all`) evaluates all four and **fails
+the exit only for the ones named**; the rest are printed, marked `over` when
+they would have tripped. So a pull request can fail on the numbers that are
+facts (bytes) and merely show the ones that are clocks, which is #153's
+decision: timings are reported, never gated, on shared runners. `--json`
+carries `gates` (`enforced`, `tripped`, `findings`).
+
+```
+gates: correctness, disk fail the run; the rest are reported
+  correctness  ok            33 cases gave their expected output and left what they should
+  disk         ok            burn small tree: 5.28 bytes per byte burned; main's 5.28, the limit 5.81 (+10%)
+  start-up     over          hello: median 6.10 ms against a budget of 5 ms
+  regression   not measured  needs `--against` (a baseline, release, ref or binary to compare with)
+```
+
+- **`reference` is what `main` stores.** It lives in the manifest, so a change
+  that raises the disk cost has to edit that line in the same pull request,
+  where a reviewer sees it. Measure it with `cig bench --only "burn small tree"`
+  on main; the ratio is bytes, so one sample is enough.
+- **`regression` stands in for #145's "(non-noisy)".** A case whose spread
+  hides a 5% change cannot reach p < 0.01, so it cannot trip; one that trips
+  has a change the noise cannot explain. The set's geometric mean counts only
+  cases whose CV is 5% or less on both sides.
+- `start-up` is a median against a limit on one machine. On a shared runner it
+  is a report; CI names `correctness,disk` only.
+- A gate that cannot work (a `disk` gate with no `reference`, a `start-up`
+  gate with no `budget`) is a manifest error, not a silent pass.
+
+CI (`.github/workflows/ci.yml`, Ubuntu) runs
+`cig bench bench/bench.toml --samples 1 --gate correctness,disk`.
+
+## The family: `--family`, `--with` and `--matrix`
+
+```
+cig bench --family                                     every product's suite
+cig bench --family --with cig@1.16.0                   cig swapped under the others
+cig bench --family --with cigo@./old/cigo              cigo swapped
+cig bench --family --matrix cig=1.16.0,1.18.0          one column per cig
+cig bench --family --product cigo=~/cig-orchestrator   where a checkout is
+```
+
+**Finding the products** (cig, cigo, cigcompile, cigar, ciginstaller), for each
+in turn:
+
+1. `--product NAME=PATH`: a checkout, its `bench` folder or a manifest;
+2. `[products]` in `~/.config/cigscript/bench-family.toml` (or under
+   `$XDG_CONFIG_HOME`), the same paths: `[products]` then `cigo = "~/cig-orchestrator"`;
+3. the installer's layout: `NAME` on the `PATH` as `<prefix>/bin/NAME` and its
+   suite in `<prefix>/share/NAME/bench/bench.toml`.
+
+A product not found is named and skipped; none at all is a usage error. A
+`--product` name outside the five is a product like any other. A manifest
+whose `[bench].product` is not the name it was found under is refused.
+
+**A product's binary** is its manifest's `[bench].binary` (in a family run,
+relative to the checkout's root, the folder above `bench/`), else the installed
+one on the `PATH` (for cig, the running cig).
+
+**Swapping.** Every product's binary is put, under its own name, in a folder
+that goes **first on the `PATH` of every command** a suite runs. cigo's suite,
+which runs `cig`, finds the cig the family names or the one `--with` swapped
+in; with `--with cig@1.16.0` the cig suite measures 1.16.0 and cigo's runs on
+it. A command written by absolute path is not swapped. `--with cig@1.16.0` is
+fetched like `--against v1.16.0` (sha256 checked before anything runs); only
+cig releases can be fetched, so any other product takes a path. A value that
+is neither a file nor (for cig) a release is refused, naming it.
+
+**`--matrix PRODUCT=V1,V2,...`** runs every product's suite once per value,
+each with that value swapped in, and prints one table per product with a
+column per value and the last over the first:
+
+```
+== cigo (median ms, cig = ...)
+case                                   1.16.0         1.18.0 last/first
+hook, benign command                      5.1            4.8     x0.94
+```
+
+A case that is `WRONG` under one value shows `WRONG` in its column and fails
+the run (a correct answer is gated; a time is not). `--family` does not
+combine with `--save`, `--against` or `--watch`. `--timings`, `--stats` and
+`--syscalls` apply to every case in it.
+
+## The reusable workflow and `cig bench history`
+
+`.github/workflows/bench.yml` is a `workflow_call` workflow every repository
+with a `bench/bench.toml` calls:
+
+```yaml
+jobs:
+  bench:
+    uses: otmof-ops/cig-script/.github/workflows/bench.yml@main
+    with:
+      cig-version: "1.20.0"     # empty builds cig from the calling repository
+    permissions: { contents: write, pull-requests: write }
+```
+
+- **On a pull request** it runs the fast groups (`fast-groups`, default
+  `start-up compute`) A/B against the base branch on the same runner,
+  interleaved, and comments the Markdown table. Heavy suites do not run there.
+- **Nightly** (a `schedule` or a manual run of the caller) it runs the whole
+  suite and appends one JSON line to `history/<product>.jsonl` on the
+  `bench-history` branch (`history/<product>.<series>.jsonl` with a `series`).
+- **What fails it** is a case whose output is `WRONG` (exit 1), a gate named in
+  its `gate` input that trips (default `correctness`), or a suite that cannot
+  be read or built (exit 3). A timing never fails it: timings are reported,
+  never gated, on shared runners (#153).
+- The cig it measures with is a release, its sha256 checked before it runs.
+
+The history line, format 1:
+
+```
+{"format":1,"at":"2026-11-11T02:00:00Z","commit":"1a2b3c...","product":"cig",
+ "cig_version":"1.20.0","machine":"CPU, 4 cores, linux 6.8",
+ "cases":{"hello":{"group":"start-up","median_ms":3.4,"p10_ms":3.3,"p90_ms":3.6,"cv":0.02,"rss_bytes":7340032}}}
+```
+
+```
+cig bench history                      the cases the history has
+cig bench history hello                that case: a sparkline, then a table
+cig bench history hello --file h.jsonl   a file instead of the branch
+cig bench history hello --branch other   another branch
+```
+
+`--series btrfs` reads one filesystem's file, `history/<product>.btrfs.jsonl`.
+It reads `history/<product>.jsonl` from the branch (local, else `origin/`),
+the product from the manifest in `bench/bench.toml`. A case matches by exact
+name, else by one substring. A line in another `format` is skipped and counted.
+A change across two different machines is marked `*`: a hosted runner is not
+the same CPU every night.
+
+### The nightly filesystem matrix
+
+`.github/workflows/bench-nightly.yml` (a `schedule`, and a manual run) calls
+the reusable workflow once per filesystem, on cig's whole suite, kernel group
+included (#145 step 3; heavy suites run nightly, pull requests run the fast
+ones):
+
+| series | runner | filesystem |
+|---|---|---|
+| `ext4`, `btrfs`, `xfs` | Linux | a sparse image on the runner's big disk, put on a loop device, formatted, mounted, and `TMPDIR` pointed at it, so every sample's home is on that filesystem (the job fails if the mount is not what it asked for) |
+| `apfs` | macOS | the runner's own disk |
+| `ntfs` | Windows | the runner's own disk |
+
+Each job appends to `history/cig.<series>.jsonl` (the line also carries
+`filesystem` and `runner_os`), read with `cig bench history --series btrfs
+hello`. A night fails only on `correctness`; reflinks, block sizes and fsync
+costs differ between filesystems, so the disk and timing gates are printed and
+recorded there, not failed.
+
 ## What is here now, and what is next
 
-This page describes **steps 1 to 3 and 5** of #179. The upcoming steps, with the
-same statistics and the same manifest, add:
-
-- **step 4** `--timings`, `--stats` and `--syscalls` for one case;
-- **step 6** the reusable CI workflow and the gates;
-- **step 7** `--family`, `--with` and `--matrix`;
-- **step 8** `--profile` and `--diff`.
+This page describes **all eight steps** of #179 and #145's gates. The manifest
+still accepts and ignores a case's `score` and `config`, reserved for what
+comes after.
 
 ## Passes (`cig-pass`)
 

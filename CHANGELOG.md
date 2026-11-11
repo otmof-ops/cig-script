@@ -8,6 +8,68 @@ project follows semantic versioning.
 - **Burn kernel throughput: native snapshots in the tin, a group sync, compressed journals** (#147).
   An overwrite's before-state now goes into the tin, chunked and deduplicated as a hop's is, instead of a whole file in `runs/<id>/snapshots/`; runs written before still unburn (the restore reads either form). The flushes of those snapshots are grouped (64 snapshots or 10 ms, and before a process runs, the run record, and close) while the journal's own sync stays per line; `CIG_SNAPSHOT_SYNC=op` restores the per-op flush. A finished run's journal is stored as `journal.jsonl.zst` with the chain checked through the stream (`CIG_JOURNAL_ZST=off` keeps it plain). New crates: `zstd`, `zstd-safe`, `zstd-sys` (BSD-3-Clause, with the zstd library the last builds from C source) and `jobserver` (Apache-2.0 OR MIT); THIRD-PARTY-NOTICES.md is regenerated. Also fixed: loading a journal, marking entries restored and checking a run before an unburn each walked every entry per entry (quadratic in the run's length).
   Measured (release build without LTO, ext4 on a shared machine at load 6 to 8, so the disk's `fsync` was 4 to 9 ms; interleaved against 1.20.0, best of 3): overwrite 1,000 x 1 KB 11,362 ms to 4,041 ms; 200 x 64 KB 2,028 ms to 1,075 ms; 50 x 1 MB to 620 ms; journal bytes per op on a finished run 575 to 56; run folder for 1,000 x 1 KB 3,308 KB to 1,517 KB (the 1,000 files here hold the same bytes, which the tin stores once). Not met: unburn is still about as slow as the burn (1.1 to 1.6 times it), small objects are not yet packed per run, chunks are not yet compressed, and reflink before-states are not built. Tests: `native_snapshots_dedupe_in_the_tin`, `old_snapshot_folders_still_unburn`, `compressed_journals_verify`, `kill_at_every_op_rolls_back_exactly`, `parallel_unburn_keeps_per_path_order`, `the_stress_test_rolls_back_bit_for_bit`, `a_missing_or_short_snapshot_is_refused_with_e703_never_restored_wrong`, `snapshot_sync_op_still_works`.
+- **A faster tree-walker, steps T3 and T4 of #146.** Calls and loop turns take
+  their scope from a free list and the arguments go straight into the callee's
+  frame: no allocation per call in steady state (a counting allocator over
+  `fib` and a loop with a call: 0, from 3). A block that declares nothing makes
+  no scope (the checker counts it the same way, so resolved names stay
+  right). Two ints or two floats take a fused path ahead of the general
+  operator, still raising E502/E503 from the general one. A read or write of
+  `m.k` remembers where the key was last found and trusts it only when the
+  key there is the same, so a map that loses or gains keys answers as before.
+  The statement and expression evaluators keep their rare cases out of line,
+  which shrinks the frame every node pays for. Measured on a shared machine,
+  minimum of five interleaved rounds, release builds: glibc `loop` 119 -> 90 ms,
+  `fib` 112 -> 84, `nbody` 857 -> 560, `fannkuch` 512 -> 386; musl `loop` 128 -> 91,
+  `fib` 107 -> 115, `nbody` 944 -> 616, `fannkuch` 545 -> 414. Over the twelve
+  programs with a CPython twin, the median against CPython went from 1.92x to
+  1.55x (glibc) and 2.46x to 1.86x (musl). Output, errors, step counts and
+  the budget's stopping line are unchanged: `tests/steps.rs`, `tests/walker.rs`
+  and the new `tests/differential.rs` (the real 1.15.1 release, by SHA-256)
+  hold them. #146's targets for `loop`, `fib`, `nbody` and `fannkuch` are not
+  yet met; `benches/profiles/` says where the time is.
+- **`cig bench --profile`, `--diff`, `--keep` and `--repeat-until-slow`**
+  (#179 step 8). `--profile` takes one extra run under `perf record -F 999 -g`
+  and draws a flamegraph SVG into `.cig-bench/profiles/<case>.svg` (the five
+  hottest frames in the table, `debug.profile` in `--json`); where perf is not
+  installed or not allowed it says `not measured: perf is not available here`
+  and why, and there is no second sampler. `--diff NAME` sets this run's phases,
+  counters and syscalls against a baseline's, most changed first (save the
+  baseline with `--save NAME --timings --stats --syscalls`: a saved case now
+  carries its `insight`). `--keep` leaves the isolated homes and work folders and
+  prints where, and how to rerun a case by hand. `--repeat-until-slow` reruns a
+  case under perf (or with its phases) until a run is over p90 x 1.5 and keeps
+  that run's profile. Tests: `profile_draws_a_flamegraph_from_perf`,
+  `profile_without_perf_says_so_and_builds_no_second_sampler`,
+  `diff_sets_two_runs_side_by_side_most_changed_first`,
+  `keep_leaves_the_isolated_home_and_says_where`,
+  `repeat_until_slow_keeps_the_slow_runs_profile`,
+  `repeat_until_slow_without_perf_keeps_the_phases`; #179's tests table is
+  now there by name (`wrong_output_gets_no_time_and_fails`,
+  `isolated_home_leaves_nothing` which also checks the user's cig and
+  orchestrator state and keys byte for byte, `watch_reruns_on_change`,
+  `watch_plain_is_line_based`, `against_a_release_checks_its_sha256`,
+  `manifest_schema_is_versioned`).
+
+- **Benchmark gates and the nightly filesystem matrix** (#145). A case's `gate`
+  key (`correctness`, `regression`, `disk`, `start-up`) and `cig bench --gate
+  LIST` (or `all`): every gate is evaluated and printed, and the exit is 1 only
+  for the gates named. `regression` is a case more than 5% slower than the
+  baseline (significantly) or the set's geometric mean more than 2% slower
+  (`--against`); `disk` is bytes on disk per byte burned more than 10% above the
+  case's `reference` (what main stores); `start-up` is a median over the case's
+  `budget` (hello 5 ms; a new `burn one write` case, 7 ms). CI fails a pull
+  request on `--gate correctness,disk` and prints the timing gates (#153). The
+  `bench-nightly.yml` workflow runs the whole suite on ext4, btrfs and XFS
+  (loop devices formatted on the runner), APFS and NTFS (the runners' own
+  disks), and appends to `history/cig.<series>.jsonl` on `bench-history`
+  (`cig bench history --series btrfs`). Tests: `the_regression_gate_trips`,
+  `disk_and_start_up_gates_fail_only_when_named`,
+  `cigs_own_suite_declares_its_gates`, `ci_gates_and_the_nightly_matrix_are_wired`;
+  `every_benchmark_matches_its_expect_file`,
+  `kernel_benchmarks_restore_exact_bytes` and `disk_per_byte_is_reported` cover
+  the rest of #145's table.
+- **`cig runs adopt <dir>`: undo an installer update with `cig unburn`** (cig-installer#7). A committed `ciginstaller` transaction (`<home>/installer/txn/<id>`) becomes a run: each saved file is checked against its recorded sha256, every path is confined to the installer home the folder names, the snapshots go into the tin, the journal is written in cig's format (chained and signed), and its head goes into the ledger as an `origin` line. The ordinary `cig unburn <id>` then puts the home back byte for byte: mkdir, link, move, write, block and delete, and the `shim-index` flip as a write of the saved index. An open, cut-off or rolled-back transaction is `E716`, a changed or missing saved file `E717`, a path outside the home (or through a link, or with `..`) `E718`, a folder that is not a readable transaction `E719`. Store objects are left (they may be in use). Adopting twice is one run. `docs/BURN.md` has the section; tests in `tests/foreign.rs`.
 
 - **Listing runs no longer starts a process for every run that died** (cigo#119).
   A run left `running` by a process that is gone is now told to be
@@ -21,6 +83,45 @@ project follows semantic versioning.
 - **A box says which cover failed, and skips one whose target is gone.** The box covers the session bus sockets with /dev/null. A refusal now names the path and the errno (`covering a way to the key refused: /run/user/1000/bus (errno 2)`), never a bare `Operation not supported`. After any failed bind the target is looked at again: if it, or the folder it sat in, is gone (a login session's runtime folder when its last session ends), there is nothing left to hide and it is skipped; a path made again is bound again, a few times; one that still exists and cannot be covered refuses as before. The regression test now also removes the runtime folder itself.
 
 - **A box no longer refuses a hop because a path it covers has gone.** The box covers the session bus sockets in the runtime folder with /dev/null; when a login session ended between the plan and the mount (other work on the machine), the bind failed with ENOENT and the hop was refused (`covering a way to the key refused`, seen as `could not start: Operation not supported`). A cover whose target is gone has nothing left to hide, so it is skipped. Test: `contained_boxes_run_together_while_a_cover_path_comes_and_goes`.
+
+- **`cig bench --timings`, `--stats` and `--syscalls`, the timings line format,
+  `cig run --timings` and `--stats`** (#179 step 4). A product writes where its
+  time went to the descriptor named by `CIG_TIMINGS_FD`, one JSON line per phase
+  (`{"v":1,"product":"cig","phase":"check","ms":0.412}`; counters go to
+  `CIG_STATS_FD` as `{"v":1,"product":"cig","counter":"allocs","value":N}`),
+  and `cig bench --timings` shows each case's phases beside its wall time with
+  what is left over as `other`, so the breakdown adds up to the wall time of the
+  run it came from; phases that pass the wall by over 5% are flagged. cig writes
+  `start`, `lower`, `check`, `begin`, `run`, `burn` and `retain` when asked
+  (`cig run --timings[=FD]`, or the variable); with neither it reads no clock and
+  writes nothing. `--stats` reads allocation counts and bytes from a cig built
+  with `--features bench-stats` (a counting allocator, off in releases) and says
+  `not measured: built without the bench-stats feature` otherwise;
+  `cig run --stats[=FD]` says so on stderr. `--syscalls` counts every syscall in
+  one untimed run under `strace -c` (Linux; `not measured` with the reason
+  elsewhere), lists the top ten by time and flags an mmap/munmap thrash: at least
+  100 pairs and over 1,000 a second of the case's median (#153). All reported,
+  never gated. Tests: `bench_timings_add_up_to_the_wall_with_other`,
+  `bench_timings_and_stats_read_cig_itself`, `cig_run_writes_its_phases_when_asked_and_only_then`,
+  `syscalls_flags_thrash`, `syscalls_flags_a_real_mmap_loop`.
+- **`cig bench --family`, `--with` and `--matrix`** (#179 step 7). `--family` runs
+  every product's suite (cig, cigo, cigcompile, cigar, ciginstaller) found through
+  `--product NAME=PATH`, `~/.config/cigscript/bench-family.toml` or the installed
+  layout, in one report. `--with cigo@<path>` or `cig@1.16.0` swaps one product's
+  binary (a cig release is fetched and its sha256 checked first): every
+  product's binary goes first on the `PATH` of each command a suite runs, so
+  cigo's suite finds the cig it is meant to. `--matrix cig=1.16.0,1.18.0` runs
+  every suite once per value and prints a column each. Tests:
+  `family_with_swaps_one_product`, `family_matrix_has_a_column_per_value`,
+  `family_finds_installed_products_by_the_installers_layout`.
+- **The reusable benchmark workflow and `cig bench history`** (#179 step 6).
+  `.github/workflows/bench.yml` (`workflow_call`) runs the fast groups on a pull
+  request, A/B against the base on the same runner, and comments the table; the
+  nightly runs the whole suite and appends one JSON line to
+  `history/<product>.jsonl` on a `bench-history` branch. A wrong answer fails a
+  run; a timing never does. `cig bench history [CASE]` prints a case's medians as
+  a sparkline and a table, marking a change across machines. Test:
+  `bench_history_reads_a_file_and_the_branch`.
 
 - **cig's own benchmark suite and the kernel measures** (#179 step 5, #145).
   `bench/bench.toml` (`format = 1`) holds the start-up and compute programs of

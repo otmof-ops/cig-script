@@ -291,13 +291,27 @@ fn run_source(
     compiled: Option<&crate::program::Program>,
 ) -> i32 {
     let dry_run = args.dry_run;
-    let code = run_source_inner(ctx, args, chain, source, compiled);
+    // Phases and counters, when asked for by flag or by CIG_TIMINGS_FD /
+    // CIG_STATS_FD; otherwise nothing is read or written (see `timings`).
+    let t = match crate::timings::Timings::from_run(args.timings.as_deref(), args.stats.as_deref())
+    {
+        Ok(t) => t,
+        Err(e) => {
+            let d = crate::diagnostics::usage(format!("--timings/--stats: {e}")).code("E800");
+            report(ctx, &d, None, None);
+            return exit::USAGE;
+        }
+    };
+    let code = run_source_inner(ctx, args, chain, source, compiled, &t);
     // The retention settings, once the run is recorded (#105); then the
     // disk budget (#149), which is off by default.
+    let retain_t = t.start();
     if !dry_run {
         crate::cli::runs::keep_by_config();
         crate::cli::runs::budget_in_background();
     }
+    t.end("retain", retain_t);
+    t.finish();
     code
 }
 
@@ -307,9 +321,13 @@ fn run_source_inner(
     chain: Option<String>,
     source: String,
     compiled: Option<&crate::program::Program>,
+    t: &crate::timings::Timings,
 ) -> i32 {
     let name = args.file.to_string_lossy().to_string();
-    let program = match parse(&source) {
+    let lower_t = t.start();
+    let parsed = parse(&source);
+    t.end("lower", lower_t);
+    let program = match parsed {
         Ok(p) => p,
         Err(d) => {
             report(ctx, &d, Some(&name), Some(&source));
@@ -321,9 +339,11 @@ fn run_source_inner(
         None => pin::pin_for(&args.file, &source).ok().flatten(),
     };
     if !args.no_check {
+        let check_t = t.start();
         let mut rep = check::check(&program, &[]);
         rep.warnings
             .extend(pin_warnings(&program, pin.as_ref(), &name));
+        t.end("check", check_t);
         if !rep.ok() {
             if ctx.json {
                 for e in &rep.errors {
@@ -347,6 +367,9 @@ fn run_source_inner(
         }
     }
 
+    // Everything between the check and the first line of the script: the
+    // trial's plan comparison, the run's record and the kernel.
+    let begin_t = t.start();
     if let Ok(v) = std::env::var("CIG_MAX_STEPS") {
         if v.trim().parse::<u64>().is_err() {
             let d = crate::diagnostics::usage(format!(
@@ -454,6 +477,8 @@ fn run_source_inner(
         interp.set_max_steps(n);
     }
 
+    t.end("begin", begin_t);
+    let run_t = t.start();
     let mut result = interp.run_program(&program);
     if result.is_ok() {
         if let Some(chain_name) = &chain {
@@ -461,6 +486,10 @@ fn run_source_inner(
         }
     }
     let _ = interp.out.flush();
+    t.end("run", run_t);
+    // The burn phase: what the run leaves behind once the program has ended
+    // (a rollback, the record, the journal's head, the ledger, the report).
+    let burn_t = t.start();
 
     let mut code = match &result {
         Ok(()) => interp.exit_requested.unwrap_or(exit::OK),
@@ -715,6 +744,7 @@ fn run_source_inner(
             code = exit::SCRIPT_ERROR;
         }
     }
+    t.end("burn", burn_t);
     code
 }
 

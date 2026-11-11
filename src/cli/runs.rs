@@ -122,6 +122,91 @@ pub fn runs(
     }
 }
 
+/// `cig runs adopt <installer transaction folder>`: import a committed
+/// `ciginstaller` transaction as a run, so the ordinary `cig unburn <id>`
+/// puts its changes back. Writes only cig's own state directory.
+pub fn adopt(ctx: &Ctx, dir: Option<&str>) -> i32 {
+    let Some(dir) = dir else {
+        eprintln!(
+            "{} `cig runs adopt` needs the installer's transaction folder",
+            ctx.red("error[E800 usage]:")
+        );
+        eprintln!("  = hint: cig runs adopt <home>/installer/txn/<id>  (`ciginstaller update` reports the id as `txn`)");
+        eprintln!("  = explain: cig explain E800");
+        return exit::USAGE;
+    };
+    if let Err(e) = crate::burn::ensure_private() {
+        eprintln!("{} {e}", ctx.red("error[E707 burn]:"));
+        eprintln!("  = explain: cig explain E707");
+        return exit::SCRIPT_ERROR;
+    }
+    match crate::burn::foreign::adopt(std::path::Path::new(dir)) {
+        Ok(a) => {
+            if ctx.json {
+                outln!(
+                    "{}",
+                    serde_json::json!({
+                        "run": a.id,
+                        "origin": crate::burn::foreign::TOOL,
+                        "home": a.home,
+                        "txn": a.txn,
+                        "label": a.label,
+                        "entries": a.entries,
+                        "store_objects_left": a.store_objects_left,
+                        "already": a.already,
+                    })
+                );
+                return exit::OK;
+            }
+            match &a.id {
+                Some(id) => {
+                    eprintln!(
+                        "{} {} {} of {} ({} op{}) {}",
+                        ctx.green("ok:"),
+                        if a.already {
+                            "already adopted:"
+                        } else {
+                            "adopted"
+                        },
+                        a.txn,
+                        crate::burn::foreign::TOOL,
+                        a.entries,
+                        if a.entries == 1 { "" } else { "s" },
+                        if a.already { "" } else { "as a run" }
+                    );
+                    if a.store_objects_left > 0 {
+                        eprintln!(
+                            "  {} store object{} stay where they are (content addressed; `ciginstaller gc` reclaims unused ones)",
+                            a.store_objects_left,
+                            if a.store_objects_left == 1 { "" } else { "s" }
+                        );
+                    }
+                    outln!("{id}");
+                    eprintln!("  = next: cig unburn {id} --dry-run, then cig unburn {id}");
+                }
+                None => {
+                    eprintln!(
+                        "{} {} changed nothing cig can put back; no run was made",
+                        ctx.yellow("note:"),
+                        a.txn
+                    );
+                }
+            }
+            exit::OK
+        }
+        Err(r) => {
+            eprintln!(
+                "{} {}",
+                ctx.red(&format!("error[{} burn]:", r.code)),
+                r.what
+            );
+            eprintln!("  = hint: {}", r.hint);
+            eprintln!("  = explain: cig explain {}", r.code);
+            exit::SCRIPT_ERROR
+        }
+    }
+}
+
 /// Per run: the paths it does not write back, and the paths whose
 /// changed-since check it skips (the combined restore).
 type CombinePlan = std::collections::BTreeMap<String, (Vec<String>, Vec<String>)>;

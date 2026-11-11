@@ -14538,7 +14538,7 @@ fn bench_matching_case_reports_numbers() {
 }
 
 #[test]
-fn bench_wrong_output_is_wrong_and_exits_nonzero() {
+fn wrong_output_gets_no_time_and_fails() {
     let sb = Sandbox::new();
     sb.write("bench/fixtures/hello.cig", "exhale \"hello\"\n");
     sb.write("bench/fixtures/wrong.out", "goodbye\n");
@@ -14598,11 +14598,25 @@ fn bench_json_carries_median_p10_p90_cv_and_rss() {
 
 #[test]
 #[cfg(unix)]
-fn bench_isolated_home_leaves_the_real_home_alone() {
+fn isolated_home_leaves_nothing() {
     let sb = Sandbox::new();
-    // The outer HOME: a fresh folder we can inspect afterwards.
+    // The user's own home, with what a user keeps in it: cig's state, the
+    // orchestrator's, and a key. A case that writes under every home it is
+    // handed must leave all of it as it was, byte for byte.
     let outer_home = sb.path().join("outer-home");
-    fs::create_dir_all(&outer_home).unwrap();
+    for (name, body) in [
+        (".cigscript/runs/r1/journal", "journal\n"),
+        (".cigscript/seal.key", "not-a-real-key\n"),
+        (".cig-orchestrator/state.json", "{}\n"),
+        (".ssh/id_ed25519", "not-a-real-key\n"),
+    ] {
+        let p = outer_home.join(name);
+        fs::create_dir_all(p.parent().unwrap()).unwrap();
+        fs::write(p, body).unwrap();
+    }
+    let before = tree_listing(&outer_home);
+    let outer_cig = sb.path().join("outer-cigscript-home");
+    fs::create_dir_all(&outer_cig).unwrap();
     sb.write(
         "bench/bench.toml",
         r#"
@@ -14613,8 +14627,8 @@ samples = 2
 per = 1
 warmup = 1
 [[case]]
-name = "touches_home"
-run = ["sh", "-c", "touch \"$HOME/cookie\" && echo ok"]
+name = "touches_every_home"
+run = ["sh", "-c", "for d in \"$HOME\" \"$USERPROFILE\" \"$CIGSCRIPT_HOME\" \"$CIGO_HOME\"; do mkdir -p \"$d/.cigscript\" \"$d/.cig-orchestrator\"; echo x > \"$d/cookie\"; echo x >> \"$d/.cigscript/seal.key\"; echo x >> \"$d/.cig-orchestrator/state.json\"; done; echo ok"]
 expect = { exit = 0 }
 "#,
     );
@@ -14623,8 +14637,10 @@ expect = { exit = 0 }
     let out = Command::new(cig_bin())
         .args(["bench"])
         .current_dir(sb.path())
-        .env("CIGSCRIPT_HOME", sb.home())
+        .env("CIGSCRIPT_HOME", &outer_cig)
+        .env("CIGO_HOME", sb.path().join("outer-cigo-home"))
         .env("HOME", &outer_home)
+        .env("USERPROFILE", &outer_home)
         .env("NO_COLOR", "1")
         .env("CIG_SEAL_KEY", "file")
         .env("CIG_BUDGET_SYNC", "1")
@@ -14638,12 +14654,45 @@ expect = { exit = 0 }
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
-    // The outer HOME was never touched.
+    // The outer homes were never touched: same files, same bytes.
     assert!(
         !outer_home.join("cookie").exists(),
         "`cookie` leaked into the real HOME {}",
         outer_home.display()
     );
+    assert_eq!(tree_listing(&outer_home), before, "the user's home changed");
+    assert_eq!(
+        tree_listing(&outer_cig),
+        Vec::<(String, String)>::new(),
+        "the user's CIGSCRIPT_HOME changed"
+    );
+    assert!(
+        !sb.path().join("outer-cigo-home").exists(),
+        "the user's CIGO_HOME was made"
+    );
+}
+
+/// Every file under `root` with its contents, in a stable order.
+#[cfg(unix)]
+fn tree_listing(root: &Path) -> Vec<(String, String)> {
+    fn walk(dir: &Path, root: &Path, out: &mut Vec<(String, String)>) {
+        let Ok(rd) = fs::read_dir(dir) else { return };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                walk(&p, root, out);
+            } else {
+                out.push((
+                    p.strip_prefix(root).unwrap().to_string_lossy().into_owned(),
+                    fs::read_to_string(&p).unwrap_or_default(),
+                ));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(root, root, &mut out);
+    out.sort();
+    out
 }
 
 #[test]
@@ -14776,7 +14825,7 @@ fn fake_cig(sb: &Sandbox, name: &str, body: &str) -> PathBuf {
 }
 
 #[test]
-fn bench_manifest_schema_is_versioned() {
+fn manifest_schema_is_versioned() {
     let sb = Sandbox::new();
     write_bench_ab(&sb, "", 2);
     let good = sb.read("bench/bench.toml");
@@ -14913,7 +14962,7 @@ fn bench_save_then_against_a_baseline() {
 
 #[test]
 #[cfg(unix)]
-fn bench_against_a_release_checks_its_sha256() {
+fn against_a_release_checks_its_sha256() {
     let sb = Sandbox::new();
     write_bench_ab(&sb, "", 2);
     let version = cigscript::update::Version(1, 0, 0);
@@ -15121,7 +15170,7 @@ impl Drop for WatchChild {
 
 #[test]
 #[cfg(unix)]
-fn bench_watch_reruns_on_change() {
+fn watch_reruns_on_change() {
     let sb = Sandbox::new();
     write_bench_ab(&sb, "watch = [\"watched.txt\"]", 2);
     // A real cig for the case: `cig` on PATH is replaced by the running one.
@@ -15174,7 +15223,7 @@ fn bench_watch_reruns_on_change() {
 
 #[test]
 #[cfg(unix)]
-fn bench_watch_plain_is_line_based() {
+fn watch_plain_is_line_based() {
     let sb = Sandbox::new();
     write_bench_ab(&sb, "watch = [\"watched.txt\"]", 2);
     sb.write("watched.txt", "one");
@@ -16917,4 +16966,1370 @@ fn snapshot_sync_op_still_works() {
     let out = cig_timed(&sb, &["unburn", &id], &op);
     assert!(out.status.success(), "{out:?}");
     assert_eq!(tree_of(&sb.path().join("w")), before);
+}
+
+// ----- bench: --timings, --stats, --syscalls (#179 step 4) --------------------
+
+/// A one-case manifest whose command is `sh run.sh`, the script written
+/// beside it, so a test can stand in for any product.
+#[cfg(unix)]
+fn write_bench_sh(sb: &Sandbox, script: &str) {
+    sb.write("bench/run.sh", &format!("{script}\n"));
+    sb.write(
+        "bench/bench.toml",
+        "format = 1\n[bench]\nproduct = \"stand-in\"\n[defaults]\nsamples = 2\nper = 1\nwarmup = 1\n[[case]]\nname = \"stand-in case\"\nrun = [\"sh\", \"run.sh\"]\nexpect = { exit = 0 }\n",
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn bench_timings_add_up_to_the_wall_with_other() {
+    let sb = Sandbox::new();
+    // A product that times two phases on the descriptor it was handed, then
+    // does 150 ms of work it never reports: that is `other`.
+    write_bench_sh(
+        &sb,
+        r#"if [ -n "$CIG_TIMINGS_FD" ]; then
+echo '{"v":1,"product":"stand-in","phase":"read","ms":40}' >&$CIG_TIMINGS_FD
+echo '{"v":1,"product":"stand-in","phase":"work","ms":60,"later":1}' >&$CIG_TIMINGS_FD
+fi
+sleep 0.25"#,
+    );
+    let (code, out, err) = bench_bounded(&sb, &["--json", "bench", "--timings"], 120);
+    assert_eq!(code, Some(0), "{out}\n{err}");
+    let v: serde_json::Value = serde_json::from_str(&out).expect("json");
+    let t = &v["cases"][0]["debug"]["timings"];
+    assert_eq!(t["measured"], true, "{out}");
+    assert_eq!(t["format"], 1);
+    let phases = t["phases"].as_array().unwrap();
+    assert_eq!(phases.len(), 2, "{t}");
+    assert_eq!(phases[0]["phase"], "read");
+    assert_eq!(phases[1]["ms"].as_f64(), Some(60.0));
+    // The breakdown adds up to the run's own wall time, `other` included.
+    let wall = t["wall_ms"].as_f64().unwrap();
+    let sum: f64 = phases.iter().map(|p| p["ms"].as_f64().unwrap()).sum();
+    let other = t["other_ms"].as_f64().unwrap();
+    assert!((sum + other - wall).abs() <= wall * 0.05, "{t}");
+    assert!(other > 100.0, "the unreported work is `other`: {t}");
+    assert_eq!(t["overlap"], false);
+    // The plain table shows the phases beside the wall time and says `other`.
+    let (code, table, _) = bench_bounded(&sb, &["bench", "--timings"], 120);
+    assert_eq!(code, Some(0), "{table}");
+    assert!(table.contains("timings: stand-in case"), "{table}");
+    assert!(table.contains("other") && table.contains("work"), "{table}");
+    // Without the flag nothing is asked of the product.
+    let plain = sb.run_ok(&["--json", "bench"]);
+    assert!(!plain.contains("\"debug\""), "{plain}");
+}
+
+#[test]
+#[cfg(unix)]
+fn bench_timings_flag_phases_that_overlap_and_products_that_say_nothing() {
+    let sb = Sandbox::new();
+    // Phases that add up to far more than the run took.
+    write_bench_sh(
+        &sb,
+        r#"[ -n "$CIG_TIMINGS_FD" ] && echo '{"v":1,"product":"p","phase":"a","ms":5000}' >&$CIG_TIMINGS_FD; true"#,
+    );
+    let (_, out, _) = bench_bounded(&sb, &["--json", "bench", "--timings"], 120);
+    let v: serde_json::Value = serde_json::from_str(&out).expect("json");
+    assert_eq!(v["cases"][0]["debug"]["timings"]["overlap"], true, "{out}");
+    // A product that writes nothing, or another format, is not measured, and
+    // the harness says why instead of inventing a breakdown.
+    write_bench_sh(&sb, "true");
+    let (code, out, _) = bench_bounded(&sb, &["--json", "bench", "--timings"], 120);
+    assert_eq!(
+        code,
+        Some(0),
+        "an unmeasured breakdown is not a failure: {out}"
+    );
+    let v: serde_json::Value = serde_json::from_str(&out).expect("json");
+    let t = &v["cases"][0]["debug"]["timings"];
+    assert_eq!(t["measured"], false);
+    assert!(
+        t["note"].as_str().unwrap().contains("CIG_TIMINGS_FD"),
+        "{t}"
+    );
+    write_bench_sh(
+        &sb,
+        r#"[ -n "$CIG_TIMINGS_FD" ] && echo '{"v":2,"phase":"a","ms":1}' >&$CIG_TIMINGS_FD; true"#,
+    );
+    let (_, out, _) = bench_bounded(&sb, &["--json", "bench", "--timings"], 120);
+    assert!(out.contains("not timings format 1"), "{out}");
+}
+
+#[test]
+#[cfg(unix)]
+fn cig_run_writes_its_phases_when_asked_and_only_then() {
+    let sb = Sandbox::new();
+    let script = sb.write("hello.cig", "exhale \"hi\"\n");
+    let quiet = sb.cig(&["run", script.to_str().unwrap()]);
+    assert!(
+        !String::from_utf8_lossy(&quiet.stderr).contains("\"phase\""),
+        "no flag, no lines"
+    );
+    let out = sb.cig(&["run", script.to_str().unwrap(), "--timings"]);
+    assert!(out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    let names: Vec<String> = err
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .filter(|v| v["v"] == 1 && v["product"] == "cig")
+        .filter_map(|v| v["phase"].as_str().map(str::to_string))
+        .collect();
+    for want in ["lower", "check", "run", "burn"] {
+        assert!(
+            names.iter().any(|n| n == want),
+            "{want} in {names:?}\n{err}"
+        );
+    }
+    // The order they ended in: the script is read, checked, then run.
+    let at = |n: &str| names.iter().position(|x| x == n).unwrap();
+    assert!(at("lower") < at("check") && at("check") < at("run") && at("run") < at("burn"));
+    // A bad descriptor is a usage error, never a silent no-op.
+    let bad = sb.cig(&["run", script.to_str().unwrap(), "--timings=77"]);
+    assert_eq!(bad.status.code(), Some(3));
+    // `--stats` says plainly when this build does not count.
+    let st = sb.cig(&["run", script.to_str().unwrap(), "--stats"]);
+    assert!(st.status.success());
+    let st_err = String::from_utf8_lossy(&st.stderr);
+    assert!(
+        st_err.contains("bench-stats") || st_err.contains("\"allocs\""),
+        "{st_err}"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn bench_timings_and_stats_read_cig_itself() {
+    let sb = Sandbox::new();
+    write_bench_hello(&sb);
+    let (code, out, err) = bench_bounded(&sb, &["--json", "bench", "--timings", "--stats"], 120);
+    assert_eq!(code, Some(0), "{out}\n{err}");
+    let v: serde_json::Value = serde_json::from_str(&out).expect("json");
+    let d = &v["cases"][0]["debug"];
+    let names: Vec<&str> = d["timings"]["phases"]
+        .as_array()
+        .expect("phases")
+        .iter()
+        .map(|p| p["phase"].as_str().unwrap())
+        .collect();
+    for want in ["lower", "check", "run", "burn"] {
+        assert!(names.contains(&want), "{want} in {names:?}");
+    }
+    let wall = d["timings"]["wall_ms"].as_f64().unwrap();
+    let sum: f64 = d["timings"]["phases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["ms"].as_f64().unwrap())
+        .sum();
+    assert!(
+        sum <= wall * 1.05,
+        "cig's own phases never pass the wall: {sum} vs {wall}"
+    );
+    // Counters: numbers in a build with `bench-stats`, and a plain "not
+    // measured" naming the feature in one without.
+    let c = &d["stats"]["counters"][0];
+    match c["value"].as_f64() {
+        Some(n) => assert!(n > 0.0, "{c}"),
+        None => assert!(c["note"].as_str().unwrap().contains("bench-stats"), "{c}"),
+    }
+    // They describe one build: not with --against or --watch.
+    let (code, _, err) = bench_bounded(&sb, &["bench", "--timings", "--watch"], 20);
+    assert_eq!(code, Some(3), "{err}");
+}
+
+/// A stand-in `strace` that writes a canned `-c` table to the `-o` file and
+/// then runs the command, so the whole path is exercised on any Linux.
+#[cfg(target_os = "linux")]
+fn fake_strace(sb: &Sandbox, rows: &str) -> PathBuf {
+    fake_cig(
+        sb,
+        "fakebin/strace",
+        &format!(
+            r#"while [ "$1" != "-o" ]; do shift; done; shift; OUT=$1; shift
+printf '%s\n' '% time     seconds  usecs/call     calls    errors syscall' '------ ----------- ----------- --------- --------- ----------------' {rows} '------ ----------- ----------- --------- --------- ----------------' > "$OUT"
+exec "$@""#
+        ),
+    )
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn syscalls_flags_thrash() {
+    let sb = Sandbox::new();
+    write_bench_sh(&sb, "true");
+    let strace = fake_strace(
+        &sb,
+        "' 70.00    0.700000          14     50000           munmap' ' 30.00    0.300000           6     50000           mmap'",
+    );
+    let path = format!(
+        "{}:{}",
+        strace.parent().unwrap().display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let run = |args: &[&str]| {
+        let out = bounded(
+            Command::new(cig_bin())
+                .args(args)
+                .current_dir(sb.path())
+                .env("PATH", &path)
+                .env("CIGSCRIPT_HOME", sb.home())
+                .env("NO_COLOR", "1")
+                .env("CIG_SEAL_KEY", "file")
+                .env("CIG_INTERNAL_TRACKER_DIR", sb.path().join("tracker")),
+            120,
+        );
+        (
+            out.status.code(),
+            String::from_utf8_lossy(&out.stdout).to_string(),
+        )
+    };
+    let (code, out) = run(&["--json", "bench", "--syscalls"]);
+    assert_eq!(code, Some(0), "{out}");
+    let v: serde_json::Value = serde_json::from_str(&out).expect("json");
+    let s = &v["cases"][0]["debug"]["syscalls"];
+    assert_eq!(s["measured"], true, "{out}");
+    assert_eq!(s["total"], 100000);
+    assert_eq!(s["top"][0]["syscall"], "munmap");
+    assert!(
+        s["thrash"].as_str().is_some_and(|t| t.contains("thrash")),
+        "{s}"
+    );
+    // The plain table flags it; and a flag is not a gate: exit stays 0.
+    let (code, table) = run(&["bench", "--syscalls"]);
+    assert_eq!(code, Some(0));
+    assert!(table.contains("FLAG: mmap/munmap thrash"), "{table}");
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn syscalls_without_strace_say_not_measured() {
+    let sb = Sandbox::new();
+    write_bench_sh(&sb, "true");
+    // An empty folder as PATH has no strace (and no sh: the case uses its
+    // absolute path).
+    let empty = sb.path().join("nopath");
+    fs::create_dir_all(&empty).unwrap();
+    sb.write(
+        "bench/bench.toml",
+        "format = 1\n[bench]\nproduct = \"x\"\n[defaults]\nsamples = 1\nper = 1\n[[case]]\nname = \"t\"\nrun = [\"/bin/true\"]\nexpect = { exit = 0 }\n",
+    );
+    let out = bounded(
+        Command::new(cig_bin())
+            .args(["--json", "bench", "--syscalls"])
+            .current_dir(sb.path())
+            .env("PATH", &empty)
+            .env("CIGSCRIPT_HOME", sb.home())
+            .env("CIG_SEAL_KEY", "file")
+            .env("CIG_INTERNAL_TRACKER_DIR", sb.path().join("tracker")),
+        60,
+    );
+    assert_eq!(out.status.code(), Some(0));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+    let s = &v["cases"][0]["debug"]["syscalls"];
+    assert_eq!(s["measured"], false, "{s}");
+    assert!(
+        s["note"].as_str().unwrap().starts_with("not measured"),
+        "{s}"
+    );
+}
+
+/// The same flag on a real loop, where the machine has `strace` and `python3`
+/// and may use `ptrace`: 3,000 mmap/munmap pairs are flagged, and a program
+/// that maps once is not. Not on musl: cig's musl build allocates through
+/// mimalloc, which keeps the loop from mapping at all (#146).
+#[test]
+#[cfg(all(target_os = "linux", not(target_env = "musl")))]
+fn syscalls_flags_a_real_mmap_loop() {
+    let have = |tool: &str| {
+        Command::new(tool)
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    };
+    if !have("strace") || !have("python3") {
+        eprintln!("skipped: needs strace and python3");
+        return;
+    }
+    let sb = Sandbox::new();
+    let case = |name: &str, body: &str| {
+        format!(
+            "[[case]]\nname = \"{name}\"\nrun = [\"python3\", \"-c\", '''{body}''']\nexpect = {{ exit = 0 }}\n"
+        )
+    };
+    sb.write(
+        "bench/bench.toml",
+        &format!(
+            "format = 1\n[bench]\nproduct = \"stand-in\"\n[defaults]\nsamples = 1\nper = 1\nwarmup = 1\n{}{}",
+            case(
+                "thrash",
+                "import mmap\nfor _ in range(3000):\n    m = mmap.mmap(-1, 1 << 20)\n    m.close()"
+            ),
+            case("calm", "import mmap\nm = mmap.mmap(-1, 1 << 20)\nm.close()")
+        ),
+    );
+    let (code, out, err) = bench_bounded(&sb, &["--json", "bench", "--syscalls"], 180);
+    assert_eq!(code, Some(0), "{out}\n{err}");
+    let v: serde_json::Value = serde_json::from_str(&out).expect("json");
+    let sys = |i: usize| v["cases"][i]["debug"]["syscalls"].clone();
+    if sys(0)["measured"] == false {
+        eprintln!("skipped: strace is not allowed here: {}", sys(0)["note"]);
+        return;
+    }
+    assert!(sys(0)["thrash"].is_string(), "{}", sys(0));
+    assert!(sys(1)["thrash"].is_null(), "{}", sys(1));
+}
+
+// ----- bench: --family, --with, --matrix (#179 step 7) ----------------------
+
+/// A stand-in product: `<name>/bench/bench.toml` with one case that runs
+/// `bin/<name>` (a shell script made from `body`) and expects `<out>` on
+/// stdout. Returns the product's folder.
+#[cfg(unix)]
+fn stand_in_product(sb: &Sandbox, name: &str, body: &str, out: &str) -> PathBuf {
+    fake_cig(sb, &format!("{name}/bin/{name}"), body);
+    sb.write(&format!("{name}/bench/fixtures/out.txt"), out);
+    sb.write(
+        &format!("{name}/bench/bench.toml"),
+        &format!(
+            "format = 1\n[bench]\nproduct = \"{name}\"\nbinary = \"bin/{name}\"\n[defaults]\nsamples = 2\nper = 1\nwarmup = 1\n[[case]]\nname = \"{name} case\"\nrun = [\"bin/{name}\"]\nexpect = {{ exit = 0, stdout = \"fixtures/out.txt\" }}\n"
+        ),
+    );
+    sb.path().join(name)
+}
+
+/// The family of three stand-ins: a `cig` that says which one it is, a
+/// `cigo` that runs whatever `cig` is on its PATH, and a `cigar` that never
+/// uses either.
+#[cfg(unix)]
+fn stand_in_family(sb: &Sandbox) -> Vec<String> {
+    let cig = stand_in_product(sb, "cig", "echo cig-one", "cig-one\n");
+    let cigo = stand_in_product(sb, "cigo", "exec cig", "cig-one\n");
+    let cigar = stand_in_product(sb, "cigar", "echo cigar", "cigar\n");
+    let mut a = Vec::new();
+    for (n, p) in [("cig", cig), ("cigo", cigo), ("cigar", cigar)] {
+        a.push("--product".to_string());
+        a.push(format!("{n}={}", p.display()));
+    }
+    a
+}
+
+#[test]
+#[cfg(unix)]
+fn family_with_swaps_one_product() {
+    let sb = Sandbox::new();
+    let products = stand_in_family(&sb);
+    let two = fake_cig(&sb, "other/cig", "echo cig-two");
+    let mut base: Vec<&str> = vec!["--json", "bench", "--family"];
+    base.extend(products.iter().map(String::as_str));
+
+    // The family as it stands: every suite timed, each against the cig it
+    // finds first on its path.
+    let (code, out, err) = bench_bounded(&sb, &base, 120);
+    assert_eq!(code, Some(0), "{out}\n{err}");
+    let v: serde_json::Value = serde_json::from_str(&out).expect("json");
+    let state = |v: &serde_json::Value, p: &str| {
+        v["products"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["product"] == p)
+            .unwrap_or_else(|| panic!("{p} in {v}"))["cases"][0]["outcome"]["state"]
+            .clone()
+    };
+    for p in ["cig", "cigo", "cigar"] {
+        assert_eq!(state(&v, p), "timed", "{p}: {out}");
+    }
+
+    // `--with cig@<other>`: the cig under cigo is now the other one. cigo's
+    // own binary is unchanged and says so by what it printed: its case now
+    // sees "cig-two", where it expects "cig-one". The suite that never calls
+    // cig is untouched.
+    let with = format!("cig@{}", two.display());
+    let mut swapped = base.clone();
+    swapped.extend(["--with", &with]);
+    let (code, out, _) = bench_bounded(&sb, &swapped, 120);
+    assert_eq!(code, Some(1), "a wrong answer under the swap fails: {out}");
+    let v: serde_json::Value = serde_json::from_str(&out).expect("json");
+    assert_eq!(state(&v, "cigo"), "wrong", "{out}");
+    let why = v["products"][1]["cases"][0]["outcome"]["why"]
+        .as_str()
+        .unwrap();
+    assert!(why.contains("cig-two"), "{why}");
+    assert_eq!(state(&v, "cigar"), "timed", "{out}");
+    assert_eq!(v["swapped"]["cig"]["value"], two.display().to_string());
+    // The swapped product's binary is the other one; the others' are not.
+    assert!(
+        v["products"][0]["binary"]
+            .as_str()
+            .unwrap()
+            .ends_with("other/cig"),
+        "{out}"
+    );
+    assert!(
+        v["products"][1]["binary"]
+            .as_str()
+            .unwrap()
+            .ends_with("cigo/bin/cigo"),
+        "{out}"
+    );
+
+    // Swapping cigo for another cigo that makes the case's answer right
+    // under the original cig proves the swap goes the other way too.
+    let cigo2 = fake_cig(&sb, "other/cigo", "exec cig");
+    let with = format!("cigo@{}", cigo2.display());
+    let mut swapped = base.clone();
+    swapped.extend(["--with", &with]);
+    let (code, out, _) = bench_bounded(&sb, &swapped, 120);
+    assert_eq!(code, Some(0), "{out}");
+    let v: serde_json::Value = serde_json::from_str(&out).expect("json");
+    assert!(
+        v["products"][1]["binary"]
+            .as_str()
+            .unwrap()
+            .ends_with("other/cigo"),
+        "{out}"
+    );
+
+    // Not a file and not a cig release: refused, naming the value.
+    let mut bad = base.clone();
+    bad.extend(["--with", "cigo@nowhere"]);
+    let (code, _, err) = bench_bounded(&sb, &bad, 60);
+    assert_eq!(code, Some(3), "{err}");
+    assert!(err.contains("nowhere"), "{err}");
+    // `--with` belongs to `--family`.
+    let (code, _, err) = bench_bounded(&sb, &["bench", "--with", "cig@x"], 60);
+    assert_eq!(code, Some(3), "{err}");
+    assert!(err.contains("--family"), "{err}");
+}
+
+#[test]
+#[cfg(unix)]
+fn family_matrix_has_a_column_per_value() {
+    let sb = Sandbox::new();
+    let products = stand_in_family(&sb);
+    let one = sb.path().join("cig/bin/cig");
+    let two = fake_cig(&sb, "other/cig", "echo cig-two");
+    let matrix = format!("cig={},{}", one.display(), two.display());
+    let mut args: Vec<&str> = vec!["--json", "bench", "--family", "--matrix", &matrix];
+    args.extend(products.iter().map(String::as_str));
+    let (code, out, _) = bench_bounded(&sb, &args, 120);
+    assert_eq!(code, Some(1), "cigo is wrong under the second cig: {out}");
+    let v: serde_json::Value = serde_json::from_str(&out).expect("json");
+    assert_eq!(v["matrix"]["product"], "cig");
+    assert_eq!(v["matrix"]["values"].as_array().unwrap().len(), 2);
+    let cigo = &v["products"][1]["cases"][0]["values"];
+    assert_eq!(cigo[0]["outcome"]["state"], "timed", "{out}");
+    assert_eq!(cigo[1]["outcome"]["state"], "wrong", "{out}");
+    // The table: one column per value, and a note that it is not gated.
+    let mut table: Vec<&str> = vec!["bench", "--family", "--matrix", &matrix];
+    table.extend(products.iter().map(String::as_str));
+    let (_, text, _) = bench_bounded(&sb, &table, 120);
+    assert!(
+        text.contains("last/first") && text.contains("WRONG"),
+        "{text}"
+    );
+    assert!(text.contains("never gated"), "{text}");
+    // One value is not a matrix.
+    let single = format!("cig={}", one.display());
+    let mut one_arg: Vec<&str> = vec!["bench", "--family", "--matrix", &single];
+    one_arg.extend(products.iter().map(String::as_str));
+    let (code, _, err) = bench_bounded(&sb, &one_arg, 60);
+    assert_eq!(code, Some(3), "{err}");
+}
+
+#[test]
+#[cfg(unix)]
+fn family_finds_installed_products_by_the_installers_layout() {
+    let sb = Sandbox::new();
+    // <prefix>/bin/cigar and <prefix>/share/cigar/bench/bench.toml.
+    let cigar = stand_in_product(&sb, "cigar", "echo cigar", "cigar\n");
+    let prefix = sb.path().join("prefix");
+    fs::create_dir_all(prefix.join("bin")).unwrap();
+    fs::create_dir_all(prefix.join("share/cigar")).unwrap();
+    fs::copy(cigar.join("bin/cigar"), prefix.join("bin/cigar")).unwrap();
+    // The suite is the manifest's own binary key dropped: installed, the
+    // binary found is the one on the PATH.
+    let m = fs::read_to_string(cigar.join("bench/bench.toml"))
+        .unwrap()
+        .replace("binary = \"bin/cigar\"\n", "")
+        .replace("\"bin/cigar\"]", "\"cigar\"]");
+    fs::create_dir_all(prefix.join("share/cigar/bench/fixtures")).unwrap();
+    fs::write(prefix.join("share/cigar/bench/bench.toml"), m).unwrap();
+    fs::write(prefix.join("share/cigar/bench/fixtures/out.txt"), "cigar\n").unwrap();
+    // Only the installed prefix is on the PATH, so what else this machine
+    // has installed cannot change the answer.
+    let path = prefix.join("bin").display().to_string();
+    let out = bounded(
+        Command::new(cig_bin())
+            .args(["--json", "bench", "--family"])
+            .current_dir(sb.path())
+            .env("PATH", &path)
+            .env("XDG_CONFIG_HOME", sb.path().join("no-config"))
+            .env("CIGSCRIPT_HOME", sb.home())
+            .env("CIG_SEAL_KEY", "file")
+            .env("CIG_INTERNAL_TRACKER_DIR", sb.path().join("tracker")),
+        120,
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{stdout}\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_str(&stdout).expect("json");
+    let products = v["products"].as_array().unwrap();
+    assert_eq!(products.len(), 1, "only cigar is installed here: {stdout}");
+    assert_eq!(products[0]["product"], "cigar");
+    assert_eq!(
+        products[0]["cases"][0]["outcome"]["state"], "timed",
+        "{stdout}"
+    );
+    // The others are named and skipped, not silently dropped.
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("cigo: not installed, skipped"), "{err}");
+}
+
+// ----- bench: history (#179 step 6) ------------------------------------------
+
+#[test]
+#[cfg(unix)]
+fn bench_history_reads_a_file_and_the_branch() {
+    let sb = Sandbox::new();
+    let line = |at: &str, commit: &str, machine: &str, hello: f64| {
+        format!(
+            "{{\"format\":1,\"at\":\"{at}\",\"commit\":\"{commit}\",\"product\":\"stand-in\",\"cig_version\":\"1.20.0\",\"machine\":\"{machine}\",\"cases\":{{\"hello\":{{\"group\":\"start-up\",\"median_ms\":{hello},\"p10_ms\":{},\"p90_ms\":{},\"cv\":0.02}},\"fib\":{{\"median_ms\":50.0}}}}}}\n",
+            hello * 0.95,
+            hello * 1.05
+        )
+    };
+    let text = format!(
+        "{}{}{}{{\"format\":2,\"cases\":{{}}}}\n",
+        line("2026-11-08T02:00:00Z", "aaaaaaaa11", "cpu-a", 4.0),
+        line("2026-11-09T02:00:00Z", "bbbbbbbb22", "cpu-a", 4.4),
+        line("2026-11-10T02:00:00Z", "cccccccc33", "cpu-b", 8.8),
+    );
+    sb.write("h.jsonl", &text);
+    let out = sb.run_ok(&["bench", "history", "hello", "--file", "h.jsonl"]);
+    assert!(out.contains("stand-in, hello, 3 runs"), "{out}");
+    assert!(out.contains("+10.0%"), "4.0 to 4.4: {out}");
+    // A change across two machines is marked, and said not to be a regression.
+    assert!(
+        out.contains("+100.0%*") && out.contains("machine differs"),
+        "{out}"
+    );
+    assert!(
+        out.contains("1 line(s) in another format were skipped"),
+        "{out}"
+    );
+    // A name that matches one case by substring is enough; JSON for a tool.
+    let json = sb.run_ok(&["--json", "bench", "history", "fi", "--file", "h.jsonl"]);
+    let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(v["case"], "fib");
+    assert_eq!(v["runs"].as_array().unwrap().len(), 3);
+    assert_eq!(v["skipped_lines"], 1);
+    // No case named: the cases the history has.
+    let list = sb.run_ok(&["bench", "history", "--file", "h.jsonl"]);
+    assert!(
+        list.contains("hello (3 runs)") && list.contains("fib (3 runs)"),
+        "{list}"
+    );
+    // An unknown case is a usage error that says what there is.
+    let err = sb.run_err(&["bench", "history", "nope", "--file", "h.jsonl"], 3);
+    assert!(
+        err.contains("hello, fib") || err.contains("fib, hello"),
+        "{err}"
+    );
+
+    // The branch the nightly workflow writes: `history/<product>.jsonl` on
+    // `bench-history`, found through the manifest's product.
+    write_bench_sh(&sb, "true");
+    let git = |args: &[&str]| {
+        let o = Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+            .args(args)
+            .current_dir(sb.path())
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .output()
+            .unwrap();
+        assert!(
+            o.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&o.stderr)
+        );
+    };
+    git(&["init", "-q", "-b", "main"]);
+    git(&["checkout", "-q", "--orphan", "bench-history"]);
+    fs::create_dir_all(sb.path().join("history")).unwrap();
+    fs::write(sb.path().join("history/stand-in.jsonl"), &text).unwrap();
+    git(&["add", "history"]);
+    git(&["commit", "-q", "-m", "history"]);
+    let out = sb.run_ok(&["bench", "history", "hello"]);
+    assert!(out.contains("hello, 3 runs"), "{out}");
+    let err = sb.run_err(&["bench", "history", "hello", "--branch", "elsewhere"], 3);
+    assert!(err.contains("elsewhere"), "{err}");
+}
+
+// ----- bench: --profile, --keep, --repeat-until-slow, --diff (#179 step 8) ----
+
+/// `cig bench` in the sandbox with `path` as its PATH, under a deadline: exit
+/// code, stdout and stderr. `tmp` becomes TMPDIR when given, so what the
+/// harness makes lives and dies with the sandbox.
+#[cfg(unix)]
+fn bench_on_path(
+    sb: &Sandbox,
+    path: &str,
+    tmp: Option<&Path>,
+    args: &[&str],
+    secs: u64,
+) -> (Option<i32>, String, String) {
+    let mut c = Command::new(cig_bin());
+    c.args(args)
+        .current_dir(sb.path())
+        .env("PATH", path)
+        .env("CIGSCRIPT_HOME", sb.home())
+        .env("NO_COLOR", "1")
+        .env("CIG_SEAL_KEY", "file")
+        .env("CIG_INTERNAL_TRACKER_DIR", sb.path().join("tracker"))
+        .env_remove("CI");
+    if let Some(t) = tmp {
+        fs::create_dir_all(t).unwrap();
+        c.env("TMPDIR", t);
+    }
+    let out = bounded(&mut c, secs);
+    (
+        out.status.code(),
+        String::from_utf8_lossy(&out.stdout).to_string(),
+        String::from_utf8_lossy(&out.stderr).to_string(),
+    )
+}
+
+/// A PATH with `dir` in front of the real one.
+#[cfg(unix)]
+fn path_with(dir: &Path) -> String {
+    format!(
+        "{}:{}",
+        dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    )
+}
+
+/// A stand-in `perf`: `record` runs the command it is given (as the real one
+/// does) after writing an empty data file, and `script` prints `script`.
+#[cfg(unix)]
+fn fake_perf(sb: &Sandbox, name: &str, script: &str) -> PathBuf {
+    fake_cig(
+        sb,
+        name,
+        &format!(
+            r#"case "$1" in
+record)
+  shift; out=""
+  while [ $# -gt 0 ]; do
+    case "$1" in -o) out="$2"; shift 2;; --) shift; break;; *) shift;; esac
+  done
+  : > "$out"
+  exec "$@" ;;
+script)
+  cat <<'PERF_SCRIPT'
+{script}PERF_SCRIPT
+  ;;
+esac"#
+        ),
+    )
+}
+
+/// What `perf script` prints for three samples: two in `hot_loop` called from
+/// `main`, one in a template function whose name must not become markup.
+#[cfg(unix)]
+const PERF_SCRIPT_TEXT: &str = "stand-in 4242 100.001:     250000 cpu-clock:u:\n\
+\t    55d0c3a8b2c0 hot_loop+0x10 (/usr/bin/stand-in)\n\
+\t    55d0c3a8b000 main+0x1 (/usr/bin/stand-in)\n\
+\n\
+stand-in 4242 100.002:     250000 cpu-clock:u:\n\
+\t    55d0c3a8b2c0 hot_loop+0x10 (/usr/bin/stand-in)\n\
+\t    55d0c3a8b000 main+0x1 (/usr/bin/stand-in)\n\
+\n\
+stand-in 4242 100.003:     250000 cpu-clock:u:\n\
+\t    55d0c3a8b300 Vec<u8>::push&co+0x4 (/usr/bin/stand-in)\n\
+\t    55d0c3a8b000 main+0x1 (/usr/bin/stand-in)\n\
+\n";
+
+#[test]
+#[cfg(unix)]
+fn profile_draws_a_flamegraph_from_perf() {
+    let sb = Sandbox::new();
+    write_bench_sh(&sb, "true");
+    let perf = fake_perf(&sb, "fakebin/perf", PERF_SCRIPT_TEXT);
+    let path = path_with(perf.parent().unwrap());
+    let (code, out, err) = bench_on_path(&sb, &path, None, &["--json", "bench", "--profile"], 120);
+    assert_eq!(code, Some(0), "{out}\n{err}");
+    let v: serde_json::Value = serde_json::from_str(&out).expect("json");
+    let p = &v["cases"][0]["debug"]["profile"];
+    assert_eq!(p["measured"], true, "{p}");
+    assert_eq!(p["samples"], 3, "{p}");
+    assert_eq!(p["top"][0]["frame"], "hot_loop", "{p}");
+    assert_eq!(p["top"][0]["samples"], 2, "{p}");
+    let svg_path = sb.path().join(p["svg"].as_str().unwrap());
+    assert!(
+        svg_path.ends_with(".cig-bench/profiles/stand-in_case.svg"),
+        "{}",
+        svg_path.display()
+    );
+    let svg = fs::read_to_string(&svg_path).expect("the drawing was written");
+    assert!(
+        svg.contains("<svg ") && svg.trim_end().ends_with("</svg>"),
+        "{svg}"
+    );
+    assert!(svg.contains("hot_loop (2 samples"), "{svg}");
+    // A template's brackets are text in the drawing, never markup.
+    assert!(svg.contains("Vec&lt;u8&gt;::push&amp;co"), "{svg}");
+    assert!(!svg.contains("Vec<u8>"), "{svg}");
+    // The plain table names the file and the hottest frame; a profile is
+    // never a gate, so the exit stays 0.
+    let (code, table, _) = bench_on_path(&sb, &path, None, &["bench", "--profile"], 120);
+    assert_eq!(code, Some(0), "{table}");
+    assert!(table.contains("profile: stand-in case:"), "{table}");
+    assert!(table.contains("hot_loop"), "{table}");
+    // A profile describes one run of one build.
+    let (code, _, err) = bench_on_path(
+        &sb,
+        &path,
+        None,
+        &["bench", "--profile", "--against", "main"],
+        60,
+    );
+    assert_eq!(code, Some(3), "{err}");
+    assert!(err.contains("--profile"), "{err}");
+}
+
+#[test]
+#[cfg(unix)]
+fn profile_without_perf_says_so_and_builds_no_second_sampler() {
+    let sb = Sandbox::new();
+    write_bench_sh(&sb, "true");
+    // No perf at all: an empty folder in front of a PATH that has sh.
+    let none = sb.path().join("noperf");
+    fs::create_dir_all(&none).unwrap();
+    for tool in ["sh", "true"] {
+        let real = ["/bin", "/usr/bin"]
+            .iter()
+            .map(|d| Path::new(d).join(tool))
+            .find(|p| p.exists())
+            .unwrap();
+        std::os::unix::fs::symlink(real, none.join(tool)).unwrap();
+    }
+    let (code, out, err) = bench_on_path(
+        &sb,
+        none.to_str().unwrap(),
+        None,
+        &["--json", "bench", "--profile"],
+        120,
+    );
+    assert_eq!(code, Some(0), "{out}\n{err}");
+    let v: serde_json::Value = serde_json::from_str(&out).expect("json");
+    let p = &v["cases"][0]["debug"]["profile"];
+    assert_eq!(p["measured"], false, "{p}");
+    assert!(
+        p["note"]
+            .as_str()
+            .unwrap()
+            .starts_with("not measured: perf is not available here"),
+        "{p}"
+    );
+    assert!(
+        !sb.exists(".cig-bench/profiles"),
+        "no drawing without a sample"
+    );
+    // A perf the kernel refuses is the same answer, with the reason.
+    let refusing = fake_cig(
+        &sb,
+        "refusing/perf",
+        "echo 'perf_event_paranoid is 3' >&2; exit 255",
+    );
+    let (code, out, _) = bench_on_path(
+        &sb,
+        &path_with(refusing.parent().unwrap()),
+        None,
+        &["--json", "bench", "--profile"],
+        120,
+    );
+    assert_eq!(code, Some(0), "{out}");
+    let v: serde_json::Value = serde_json::from_str(&out).expect("json");
+    let note = v["cases"][0]["debug"]["profile"]["note"].as_str().unwrap();
+    assert!(
+        note.starts_with("not measured: perf is not available here")
+            && note.contains("255")
+            && note.contains("perf_event_paranoid"),
+        "{note}"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn keep_leaves_the_isolated_home_and_says_where() {
+    let sb = Sandbox::new();
+    write_bench_sh(&sb, "echo mine > \"$HOME/cookie\"");
+    let tmp = sb.path().join("tmp");
+    let path = std::env::var("PATH").unwrap_or_default();
+    let (code, _, err) = bench_on_path(&sb, &path, Some(&tmp), &["bench", "--keep"], 120);
+    assert_eq!(code, Some(0), "{err}");
+    let line = err
+        .lines()
+        .find(|l| l.contains("kept the isolated homes"))
+        .unwrap_or_else(|| panic!("it says where: {err}"));
+    let kept = PathBuf::from(line.rsplit(" in ").next().unwrap().trim());
+    assert!(kept.starts_with(&tmp), "{}", kept.display());
+    // The case's work folder, its last sample's home and what the run left.
+    let cookies: Vec<PathBuf> = fs::read_dir(&kept)
+        .unwrap()
+        .flatten()
+        .flat_map(|c| fs::read_dir(c.path()).unwrap().flatten())
+        .map(|h| h.path().join("cookie"))
+        .filter(|p| p.exists())
+        .collect();
+    assert!(
+        !cookies.is_empty(),
+        "nothing was left under {}",
+        kept.display()
+    );
+    assert_eq!(fs::read_to_string(&cookies[0]).unwrap(), "mine\n");
+    assert!(err.contains("rerun by hand: cd "), "{err}");
+    assert!(err.contains("sh run.sh"), "{err}");
+    // Without the flag nothing is left behind.
+    let tmp2 = sb.path().join("tmp2");
+    let (code, _, err) = bench_on_path(&sb, &path, Some(&tmp2), &["bench"], 120);
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(
+        fs::read_dir(&tmp2).unwrap().count(),
+        0,
+        "scratch folders left"
+    );
+    // It is for a finished run, not a watch.
+    let (code, _, err) = bench_on_path(&sb, &path, None, &["bench", "--keep", "--watch"], 60);
+    assert_eq!(code, Some(3), "{err}");
+}
+
+#[test]
+#[cfg(unix)]
+fn repeat_until_slow_keeps_the_slow_runs_profile() {
+    let sb = Sandbox::new();
+    // Quick, and slow once, on the 22nd invocation: the warm-up and the two
+    // samples are the first three, the ten reference runs the next ten.
+    let count = sb.path().join("count");
+    write_bench_sh(
+        &sb,
+        &format!(
+            "n=0; [ -f '{c}' ] && read n < '{c}'; n=$((n+1)); echo $n > '{c}'; if [ \"$n\" -ge 22 ]; then sleep 1; else sleep 0.03; fi",
+            c = count.display()
+        ),
+    );
+    let perf = fake_perf(&sb, "fakebin/perf", PERF_SCRIPT_TEXT);
+    let path = path_with(perf.parent().unwrap());
+    let (code, out, err) = bench_on_path(
+        &sb,
+        &path,
+        None,
+        &["--json", "bench", "--repeat-until-slow"],
+        300,
+    );
+    assert_eq!(code, Some(0), "{out}\n{err}");
+    let v: serde_json::Value = serde_json::from_str(&out).expect("json");
+    let s = &v["cases"][0]["debug"]["repeat_until_slow"];
+    assert_eq!(s["measured"], true, "{s}");
+    let found = &s["found"];
+    assert!(found.is_object(), "a slow run was found: {s}");
+    // It is one of the runs after the reference, over the threshold, and the
+    // threshold is 1.5 times the reference's p90.
+    assert!(found["run"].as_u64().unwrap() > 10, "{s}");
+    let (ms, threshold, p90) = (
+        found["ms"].as_f64().unwrap(),
+        s["threshold_ms"].as_f64().unwrap(),
+        s["reference_p90_ms"].as_f64().unwrap(),
+    );
+    assert!(ms > threshold, "{s}");
+    assert!((threshold - 1.5 * p90).abs() < 1e-6, "{s}");
+    // And it kept that run's profile, drawn from the recording it made.
+    let prof = &found["profile"];
+    assert_eq!(prof["measured"], true, "{s}");
+    let svg = fs::read_to_string(sb.path().join(prof["svg"].as_str().unwrap())).unwrap();
+    assert!(svg.contains("hot_loop"), "{svg}");
+    assert!(
+        prof["svg"].as_str().unwrap().ends_with("-slow.svg"),
+        "{prof}"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn repeat_until_slow_without_perf_keeps_the_phases() {
+    let sb = Sandbox::new();
+    let count = sb.path().join("count");
+    // The product reports one phase on its descriptor when it is handed one;
+    // the slow run reports a long one.
+    write_bench_sh(
+        &sb,
+        &format!(
+            "n=0; [ -f '{c}' ] && read n < '{c}'; n=$((n+1)); echo $n > '{c}'; if [ \"$n\" -ge 22 ]; then ms=900; sleep 1; else ms=30; sleep 0.03; fi; [ -n \"$CIG_TIMINGS_FD\" ] && printf '{{\"v\":1,\"product\":\"stand-in\",\"phase\":\"work\",\"ms\":%s}}\\n' \"$ms\" >&9; exit 0",
+            c = count.display()
+        ),
+    );
+    let refusing = fake_cig(&sb, "refusing/perf", "echo 'no PMU here' >&2; exit 255");
+    let (code, out, err) = bench_on_path(
+        &sb,
+        &path_with(refusing.parent().unwrap()),
+        None,
+        &["--json", "bench", "--repeat-until-slow"],
+        300,
+    );
+    assert_eq!(code, Some(0), "{out}\n{err}");
+    let v: serde_json::Value = serde_json::from_str(&out).expect("json");
+    let s = &v["cases"][0]["debug"]["repeat_until_slow"];
+    assert!(
+        s["note"]
+            .as_str()
+            .is_some_and(|n| n.starts_with("not measured: perf is not available here")),
+        "{s}"
+    );
+    let found = &s["found"];
+    let phases = &found["phases"];
+    assert_eq!(phases["measured"], true, "{s}");
+    assert_eq!(phases["phases"][0]["phase"], "work", "{s}");
+    // The run over the threshold keeps its own phases. That is the designed
+    // slow run (900 ms) unless a loaded machine made an earlier run slow first,
+    // and then it is that run's reading (30 ms) that is kept.
+    let ms = phases["phases"][0]["ms"].as_f64().unwrap_or(-1.0);
+    assert!(ms == 900.0 || ms == 30.0, "{s}");
+    assert!(
+        found["ms"].as_f64().unwrap_or(0.0) > s["threshold_ms"].as_f64().unwrap_or(f64::MAX),
+        "{s}"
+    );
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn diff_sets_two_runs_side_by_side_most_changed_first() {
+    let sb = Sandbox::new();
+    // A product whose `beta` phase takes as long as a control file says, and
+    // that counts its calls the same way.
+    let control = sb.path().join("control");
+    fs::write(&control, "5\n").unwrap();
+    write_bench_sh(
+        &sb,
+        &format!(
+            "read ms < '{c}'; if [ -n \"$CIG_TIMINGS_FD\" ]; then printf '{{\"v\":1,\"product\":\"stand-in\",\"phase\":\"alpha\",\"ms\":1.0}}\\n{{\"v\":1,\"product\":\"stand-in\",\"phase\":\"beta\",\"ms\":%s}}\\n{{\"v\":1,\"product\":\"stand-in\",\"counter\":\"calls\",\"value\":%s}}\\n' \"$ms\" \"$ms\" >&9; fi",
+            c = control.display()
+        ),
+    );
+    let strace = |reads: &str| {
+        fake_strace(
+            &sb,
+            &format!(
+                "' 90.00    0.900000          14     {reads}           read' ' 10.00    0.100000           6       100           mmap'"
+            ),
+        )
+    };
+    let tool = strace("   100");
+    let path = path_with(tool.parent().unwrap());
+    // The baseline keeps what a plain `--save` does not: its phases,
+    // counters and syscalls.
+    let (code, _, err) = bench_on_path(
+        &sb,
+        &path,
+        None,
+        &[
+            "bench",
+            "--save",
+            "base",
+            "--timings",
+            "--stats",
+            "--syscalls",
+        ],
+        120,
+    );
+    assert_eq!(code, Some(0), "{err}");
+    let saved: serde_json::Value =
+        serde_json::from_str(&sb.read(".cig-bench/baselines/base.json")).unwrap();
+    assert_eq!(
+        saved["cases"][0]["insight"]["phases"][1]["name"],
+        "stand-in: beta"
+    );
+    // Now beta is 300 ms and `read` is called 5,000 times.
+    fs::write(&control, "300\n").unwrap();
+    strace("  5000");
+    let (code, out, err) = bench_on_path(
+        &sb,
+        &path,
+        None,
+        &["--json", "bench", "--diff", "base"],
+        120,
+    );
+    assert_eq!(code, Some(0), "{out}\n{err}");
+    let v: serde_json::Value = serde_json::from_str(&out).expect("json");
+    let d = &v["cases"][0]["diff"];
+    assert_eq!(d["compared"], true, "{d}");
+    assert_eq!(d["baseline"], "base");
+    let by = |key: &str| -> Vec<serde_json::Value> { d[key].as_array().unwrap().clone() };
+    let find = |key: &str, name: &str| -> serde_json::Value {
+        by(key)
+            .into_iter()
+            .find(|r| r["name"] == name)
+            .unwrap_or_else(|| panic!("{name} in {key}: {d}"))
+    };
+    assert_eq!(find("phases", "stand-in: beta")["before"], 5.0);
+    assert_eq!(find("phases", "stand-in: beta")["after"], 300.0);
+    assert_eq!(find("phases", "stand-in: alpha")["change"], 0.0);
+    assert_eq!(find("counters", "stand-in: calls")["after"], 300.0);
+    assert_eq!(find("syscalls", "read")["before"], 100.0);
+    assert_eq!(find("syscalls", "read")["after"], 5000.0);
+    // Most changed first, in every table: |change| never goes up.
+    for key in ["phases", "syscalls", "syscall_ms"] {
+        let changes: Vec<f64> = by(key)
+            .iter()
+            .map(|r| r["change"].as_f64().unwrap().abs())
+            .collect();
+        assert!(!changes.is_empty(), "{key}: {d}");
+        assert!(
+            changes.windows(2).all(|w| w[0] >= w[1]),
+            "{key} is not sorted: {changes:?}"
+        );
+    }
+    assert_eq!(by("syscalls")[0]["name"], "read", "{d}");
+    // The plain table reads the same story.
+    let (code, table, _) = bench_on_path(&sb, &path, None, &["bench", "--diff", "base"], 120);
+    assert_eq!(code, Some(0), "{table}");
+    assert!(
+        table.contains("diff: stand-in case against baseline `base`"),
+        "{table}"
+    );
+    assert!(table.contains("beta") && table.contains("+295"), "{table}");
+    // A baseline saved without them has nothing to compare, and says how to
+    // save one that does.
+    let (code, _, _) = bench_on_path(&sb, &path, None, &["bench", "--save", "plain"], 120);
+    assert_eq!(code, Some(0));
+    let (code, _, err) = bench_on_path(&sb, &path, None, &["bench", "--diff", "plain"], 120);
+    assert_eq!(code, Some(3), "{err}");
+    assert!(
+        err.contains("--save plain --timings --stats --syscalls"),
+        "{err}"
+    );
+}
+
+// ----- bench: the gates (#145) -----------------------------------------------
+
+/// A one-case manifest for the gates: `[[case]]` lines after the preamble.
+#[cfg(unix)]
+fn gate_manifest(sb: &Sandbox, case: &str) {
+    sb.write(
+        "bench/bench.toml",
+        &format!(
+            "format = 1\n[bench]\nproduct = \"stand-in\"\n[defaults]\nsamples = 6\nper = 1\nwarmup = 1\n[[case]]\nname = \"case\"\nrun = [\"sleep\", \"0.1\"]\nexpect = {{ exit = 0 }}\n{case}"
+        ),
+    );
+}
+
+/// A baseline made by hand: the case's samples, in milliseconds.
+#[cfg(unix)]
+fn planted_baseline(sb: &Sandbox, ms: f64) {
+    let samples: Vec<f64> = vec![ms; 6];
+    sb.write(
+        ".cig-bench/baselines/main.json",
+        &serde_json::json!({
+            "format": 1,
+            "product": "stand-in",
+            "cases": [{ "name": "case", "group": null, "samples_ms": samples, "rss_bytes": null }],
+        })
+        .to_string(),
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn the_regression_gate_trips() {
+    let sb = Sandbox::new();
+    gate_manifest(&sb, "gate = [\"regression\"]\n");
+    let path = std::env::var("PATH").unwrap_or_default();
+    // Main took 1 ms; this build takes 100: a planted slowdown.
+    planted_baseline(&sb, 1.0);
+    let (code, out, err) = bench_on_path(
+        &sb,
+        &path,
+        None,
+        &["bench", "--against", "main", "--gate", "regression"],
+        120,
+    );
+    assert_eq!(code, Some(1), "asked for, it fails the run:\n{out}\n{err}");
+    assert!(out.contains("TRIP"), "{out}");
+    assert!(err.contains("gate regression tripped by case"), "{err}");
+    let (code, out, _) = bench_on_path(
+        &sb,
+        &path,
+        None,
+        &[
+            "--json",
+            "bench",
+            "--against",
+            "main",
+            "--gate",
+            "regression",
+        ],
+        120,
+    );
+    assert_eq!(code, Some(1));
+    let v: serde_json::Value = serde_json::from_str(&out).expect("json");
+    assert_eq!(v["gates"]["tripped"], true, "{out}");
+    let case = v["gates"]["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["case"] == "case")
+        .expect("the case's finding");
+    assert_eq!(case["status"], "trip");
+    // Not asked for, the same slowdown is printed and the run passes: a
+    // shared runner's timing is a report, never a failure (#153).
+    let (code, out, err) = bench_on_path(
+        &sb,
+        &path,
+        None,
+        &["bench", "--against", "main", "--gate", "correctness"],
+        120,
+    );
+    assert_eq!(code, Some(0), "{out}\n{err}");
+    assert!(out.contains("over"), "reported, not failed:\n{out}");
+    // A build that is faster than main trips nothing.
+    planted_baseline(&sb, 5000.0);
+    let (code, out, err) = bench_on_path(
+        &sb,
+        &path,
+        None,
+        &["bench", "--against", "main", "--gate", "regression"],
+        120,
+    );
+    assert_eq!(code, Some(0), "{out}\n{err}");
+    // And a gate that is not one is a usage error that lists the real ones.
+    let (code, _, err) = bench_on_path(&sb, &path, None, &["bench", "--gate", "speed"], 60);
+    assert_eq!(code, Some(3), "{err}");
+    assert!(err.contains("start-up"), "{err}");
+}
+
+#[test]
+#[cfg(unix)]
+fn disk_and_start_up_gates_fail_only_when_named() {
+    let sb = Sandbox::new();
+    let path = std::env::var("PATH").unwrap_or_default();
+    // A case that burns 100 KiB under its home: about one byte on disk per
+    // byte, against a reference of 3 (main's) it is fine, against 0.5 not.
+    let case = |reference: &str, budget: &str| {
+        format!(
+            "run = [\"sh\", \"-c\", \"dd if=/dev/zero of=\\\"$CIGSCRIPT_HOME/f\\\" bs=1024 count=100 2>/dev/null\"]\nburned = 102400\nbudget = \"{budget}\"\ngate = [\"disk\", \"start-up\"]\nmeasure = [\"wall\", \"disk-per-byte\"]\nreference = {{ disk-per-byte = {reference} }}\n"
+        )
+    };
+    let manifest = |reference: &str, budget: &str| {
+        sb.write(
+            "bench/bench.toml",
+            &format!(
+                "format = 1\n[bench]\nproduct = \"stand-in\"\n[defaults]\nsamples = 2\nper = 1\nwarmup = 1\n[[case]]\nname = \"burn\"\nexpect = {{ exit = 0 }}\n{}",
+                case(reference, budget)
+            ),
+        );
+    };
+    manifest("3.0", "60 s");
+    let (code, out, err) = bench_on_path(
+        &sb,
+        &path,
+        None,
+        &["bench", "--gate", "correctness,disk"],
+        120,
+    );
+    assert_eq!(code, Some(0), "{out}\n{err}");
+    assert!(
+        out.contains("disk") && out.contains("bytes per byte burned"),
+        "{out}"
+    );
+    // The reference says main stored half as much: the disk gate trips, and
+    // only because it is named.
+    manifest("0.5", "60 s");
+    let (code, out, err) = bench_on_path(
+        &sb,
+        &path,
+        None,
+        &["bench", "--gate", "correctness,disk"],
+        120,
+    );
+    assert_eq!(code, Some(1), "{out}\n{err}");
+    assert!(err.contains("gate disk tripped by burn"), "{err}");
+    let (code, out, _) = bench_on_path(&sb, &path, None, &["bench", "--gate", "correctness"], 120);
+    assert_eq!(code, Some(0), "disk was only reported: {out}");
+    assert!(out.contains("over"), "{out}");
+    // The start-up budget is a median over a limit; here no process starts
+    // in a thousandth of a millisecond.
+    manifest("3.0", "0.001 ms");
+    let (code, out, err) = bench_on_path(&sb, &path, None, &["bench", "--gate", "start-up"], 120);
+    assert_eq!(code, Some(1), "{out}\n{err}");
+    assert!(err.contains("gate start-up tripped by burn"), "{err}");
+    let (code, out, _) = bench_on_path(
+        &sb,
+        &path,
+        None,
+        &["bench", "--gate", "correctness,disk"],
+        120,
+    );
+    assert_eq!(code, Some(0), "start-up was only reported: {out}");
+    // A gate that cannot work is a manifest error, not a pass.
+    sb.write(
+        "bench/bench.toml",
+        "format = 1\n[bench]\nproduct = \"stand-in\"\n[[case]]\nname = \"burn\"\nrun = [\"true\"]\ngate = [\"disk\"]\n",
+    );
+    let (code, _, err) = bench_on_path(&sb, &path, None, &["bench"], 60);
+    assert_eq!(code, Some(3), "{err}");
+    assert!(err.contains("`disk` gate needs"), "{err}");
+}
+
+#[test]
+fn cigs_own_suite_declares_its_gates() {
+    // The suite parses with its gates (a gate that cannot work is a manifest
+    // error), and the cases #145 names carry them: hello and a one-write
+    // burn under start-up, the burn and overwrite cases under disk.
+    let sb = Sandbox::new();
+    let manifest = own_suite(&sb);
+    let doc: toml::Value = fs::read_to_string(&manifest).unwrap().parse().unwrap();
+    let gates_of = |name: &str| -> Vec<String> {
+        doc["case"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"].as_str() == Some(name))
+            .unwrap_or_else(|| panic!("no case {name}"))
+            .get("gate")
+            .map(|g| {
+                g.as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|x| x.as_str().unwrap().to_string())
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    assert!(gates_of("hello").contains(&"start-up".to_string()));
+    assert!(gates_of("burn one write").contains(&"start-up".to_string()));
+    for name in ["burn small tree", "burn big tree", "overwrite big file"] {
+        assert!(gates_of(name).contains(&"disk".to_string()), "{name}");
+    }
+    let (code, out, err) = bench_bounded(
+        &sb,
+        &[
+            "--json",
+            "bench",
+            "bench/bench.toml",
+            "--only",
+            "hello",
+            "--samples",
+            "1",
+            "--gate",
+            "correctness",
+        ],
+        300,
+    );
+    assert_eq!(code, Some(0), "{out}\n{err}");
+    let v: serde_json::Value = serde_json::from_str(&out).expect("json");
+    assert!(
+        v["gates"]["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["gate"] == "start-up" && f["case"] == "hello"),
+        "{out}"
+    );
+}
+
+#[test]
+fn ci_gates_and_the_nightly_matrix_are_wired() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join(".github/workflows");
+    let read = |f: &str| fs::read_to_string(root.join(f)).unwrap_or_else(|e| panic!("{f}: {e}"));
+    // A pull request fails on correctness and disk, and on nothing that is a
+    // clock: the timing gates are printed (#153).
+    let ci = read("ci.yml");
+    let gate_lines: Vec<&str> = ci.lines().filter(|l| l.contains("--gate")).collect();
+    assert_eq!(gate_lines.len(), 1, "{gate_lines:?}");
+    assert!(
+        gate_lines[0].contains("--gate correctness,disk"),
+        "{gate_lines:?}"
+    );
+    assert!(!gate_lines[0].contains("regression") && !gate_lines[0].contains("start-up"));
+    // The nightly calls the reusable workflow once per filesystem, on a
+    // schedule, with the history written to the bench-history branch.
+    let nightly = read("bench-nightly.yml");
+    assert!(
+        nightly.contains("schedule:") && nightly.contains("cron:"),
+        "{nightly}"
+    );
+    assert!(
+        nightly.contains("uses: ./.github/workflows/bench.yml"),
+        "{nightly}"
+    );
+    for series in ["ext4", "btrfs", "xfs", "apfs", "ntfs"] {
+        assert!(
+            nightly.contains(&format!("series: {series},")),
+            "{series} is not in the matrix"
+        );
+    }
+    for os in ["ubuntu-latest", "macos-latest", "windows-latest"] {
+        assert!(nightly.contains(os), "{os}");
+    }
+    // Only a correctness failure fails a night.
+    assert!(nightly.contains("gate: correctness"), "{nightly}");
+    let bench = read("bench.yml");
+    for needle in [
+        "filesystem:",
+        "series:",
+        "mkfs.btrfs",
+        "mkfs.xfs",
+        "mkfs.ext4",
+        "losetup",
+        "TMPDIR=",
+        "bench-history",
+        "--gate \"$GATE\"",
+    ] {
+        assert!(bench.contains(needle), "bench.yml lacks {needle}");
+    }
+}
+
+/// The same flag against the real `perf`, where the machine has it and lets
+/// a process be sampled: a busy loop is drawn, with samples. Skipped (and
+/// said) where perf is absent or forbidden.
+#[test]
+#[cfg(target_os = "linux")]
+fn profile_with_the_real_perf_when_it_is_allowed() {
+    let have = |tool: &str| {
+        Command::new(tool)
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    };
+    if !have("perf") || !have("python3") {
+        eprintln!("skipped: needs perf and python3");
+        return;
+    }
+    let sb = Sandbox::new();
+    sb.write(
+        "bench/bench.toml",
+        "format = 1\n[bench]\nproduct = \"stand-in\"\n[defaults]\nsamples = 1\nper = 1\nwarmup = 1\n[[case]]\nname = \"busy\"\nrun = [\"python3\", \"-c\", '''import time\nt = time.time()\nwhile time.time() - t < 0.4:\n    pass''']\nexpect = { exit = 0 }\n",
+    );
+    let (code, out, err) = bench_bounded(&sb, &["--json", "bench", "--profile"], 180);
+    assert_eq!(code, Some(0), "{out}\n{err}");
+    let v: serde_json::Value = serde_json::from_str(&out).expect("json");
+    let p = &v["cases"][0]["debug"]["profile"];
+    if p["measured"] == false {
+        eprintln!("skipped: perf is not allowed here: {}", p["note"]);
+        return;
+    }
+    assert!(p["samples"].as_u64().unwrap() > 0, "{p}");
+    let svg = fs::read_to_string(sb.path().join(p["svg"].as_str().unwrap())).unwrap();
+    assert!(svg.contains("<svg ") && svg.contains("python3"), "{svg}");
 }
