@@ -117,6 +117,11 @@ pub const KEYS: &[(&str, &str, &str)] = &[
         "the tin read-only to hops, the key folder hidden from them (Linux): auto (boxed hops, wherever the kernel allows; one note where it does not), on (every hop, and refuse to run one unguarded), off",
     ),
     (
+        "box_hide_keyring",
+        "off",
+        "hide the session bus (the Secret Service) from every guarded or boxed hop even when the key is in a file: on unsets DBUS_SESSION_BUS_ADDRESS and covers the bus sockets for the hop; off leaves a hop the bus while seal_key is file, since some tasks need D-Bus. While the key may be in the OS keyring (seal_key is not file) the bus is always cut",
+    ),
+    (
         "keep_runs",
         "0",
         "after each run, keep only this many run records, the newest, and prune the rest as cig runs --prune does (recorded in the ledger); 0 keeps every run",
@@ -267,6 +272,12 @@ impl Config {
             ("vault_socket", other) => {
                 return Err(format!(
                     "vault_socket is an absolute path (or empty for the default), not `{other}`"
+                ))
+            }
+            ("box_hide_keyring", "on" | "off") => {}
+            ("box_hide_keyring", other) => {
+                return Err(format!(
+                    "box_hide_keyring must be on or off, not `{other}`"
                 ))
             }
             ("seal_key", "keyring" | "file" | "passphrase") => {}

@@ -1350,9 +1350,11 @@ pub fn prepare_inbox(run_dir: &Path) -> io::Result<PathBuf> {
 /// keyring (`seal_key` is not `file`): on Linux that keyring is the Secret
 /// Service on the session bus, which hands a secret to any process of the
 /// user's that asks for it, and systemd's user manager on the same bus would
-/// start a process outside the box that could ask.
+/// start a process outside the box that could ask. `box_hide_keyring = on`
+/// cuts it whatever the key's keeper (off by default: some tasks need D-Bus).
 pub fn bus_cut() -> bool {
-    crate::config::Config::load().get("seal_key") != "file"
+    let cfg = crate::config::Config::load();
+    cfg.get("seal_key") != "file" || cfg.get("box_hide_keyring") == "on"
 }
 
 /// The ways to the key a guarded hop must not have, beyond the key folder
