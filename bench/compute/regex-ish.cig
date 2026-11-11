@@ -1,0 +1,13 @@
+# SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Regex-ish: string find, replace and split over a megabyte of text (5 at 5x).
+stick scale = int(args.get(0, "1"))
+roll parts = []
+for i in 0..(80000 * scale) {
+  parts.push("foo-${i}-bar")
+}
+stick text = parts.join(" ")
+stick replaced = text.replace("foo", "FOO")
+stick found = text.find("bar")
+stick words = text.split(" ")
+exhale replaced.len(), found, words.len()

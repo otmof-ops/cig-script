@@ -1,0 +1,25 @@
+$ cig run err-closure-late-name.cig
+exit 2
+--- stdout
+--- stderr
+Don't see any cigarettes.
+error[E301 check]: unknown name `counts`
+  --> err-closure-late-name.cig:6:11
+  |
+6 |     snuff counts
+  |           ^^^^^^
+  = hint: did you mean `count`?
+  = explain: cig explain E301
+
+$ cig check err-closure-late-name.cig
+exit 2
+--- stdout
+--- stderr
+Don't see any cigarettes.
+error[E301 check]: unknown name `counts`
+  --> err-closure-late-name.cig:6:11
+  |
+6 |     snuff counts
+  |           ^^^^^^
+  = hint: did you mean `count`?
+  = explain: cig explain E301

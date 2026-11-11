@@ -1384,6 +1384,7 @@ the burn kernel and its journal (write-ahead log).
 | [`E721`](#e721-the-tin's-key-folder-is-not-private) | the tin's key folder is not private | these are MY ciggies | a folder or file that is yours, made under sudo: chown it back to yourself. One that is not yours: move it aside (it is not your key), or set CIG_KEYS_DIR to a folder only you can write. A seal.key others could read: chmod 600 it, then cig tin rekey if anyone else could have read it; never move your own key aside, a new key opens nothing the old one sealed |
 | [`E722`](#e722-a-tin-parcel-does-not-verify) | a tin parcel does not verify | one of the four; the message says which | restore from an earlier parcel, or write a new one from the tin; for an incremental parcel keep every parent beside it; for a ledger that cannot be checked put the tin's key back first (cig tin key import) and run cig tin unparcel again |
 | [`E723`](#e723-a-different-live-run-is-in-the-way-of-an-unparcel) | a different live run is in the way of an unparcel | one of the four; the message says which | restore into an empty tin (a new CIGSCRIPT_HOME), or move the named run out of the way (cig unburn it, or cig runs --prune) and unparcel again; a ledger with another history belongs to another tin |
+| [`E724`](#e724-the-vault-refused-or-did-not-answer) | the vault refused or did not answer | one of the four; the message says which | start the vault (systemctl start cig-vault, or cig tin vault install if it is not installed); the next run hands over what waited. A refusal names its reason: free space (cig tin vault gc), or cig tin verify for an object that does not match its name |
 | [`E730`](#e730-a-pass-does-not-hold) | a pass does not hold | these are MY ciggies | cig pass show <id> says which input or caveat failed; redo the work and issue a new pass (pass.memo does both), or ask for a fresh pass from whoever issued this one |
 | [`E731`](#e731-the-work-cannot-be-vouched-for) | the work cannot be vouched for | these are MY ciggies | declare what the program reads: proc.run(cmd, args, {reads: [paths]}); for a clock, give pass.issue an until; otherwise take the call out of the work, or do not issue a pass for it |
 | [`E732`](#e732-the-work-reads-a-variable-from-outside-it) | the work reads a variable from outside it | these are MY ciggies | put the value in the subject, and read it from the argument the work is called with: pass.issue("check", {n: n}, pack(s) => s.n + 1) |
@@ -1688,7 +1689,8 @@ cig tin rekey refuses because what it needs is not here, is already in use, or w
 3. an earlier rekey crashed and left a seal.key.old that no longer reads as a key (probe `path-exists`). **Remedy:** move the file aside (it is in the keys directory); the rekey picks up from a clean state on the next run
 4. another cig tin rekey is in progress on this tin (probe `path-exists`). **Remedy:** wait for the other one to finish; if it crashed, run cig tin rekey again and it picks up the walk
 5. a run's journal, or the ledger, does not verify under the current key (probe `path-exists`). **Remedy:** the run is named in the message; investigate the edit and either put the chain back (a backup) or move the run aside before running cig tin rekey again
-6. the keeper would not carry the new key (keyring write failed the read-back, or the key file could not be written) (no probe; a suggestion, not a finding). **Remedy:** both stashes stay on disk and every sealed object is still readable; fix the keeper (unlock the keyring, free space on the keys filesystem) and run cig tin rekey again to finish
+6. another command needed the key while a rekey was running, and the rekey outlasted rekey_wait (30 seconds by default) (probe `path-exists`). **Remedy:** wait for the rekey to finish and run the command again; cig config rekey_wait N changes how long a command waits
+7. the keeper would not carry the new key (keyring write failed the read-back, or the key file could not be written) (no probe; a suggestion, not a finding). **Remedy:** both stashes stay on disk and every sealed object is still readable; fix the keeper (unlock the keyring, free space on the keys filesystem) and run cig tin rekey again to finish
 
 Related: `E703`, `E707`, `E708`, `E709`.
 
@@ -1749,6 +1751,25 @@ cig tin unparcel verified the parcel and then found something here that it would
 2. the ledger here and the parcel's diverged: neither is a prefix of the other (no probe; a suggestion, not a finding). **Remedy:** the parcel is from another tin or another history; restore into an empty tin
 
 Related: `E722`, `E709`.
+
+
+### E724 the vault refused or did not answer
+
+*burn · since 1.21.0 · arises in run, unburn*
+
+**Kind of no:** one of the four; the message says which (read the operating-system reason in the message; ENOENT, EACCES, ENOSPC and friends, each mapped in the causes below).
+
+The vault (the helper that keeps a copy of the tin's objects under its own account, where nothing that runs as you can delete them) is installed, but did not take an object: it is stopped, its socket is missing or is not the vault's, it answered no (its reason is in the note: a full share is quota, an object that does not hash to its name is hash-mismatch), or the connection broke part way. The run is not stopped: the objects are in the tin as always and the run unburns from it. What was kept only in the tin because the vault was not there is listed in tin/vault-pending and handed to the vault the next time it answers (the next run, or any run, notes it once); an object the vault refused for a reason that will not change is not listed again. Until the vault has the copy, a process running as you could still delete it from the tin.
+
+**What to type next:** start the vault (systemctl start cig-vault, or cig tin vault install if it is not installed); the next run hands over what waited. A refusal names its reason: free space (cig tin vault gc), or cig tin verify for an object that does not match its name
+
+**Known causes**, ranked; doctor checks them in this order:
+
+1. the vault is stopped, or its socket is gone (probe `path-exists`). **Remedy:** start it (systemctl start cig-vault); runs in the meantime are kept in the tin and handed over later
+2. the socket is there but is not owned by the vault's account (_cigtin), so cig does not talk to it (probe `path-permissions`). **Remedy:** do not trust it: it was not made by the vault. Remove it as an administrator and restart the vault
+3. the vault refused the object (quota, a hash that does not match, a recipe whose chunks it does not have) (no probe; a suggestion, not a finding). **Remedy:** the reason is in the note; free the vault's space with cig tin vault gc, or run cig tin verify
+
+Related: `E703`, `E707`, `E720`.
 
 
 ### E730 a pass does not hold

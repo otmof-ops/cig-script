@@ -1,0 +1,15 @@
+# SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Dispatch: functions kept in a map, called by key.
+stick ops = {
+  add: pack(a, b) => a + b,
+  sub: pack(a, b) => a - b,
+  mul: pack(a, b) => a * b % 1000003
+}
+stick names = ["add", "sub", "mul"]
+roll acc = 1
+for i in 0..150000 {
+  stick f = ops[names[i % 3]]
+  acc = (f(acc, i) % 1000003 + 1000003) % 1000003
+}
+exhale acc

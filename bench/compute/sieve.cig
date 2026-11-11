@@ -1,0 +1,28 @@
+# SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Sieve of Eratosthenes: index writes into a big list.
+stick n = 300000
+roll is = []
+for i in 0..(n + 1) {
+  is.push(true)
+}
+is[0] = false
+is[1] = false
+roll p = 2
+while p * p <= n {
+  if is[p] {
+    roll m = p * p
+    while m <= n {
+      is[m] = false
+      m += p
+    }
+  }
+  p += 1
+}
+roll c = 0
+for b in is {
+  if b {
+    c += 1
+  }
+}
+exhale c

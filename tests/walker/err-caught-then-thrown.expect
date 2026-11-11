@@ -1,0 +1,17 @@
+$ cig run err-caught-then-thrown.cig
+exit 1
+--- stdout
+--- stderr
+Don't see any cigarettes.
+error[E600 cough]: gave up at 3: too big: 3
+  --> err-caught-then-thrown.cig:16:7
+   |
+16 |       cough "gave up at ${i}: ${e.message}"
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  = explain: cig explain E600
+
+$ cig check err-caught-then-thrown.cig
+exit 0
+--- stdout
+--- stderr
+ok: err-caught-then-thrown.cig (4 statements, 0 warnings)

@@ -380,7 +380,9 @@ the old key sits at `seal.key.old` and the new one at `seal.key.new`
 beside the keeper's primary file, with a `rekey.in-progress` marker
 next to them; so any sealed object is readable under one of the
 stashes no matter when a crash lands, and `cig tin verify` is quiet.
-A second `cig tin rekey` after a crash picks up where the walk left
+A command that needs the key while a rekey runs waits for it, at most
+`rekey_wait` seconds (30 unless set; 0 does not wait), and then stops with
+`E720` saying a rekey is running. A second `cig tin rekey` after a crash picks up where the walk left
 off and finishes without starting over. On resume, the keeper's
 current key must equal one of the stash keys (a constant-time
 compare): legitimate mid-rekey state always satisfies it; a planted
@@ -720,6 +722,54 @@ out of reach of what cig runs.
   is a note (`E710`, `cig runs --forget`). `cig tin head` prints the
   ledger's head to keep elsewhere; `cig tin verify --head` checks it.
   `journal_sign off` writes the unsigned format 2.
+- **A key that is a passphrase.** `cig config seal_key passphrase` keeps no
+  key anywhere: the tin's key is derived from a passphrase with Argon2id
+  (64 MiB, 3 passes) each time it is needed, for a machine with no keyring
+  and no place to leave a key file. The derivation's parameters, a random
+  salt and a check value (never the key) are kept as `seal.kdf` in the keys
+  folder and copied beside the tin, so a wrong passphrase is refused by name
+  (`this is not the passphrase this tin was sealed under`) and a restored tin
+  opens with the passphrase alone; a record rewritten to cheaper parameters
+  is refused. The passphrase is typed on the terminal (no echo) or read from
+  `--seal-key-fd N` (`3<pass.txt`); never from an environment variable and
+  never from argv. A tin that holds sealed objects and has lost its record is
+  refused, not given a new passphrase. `cig tin rekey` has nowhere to write
+  the new key under it and says so. Linux, macOS and the BSDs.
+- **The vault.** An opt-in store that runs as its own account (`_cigtin`) and
+  has no delete (#105, L7). When the account exists, every object the tin
+  commits is also handed to the vault, as an open file descriptor over its
+  local socket (`/run/cig-vault/vault.sock`; the vault hashes the bytes
+  itself, and tells whose tin it is from the kernel's record of who is on the
+  other end). The store belongs to the vault's account (`0700`), so a write to
+  it as you fails, and the protocol has `store`, `fetch`, `verify`, `has`,
+  `list` and `gc`, which only reports what no live run names: removing is
+  `cig-vault gc --apply`, run as the vault's account through a sudo rule. cig
+  talks only to a socket the vault's account owns. When the vault does not
+  answer, the run goes on from the tin, says so once (`E724`), and lists what
+  the vault missed in `tin/vault-pending`; the next run that finds the vault
+  answering hands it over first. A tin object that is missing or no longer
+  hashes to its name at restore is fetched back from the vault. `vault = off`
+  never asks. `cig tin vault install|uninstall|gc|update` set it up, take it down
+  (the objects stay unless `--purge --yes`), collect what no run names
+  (`gc` plans, `gc --apply` removes, through a sudo rule that asks for a
+  password) and swap the daemon.
+- **What each platform gets.** Linux has every level: the read-only tin
+  for a hop, the box, the seccomp filter, the vault. **macOS and Windows get
+  user-space protection**, and the gap is stated here. On macOS no Seatbelt
+  profile is applied to an unboxed hop (not built yet): such a hop can reach
+  everything you can, the tin, the run records and the key folder included,
+  so a hop that means harm can rewrite or delete the tin while it runs. What
+  stands in for the kernel there: the owner-only mode, `PT_DENY_ATTACH`, the
+  signed journal and the ledger (any rewrite is caught, never silently
+  restored from), the key kept out of the tin, the vault for the objects, and
+  the box, which on macOS gives a hop the overlay and a hidden pack but not
+  the read-only tin mount or the syscall filter (those are Linux kernel
+  features). On Windows the state directory (tin, runs, keys) gets a
+  protected DACL for the user and SYSTEM alone, set when it is made and
+  checked by `cig doctor` (it prints the `icacls` line that fixes it), and the
+  process refuses memory reads by another process of the same user; a hop
+  still writes the tin while it runs, caught afterwards the same way, and
+  there is no vault.
 - **Out of cig's memory.** Once a key is loaded cig blocks a debugger and
   `/proc/<pid>/mem` of the same user (Linux `PR_SET_DUMPABLE`, macOS
   `PT_DENY_ATTACH`), so a hop cannot read the key out of cig. It resets for

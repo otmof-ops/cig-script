@@ -1,0 +1,45 @@
+# SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Spectral norm: float loops and calls.
+pull a(i, j) {
+  snuff 1.0 / ((i + j) * (i + j + 1) / 2 + i + 1)
+}
+pull mulav(v, n) {
+  roll out = []
+  for i in 0..n {
+    roll s = 0.0
+    for j in 0..n {
+      s += a(i, j) * v[j]
+    }
+    out.push(s)
+  }
+  snuff out
+}
+pull mulatv(v, n) {
+  roll out = []
+  for i in 0..n {
+    roll s = 0.0
+    for j in 0..n {
+      s += a(j, i) * v[j]
+    }
+    out.push(s)
+  }
+  snuff out
+}
+stick n = 100
+roll u = []
+for i in 0..n {
+  u.push(1.0)
+}
+roll v = []
+for k in 0..10 {
+  v = mulatv(mulav(u, n), n)
+  u = mulatv(mulav(v, n), n)
+}
+roll vbv = 0.0
+roll vv = 0.0
+for i in 0..n {
+  vbv += u[i] * v[i]
+  vv += v[i] * v[i]
+}
+exhale math.round(math.sqrt(vbv / vv), 9)

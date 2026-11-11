@@ -1,0 +1,13 @@
+# SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Kernel set: burn a tree of 100 new files of 1024 bytes under the sample's home.
+# The tree goes under $CIGSCRIPT_HOME/work, never into the repository.
+stick root = "${env.get("CIGSCRIPT_HOME")}/work/small"
+stick body = "x".repeat(1024)
+burn {
+  fs.mkdir(root)
+  for i in 0..100 {
+    fs.write_text("${root}/f${i}.txt", body)
+  }
+}
+exhale "burned 100 files of 1024 bytes"

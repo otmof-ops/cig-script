@@ -1,0 +1,14 @@
+# SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Startup with ten stdlib modules touched.
+stick _1 = math.abs(-1)
+stick _2 = str(1)
+stick _3 = json.stringify({a: 1})
+stick _4 = "a b".split(" ")
+stick _5 = path.base("/x/y")
+stick _6 = time.format_ms(0)
+stick _7 = hash.short("x")
+stick _8 = cig.version()
+stick _9 = env.get("PATH", "")
+stick _10 = len([])
+exhale "hello"

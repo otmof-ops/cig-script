@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
+# SPDX-License-Identifier: FSL-1.1-ALv2
+pull inner(xs, i) {
+  snuff xs[i] / (i - 2)
+}
+pull middle(xs) {
+  roll total = 0
+  for i in 0..4 {
+    total += inner(xs, i)
+  }
+  snuff total
+}
+pull outer() {
+  snuff middle([4, 5, 6, 7])
+}
+exhale outer()

@@ -1,0 +1,13 @@
+# SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Kernel set: a pack of 2,000 files of 1 KiB under the sample's home, for the hop case.
+pack { "~/work/hop" }
+stick body = "y".repeat(1024)
+stick root = "${env.get("HOME")}/work/hop"
+burn {
+  fs.mkdir(root)
+  for i in 0..2000 {
+    fs.write_text("${root}/f${i}.txt", body)
+  }
+}
+exhale "made 2000 files"

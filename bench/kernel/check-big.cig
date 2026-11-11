@@ -1,0 +1,15 @@
+# SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Kernel set, check after restoring the big file: every byte of the first
+# version is back, by hash.
+stick path = "${env.get("CIGSCRIPT_HOME")}/work/big.bin"
+stick want = hash.sha256("0123456789abcdef".repeat(2097152))
+roll verdict = "MISMATCH"
+if fs.exists(path) {
+  if fs.size(path) == 33554432 {
+    if hash.sha256_file(path) == want {
+      verdict = "restored exact"
+    }
+  }
+}
+exhale "big file: ${verdict}"

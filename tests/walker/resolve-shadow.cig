@@ -1,0 +1,19 @@
+# SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
+# SPDX-License-Identifier: FSL-1.1-ALv2
+roll x = 1
+pull outer() {
+  pull f() {
+    snuff x
+  }
+  roll before = f()
+  roll x = 2
+  snuff [before, f()]
+}
+exhale outer()
+roll v = 1
+if true {
+  exhale v
+  roll v = 2
+  exhale v
+}
+exhale v

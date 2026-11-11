@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
+# SPDX-License-Identifier: FSL-1.1-ALv2
+pull risky(n) {
+  if n > 1 {
+    cough {message: "too big: ${n}", code: n}
+  }
+  snuff n
+}
+roll seen = []
+for i in 0..4 {
+  try {
+    seen.push(risky(i))
+  } ashtray e {
+    seen.push(e.message)
+    if e.code == 3 {
+      cough "gave up at ${i}: ${e.message}"
+    }
+  }
+}
+exhale seen

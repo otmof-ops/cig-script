@@ -1,0 +1,18 @@
+$ cig run err-steps.cig
+exit 1
+--- stdout
+--- stderr
+Don't see any cigarettes.
+error[E515 runtime]: your loop never ends: 5000 steps and still going
+  --> err-steps.cig:6:5
+  |
+6 |     n += k
+  |     ^^^^^^
+  = hint: check what changes the loop condition at this line; --max-steps N or CIG_MAX_STEPS=N raises the budget (0 disables it)
+  = explain: cig explain E515
+
+$ cig check err-steps.cig
+exit 0
+--- stdout
+--- stderr
+ok: err-steps.cig (3 statements, 0 warnings)

@@ -88,7 +88,7 @@ pub struct ChunkRef {
     pub len: u64,
 }
 
-fn object_path(hash: &str) -> PathBuf {
+pub(crate) fn object_path(hash: &str) -> PathBuf {
     objects_dir().join(&hash[..2]).join(hash)
 }
 
@@ -97,7 +97,7 @@ pub fn object_path_pub(hash: &str) -> PathBuf {
     object_path(hash)
 }
 
-fn recipe_path(hash: &str) -> PathBuf {
+pub(crate) fn recipe_path(hash: &str) -> PathBuf {
     recipes_dir().join(&hash[..2]).join(hash)
 }
 
@@ -297,7 +297,7 @@ pub(crate) fn mode_of(meta: &fs::Metadata) -> Option<u32> {
     }
 }
 
-fn make_read_only(p: &Path) -> io::Result<()> {
+pub(crate) fn make_read_only(p: &Path) -> io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -610,6 +610,13 @@ impl Staged {
                 let _ = fs::remove_file(tmp);
             }
             done?;
+            if let Some((_, id)) = &self.sealed {
+                super::vault::keep_all(&[(
+                    super::vault::VKind::Sealed,
+                    id.clone(),
+                    object.clone(),
+                )]);
+            }
             return Ok(Stashed {
                 object,
                 sha256: self.sha256,
@@ -619,6 +626,29 @@ impl Staged {
                 link: None,
                 git: None,
             });
+        }
+        // What the vault is handed once the copies have their names: the
+        // chunks, then the recipe that names them.
+        let mut for_vault: Vec<super::vault::Item> = Vec::new();
+        if self.chunked {
+            for c in &self.chunks {
+                for_vault.push((
+                    super::vault::VKind::Object,
+                    c.sha256.clone(),
+                    object_path(&c.sha256),
+                ));
+            }
+            for_vault.push((
+                super::vault::VKind::Recipe,
+                self.sha256.clone(),
+                object.clone(),
+            ));
+        } else if self.tmp.is_some() {
+            for_vault.push((
+                super::vault::VKind::Object,
+                self.sha256.clone(),
+                object.clone(),
+            ));
         }
         if self.chunked {
             let mut chunks = self.chunks.into_iter();
@@ -666,6 +696,7 @@ impl Staged {
         } else if let Some(tmp) = &self.tmp {
             press(tmp, &object, self.bytes, &self.sha256)?;
         }
+        super::vault::keep_all(&for_vault);
         Ok(Stashed {
             object,
             sha256: self.sha256,
@@ -678,7 +709,7 @@ impl Staged {
     }
 }
 
-fn lift_read_only(p: &Path) {
+pub(crate) fn lift_read_only(p: &Path) {
     if let Ok(m) = fs::metadata(p) {
         let mut perms = m.permissions();
         #[cfg(unix)]
@@ -778,7 +809,13 @@ pub fn take_with(path: &Path, seal: bool) -> io::Result<Stashed> {
 /// `dest` is removed, so nothing that does not hash as named is ever left
 /// where a file is about to be restored.
 pub fn materialize(snapshot: &Path, expect_sha256: &str, dest: &Path) -> io::Result<()> {
-    let result = materialize_inner(snapshot, expect_sha256, dest);
+    let mut result = materialize_inner(snapshot, expect_sha256, dest);
+    // A tin object that is gone or no longer hashes to its name: the vault
+    // (when there is one) has the copy nothing running as the user could
+    // delete. Put back, the restore is tried once more.
+    if result.is_err() && super::vault::heal(snapshot) {
+        result = materialize_inner(snapshot, expect_sha256, dest);
+    }
     if result.is_err() {
         let _ = fs::remove_file(dest);
     }

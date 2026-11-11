@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# CSV written in a burn, then read and summed.
+roll rows = []
+for i in 0..20000 {
+  rows.push({series: "s${i % 5}", value: i * 1.5})
+}
+burn {
+  csv.write("bench.csv", rows)
+}
+stick back = csv.read("bench.csv", {header: true})
+roll total = 0.0
+for r in back {
+  total += float(r.value)
+}
+exhale back.len(), total

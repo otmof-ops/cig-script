@@ -1,0 +1,32 @@
+# SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# JSON deep: a six-level nested document, parsed and walked.
+stick scale = int(args.get(0, "1"))
+pull mkdoc(d, n) {
+  if d == 0 {
+    snuff {leaf: n}
+  }
+  roll kids = []
+  for i in 0..n {
+    kids.push(mkdoc(d - 1, n))
+  }
+  snuff {level: d, kids: kids}
+}
+pull walk(x) {
+  if x.has("leaf") {
+    snuff x.leaf
+  }
+  roll s = 0
+  for k in x.kids {
+    s += walk(k)
+  }
+  snuff s + x.level
+}
+stick doc = mkdoc(6, 3)
+stick body = json.stringify(doc)
+roll total = 0
+for i in 0..scale {
+  stick back = json.parse(body)
+  total += walk(back)
+}
+exhale total, body.len()

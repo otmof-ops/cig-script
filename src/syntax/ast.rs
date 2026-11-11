@@ -4,7 +4,22 @@
 //! The abstract syntax tree.
 
 use super::span::Span;
+use std::cell::Cell;
 use std::rc::Rc;
+
+/// Where `cig check` found a name: written by the checker, read by the
+/// evaluator (cig-script#146). `Unresolved` is the answer for anything the
+/// checker did not see or could not be sure of, and means "look the name up".
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Res {
+    #[default]
+    Unresolved,
+    /// A builtin or module, held by the prelude.
+    Prelude,
+    /// `depth` scopes up from the one the read runs in, the `idx`th name
+    /// declared there.
+    Local { depth: u16, idx: u16 },
+}
 
 #[derive(Clone, Debug)]
 pub struct Program {
@@ -36,9 +51,16 @@ pub enum AssignOp {
 
 #[derive(Clone, Debug)]
 pub enum AssignTarget {
-    Var(String),
-    Index { object: Expr, index: Expr },
-    Member { object: Expr, name: String },
+    /// The name, and where the checker found it.
+    Var(String, Cell<Res>),
+    Index {
+        object: Expr,
+        index: Expr,
+    },
+    Member {
+        object: Expr,
+        name: String,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -234,6 +256,8 @@ pub enum LambdaBody {
 pub struct Expr {
     pub kind: ExprKind,
     pub span: Span,
+    /// Set by the checker on an `Ident`; `Unresolved` everywhere else.
+    pub res: Cell<Res>,
 }
 
 #[derive(Clone, Debug)]
@@ -289,6 +313,10 @@ pub enum ExprKind {
 
 impl Expr {
     pub fn new(kind: ExprKind, span: Span) -> Self {
-        Self { kind, span }
+        Self {
+            kind,
+            span,
+            res: Cell::new(Res::Unresolved),
+        }
     }
 }

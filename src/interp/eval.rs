@@ -492,18 +492,34 @@ impl Interp {
     ) -> Exec {
         let rhs = self.eval(value, env)?;
         match target {
-            AssignTarget::Var(name) => {
+            AssignTarget::Var(name, res) => {
                 if self.recording() {
                     self.recorded_assign(env, name, span)?;
                 }
+                // A recording pass goes by name: it needs the owner's serial.
+                let at = match res.get() {
+                    Res::Local { depth, idx } if !self.recording() => Some((depth, idx)),
+                    _ => None,
+                };
                 let new = match op {
                     AssignOp::Set => rhs,
                     _ => {
-                        let current = env.get(name).ok_or_else(|| unknown_name(name, env, span))?;
+                        let resolved = at.and_then(|(d, i)| env.get_at(d, i, name));
+                        let current = match resolved {
+                            Some(v) => v,
+                            None => env.get(name).ok_or_else(|| unknown_name(name, env, span))?,
+                        };
                         self.binary(compound_op(op), current, rhs, span)?
                     }
                 };
-                match env.assign(name, new) {
+                let result = match at {
+                    Some((d, i)) => match env.assign_at(d, i, name, new) {
+                        Ok(r) => r,
+                        Err(back) => env.assign(name, back),
+                    },
+                    None => env.assign(name, new),
+                };
+                match result {
                     Ok(()) => Ok(()),
                     Err(AssignError::NotFound) => Err(unknown_name(name, env, span)
                         .with_hint(format!("declare it first: roll {name} = ..."))
@@ -631,6 +647,21 @@ impl Interp {
                         Some(r) => r,
                         None => Err(unknown_name(name, env, span)),
                     };
+                }
+                match expr.res.get() {
+                    Res::Local { depth, idx } => {
+                        if let Some(v) = env.get_at(depth, idx, name) {
+                            return Ok(v);
+                        }
+                    }
+                    Res::Prelude => {
+                        if let Some(v) = self.prelude.get(name) {
+                            #[cfg(debug_assertions)]
+                            env.cross_check_owner(name, self.prelude.serial());
+                            return Ok(v);
+                        }
+                    }
+                    Res::Unresolved => {}
                 }
                 env.get(name).ok_or_else(|| unknown_name(name, env, span))
             }

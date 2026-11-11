@@ -1,0 +1,19 @@
+$ cig run err-type-errors.cig
+exit 1
+--- stdout
+cannot add int and string
+list has no method `nope`
+--- stderr
+Don't see any cigarettes.
+error[E401 type]: add expects 2 arguments, got 1
+  --> err-type-errors.cig:17:8
+   |
+17 | exhale add(1)
+   |        ^^^^^^
+  = explain: cig explain E401
+
+$ cig check err-type-errors.cig
+exit 0
+--- stdout
+--- stderr
+ok: err-type-errors.cig (5 statements, 0 warnings)

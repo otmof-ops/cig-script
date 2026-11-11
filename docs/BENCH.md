@@ -5,12 +5,13 @@ cases in `bench/bench.toml`; `cig bench` reads that manifest, checks each
 case's output first, samples it in batches, and reports median, p10 to
 p90, CV and peak resident set in one of three formats.
 
-This page covers steps 1 to 3 of the issue (#179): the manifest, the
+This page covers steps 1 to 3 and 5 of the issue (#179): the manifest, the
 harness, `--json` and `--markdown`; `--save` and `--against` (A and B
-interleaved, with a significance test); and `--watch`. Later steps bring
-the debugging flags (`--timings`, `--stats`, `--syscalls`, `--profile`),
-the family runner (`--family`, `--with`, `--matrix`) and the reusable CI
-workflow. A manifest written with fields reserved for those steps still
+interleaved, with a significance test); `--watch`; and cig's own suite with
+the kernel measures (what a burn leaves on disk, how often it syncs). Later
+steps bring the debugging flags (`--timings`, `--stats`, `--syscalls`,
+`--profile`), the family runner (`--family`, `--with`, `--matrix`) and the
+reusable CI workflow. A manifest written with fields reserved for those steps still
 parses today: the reserved keys are accepted and ignored for now.
 
 ## The manifest
@@ -41,9 +42,13 @@ run     = ["cig", "run", "fixtures/hello.cig"]   # required
 stdin   = "fixtures/hello.in"                    # optional, a file path
 expect  = { exit = 0, stdout = "fixtures/hello.out" }  # exit defaults to 0; stdout is a file
 setup   = ["sh", "-c", "fixtures/make-tree.sh"]  # once per case, not timed
-before  = ["cig", "run", "fixtures/hop.cig"]     # once per sample, not timed
+before  = ["cig", "run", "fixtures/hop.cig"]     # once per sample, not timed; or a list of commands
+after   = ["cig", "run", "fixtures/check.cig"]   # once after each sample's batch, not timed
+per     = 1                                      # this case's own batch size
+burned  = 102400                                 # bytes one run burns (for disk-per-byte)
+ops     = 101                                    # operations one run performs (for fsyncs-per-op)
 budget  = "5 ms"                                 # reported; gating comes with step 6
-measure = ["wall", "rss"]                        # wall and rss so far
+measure = ["wall", "rss", "tin-growth"]          # see "The kernel measures" below
 watch   = ["src/interp/**"]                      # --watch: only these changes rerun this case
 env     = { EXTRA = "value" }                    # optional per-case overrides
 ```
@@ -93,6 +98,18 @@ manifest's `env`, the case's `env`, `PATH`, and only what a process needs
 to start at all: the temp folder (`TMPDIR`, `TEMP`, `TMP`) and, on
 Windows, `SystemRoot`, `windir`, `PATHEXT` and `COMSPEC`.
 
+- **`before` may be a list.** `before = [["cig", "run", "a.cig"], ["cig",
+  "run", "b.cig"]]` runs the commands in order, once per sample, not timed:
+  a case that needs two earlier runs (an unburn of the second one) says so.
+- **`after` and `expect.after_stdout`.** Some commands print nothing a
+  file can hold (`cig unburn` names its run and its home). A case can run an
+  `after` command once after each sample's batch, with the clock stopped,
+  and check its stdout against `expect.after_stdout`: the check script says
+  what the run left behind, and a case whose answer differs is `WRONG`.
+- **`per` is the case's own batch size** and wins over `[defaults].per` and
+  `--per`: a case that cannot be repeated in one home (an unburn takes
+  the newest run once) says `per = 1`.
+
 ## Statistics
 
 For each case, after one warm-up run (which must match `expect` for the
@@ -116,7 +133,7 @@ kernel release, and (on Linux) the CPU governor.
 
 ```
 cig bench                           # every case in ./bench/bench.toml
-cig bench --manifest path/to.toml   # another manifest
+cig bench path/to.toml              # another manifest (the same as --manifest)
 cig bench --only hello              # cases whose name contains the string
 cig bench --group start-up          # cases in this group
 cig bench --samples 3 --per 1       # override the defaults (quick smoke)
@@ -195,6 +212,87 @@ $ cig --json bench
   ]
 }
 ```
+
+## The kernel measures
+
+`measure` names what is recorded next to the time. `wall` and `rss` are
+always taken. These four describe what a case does to the disk, and are
+reported next to the timing, **never gated** (#153: timings are reported, not
+gated; a size is the same kind of fact).
+
+| `measure` | what it reports | needs |
+|---|---|---|
+| `tin-growth` | bytes added under `$CIGSCRIPT_HOME/tin` by one run (allocated blocks, so a file counts what it holds; a run that frees tin objects reports a negative number) | nothing |
+| `file:<path>` | the size of a file after the run, in bytes. `$NAME` and `${NAME}` in the path are read from the sampled command's environment, so `file:$CIGSCRIPT_HOME/runs-index.jsonl` is the sample's own index | nothing |
+| `disk-per-byte` | net bytes added on disk under the home by one run, per byte the case burns (allocated blocks). A new tree of 1,000 files of 16 KiB reports 1.06: the bytes, plus the journal. A tree of 100 files of 1 KiB reports 5.3: each file takes a 4 KiB block. An overwrite of a 32 MiB file reports 1.0: the new bytes replace the old ones in place, and the run keeps a whole copy of the old file in its `snapshots/` folder | `burned` |
+| `fsyncs-per-op` | `fsync`, `fdatasync`, `sync_file_range` and `syncfs` calls in one run, divided by `ops` (default 1) | Linux and `strace` |
+
+How they are taken:
+
+- **Outside the clock.** Sizes are read before a sample's timed batch starts
+  and after its clock stops, and divided by `per`; the walk over a big tree
+  never lands in a time.
+- **Per sample, then the median.** A number that could not be read in some
+  samples is left out of the median; one that could not be read in any is
+  shown as `not measured`, with the reason in `note` (`--json`) and under the
+  row.
+- **Syncs come from the kernel's own syscall events.** One extra run of the
+  case, never timed, goes under `strace -f -c` and the sync calls are added
+  up. On a system with no `strace`, with `ptrace` forbidden, or off Linux, the
+  number is `not measured` and the reason is printed: a count is never
+  guessed.
+- **A ratio needs its denominator.** `disk-per-byte` without `burned` is
+  refused with the case's name, before anything runs.
+- **Where the files go.** `disk-per-byte` counts everything allocated under
+  the sample's home, a tree the script wrote there included, so a script that
+  writes new files under `$CIGSCRIPT_HOME/work` counts its own bytes once, and
+  one that overwrites counts only what the overwrite added.
+
+In `--json`, a timed case's `outcome.metrics` is a list of `{name, unit,
+value, note}`; `--markdown` prints a second table. A/B comparisons
+(`--against`, `--watch`) compare timings only.
+
+## cig's own suite
+
+`bench/bench.toml` in this repository is the suite for cig itself (#145,
+#179 step 5): `format = 1`, product `cig`, every case checked against an
+`.expect` file before it gets a time.
+
+```
+cargo build --release && cig bench bench/bench.toml
+```
+
+`cig bench bench/bench.toml` takes the manifest as its argument (it is the same as
+`--manifest`). The manifest's `binary` is `target/release/cig`, so the run
+measures the build in this checkout. Every case runs against a scratch home,
+and the kernel scripts write only under `$CIGSCRIPT_HOME/work`, so nothing
+lands in the repository. The whole suite takes a few minutes; the heavy part
+is the kernel set, which CI runs nightly (the fast groups run on every pull
+request).
+
+| group | cases | what it measures |
+|---|---|---|
+| `start-up` | `hello`, `startup-0`, `startup-1`, `startup-10` | the smallest programs: process start, with 0, 1 and 10 standard-library modules touched (`per = 20`) |
+| `compute` | `loop`, `fib`, `nbody`, `trees`, `spectral`, `mandel`, `fannkuch`, `closures`, `dispatch`, `sieve`, `words`, `strings`, `strbuild`, `maps`, `lists`, `json`, `json-deep`, `csv`, `regex-ish`, `richards`, `deltablue` | how fast a script computes: the compute set of `cigcompile bench`, the same programs and `.expect` files, so the interpreter and the compiler are measured the same way |
+| `kernel` | `burn small tree` (100 files of 1 KiB), `burn big tree` (1,000 files of 16 KiB), `unburn small tree`, `unburn big tree`, `overwrite big file` (32 MiB over 32 MiB), `restore big file` (an unburn of that overwrite), `hop, 2,000 files unchanged` | what a burn, an unburn and a hop cost, with `tin-growth`, `disk-per-byte`, `fsyncs-per-op` and `file:` next to the time |
+
+How the kernel cases are checked:
+
+- A burn prints one line, and that is its `.expect`.
+- An unburn cannot print a fixed line, so the case has an `after`
+  script: `check-gone.cig` says the tree is gone, `check-big.cig` says the 32
+  MiB file is back and that its SHA-256 is the first version's: `big file:
+  restored exact`. A restore that gives back anything else is `WRONG` and gets
+  no time.
+- The hop case makes a tree of 2,000 files (#145 names 10,000: change `0..2000` in `kernel/make-hop-tree.cig` for that, a few minutes slower on a busy disk) and hops once in `before`, so the
+  timed hop is the one after it, with the pack unchanged: what cig does around
+  a command that does nothing.
+
+The tests are `every_benchmark_matches_its_expect_file` (every case names an
+existing `.expect`, none is orphaned, and the start-up and compute sets run
+and match), `kernel_benchmarks_restore_exact_bytes` (the unburn cases pass, and
+the same scripts run by hand put back a 32 MiB file and a tree byte for byte)
+and `disk_per_byte_is_reported`.
 
 ## Saving and comparing: `--save` and `--against`
 
@@ -313,11 +411,10 @@ end the watch: it runs until it is killed, or its stdout closes.
 
 ## What is here now, and what is next
 
-This page describes **steps 1 to 3** of #179. The upcoming steps, with the
+This page describes **steps 1 to 3 and 5** of #179. The upcoming steps, with the
 same statistics and the same manifest, add:
 
 - **step 4** `--timings`, `--stats` and `--syscalls` for one case;
-- **step 5** cig's own suite in `bench/`;
 - **step 6** the reusable CI workflow and the gates;
 - **step 7** `--family`, `--with` and `--matrix`;
 - **step 8** `--profile` and `--diff`.

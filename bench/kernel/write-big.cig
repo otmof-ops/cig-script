@@ -1,0 +1,15 @@
+# SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Kernel set: write one 32 MiB file under the sample's home. `a` makes it, `b`
+# writes different bytes over it, so the run keeps a whole copy of the old file.
+stick which = args.get(0, "a")
+roll unit = "0123456789abcdef"
+if which == "b" {
+  unit = "fedcba9876543210"
+}
+stick path = "${env.get("CIGSCRIPT_HOME")}/work/big.bin"
+burn {
+  fs.mkdir("${env.get("CIGSCRIPT_HOME")}/work")
+  fs.write_text(path, unit.repeat(2097152))
+}
+exhale "wrote big file ${which}, 33554432 bytes"

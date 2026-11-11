@@ -1,0 +1,70 @@
+# SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Fannkuch-redux: list indexing and swaps.
+stick n = 8
+roll perm1 = []
+for i in 0..n {
+  perm1.push(i)
+}
+roll count = []
+for i in 0..n {
+  count.push(0)
+}
+roll maxflips = 0
+roll checksum = 0
+roll permcount = 0
+roll r = n
+roll done = false
+while not done {
+  while r != 1 {
+    count[r - 1] = r
+    r -= 1
+  }
+  roll perm = perm1.slice(0)
+  roll flips = 0
+  roll k = perm[0]
+  while k != 0 {
+    roll i = 0
+    roll j = k
+    while i < j {
+      stick t = perm[i]
+      perm[i] = perm[j]
+      perm[j] = t
+      i += 1
+      j -= 1
+    }
+    flips += 1
+    k = perm[0]
+  }
+  if flips > maxflips {
+    maxflips = flips
+  }
+  if permcount % 2 == 0 {
+    checksum += flips
+  } else {
+    checksum -= flips
+  }
+  roll more = true
+  while more {
+    if r == n {
+      done = true
+      more = false
+    } else {
+      stick p0 = perm1[0]
+      roll i = 0
+      while i < r {
+        perm1[i] = perm1[i + 1]
+        i += 1
+      }
+      perm1[r] = p0
+      count[r] = count[r] - 1
+      if count[r] > 0 {
+        more = false
+      } else {
+        r += 1
+      }
+    }
+  }
+  permcount += 1
+}
+exhale checksum, maxflips

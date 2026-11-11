@@ -1,0 +1,17 @@
+$ cig run err-nested-call.cig
+exit 1
+--- stdout
+--- stderr
+Don't see any cigarettes.
+error[E502 runtime]: division by zero
+  --> err-nested-call.cig:4:9
+  |
+4 |   snuff xs[i] / (i - 2)
+  |         ^^^^^^^^^^^^^^^
+  = explain: cig explain E502
+
+$ cig check err-nested-call.cig
+exit 0
+--- stdout
+--- stderr
+ok: err-nested-call.cig (4 statements, 0 warnings)

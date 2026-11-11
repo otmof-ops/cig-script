@@ -1,0 +1,18 @@
+$ cig run err-name-before-chain.cig
+exit 1
+--- stdout
+--- stderr
+Don't see any cigarettes.
+error[E501 runtime]: unknown name `lit`
+  --> err-name-before-chain.cig:5:9
+  |
+5 |   snuff lit
+  |         ^^^
+  = hint: did you mean `lite`?
+  = explain: cig explain E501
+
+$ cig check err-name-before-chain.cig
+exit 0
+--- stdout
+--- stderr
+ok: err-name-before-chain.cig (4 statements, 0 warnings)

@@ -461,6 +461,9 @@ pub enum Keeper {
     /// `--seal-key-fd N`: handed over on a descriptor and held in memory
     /// only, never written down.
     Descriptor,
+    /// `seal_key = passphrase`: derived from a passphrase each time and
+    /// stored nowhere (`passkeep`).
+    Passphrase,
 }
 
 /// The key `--seal-key-fd` handed over, read once at start-up.
@@ -512,6 +515,16 @@ pub fn take_key_from_fd(fd: i32) -> Result<(), String> {
             // SAFETY: dup2 onto 0 replaces stdin with an open descriptor.
             unsafe { libc::dup2(null.as_raw_fd(), 0) };
         }
+    }
+    if crate::config::Config::load().get("seal_key") == "passphrase" {
+        // The descriptor holds the passphrase, not a key; passkeep owns it
+        // from here (and wipes what it was copied from).
+        let given = match read {
+            Ok(_) => super::passkeep::give(text.clone()),
+            Err(e) => Err(e.to_string()),
+        };
+        wipe_bytes(&mut text);
+        return given.map_err(|e| format!("descriptor {fd} did not hold a passphrase ({e})"));
     }
     let decoded = match read {
         Ok(_) => std::str::from_utf8(&text)
@@ -819,6 +832,9 @@ fn key_uncached() -> Result<(Key, Keeper), String> {
         return Ok((k, Keeper::Descriptor));
     }
     let cfg = crate::config::Config::load();
+    if cfg.get("seal_key") == "passphrase" {
+        return super::passkeep::key(sealed_in_use()).map(|k| (k, Keeper::Passphrase));
+    }
     if cfg.get("seal_key") != "file" {
         match keyring_key() {
             Ok(k) => return Ok((k, Keeper::Keyring)),
@@ -1145,12 +1161,20 @@ pub fn ensure_keys_dir() -> Result<PathBuf, String> {
     }
     #[cfg(not(unix))]
     {
+        let fresh = !dir.exists();
         fs::create_dir_all(&dir).map_err(|e| {
             format!(
                 "could not create the keys directory {} ({e}); refusing to proceed unprotected against a concurrent cig tin rekey",
                 dir.display()
             )
         })?;
+        // Made now: protected from the start, the user and SYSTEM alone (#105, K2).
+        #[cfg(windows)]
+        if fresh {
+            let _ = super::winacl::protect_dir(&dir);
+        }
+        #[cfg(not(windows))]
+        let _ = fresh;
     }
     Ok(dir)
 }
@@ -1350,6 +1374,12 @@ pub fn harden_process_memory() {
                 // PT_DENY_ATTACH (31): refuse a debugger and core dumps.
                 libc::ptrace(31, 0, std::ptr::null_mut(), 0);
             }
+            #[cfg(windows)]
+            {
+                // Another process of the same user may not open cig to read
+                // or write its memory (#105, K2).
+                let _ = super::winacl::protect_process();
+            }
         }
     });
 }
@@ -1515,7 +1545,10 @@ pub fn import_key(src: &Path, passphrase: &str) -> Result<(), String> {
 ///
 /// `seal_key = file` leaves the keyring alone and returns `Ok`.
 pub fn store_in_keyring(k: &Key) -> Result<(), String> {
-    if crate::config::Config::load().get("seal_key") == "file" {
+    if matches!(
+        crate::config::Config::load().get("seal_key").as_str(),
+        "file" | "passphrase"
+    ) {
         return Ok(());
     }
     // The hex copy is let go after the compare: both the one sent to the
@@ -1564,6 +1597,11 @@ pub fn store_in_keyring(k: &Key) -> Result<(), String> {
 pub fn peek_keeper() -> Option<Keeper> {
     if GIVEN.is_set() {
         return Some(Keeper::Descriptor);
+    }
+    if crate::config::Config::load().get("seal_key") == "passphrase" {
+        return super::passkeep::record_path()
+            .exists()
+            .then_some(Keeper::Passphrase);
     }
     if crate::config::Config::load().get("seal_key") != "file" && keyring_has_entry() {
         return Some(Keeper::Keyring);

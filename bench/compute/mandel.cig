@@ -1,0 +1,29 @@
+# SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Mandelbrot: a tight float loop with an early exit.
+stick w = 160
+stick h = 160
+roll inside = 0
+for y in 0..h {
+  for x in 0..w {
+    stick cr = 2.0 * x / w - 1.5
+    stick ci = 2.0 * y / h - 1.0
+    roll zr = 0.0
+    roll zi = 0.0
+    roll k = 0
+    roll escaped = false
+    while k < 50 and not escaped {
+      stick t = zr * zr - zi * zi + cr
+      zi = 2.0 * zr * zi + ci
+      zr = t
+      if zr * zr + zi * zi > 4.0 {
+        escaped = true
+      }
+      k += 1
+    }
+    if not escaped {
+      inside += 1
+    }
+  }
+}
+exhale inside

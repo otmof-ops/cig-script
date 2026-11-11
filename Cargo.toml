@@ -12,7 +12,7 @@ categories = ["command-line-utilities", "development-tools"]
 default-run = "cig"
 
 [workspace]
-members = [".", "crates/cig-pass"]
+members = [".", "crates/cig-pass", "crates/cig-vault"]
 exclude = ["crates/cig-pass/fuzz"]
 
 [lib]
@@ -52,10 +52,17 @@ blake3 = { version = "1", features = ["pure"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+cig-vault = { path = "crates/cig-vault", version = "0.1.0" }
+
+# The static musl build's own allocator makes every allocation-heavy script 2
+# to 5x slower than the same code on glibc (cig-script#146), so musl alone
+# links mimalloc. Every other target keeps the system allocator.
+[target.'cfg(target_env = "musl")'.dependencies]
+mimalloc = { version = "0.1", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
 # Job Objects: a hop's whole process tree ends with the hop on Windows.
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp"] }
 
 [dev-dependencies]
 tempfile = "3"

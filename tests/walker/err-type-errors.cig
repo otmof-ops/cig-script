@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
+# SPDX-License-Identifier: FSL-1.1-ALv2
+roll items = [1, 2, 3]
+pull add(a, b) {
+  snuff a + b
+}
+try {
+  exhale add(1, "x")
+} ashtray e {
+  exhale e.message
+}
+try {
+  exhale items.nope()
+} ashtray e {
+  exhale e.message
+}
+exhale add(1)

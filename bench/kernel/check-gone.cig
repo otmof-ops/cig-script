@@ -1,0 +1,10 @@
+# SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Kernel set, check after an unburn of a tree: nothing of it is left.
+stick name = args.get(0, "small")
+stick root = "${env.get("CIGSCRIPT_HOME")}/work/${name}"
+roll state = "gone"
+if fs.exists(root) {
+  state = "still there"
+}
+exhale "tree ${name}: ${state}"

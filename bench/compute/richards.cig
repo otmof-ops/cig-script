@@ -1,0 +1,31 @@
+# SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Richards-like: a small priority scheduler of tasks, mixed maps and control flow.
+stick scale = int(args.get(0, "1"))
+roll tasks = []
+for i in 0..5 {
+  tasks.push({pri: (i + 3) % 5, work: 0, qlen: 0})
+}
+stick ticks = 10000 * scale
+for t in 0..ticks {
+  roll best = 0
+  for i in 1..5 {
+    if tasks[i].pri > tasks[best].pri {
+      best = i
+    }
+  }
+  tasks[best].work = tasks[best].work + 1
+  tasks[best].qlen = tasks[best].qlen + 1
+  stick next_i = (best + 1) % 5
+  if tasks[best].qlen > 3 {
+    tasks[best].qlen = tasks[best].qlen - 1
+    tasks[next_i].pri = (tasks[next_i].pri + 1) % 5
+  }
+}
+roll total = 0
+roll pri_sum = 0
+for i in 0..5 {
+  total += tasks[i].work
+  pri_sum += tasks[i].pri
+}
+exhale total, pri_sum

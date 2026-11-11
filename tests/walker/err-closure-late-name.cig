@@ -1,0 +1,11 @@
+# SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
+# SPDX-License-Identifier: FSL-1.1-ALv2
+roll count = 1
+pull make() {
+  pull read() {
+    snuff counts
+  }
+  roll before = 0
+  snuff read
+}
+exhale make()()

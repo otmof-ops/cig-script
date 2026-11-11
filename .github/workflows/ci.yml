@@ -65,11 +65,14 @@ jobs:
     container: alpine:latest
     steps:
       - uses: actions/checkout@v4
-      - run: apk add --no-cache bash curl gcc musl-dev python3 git nodejs procps
+      - run: apk add --no-cache bash curl gcc musl-dev python3 git nodejs procps strace
       - run: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
       - run: |
           . "$HOME/.cargo/env"
           cargo test --workspace
+        # musl links mimalloc (#146): the mmap gate must run here, not skip
+        env:
+          CIG_REQUIRE_MMAP_GATE: "1"
       - run: |
           . "$HOME/.cargo/env"
           cargo build --release
@@ -200,7 +203,13 @@ jobs:
       - name: cross, for a target this runner cannot link itself
         if: matrix.tool == 'cross'
         run: cargo install cross --locked
+      - name: musl C toolchain (mimalloc builds C on the musl targets, #146)
+        if: matrix.tool == 'cargo' && contains(matrix.target, 'linux-musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
       - run: ${{ matrix.tool }} build --release --target ${{ matrix.target }}
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
+          CC_aarch64_unknown_linux_musl: musl-gcc
       - name: name and checksum the asset (matches update::asset_name)
         shell: bash
         run: |

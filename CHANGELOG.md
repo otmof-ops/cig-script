@@ -9,6 +9,22 @@ project follows semantic versioning.
 
 - **A box no longer refuses a hop because a path it covers has gone.** The box covers the session bus sockets in the runtime folder with /dev/null; when a login session ended between the plan and the mount (other work on the machine), the bind failed with ENOENT and the hop was refused (`covering a way to the key refused`, seen as `could not start: Operation not supported`). A cover whose target is gone has nothing left to hide, so it is skipped. Test: `contained_boxes_run_together_while_a_cover_path_comes_and_goes`.
 
+- **cig's own benchmark suite and the kernel measures** (#179 step 5, #145).
+  `bench/bench.toml` (`format = 1`) holds the start-up and compute programs of
+  cigcompile's set, each with its `.expect` file, and a kernel set: burn and
+  unburn of a small and a big tree, an overwrite and a restore of a 32 MiB file
+  (checked byte for byte by hash), and a hop over 2,000 unchanged files. New
+  `measure` kinds, reported next to the time and never gated (#153): `tin-growth`
+  (bytes added under the tin per run), `file:<path>` (a file's size after the
+  run), `disk-per-byte` (bytes added on disk per byte burned) and `fsyncs-per-op`
+  (sync calls per operation, counted from the kernel's syscall events through
+  `strace` in one untimed run, `not measured` where that cannot be done). A
+  case gains `burned`, `ops`, its own `per`, an `after` command checked
+  against `expect.after_stdout`, and a `before` that may be a list. `cig bench
+  <manifest>` takes the manifest as its argument. `--json` carries
+  `outcome.metrics`; the plain and Markdown tables print them under the timings.
+  Tests: `every_benchmark_matches_its_expect_file`,
+  `kernel_benchmarks_restore_exact_bytes`, `disk_per_byte_is_reported`.
 - **`cig tin parcel` and `cig tin unparcel` (#141): the whole tin as a verifiable,
   incremental backup.** One parcel holds every live run's record and journal,
   the objects their before-states need, the ledger and its head, and a SHA-256
@@ -52,6 +68,72 @@ project follows semantic versioning.
   refuses the hop. io_uring, already refused in a contained hop, now leaves an
   event and a note (`E776`). Tests: `the_watch_reports_open_connect_exec`,
   `the_watch_falls_back_to_ptrace`, `a_hop_cannot_use_io_uring`.
+- **Windows state-directory DACL** (#105, K2): the state directory (tin, runs,
+  keys) gets a protected DACL naming only the current user and SYSTEM, set
+  when it is made (`windows-sys` with `Win32_Security_Authorization`); `cig
+  doctor` checks it and prints the `icacls` line that fixes it. cig's own
+  process also gets a DACL that denies another process of the same user
+  `PROCESS_VM_READ`/`VM_WRITE`/`VM_OPERATION`/`CREATE_THREAD`/`DUP_HANDLE`.
+  Tests run on the Windows runners. On macOS an unboxed hop has no Seatbelt
+  profile yet; what that leaves open, and that the kernel-level protections are
+  Linux's, is stated in SECURITY.md and docs/BURN.md.
+- **A command waits a bounded time for a rekey.** A command that needs the key
+  while `cig tin rekey` holds the tin now waits at most `rekey_wait` seconds
+  (default 30; 0 = do not wait) and then stops with `E720` saying a rekey is
+  running, instead of waiting without end.
+- **`cig tin vault install|uninstall|gc|update`** (#105, V3). `install` makes
+  the `_cigtin` account, the private store, the daemon in
+  `/usr/local/bin`, a systemd service (Linux) or launchd job (macOS), and a
+  sudo rule that lets the installing user run `cig-vault gc` for their own
+  uid as `_cigtin` with a password (never setuid, never NOPASSWD); every step
+  runs through sudo and `--dry-run` prints them. `uninstall` removes the
+  service and the rule and leaves the store's objects; `--purge --yes`
+  removes the store and the account. `gc` sends the objects the runs name
+  and prints what the vault would collect; `--apply` removes it, `--now`
+  ignores the seven-day grace; an empty live set is refused. `update` swaps
+  the daemon and restarts it. Windows says it has no transport yet.
+- The vault's code is `E724` (E722 and E723 are the parcel's).
+- **`seal_key = passphrase`** (#105): the tin's key derived from a passphrase
+  with Argon2id, stored nowhere, for a machine with no keyring. The
+  parameters, salt and a check value are recorded in `seal.kdf` (keys folder,
+  copied beside the tin) so a wrong passphrase is refused by name and a
+  rewritten cheaper record is refused. The passphrase comes from the
+  terminal or `--seal-key-fd N`, never from the environment or argv.
+- **The vault** (#105, L7): new crate `crates/cig-vault`, the `cig-vault`
+  helper that runs as its own account (`_cigtin`). It keeps the tin's objects
+  (plain, chunk, recipe, sealed) under the tin's own ids, one tree per user by
+  the kernel's peer credentials, takes them as open file descriptors it
+  hashes itself, and has no delete: `store`, `fetch`, `verify`, `has`, `list`
+  and a `gc` that only reports; removing is `cig-vault gc --apply` as its
+  account. cig hands every committed object to it when the account exists
+  (`vault = auto|on|off`, `vault_socket`), falls back to the tin when it does
+  not answer (`E724`, listed in `tin/vault-pending` and handed over the next
+  time it answers), and fetches a missing or changed tin object back from it
+  at restore. `tests/attack/` is a test target; `the_vault_has_no_delete` and
+  `a_stopped_vault_falls_back_and_catches_up` run in the VM.
+- **A faster tree-walker, first two steps (#146).**
+  - **The static Linux build uses mimalloc.** musl's own allocator made every
+    script that allocates 2 to 5 times slower than the same code on glibc
+    (an allocating loop made 10,305 `mmap` calls; it now makes 11), so
+    `x86_64`, `aarch64` and `armv7` musl builds link mimalloc as the global
+    allocator. Every other target keeps the system allocator. The release
+    job needs `musl-tools` for the C part. `tests/mmap_gate.rs` counts the
+    memory-mapping calls of a steady-state script and fails past 48, or if
+    four times the work adds more than 8.
+  - **Names are resolved when the script is checked.** `cig check` records,
+    for each use of a name, how many scopes up it is and which slot, and
+    scopes keep their names in an array in declaration order: a read is a
+    position, not a search. A name the checker cannot be sure of (one a
+    function body read before its scope declared the same name, anything in
+    an `unburn { }`, anything while a pass is recording) is looked up by name
+    as before; a tree that was never checked is too. Behavior is unchanged:
+    outputs, error codes, messages, positions, backtraces, the step count and
+    the journal are the same, and a debug build checks every resolved read
+    against the lookup by name. `tests/walker.rs` holds the error corpus
+    from before the change.
+  - **Scopes come from a pool.** A scope that ends hands its slot array,
+    with its name buffers, to the next call, block or loop turn, so a call
+    and a loop turn make 3 allocations instead of 9.
 
 - **License: FSL-1.1-ALv2 from the next release.** The code moves from Apache-2.0 to
   the Functional Source License 1.1 with an Apache-2.0 future license: free to
