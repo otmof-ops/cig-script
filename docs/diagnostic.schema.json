@@ -130,6 +130,7 @@
         "E761",
         "E762",
         "E763",
+        "E764",
         "E800",
         "E801",
         "E802",
@@ -242,8 +243,11 @@
         "type",
         "runtime",
         "ghost",
+        "net",
         "hop",
+        "cigos",
         "blacklist",
+        "backup",
         "cough",
         "kernel",
         "fold",
@@ -258,7 +262,12 @@
         "layers",
         "ownership",
         "foreign",
-        "carton"
+        "carton",
+        "installer",
+        "installer",
+        "agent",
+        "deep-guard",
+        "firmware"
       ]
     },
     "no": {

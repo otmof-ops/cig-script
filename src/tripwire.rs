@@ -121,6 +121,9 @@ pub fn after_rollback(journal: &Journal, report: &RollbackReport) -> Option<Trip
     };
     for (entry, state) in &first {
         let path = &state.path;
+        if crate::burn::journal::left_for_older_run(&journal.run_dir_of(), path) {
+            continue;
+        }
         let shown = path.display().to_string();
         let meta = std::fs::symlink_metadata(path);
         let folder = made_folder_over(path);

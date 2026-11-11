@@ -105,8 +105,11 @@ pub enum Command {
     Repl,
     /// The lab notebook: every run, its status, its burns; or one run with its journal (run history).
     Runs {
-        /// A run id (or unique prefix) to show in detail.
+        /// A run id (or unique prefix) to show in detail; or `pin` / `unpin`, then the run (`cig runs pin <id>`).
         id: Option<String>,
+        /// The run, after `pin` or `unpin`.
+        #[arg(value_name = "RUN", hide = true)]
+        target: Option<String>,
         /// Delete run records older than the newest N.
         #[arg(long, value_name = "N")]
         prune: Option<usize>,
@@ -122,6 +125,9 @@ pub enum Command {
         /// Keep this run whatever keep_runs, keep_days and --prune say (the run before a migration or a release).
         #[arg(long, value_name = "ID")]
         pin: Option<String>,
+        /// List every run, not the newest 50 (the default for a table; --json lists all).
+        #[arg(long)]
+        all: bool,
         /// Let a pinned run go again.
         #[arg(long, value_name = "ID")]
         unpin: Option<String>,
@@ -220,6 +226,9 @@ pub enum Command {
         #[command(subcommand)]
         command: Option<crash::CrashCommand>,
     },
+    /// One pass of the history budget (what a run starts in the background after it ends).
+    #[command(hide = true, name = "__budget")]
+    InternalBudget,
     /// Report a bug: a stub for `ciginstaller bug cig` (no run) or `ciginstaller bug --run <run> --part cig`; `--out FILE` is `ciginstaller report <run> --cig --out FILE`.
     Report {
         /// The run id, or a unique prefix of it; none starts the bug report with no run.
@@ -369,6 +378,9 @@ pub struct RunArgs {
     /// Run here without comparing plans with the last good version.
     #[arg(long)]
     pub no_trial: bool,
+    /// Pin this run when it ends, so keep_runs, keep_days and the history budget keep it (the run before a migration or a release).
+    #[arg(long)]
+    pub pin: bool,
     /// Arguments passed to the script as `args`.
     #[arg(last = true)]
     pub args: Vec<String>,
@@ -521,6 +533,7 @@ pub fn main() -> i32 {
         cli.command,
         Command::Crash { .. }
             | Command::InternalCrash { .. }
+            | Command::InternalBudget
             | Command::ReportBundle { queue: true, .. }
     );
     let code = dispatch(ctx, cli.command);
@@ -566,6 +579,7 @@ fn dispatch(ctx: Ctx, command: Command) -> i32 {
                 max_steps: a.max_steps,
                 trial: a.trial,
                 no_trial: a.no_trial,
+                pin: false,
                 args: a.args,
             },
             Some(a.chain),
@@ -579,20 +593,27 @@ fn dispatch(ctx: Ctx, command: Command) -> i32 {
         Command::Repl => repl::repl(&ctx),
         Command::Runs {
             id,
+            target,
             prune,
             verify,
             deep,
             forget,
             pin,
+            all,
             unpin,
             pruned,
             reindex,
         } => match (pin, unpin) {
             _ if pruned => runs::pruned(&ctx),
             _ if reindex => runs::reindex(&ctx),
+            _ if matches!(id.as_deref(), Some("pin" | "unpin")) && target.is_some() => runs::pin(
+                &ctx,
+                &target.unwrap_or_default(),
+                id.as_deref() == Some("pin"),
+            ),
             (Some(id), _) => runs::pin(&ctx, &id, true),
             (None, Some(id)) => runs::pin(&ctx, &id, false),
-            _ => runs::runs(&ctx, id, prune, verify, deep, forget),
+            _ => runs::runs(&ctx, id, prune, verify, deep, forget, all),
         },
         Command::Unburn {
             id,
@@ -648,6 +669,10 @@ fn dispatch(ctx: Ctx, command: Command) -> i32 {
         Command::Config { key, value, unset } => config::config(&ctx, key, value, unset),
         Command::Crash { command } => crash::crash_stub(&ctx, command),
         Command::InternalCrash { command } => crash::crash(&ctx, command),
+        Command::InternalBudget => {
+            runs::budget_pass();
+            exit::OK
+        }
         Command::Report { id, out, send } => report::report(&ctx, id.as_deref(), out, send),
         Command::ReportBundle { id, out, queue } => report::bundle_cmd(&ctx, &id, out, queue),
         Command::Update {

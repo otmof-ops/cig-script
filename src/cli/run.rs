@@ -293,7 +293,7 @@ fn run_source(
     // disk budget (#149), which is off by default.
     if !dry_run {
         crate::cli::runs::keep_by_config();
-        crate::cli::runs::budget_by_config();
+        crate::cli::runs::budget_in_background();
     }
     code
 }
@@ -570,6 +570,18 @@ fn run_source_inner(
                 "{} could not finish the run record: {e}",
                 ctx.yellow("warning:")
             );
+        } else if args.pin {
+            // `--pin`: the run is kept whatever the budget says, as if
+            // `cig runs pin <id>` had been said once it ended.
+            let marker = record.dir().join(crate::burn::runs::PIN_FILE);
+            match std::fs::write(&marker, format!("{}\n", chrono::Utc::now().to_rfc3339())) {
+                Ok(()) => crate::burn::runs_index::upsert(&record),
+                Err(e) => eprintln!(
+                    "{} could not pin {}: {e}",
+                    ctx.yellow("warning:"),
+                    record.id
+                ),
+            }
         }
         // The inbox of this run's hops, if a hop died with it still there.
         let _ = crate::burn::overlay::remove_tree_force(&crate::burn::overlay::inbox_dir(

@@ -536,6 +536,45 @@ fn chain_seed(run_id: &str) -> String {
     sha256_hex(run_id.as_bytes())
 }
 
+/// Paths a stretch's combined restore (#149) treats specially, by run
+/// folder: `.1` the paths this run does not write back (an older run of the
+/// stretch restores them to an earlier state, so the write would be undone
+/// at once), `.2` the paths whose "changed since" check this run skips (a
+/// newer run of the stretch already checked them and left them as it found
+/// them). Set by `cig unburn --to/--since/--last`, empty otherwise.
+type PathSet = std::collections::BTreeSet<PathBuf>;
+static COMBINED: std::sync::Mutex<Vec<(PathBuf, PathSet, PathSet)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Does the stretch in progress leave `path` of this run's journal for an
+/// older run to put back? The after-rollback check does not judge such a
+/// path: it is the older run's to restore.
+pub fn left_for_older_run(run_dir: &Option<PathBuf>, path: &Path) -> bool {
+    combined_for(run_dir).0.contains(path)
+}
+
+/// Install the combined-restore plan for the stretch in progress.
+pub fn set_combined(plan: Vec<(PathBuf, PathSet, PathSet)>) {
+    if let Ok(mut g) = COMBINED.lock() {
+        *g = plan;
+    }
+}
+
+fn combined_for(run_dir: &Option<PathBuf>) -> (PathSet, PathSet) {
+    let Some(dir) = run_dir else {
+        return Default::default();
+    };
+    COMBINED
+        .lock()
+        .ok()
+        .and_then(|g| {
+            g.iter()
+                .find(|(d, _, _)| d == dir)
+                .map(|(_, a, b)| (a.clone(), b.clone()))
+        })
+        .unwrap_or_default()
+}
+
 pub struct Journal {
     run_dir: Option<PathBuf>,
     file: Option<fs::File>,
@@ -872,6 +911,10 @@ impl Journal {
 
     pub fn run_dir(&self) -> Option<&Path> {
         self.run_dir.as_deref()
+    }
+
+    pub fn run_dir_of(&self) -> Option<PathBuf> {
+        self.run_dir.clone()
     }
 
     pub fn entries(&self) -> &[Entry] {
@@ -1526,6 +1569,7 @@ impl Journal {
         // still the run's (copied to another machine, touched) is the
         // run's own work, not someone else's.
         let after = if again { None } else { self.after_state() };
+        let (combined_skip, _) = combined_for(&self.run_dir);
         for entry in self.entries.iter().skip(from).rev() {
             if entry.undone || (entry.restored && !again) {
                 continue;
@@ -1659,7 +1703,18 @@ impl Journal {
                     report.actions.push(("kept".to_string(), text));
                     continue;
                 }
-                match restore(state, hop) {
+                // Combined restore (#149): an older run of the stretch puts
+                // this file back to an earlier state, so a plain write here
+                // would only be written over.
+                let skipped = !hop
+                    && combined_skip.contains(&state.path)
+                    && matches!(state.before, Before::File { .. } | Before::Absent);
+                let restored_now = if skipped {
+                    Ok((Some("left for the older run's restore of it"), Vec::new()))
+                } else {
+                    restore(state, hop)
+                };
+                match restored_now {
                     Ok((note, taken)) => {
                         let to_tin = match taken.len() {
                             0 => String::new(),
@@ -2229,6 +2284,60 @@ impl Journal {
         Some(after)
     }
 
+    /// A stretch stopped: put the paths the finished runs left for an older
+    /// run's restore back to where the oldest finished run found them, so
+    /// the files are as if each run had been undone on its own. Newest entry
+    /// first, as a rollback goes, so the oldest before-state lands last.
+    /// Returns what could not be written.
+    pub fn flush_skipped(&self, paths: &PathSet) -> Vec<String> {
+        let mut failed = Vec::new();
+        for e in self.entries.iter().rev() {
+            for b in e.before.iter().rev() {
+                if paths.contains(&b.path)
+                    && matches!(b.before, Before::File { .. } | Before::Absent)
+                {
+                    if let Err(err) = restore(b, false) {
+                        failed.push(format!("{}: {err}", b.path.display()));
+                    }
+                }
+            }
+        }
+        failed
+    }
+
+    /// For the combined restore: the paths this journal restores with a
+    /// plain write of a file or its absence (`.0`), and those it restores
+    /// any other way (`.1`: a hop's, a directory, a link, a move, a
+    /// compensation). Only a path that is plain in every run of a stretch
+    /// is restored once.
+    pub fn restore_profile(&self) -> (PathSet, PathSet) {
+        let (mut plain, mut other) = (PathSet::new(), PathSet::new());
+        for e in &self.entries {
+            if e.undone || e.restored {
+                continue;
+            }
+            let hop = matches!(e.op, Op::HopCreated { .. } | Op::HopChanged { .. });
+            for b in &e.before {
+                let simple = !hop
+                    && e.reversible
+                    && e.compensation.is_none()
+                    && e.took.is_empty()
+                    && matches!(b.before, Before::File { .. } | Before::Absent);
+                if simple {
+                    plain.insert(b.path.clone());
+                } else {
+                    other.insert(b.path.clone());
+                }
+            }
+            if let Some(p) = e.op.path() {
+                if hop || !e.reversible {
+                    other.insert(p.to_path_buf());
+                }
+            }
+        }
+        (plain, other)
+    }
+
     /// Which touched paths are no longer as the run left them. Restoring
     /// over one of these would overwrite work done since.
     pub fn changed_since(&self) -> ChangedSince {
@@ -2262,8 +2371,12 @@ impl Journal {
                 }
             }
         }
+        let (_, ignore) = combined_for(&self.run_dir);
         let mut changes = Vec::new();
         for (path, seq) in paths {
+            if ignore.contains(&path) {
+                continue;
+            }
             let Some(was) = restored.get(&path).or_else(|| after.paths.get(&path)) else {
                 continue;
             };

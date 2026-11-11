@@ -14,8 +14,11 @@ A code never changes meaning. A retired code is never reused. A code marked *pla
 | `E400`–`E499` | type | `type` | types and arity: a value of the wrong shape reached an operation |
 | `E500`–`E519` | runtime | `runtime` | runtime: a failure while the script was running, including the resource ceilings |
 | `E520`–`E529` | ghost | `runtime` | the ghost filesystem: dry-run reads of paths that simulated ops changed |
+| `E530`–`E549` | net | `runtime` | reserved for `cig net` (cig-script#115): tunnels, the resolver, routes, canaries and the network kill switch; owned by cig-script |
 | `E550`–`E569` | hop | `runtime` | hops (process boundaries): child processes and foreign scripts |
-| `E580`–`E589` | blacklist | `runtime` | the blacklist: what cig-orchestrator stops wherever it shows up, from the lists it keeps and your own entries |
+| `E570`–`E579` | cigos | `runtime` | reserved for CIG.OS (cig-os): the OS layer's own refusals, owned by cig-os; no other family takes it |
+| `E580`–`E588` | blacklist | `runtime` | the blacklist: what cig-orchestrator stops wherever it shows up, from the lists it keeps and your own entries |
+| `E589`–`E599` | backup | `runtime` | reserved for cig-orchestrator's offsite backup of the tin (cig-orchestrator#65): the sealed backup, the push and verify to a place, the recovery key and its drills; owned by cig-orchestrator |
 | `E600`–`E699` | cough | `cough` | raised by the script: cough, assert, chains, process checks |
 | `E700`–`E749` | kernel | `burn` | the burn kernel and its journal (write-ahead log) |
 | `E750`–`E769` | fold | `burn` | folds and packs: refusals when automation is composed |
@@ -31,6 +34,11 @@ A code never changes meaning. A retired code is never reused. A code marked *pla
 | `E1500`–`E1599` | ownership | `check` | CigarScript: ownership and concurrency at full strength |
 | `E1600`–`E1699` | foreign | `check` | CigarScript: calling Rust and C, and the burn rule at that boundary |
 | `E1700`–`E1799` | carton | `usage` | carton: packages, manifests and the lock file |
+| `E1800`–`E1899` | installer | `usage` | reserved for ciginstaller: installing, updating, removing and checking the family (cig-installer's first range); owned by cig-installer |
+| `E1900`–`E1999` | installer | `usage` | reserved for ciginstaller, its second range, for the codes its first range cannot hold; owned by cig-installer |
+| `E2000`–`E2099` | agent | `usage` | reserved for cigo's agent family (cig-orchestrator#63): launching an agent, the scrubbed fetch, quote folders, the taint and download rules; owned by cig-orchestrator |
+| `E2100`–`E2199` | deep-guard | `burn` | reserved for the guard's level 5, spyware and anti-forensics checks (cig-orchestrator#57, #58, #89): eBPF enforcement and what it finds; owned by cig-orchestrator |
+| `E2200`–`E2299` | firmware | `burn` | reserved for cigo's firmware checks (cig-orchestrator#61): the firmware status, the measured boot and what a refused flash names; owned by cig-orchestrator |
 
 ## The four kinds of no
 
@@ -913,6 +921,12 @@ In a dry-run, a step read a path that an earlier simulated op would have deleted
 1. an earlier step's simulated delete or move took the path away (probe `plan-order`). **Remedy:** move the read before that step, or drop the delete; the plan shows the op that took it
 
 
+## net (`E530`–`E549`)
+
+reserved for `cig net` (cig-script#115): tunnels, the resolver, routes, canaries and the network kill switch; owned by cig-script.
+
+*Reserved; nothing emitted yet.*
+
 ## hop (`E550`–`E569`)
 
 hops (process boundaries): child processes and foreign scripts.
@@ -1069,7 +1083,13 @@ A hop's output is not valid in the encoding expected (UTF-8 unless told otherwis
 2. binary data on stdout (no probe; a suggestion, not a finding). **Remedy:** redirect it to a file with the tool's own flag, then read the file
 
 
-## blacklist (`E580`–`E589`)
+## cigos (`E570`–`E579`)
+
+reserved for CIG.OS (cig-os): the OS layer's own refusals, owned by cig-os; no other family takes it.
+
+*Reserved; nothing emitted yet.*
+
+## blacklist (`E580`–`E588`)
 
 the blacklist: what cig-orchestrator stops wherever it shows up, from the lists it keeps and your own entries.
 
@@ -1237,6 +1257,12 @@ A blacklist file, or its signature, was deleted. Its entries still count in full
 
 Related: `E580`, `E587`.
 
+
+## backup (`E589`–`E599`)
+
+reserved for cig-orchestrator's offsite backup of the tin (cig-orchestrator#65): the sealed backup, the push and verify to a place, the recovery key and its drills; owned by cig-orchestrator.
+
+*Reserved; nothing emitted yet.*
 
 ## cough (`E600`–`E699`)
 
@@ -1892,6 +1918,7 @@ folds and packs: refusals when automation is composed.
 | [`E761`](#e761-a-hop's-report-could-not-be-used) | a hop's report could not be used | can't see any ciggies bro | docs/PROTOCOL.md has the line shapes; report paths inside the pack, and keep a copy of the before-bytes (`saved`) or give an `undo` command |
 | [`E762`](#e762-a-parcel-could-not-be-written-or-imported) | a parcel could not be written or imported | can't see any ciggies bro | cig unparcel --show <file> lists the roots to map; --root name=path for each, --cwd when the working directory cannot be told, --allow-sealed-missing to import what this machine cannot open |
 | [`E763`](#e763-the-box-could-not-be-made,-or-its-layer-not-applied) | the box could not be made, or its layer not applied | can't see any ciggies bro | the warning needs nothing done unless the box was the point: Linux 5.11 or later with user namespaces allowed (kernel.apparmor_restrict_unprivileged_userns=0 on Ubuntu); the error names the path that refused |
+| [`E764`](#e764-the-ledger's-chain-is-broken,-so-nothing-is-appended) | the ledger's chain is broken, so nothing is appended | can't see any ciggies bro | `cig runs --verify` names the first line that does not fit; look at what changed the ledger before anything else is trusted |
 
 ### E750 literal path outside the pack
 
@@ -2135,6 +2162,25 @@ A hop asked to run in the box (`{box: true}`): over a copy-on-write layer on the
 4. a path in the layer could not be written to the pack (permissions, a device full) (probe `path-permissions`). **Remedy:** the run rolled back what was applied; fix the path and run again
 
 Related: `E757`, `E752`.
+
+
+### E764 the ledger's chain is broken, so nothing is appended
+
+*burn · since 1.20.0 · arises in run, unburn, runs*
+
+**Kind of no:** can't see any ciggies bro (yours: you're pointed at the wrong place; wrong address: a path, a name, a directory not on PATH; ENOENT).
+
+Every ledger line is signed over the line before it, under the tin's key. An append chains its new line onto the last one, so a last line that no key verifies (edited, replaced, cut mid-line, or signed under a key this machine does not have) would be given a good line after it and the break would look as if it had always been there. The run's own work is not affected; the ledger is left as it is and the run says so. E760 is the same check on a run's journal.
+
+**What to type next:** `cig runs --verify` names the first line that does not fit; look at what changed the ledger before anything else is trusted
+
+**Known causes**, ranked; doctor checks them in this order:
+
+1. a ledger line was edited by hand, or a tool rewrote the file (no probe; a suggestion, not a finding). **Remedy:** `cig runs --verify` says which line; the record cannot be re-signed without the key, so restore the ledger from a copy you trust
+2. the ledger was written under another machine's key (a tin copied without its key) (no probe; a suggestion, not a finding). **Remedy:** copy the key that signed it
+3. the last line was cut short by a crash or a full disk (no probe; a suggestion, not a finding). **Remedy:** `cig runs --verify` names the line; keep a copy of the ledger, then cut the torn last line away
+
+Related: `E760`, `E709`.
 
 
 ## guard (`E770`–`E799`)
@@ -3337,5 +3383,35 @@ CigarScript: calling Rust and C, and the burn rule at that boundary.
 ## carton (`E1700`–`E1799`)
 
 carton: packages, manifests and the lock file.
+
+*Reserved; nothing emitted yet.*
+
+## installer (`E1800`–`E1899`)
+
+reserved for ciginstaller: installing, updating, removing and checking the family (cig-installer's first range); owned by cig-installer.
+
+*Reserved; nothing emitted yet.*
+
+## installer (`E1900`–`E1999`)
+
+reserved for ciginstaller, its second range, for the codes its first range cannot hold; owned by cig-installer.
+
+*Reserved; nothing emitted yet.*
+
+## agent (`E2000`–`E2099`)
+
+reserved for cigo's agent family (cig-orchestrator#63): launching an agent, the scrubbed fetch, quote folders, the taint and download rules; owned by cig-orchestrator.
+
+*Reserved; nothing emitted yet.*
+
+## deep-guard (`E2100`–`E2199`)
+
+reserved for the guard's level 5, spyware and anti-forensics checks (cig-orchestrator#57, #58, #89): eBPF enforcement and what it finds; owned by cig-orchestrator.
+
+*Reserved; nothing emitted yet.*
+
+## firmware (`E2200`–`E2299`)
+
+reserved for cigo's firmware checks (cig-orchestrator#61): the firmware status, the measured boot and what a refused flash names; owned by cig-orchestrator.
 
 *Reserved; nothing emitted yet.*

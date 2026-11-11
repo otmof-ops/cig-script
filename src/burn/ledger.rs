@@ -378,6 +378,13 @@ struct Tail {
     key: Option<super::seal::Key>,
 }
 
+/// What an append says when the ledger's last line does not verify (E764).
+fn broken_tail_message(at: u64) -> String {
+    format!(
+        "error[E764 burn]: the ledger's chain is broken at line {at}, so nothing is appended to it (cig runs --verify says more; cig explain E764)"
+    )
+}
+
 /// The tail an append chains on, or `None` when the tail is not one an
 /// append can read on its own (a torn last line, a line that does not
 /// parse, a last line longer than the window): the caller loads the whole
@@ -441,6 +448,12 @@ fn tail_for_append() -> Result<Option<Tail>, String> {
     let key = candidate_keys()
         .into_iter()
         .find(|k| mac_hex(k, &prev, body.as_bytes()) == last.mac);
+    if key.is_none() {
+        // No key verifies the last line: an append would chain a good
+        // line onto a bad one and make the break look as if it had been
+        // there all along. Refuse; `cig runs --verify` names the line.
+        return Err(broken_tail_message(last.seq));
+    }
     Ok(Some(Tail {
         head: last.mac,
         seq: last.seq,
@@ -503,6 +516,9 @@ pub fn append_locked(
         Some(t) => t,
         None => {
             let loaded = load()?;
+            if let Some(at) = loaded.broken_at {
+                return Err(broken_tail_message(at as u64));
+            }
             Tail {
                 head: loaded.head.clone(),
                 seq: loaded.lines.last().map(|l| l.seq).unwrap_or(0),

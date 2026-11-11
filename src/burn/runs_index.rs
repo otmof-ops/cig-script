@@ -60,11 +60,55 @@ enum Line {
         /// The size of `run.json` when this line was written, in bytes.
         #[serde(default)]
         size: u64,
+        /// The run may have box layers under it (`overlay::prepare` wrote
+        /// the flag before it made them): the sweep visits flagged runs
+        /// only. Written from the folder when the index is rewritten.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        boxed: bool,
+        /// The runs folder's own `(mtime_ns, nlink)` when this line was
+        /// written, under the index lock. The last one says whether the
+        /// index still names every record in the folder: a record an older
+        /// cig added without the index changes the folder's mtime.
+        #[serde(default)]
+        dir_mtime_ns: u64,
+        #[serde(default)]
+        dir_nlink: u64,
         #[serde(flatten)]
         rec: Box<RunRecord>,
     },
     /// The run's folder was removed (prune, forget, budget).
-    Rm { id: String },
+    Rm {
+        id: String,
+        #[serde(default)]
+        dir_mtime_ns: u64,
+        #[serde(default)]
+        dir_nlink: u64,
+    },
+    /// The run may (`on`) or may not have box layers under it. Written
+    /// before the layers are made.
+    Box { id: String, on: bool },
+}
+
+/// `(mtime_ns, nlink)` of the runs folder: what tells a reader the index
+/// still names everything in it. nlink is 0 where the platform has none.
+fn dir_stamp() -> (u64, u64) {
+    let Ok(meta) = fs::metadata(runs_dir()) else {
+        return (0, 0);
+    };
+    let mtime_ns = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX))
+        .unwrap_or(0);
+    #[cfg(unix)]
+    let nlink = {
+        use std::os::unix::fs::MetadataExt;
+        meta.nlink()
+    };
+    #[cfg(not(unix))]
+    let nlink = 0;
+    (mtime_ns, nlink)
 }
 
 /// `list()` said the index was missing or torn and rebuilt it. Said once
@@ -171,11 +215,15 @@ pub fn list() -> io::Result<Vec<RunRecord>> {
         // We do this only here, for the small handful of such records,
         // not on every indexed entry.
         let may_be_interrupted = matches!(rec.status.as_str(), "running" | "damaged");
-        let alive = rec
-            .pid
-            .map(|pid| super::runs::pid_alive(pid, rec.pid_started.as_deref()))
-            .unwrap_or(false);
-        if may_be_interrupted && !alive {
+        // Asked only of a record that could be interrupted: a process
+        // lookup for each of ten thousand finished runs was most of the
+        // listing time.
+        let dead = may_be_interrupted
+            && !rec
+                .pid
+                .map(|pid| super::runs::pid_alive(pid, rec.pid_started.as_deref()))
+                .unwrap_or(false);
+        if dead {
             rec.refresh_from_journal();
         }
         out.push(rec);
@@ -198,6 +246,7 @@ struct CachedEntry {
     rec: Box<RunRecord>,
     mtime_ns: u64,
     size: u64,
+    boxed: bool,
 }
 
 fn read_index_as_map() -> io::Result<std::collections::HashMap<String, CachedEntry>> {
@@ -224,19 +273,27 @@ fn read_index_as_map() -> io::Result<std::collections::HashMap<String, CachedEnt
                 rec,
                 mtime_ns,
                 size,
+                boxed,
                 ..
             } => {
+                let boxed = boxed || map.get(&rec.id).is_some_and(|c| c.boxed);
                 map.insert(
                     rec.id.clone(),
                     CachedEntry {
                         rec,
                         mtime_ns,
                         size,
+                        boxed,
                     },
                 );
             }
-            Line::Rm { id } => {
+            Line::Rm { id, .. } => {
                 map.remove(&id);
+            }
+            Line::Box { id, on } => {
+                if let Some(c) = map.get_mut(&id) {
+                    c.boxed = on;
+                }
             }
         }
     }
@@ -259,6 +316,9 @@ pub fn upsert(rec: &RunRecord) {
         pinned,
         mtime_ns,
         size,
+        boxed: dir.join("box").exists(),
+        dir_mtime_ns: 0,
+        dir_nlink: 0,
         rec: Box::new(rec.clone()),
     }) {
         eprintln!("note: could not update the runs index: {e}");
@@ -285,7 +345,11 @@ fn stat_run_json(run_dir: &Path) -> Option<(u64, u64)> {
 /// (#178), but `remove()` is kept as the one-off path and still
 /// compacts if the heuristic trips, so a single `--forget` tidies up.
 pub fn remove(id: &str) {
-    if let Err(e) = append(&Line::Rm { id: id.to_string() }) {
+    if let Err(e) = append(&Line::Rm {
+        id: id.to_string(),
+        dir_mtime_ns: 0,
+        dir_nlink: 0,
+    }) {
         eprintln!("note: could not update the runs index: {e}");
     }
     let _ = compact_if_grown();
@@ -435,7 +499,12 @@ pub fn write_fresh(view: &[RunRecord]) -> io::Result<()> {
         use std::os::unix::fs::PermissionsExt;
         let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600));
     }
-    for rec in view {
+    let (dir_mtime_ns, dir_nlink) = dir_stamp();
+    // Oldest first, so the end of the file is the newest run, as it is
+    // when lines are appended as runs finish: `last_good` reads from there.
+    let mut ordered: Vec<&RunRecord> = view.iter().collect();
+    ordered.sort_by(|a, b| a.started.cmp(&b.started).then_with(|| a.id.cmp(&b.id)));
+    for rec in ordered {
         let dir = rec
             .loaded_from
             .clone()
@@ -446,6 +515,9 @@ pub fn write_fresh(view: &[RunRecord]) -> io::Result<()> {
             pinned,
             mtime_ns,
             size,
+            boxed: dir.join("box").exists(),
+            dir_mtime_ns,
+            dir_nlink,
             rec: Box::new(rec.clone()),
         };
         let text = serde_json::to_string(&line)
@@ -465,8 +537,172 @@ pub fn write_fresh(view: &[RunRecord]) -> io::Result<()> {
     Ok(())
 }
 
+/// Say, before its layers are made, that a run may have box layers (`on`),
+/// or that it has none. Best effort, like every index write: a failure
+/// only means the next sweep falls back to the folder scan.
+pub fn mark_boxed(id: &str, on: bool) {
+    let _ = append(&Line::Box {
+        id: id.to_string(),
+        on,
+    });
+}
+
+/// The index's text, when it can stand in for a look at the runs folder:
+/// it exists, no append was cut short, and its last stamp is the runs
+/// folder's stamp now (nothing was added or removed outside the index).
+/// `None` sends the caller to the folder scan, which is always right.
+fn trusted_text() -> Option<String> {
+    let text = fs::read_to_string(path()).ok()?;
+    if text.is_empty() || !text.ends_with('\n') {
+        return None;
+    }
+    // The last line that carries a stamp: `box` lines do not.
+    let last = text
+        .lines()
+        .rev()
+        .find(|l| !l.trim().is_empty() && !l.starts_with("{\"op\":\"box\""))?;
+    let stamp = match serde_json::from_str::<Line>(last).ok()? {
+        Line::Set {
+            dir_mtime_ns,
+            dir_nlink,
+            ..
+        }
+        | Line::Rm {
+            dir_mtime_ns,
+            dir_nlink,
+            ..
+        } => (dir_mtime_ns, dir_nlink),
+        Line::Box { .. } => return None,
+    };
+    (stamp.0 != 0 && stamp == dir_stamp()).then_some(text)
+}
+
+/// The text of a string field of one index line (ids and timestamps hold
+/// no quote or escape), without parsing the line.
+fn text_field<'a>(raw: &'a str, key: &str) -> Option<&'a str> {
+    let needle = format!("\"{key}\":\"");
+    let at = raw.find(&needle)? + needle.len();
+    let end = raw[at..].find('"')?;
+    Some(&raw[at..at + end])
+}
+
+/// Candidates for a script's last good run, newest first by start time,
+/// read from the index without parsing a line: each is tested for the
+/// script's hash, status and mode as text, so the cost is a memory scan,
+/// not a parse and an allocation per run. `confirm` is given each
+/// candidate's record in turn, read from the run's own `run.json` (the
+/// folder is the truth), and the first `Some` wins. The outer `None`
+/// means the index cannot be trusted and the caller must scan the
+/// folders.
+pub fn last_good_candidates<T>(
+    script_sha256: &str,
+    mut confirm: impl FnMut(&str) -> Option<T>,
+) -> Option<Option<T>> {
+    let text = trusted_text()?;
+    let needle = format!("\"script_sha256\":\"{script_sha256}\"");
+    // id -> started, for runs whose latest line says ok and run. A later
+    // line for the same id replaces an earlier one; an `rm` drops it.
+    let mut good: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+    for raw in text.lines() {
+        if raw.starts_with("{\"op\":\"rm\"") {
+            if let Some(id) = text_field(raw, "id") {
+                good.remove(id);
+            }
+        } else if raw.starts_with("{\"op\":\"set\"") && raw.contains(&needle) {
+            let (Some(id), Some(started)) = (text_field(raw, "id"), text_field(raw, "started"))
+            else {
+                continue;
+            };
+            if raw.contains("\"status\":\"ok\"") && raw.contains("\"mode\":\"run\"") {
+                good.insert(id, started);
+            } else {
+                good.remove(id);
+            }
+        }
+    }
+    let mut ranked: Vec<(&str, &str)> = good.into_iter().map(|(id, st)| (st, id)).collect();
+    ranked.sort_unstable_by(|a, b| b.cmp(a));
+    for (_, id) in ranked {
+        if let Some(hit) = confirm(id) {
+            return Some(Some(hit));
+        }
+    }
+    Some(None)
+}
+
+/// The newest `n` runs straight off the end of the index (#149): the lines
+/// are read backward, the first line met for an id is its latest, a later
+/// `rm` hides the id, and only the lines kept are parsed. No stat and no
+/// copy of a record that is not shown. `None` when the index cannot stand
+/// in for the folder (see `trusted_text`): the caller lists the folder,
+/// which also brings the index level.
+pub fn list_recent(n: usize) -> Option<Vec<RunRecord>> {
+    let text = trusted_text()?;
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut kept: Vec<&str> = Vec::new();
+    // A little more than `n`: an old run rewritten late (an unburn) sits
+    // near the end of the file without being among the newest by start.
+    let want = n + n / 2 + 8;
+    for raw in text.lines().rev() {
+        let set = raw.starts_with("{\"op\":\"set\"");
+        if !set && !raw.starts_with("{\"op\":\"rm\"") {
+            continue;
+        }
+        let Some(id) = text_field(raw, "id") else {
+            continue;
+        };
+        if !seen.insert(id) || !set {
+            continue;
+        }
+        kept.push(raw);
+        if kept.len() >= want {
+            break;
+        }
+    }
+    let mut out: Vec<RunRecord> = Vec::with_capacity(kept.len());
+    for raw in kept {
+        let Ok(Line::Set { rec, .. }) = serde_json::from_str::<Line>(raw) else {
+            return None;
+        };
+        let mut rec = *rec;
+        rec.loaded_from = Some(runs_dir().join(&rec.id));
+        out.push(rec);
+    }
+    out.sort_by(|a, b| b.started.cmp(&a.started).then_with(|| b.id.cmp(&a.id)));
+    out.truncate(n);
+    Some(out)
+}
+
+/// The runs flagged as possibly holding box layers, or `None` when the
+/// folder scan must stand in. Only lines that can change a flag are
+/// parsed.
+pub fn boxed_runs() -> Option<Vec<String>> {
+    let text = trusted_text()?;
+    let mut flagged: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for raw in text.lines() {
+        if raw.starts_with("{\"op\":\"box\"") || raw.starts_with("{\"op\":\"rm\"") {
+        } else if !(raw.starts_with("{\"op\":\"set\"") && raw.contains("\"boxed\":true")) {
+            continue;
+        }
+        match serde_json::from_str::<Line>(raw) {
+            Ok(Line::Box { id, on: true }) => {
+                flagged.insert(id);
+            }
+            Ok(Line::Box { id, on: false }) | Ok(Line::Rm { id, .. }) => {
+                flagged.remove(&id);
+            }
+            Ok(Line::Set { rec, .. }) => {
+                flagged.insert(rec.id.clone());
+            }
+            Err(_) => return None,
+        }
+    }
+    Some(flagged.into_iter().collect())
+}
+
 /// Append one line under the exclusive index lock, fsync, release.
 fn append(line: &Line) -> io::Result<()> {
+    let mut line = line.clone();
     let p = path();
     let home = home_dir();
     fs::create_dir_all(&home)?;
@@ -484,8 +720,27 @@ fn append(line: &Line) -> io::Result<()> {
         opts.mode(0o600);
     }
     let mut f = opts.open(&p)?;
+    // The runs folder's stamp, read under the lock so the stamps in the
+    // file only ever move forward.
+    let (m, n) = dir_stamp();
+    match &mut line {
+        Line::Set {
+            dir_mtime_ns,
+            dir_nlink,
+            ..
+        }
+        | Line::Rm {
+            dir_mtime_ns,
+            dir_nlink,
+            ..
+        } => {
+            *dir_mtime_ns = m;
+            *dir_nlink = n;
+        }
+        Line::Box { .. } => {}
+    }
     let text =
-        serde_json::to_string(line).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        serde_json::to_string(&line).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     f.write_all(text.as_bytes())?;
     f.write_all(b"\n")?;
     f.sync_all()?;
@@ -592,11 +847,16 @@ mod tests {
             pinned: false,
             mtime_ns: 0,
             size: 0,
+            boxed: false,
+            dir_mtime_ns: 0,
+            dir_nlink: 0,
             rec: Box::new(rec),
         })
         .unwrap();
         let rm = serde_json::to_string(&Line::Rm {
             id: "20260101T000000-aaaaaa".to_string(),
+            dir_mtime_ns: 0,
+            dir_nlink: 0,
         })
         .unwrap();
         fs::write(&p, format!("{a}\n{rm}\n")).unwrap();

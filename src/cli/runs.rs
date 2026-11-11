@@ -6,6 +6,7 @@
 use super::{exit, Ctx};
 use crate::burn::journal::{Before, Journal};
 use crate::burn::runs::{self, RunRecord};
+use std::io::Write;
 
 pub fn runs(
     ctx: &Ctx,
@@ -14,6 +15,7 @@ pub fn runs(
     verify: bool,
     deep: bool,
     forget: Option<String>,
+    show_all: bool,
 ) -> i32 {
     if let Some(keep) = prune {
         return prune_runs(ctx, keep);
@@ -34,6 +36,31 @@ pub fn runs(
                 exit::SCRIPT_ERROR
             }
         };
+    }
+    // The default table (#149): the newest 50 off the end of the index,
+    // no stat and no copy per run. `--all`, `--json`, an id and `--verify`
+    // want every run and take the full list below, which also reconciles
+    // the index when the runs folder no longer fits it.
+    let (recent, total) = if id.is_none() && !verify && !show_all && !ctx.json {
+        match crate::burn::runs_index::list_recent(TABLE_ROWS) {
+            // A run that says it is running may have died: only the full
+            // list checks, so it takes over.
+            Some(r)
+                if !r.is_empty()
+                    && !r
+                        .iter()
+                        .any(|x| matches!(x.status.as_str(), "running" | "damaged")) =>
+            {
+                (Some(r), None)
+            }
+            _ => (None, None),
+        }
+    } else {
+        (None, None)
+    };
+    if let Some(rows) = recent {
+        print_table(ctx, &rows, total);
+        return exit::OK;
     }
     let all = match runs::list() {
         Ok(r) => r,
@@ -84,43 +111,66 @@ pub fn runs(
                 );
                 return exit::OK;
             }
-            outln!(
-                "{:<24} {:<12} {:>5} {:>4}  {}",
-                "run",
-                "status",
-                "burns",
-                "irr",
-                "script"
-            );
-            for r in &all {
-                let status = match r.status.as_str() {
-                    "ok" => ctx.green(&r.status),
-                    "rolled_back" | "unburned" => ctx.yellow(&r.status),
-                    "interrupted" => ctx.red(&r.status),
-                    "running" => ctx.dim(&r.status),
-                    _ => ctx.red(&r.status),
-                };
-                let script = if r.program.is_some() {
-                    format!("{} (program)", r.script)
-                } else {
-                    r.script.clone()
-                };
-                let script = if is_pinned(r) {
-                    format!("{script}  (pinned)")
-                } else {
-                    script
-                };
-                outln!(
-                    "{:<24} {:<12} {:>5} {:>4}  {}",
-                    r.id,
-                    status,
-                    r.burns,
-                    r.irreversible,
-                    script
-                );
-            }
+            let rows = if show_all {
+                all.len()
+            } else {
+                all.len().min(TABLE_ROWS)
+            };
+            print_table(ctx, &all[..rows], Some(all.len()));
             exit::OK
         }
+    }
+}
+
+/// Per run: the paths it does not write back, and the paths whose
+/// changed-since check it skips (the combined restore).
+type CombinePlan = std::collections::BTreeMap<String, (Vec<String>, Vec<String>)>;
+
+const TABLE_ROWS: usize = 50;
+
+/// The table: one buffered write, the newest 50 unless `--all` handed in
+/// every run. `total` is how many runs there are, when known.
+fn print_table(ctx: &Ctx, all: &[RunRecord], total: Option<usize>) {
+    let rows = all.len();
+    let mut out = std::io::BufWriter::new(std::io::stdout().lock());
+    let _ = writeln!(
+        out,
+        "{:<24} {:<12} {:>5} {:>4}  script",
+        "run", "status", "burns", "irr"
+    );
+    for r in all.iter().take(rows) {
+        let status = match r.status.as_str() {
+            "ok" => ctx.green(&r.status),
+            "rolled_back" | "unburned" => ctx.yellow(&r.status),
+            "interrupted" => ctx.red(&r.status),
+            "running" => ctx.dim(&r.status),
+            _ => ctx.red(&r.status),
+        };
+        let script = if r.program.is_some() {
+            format!("{} (program)", r.script)
+        } else {
+            r.script.clone()
+        };
+        let script = if is_pinned(r) {
+            format!("{script}  (pinned)")
+        } else {
+            script
+        };
+        let _ = writeln!(
+            out,
+            "{:<24} {:<12} {:>5} {:>4}  {}",
+            r.id, status, r.burns, r.irreversible, script
+        );
+    }
+    let _ = out.flush();
+    match total {
+        Some(t) if t > rows => {
+            eprintln!("showing the newest {rows} of {t} runs (cig runs --all lists every one)")
+        }
+        None if rows >= TABLE_ROWS => {
+            eprintln!("showing the newest {rows} runs (cig runs --all lists every one)")
+        }
+        _ => {}
     }
 }
 
@@ -178,6 +228,15 @@ fn verify_all(ctx: &Ctx, all: &[RunRecord], deep: bool) -> i32 {
         ledger_presence,
         crate::burn::ledger::Presence::Missing | crate::burn::ledger::Presence::Empty
     );
+    // The ledger's own chain (#184): every line is signed over the line
+    // before it, so an edited, cut or reordered line breaks it from there
+    // on. Said first, whatever the runs say.
+    let ledger_broken_at = ledger.as_ref().and_then(|l| l.broken_at);
+    if let Some(at) = ledger_broken_at {
+        problems.push(format!(
+            "the ledger's own chain is broken at line {at} (a line was edited, removed or reordered); nothing more is appended to it [E764]"
+        ));
+    }
     let mut forced_deep = deep;
     if any_head && ledger_gone {
         let where_ = crate::burn::ledger::path();
@@ -325,6 +384,7 @@ fn verify_all(ctx: &Ctx, all: &[RunRecord], deep: bool) -> i32 {
                 "checked": checked,
                 "deep": forced_deep,
                 "problems": problems,
+                "ledger": {"broken_at": ledger_broken_at},
                 "ok": problems.is_empty(),
             })
         );
@@ -1278,7 +1338,7 @@ fn holds_a_layer(r: &runs::RunRecord) -> bool {
         .unwrap_or(false)
 }
 
-/// `history_budget` (#149), off by default: after a run, and after
+/// `history_budget` (#149), off by default; a run starts it in the background (`budget_in_background`): after a run, and after
 /// `cig runs --prune`, the oldest runs go until the history (runs and tin)
 /// fits, then the tin is collected. Never pruned: a pinned run, a run with
 /// work left (running, interrupted, an unburn that failed), a run holding a
@@ -1288,6 +1348,45 @@ fn holds_a_layer(r: &runs::RunRecord) -> bool {
 /// that refers to it goes, so the pass prunes no more than it must. Each
 /// prune is a ledger line with status `budget`, so `cig runs --pruned` says
 /// why it went.
+pub fn budget_in_background() {
+    let cfg = crate::config::Config::load();
+    if !matches!(
+        crate::config::parse_bytes(&cfg.get("history_budget")),
+        Some(Some(_))
+    ) {
+        return;
+    }
+    // The tests that read the result straight after a run ask for it here.
+    if std::env::var_os("CIG_BUDGET_SYNC").is_some() {
+        budget_pass();
+        return;
+    }
+    // Marked as cig's call to itself: a program's binary is `cig` for it.
+    let Ok(mut c) = crate::program::self_command() else {
+        return;
+    };
+    c.arg("__budget")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        c.process_group(0);
+    }
+    let _ = c.spawn();
+}
+
+/// One pass of the budget under its own lock: a second pass that finds the
+/// first still running leaves it to finish.
+pub fn budget_pass() {
+    let Ok(Some(_held)) = crate::burn::lock::try_lock_file(&runs::home_dir().join("budget.lock"))
+    else {
+        return;
+    };
+    budget_by_config();
+}
+
 pub fn budget_by_config() {
     let cfg = crate::config::Config::load();
     let Some(Some(budget)) = crate::config::parse_bytes(&cfg.get("history_budget")) else {
@@ -1729,6 +1828,7 @@ pub fn unburn_stretch(
             )
         }
     };
+    let mut saved_plan: Option<CombinePlan> = None;
     let ids: Vec<String> = if let Stretch::Continue = how {
         let Ok(text) = std::fs::read_to_string(stretch_file()) else {
             return usage(
@@ -1737,6 +1837,7 @@ pub fn unburn_stretch(
             );
         };
         let v: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
+        saved_plan = serde_json::from_value(v["combine"].clone()).ok();
         v["runs"]
             .as_array()
             .map(|a| {
@@ -1839,9 +1940,20 @@ pub fn unburn_stretch(
         }
     }
     let ids: Vec<String> = todo.iter().map(|r| r.id.clone()).collect();
+    // The combined restore (#149): each file written once, to the earliest
+    // before-state in the stretch. Worked out here, once, and kept in the
+    // stretch file, so `--continue` after a stop uses the same plan and not
+    // one recomputed from the runs that are left.
+    let plan: CombinePlan = if let (Stretch::Continue, Some(p)) = (&how, saved_plan.as_ref()) {
+        p.clone()
+    } else {
+        combined_plan(&todo)
+    };
+    install_plan(&todo, &plan);
     let _ = std::fs::write(
         stretch_file(),
-        serde_json::json!({"runs": ids, "made": chrono::Utc::now().to_rfc3339()}).to_string(),
+        serde_json::json!({"runs": ids, "made": chrono::Utc::now().to_rfc3339(), "combine": plan})
+            .to_string(),
     );
     let mut undone = Vec::new();
     for (k, id) in ids.iter().enumerate() {
@@ -1864,10 +1976,31 @@ pub fn unburn_stretch(
                     id
                 );
             }
+            crate::burn::journal::set_combined(Vec::new());
+            // The runs done so far left files for an older run to put back;
+            // that run is not coming yet, so they go back now, as if each
+            // had been undone on its own.
+            for done in undone.iter().rev() {
+                let skipped: std::collections::BTreeSet<std::path::PathBuf> = plan
+                    .get(done)
+                    .map(|(skip, _)| skip.iter().map(std::path::PathBuf::from).collect())
+                    .unwrap_or_default();
+                if skipped.is_empty() {
+                    continue;
+                }
+                if let Some(r) = all.iter().find(|r| &r.id == done) {
+                    if let Ok(j) = Journal::load(&r.dir()) {
+                        for f in j.flush_skipped(&skipped) {
+                            eprintln!("{} {f}", ctx.red("error:"));
+                        }
+                    }
+                }
+            }
             return code;
         }
         undone.push(id.clone());
     }
+    crate::burn::journal::set_combined(Vec::new());
     let _ = std::fs::remove_file(stretch_file());
     if ctx.json {
         outln!(
@@ -1883,6 +2016,64 @@ pub fn unburn_stretch(
         );
     }
     exit::OK
+}
+
+/// The combined-restore plan for `todo` (newest first): per run, the paths
+/// it does not write back and the paths whose changed-since check it skips.
+/// A path is combined only when it is a plain file write or removal in
+/// every run of the stretch that touches it, and at least two do: the
+/// newest run still checks it, the oldest still writes it, and the runs
+/// between do neither.
+fn combined_plan(todo: &[&runs::RunRecord]) -> CombinePlan {
+    use std::collections::BTreeMap;
+    let profiles: Vec<_> = todo
+        .iter()
+        .map(|r| Journal::load(&r.dir()).ok().map(|j| j.restore_profile()))
+        .collect();
+    let mut touching: BTreeMap<std::path::PathBuf, Vec<usize>> = BTreeMap::new();
+    let mut spoiled: std::collections::BTreeSet<std::path::PathBuf> = Default::default();
+    for (k, p) in profiles.iter().enumerate() {
+        let Some((plain, other)) = p else {
+            continue;
+        };
+        for path in plain {
+            touching.entry(path.clone()).or_default().push(k);
+        }
+        spoiled.extend(other.iter().cloned());
+    }
+    // A run whose journal could not be read may touch anything: no combining.
+    if profiles.iter().any(|p| p.is_none()) {
+        return BTreeMap::new();
+    }
+    let mut plan: BTreeMap<String, (Vec<String>, Vec<String>)> = BTreeMap::new();
+    for (path, runs_at) in touching {
+        if runs_at.len() < 2 || spoiled.contains(&path) {
+            continue;
+        }
+        let text = path.to_string_lossy().to_string();
+        let last = runs_at.len() - 1;
+        for (n, k) in runs_at.iter().enumerate() {
+            let e = plan.entry(todo[*k].id.clone()).or_default();
+            if n < last {
+                e.0.push(text.clone());
+            }
+            if n > 0 {
+                e.1.push(text.clone());
+            }
+        }
+    }
+    plan
+}
+
+fn install_plan(todo: &[&runs::RunRecord], plan: &CombinePlan) {
+    let set = |v: &Vec<String>| -> std::collections::BTreeSet<std::path::PathBuf> {
+        v.iter().map(std::path::PathBuf::from).collect()
+    };
+    crate::burn::journal::set_combined(
+        todo.iter()
+            .filter_map(|r| plan.get(&r.id).map(|(a, b)| (r.dir(), set(a), set(b))))
+            .collect(),
+    );
 }
 
 /// How many changed paths an E704 refusal names before saying how many more.
@@ -2063,10 +2254,13 @@ pub fn unburn(ctx: &Ctx, id: &str, dry_run: bool, force: bool, accept_unsigned: 
             );
         }
     }
-    // A rollback that left restores failed is finished by a plain unburn:
-    // the entries restored the first time are skipped, the failed ones
-    // tried again. `--force` restores everything again, on purpose.
-    let retry = !force && rec.rolled_back && !rec.rollback_failed.is_empty();
+    // A rollback that left restores failed is finished by a retry: the
+    // entries restored the first time are skipped, the failed ones tried
+    // again. `--force` on such a run is the same retry with the checks
+    // overridden: it never redoes what a pass already put back, which an
+    // older run's own unburn may have rewound since (#132). `--force` on a
+    // run that was rolled back cleanly still restores everything again.
+    let retry = rec.rolled_back && !rec.rollback_failed.is_empty();
     if (rec.status == "unburned" || rec.rolled_back) && !dry_run && !retry {
         if !force {
             eprintln!(
@@ -2328,7 +2522,7 @@ pub fn unburn(ctx: &Ctx, id: &str, dry_run: bool, force: bool, accept_unsigned: 
         }
         interp.run_compensation(c).map_err(|e| e.message)
     };
-    let mut report = if force {
+    let mut report = if force && !retry {
         journal.rollback_again_with(&mut runner)
     } else {
         journal.rollback_with(&mut runner)

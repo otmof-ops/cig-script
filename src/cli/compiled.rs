@@ -295,6 +295,7 @@ pub fn main(p: Program) -> i32 {
         max_steps: o.max_steps,
         trial: false,
         no_trial: true,
+        pin: false,
         args: o.args,
     };
     let code = run::run_program(&ctx, args, &p, o.light);
