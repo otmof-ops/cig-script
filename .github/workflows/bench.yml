@@ -15,6 +15,9 @@
 #       uses: otmof-ops/cig-script/.github/workflows/bench.yml@main
 #       with:
 #         cig-version: "1.20.0"        # leave empty in cig-script itself: it builds its own cig
+#         prepare: |                   # optional: what the suite needs beside cig
+#           cargo build --release --locked --bin <product>
+#           echo "$PWD/target/release" >> "$GITHUB_PATH"
 #       permissions:
 #         contents: write              # the nightly appends to the bench-history branch
 #         pull-requests: write         # the PR comment
@@ -26,10 +29,17 @@
 # `cig bench history <case>` reads. Heavy suites run nightly, never on a pull
 # request (DECISIONS 11).
 #
-# What fails a run: a case whose output is WRONG (`cig bench` exits 1), or a
-# suite that cannot be read or built. A timing never fails it: timings are
-# reported, never gated, on shared runners (#153); the table says what moved
-# and how sure the test is.
+# What fails a run: a case whose output is WRONG (`cig bench` exits 1), a gate
+# named in `gate` that trips, or a suite that cannot be read or built. A timing
+# never fails it: timings are reported, never gated, on shared runners (#153);
+# the table says what moved and how sure the test is, and `cig bench --gate`
+# prints every gate, failing only the ones `gate` names.
+#
+# The nightly filesystem matrix (.github/workflows/bench-nightly.yml, #145)
+# calls this once per filesystem: `runs-on` picks the runner, `filesystem`
+# (Linux: ext4, btrfs or xfs) makes that filesystem on a loop device and puts
+# every sample's home on it, and `series` names the history file
+# (`history/<product>.<series>.jsonl`, read with `cig bench history --series`).
 name: bench
 
 on:
@@ -55,19 +65,47 @@ on:
         description: The branch the nightly appends to.
         type: string
         default: bench-history
+      runs-on:
+        description: The runner label.
+        type: string
+        default: ubuntu-latest
+      filesystem:
+        description: "Linux only: ext4, btrfs or xfs, formatted on a loop device on the runner and used for every sample's home. Empty uses the runner's own disk."
+        type: string
+        default: ""
+      series:
+        description: "Names the history file: history/<product>.<series>.jsonl. Empty is history/<product>.jsonl."
+        type: string
+        default: ""
+      gate:
+        description: "Gates that fail the run (cig bench --gate): correctness, disk, start-up, regression or all. The rest are printed."
+        type: string
+        default: correctness
+      prepare:
+        description: "Shell lines run from the repository root once cig is on PATH, before the suite: what it needs beside cig (a sibling checkout, the product's own build on GITHUB_PATH). A failing line fails the run."
+        type: string
+        default: ""
 
 permissions:
   contents: read
 
 jobs:
   bench:
-    name: bench (${{ inputs.mode }})
-    runs-on: ubuntu-latest
-    # One writer at a time to the history branch.
+    name: bench (${{ inputs.mode }}${{ inputs.series && format(', {0}', inputs.series) || '' }})
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 120
+    # One writer at a time to each series' history; the push below retries
+    # when another series wrote the branch first.
     concurrency:
-      group: bench-history-${{ github.repository }}
+      group: bench-history-${{ github.repository }}-${{ inputs.series }}
       cancel-in-progress: false
+    defaults:
+      run:
+        shell: bash
     env:
+      GATE: ${{ inputs.gate }}
+      FILESYSTEM: ${{ inputs.filesystem }}
+      SERIES: ${{ inputs.series }}
       MANIFEST: ${{ inputs.manifest }}
       FAST_GROUPS: ${{ inputs.fast-groups }}
       CIG_VERSION: ${{ inputs.cig-version }}
@@ -92,13 +130,16 @@ jobs:
           echo "mode=$mode" >> "$GITHUB_OUTPUT"
 
       - uses: dtolnay/rust-toolchain@stable
-        if: inputs.cig-version == ''
+        if: inputs.cig-version == '' || inputs.prepare != ''
 
       - name: Build cig from this repository
         if: inputs.cig-version == ''
         run: |
           cargo build --release --locked
-          echo "$PWD/target/release" >> "$GITHUB_PATH"
+          bin="$PWD/target/release"
+          # GITHUB_PATH wants a Windows path on Windows.
+          if command -v cygpath > /dev/null; then bin="$(cygpath -w "$bin")"; fi
+          echo "$bin" >> "$GITHUB_PATH"
 
       - name: Install the cig release
         if: inputs.cig-version != ''
@@ -119,6 +160,57 @@ jobs:
           chmod +x cig
           echo "$PWD" >> "$GITHUB_PATH"
 
+      # The nightly matrix's Linux filesystems: a sparse image on the runner's
+      # big temporary disk, formatted and mounted, and TMPDIR pointed at it, so
+      # every sample's home (where the kernel cases write) is on that filesystem.
+      - name: Make the filesystem
+        if: inputs.filesystem != '' && runner.os == 'Linux'
+        run: |
+          set -eu
+          case "$FILESYSTEM" in
+            ext4) ;;
+            btrfs) sudo apt-get install -y --no-install-recommends btrfs-progs ;;
+            xfs) sudo apt-get install -y --no-install-recommends xfsprogs ;;
+            *) echo "filesystem must be ext4, btrfs or xfs, not $FILESYSTEM"; exit 1 ;;
+          esac
+          img=/mnt/bench-fs.img
+          sudo truncate -s 8G "$img"
+          dev="$(sudo losetup --find --show "$img")"
+          case "$FILESYSTEM" in
+            ext4) sudo mkfs.ext4 -q -F "$dev" ;;
+            btrfs) sudo mkfs.btrfs -q -f "$dev" ;;
+            xfs) sudo mkfs.xfs -q -f "$dev" ;;
+          esac
+          mnt="$RUNNER_TEMP/bench-fs"
+          sudo mkdir -p "$mnt"
+          sudo mount "$dev" "$mnt"
+          sudo chown "$(id -u):$(id -g)" "$mnt"
+          got="$(findmnt -no FSTYPE "$mnt")"
+          [ "$got" = "$FILESYSTEM" ] || { echo "mounted $got, wanted $FILESYSTEM"; exit 1; }
+          echo "TMPDIR=$mnt" >> "$GITHUB_ENV"
+          echo "FS_TYPE=$got" >> "$GITHUB_ENV"
+
+      # Where the runner's own disk is the filesystem (macOS APFS, Windows
+      # NTFS), say which it is; the history line carries it.
+      - name: Record the filesystem
+        if: inputs.filesystem == '' || runner.os != 'Linux'
+        run: |
+          case "$RUNNER_OS" in
+            macOS) fs="$(diskutil info "$RUNNER_TEMP" 2>/dev/null | awk -F: '/Type \(Bundle\)/ {gsub(/ /, "", $2); print $2}')" ;;
+            Windows) fs="$(powershell -NoProfile -Command "(Get-Volume -DriveLetter ('$RUNNER_TEMP'.Substring(0,1))).FileSystem" 2>/dev/null | tr -d '\r')" ;;
+            *) fs="$(findmnt -no FSTYPE -T "$RUNNER_TEMP" 2>/dev/null)" ;;
+          esac
+          echo "FS_TYPE=${fs:-unknown}" >> "$GITHUB_ENV"
+          echo "filesystem: ${fs:-unknown}"
+
+      # The calling repository's own preparation, as it wrote it (its text
+      # reaches bash through the environment, never through the expression).
+      - name: Prepare the suite
+        if: inputs.prepare != ''
+        env:
+          PREPARE: ${{ inputs.prepare }}
+        run: bash -eu -c "$PREPARE"
+
       - name: Pull request, A/B against the base
         if: steps.mode.outputs.mode == 'pr'
         run: |
@@ -129,7 +221,7 @@ jobs:
           for g in $FAST_GROUPS; do
             printf '### %s\n\n' "$g" >> bench-report.md
             # B is this checkout; A is the base, built in a worktree with [bench].build.
-            cig bench "$MANIFEST" --group "$g" --against "origin/${{ github.base_ref }}" --markdown >> bench-report.md || status=$?
+            cig bench "$MANIFEST" --group "$g" --against "origin/${{ github.base_ref }}" --markdown --gate "$GATE" >> bench-report.md || status=$?
             printf '\n' >> bench-report.md
           done
           cat bench-report.md >> "$GITHUB_STEP_SUMMARY"
@@ -156,11 +248,12 @@ jobs:
           set -u
           cig --version
           status=0
-          cig --json bench "$MANIFEST" > bench-run.json || status=$?
+          cig --json bench "$MANIFEST" --gate "$GATE" > bench-run.json || status=$?
           echo "status=$status" >> "$GITHUB_ENV"
           # One line per run: the format `cig bench history` reads.
-          jq -c --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg commit "${{ github.sha }}" '
+          jq -c --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg commit "${{ github.sha }}" --arg fs "${FS_TYPE:-unknown}" --arg os "$RUNNER_OS" '
             { format: 1, at: $at, commit: $commit, product: .product, cig_version: .cig_version,
+              filesystem: $fs, runner_os: $os,
               machine: "\(.conditions.cpu), \(.conditions.cores) cores, \(.conditions.os) \(.conditions.kernel)",
               cases: ( [ .cases[] | select(.outcome.state == "timed")
                          | { key: .name, value: { group: .group, median_ms: .outcome.median_ms,
@@ -168,6 +261,8 @@ jobs:
                              rss_bytes: .outcome.rss_bytes } } ] | from_entries ) }' bench-run.json > bench-line.json
           product="$(jq -r .product bench-run.json)"
           echo "PRODUCT=$product" >> "$GITHUB_ENV"
+          # One file per series (the nightly matrix: ext4, btrfs, xfs, apfs, ntfs).
+          echo "HISTORY_FILE=${product}${SERIES:+.$SERIES}.jsonl" >> "$GITHUB_ENV"
           cat bench-line.json
 
       - name: Nightly, append to the history branch
@@ -176,7 +271,7 @@ jobs:
           set -eu
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          for attempt in 1 2 3; do
+          for attempt in 1 2 3 4 5 6; do
             rm -rf "$RUNNER_TEMP/hist"
             if git ls-remote --exit-code --heads origin "$HISTORY_BRANCH" > /dev/null; then
               git fetch origin "$HISTORY_BRANCH"
@@ -188,9 +283,9 @@ jobs:
               git -C "$RUNNER_TEMP/hist" rm -rf . > /dev/null 2>&1 || true
             fi
             mkdir -p "$RUNNER_TEMP/hist/history"
-            cat bench-line.json >> "$RUNNER_TEMP/hist/history/${PRODUCT}.jsonl"
+            cat bench-line.json >> "$RUNNER_TEMP/hist/history/${HISTORY_FILE}"
             git -C "$RUNNER_TEMP/hist" add history
-            git -C "$RUNNER_TEMP/hist" commit -m "bench: ${PRODUCT} ${{ github.sha }}"
+            git -C "$RUNNER_TEMP/hist" commit -m "bench: ${PRODUCT}${SERIES:+ ($SERIES)} ${{ github.sha }}"
             if git -C "$RUNNER_TEMP/hist" push origin "HEAD:$HISTORY_BRANCH"; then
               exit 0
             fi

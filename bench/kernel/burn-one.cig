@@ -1,0 +1,8 @@
+# SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Start-up set: a burn of one file, the smallest unit of work the kernel does
+# (#145: a one-write burn is under 7 ms). The file goes under the sample's home.
+burn {
+  fs.write_text("${env.get("CIGSCRIPT_HOME")}/one.txt", "x")
+}
+exhale "burned one file"

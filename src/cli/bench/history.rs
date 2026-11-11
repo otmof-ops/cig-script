@@ -5,7 +5,9 @@
 //! what the nightly workflow (`.github/workflows/bench.yml`) appended to the
 //! `bench-history` branch, or from a file.
 //!
-//! The file is `history/<product>.jsonl`, one JSON object per nightly run:
+//! The file is `history/<product>.jsonl` (or `history/<product>.<series>.jsonl`
+//! for one filesystem of the nightly matrix: `--series btrfs`), one JSON
+//! object per nightly run:
 //!
 //! ```text
 //! {"format":1,"at":"2026-11-11T02:00:00Z","commit":"1a2b3c...","product":"cig",
@@ -40,6 +42,7 @@ pub(super) fn history(
     manifest: Option<PathBuf>,
     file: Option<PathBuf>,
     branch: Option<String>,
+    series: Option<String>,
 ) -> i32 {
     let usage = |e: String| {
         eprintln!("{} {e}", ctx.red("error[E800 usage]:"));
@@ -60,7 +63,7 @@ pub(super) fn history(
                 Err(e) => return usage(format!("{e} (or name the history with `--file`)")),
             };
             let branch = branch.unwrap_or_else(|| "bench-history".into());
-            match read_branch(&branch, &product) {
+            match read_branch(&branch, &product, series.as_deref()) {
                 Ok(t) => t,
                 Err(e) => return usage(e),
             }
@@ -212,14 +215,19 @@ pub(super) fn history(
 }
 
 /// `history/<product>.jsonl` on a branch, local or `origin/`.
-fn read_branch(branch: &str, product: &str) -> Result<String, String> {
+fn read_branch(branch: &str, product: &str, series: Option<&str>) -> Result<String, String> {
     let git = |spec: String| -> Option<String> {
         let out = Command::new("git").args(["show", &spec]).output().ok()?;
         out.status
             .success()
             .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
     };
-    let rel = format!("history/{product}.jsonl");
+    // The nightly filesystem matrix writes one file per series:
+    // `history/cig.btrfs.jsonl`.
+    let rel = match series {
+        Some(s) if !s.is_empty() => format!("history/{product}.{s}.jsonl"),
+        _ => format!("history/{product}.jsonl"),
+    };
     git(format!("{branch}:{rel}"))
         .or_else(|| git(format!("origin/{branch}:{rel}")))
         .ok_or_else(|| {
