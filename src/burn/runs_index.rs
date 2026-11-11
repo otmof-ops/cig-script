@@ -157,6 +157,7 @@ pub fn list() -> io::Result<Vec<RunRecord>> {
     };
     let mut out: Vec<RunRecord> = Vec::new();
     let mut reloaded = false;
+    let mut flipped = false;
     for entry in dir_entries {
         let Ok(entry) = entry else { continue };
         let id = entry.file_name().to_string_lossy().to_string();
@@ -214,6 +215,7 @@ pub fn list() -> io::Result<Vec<RunRecord>> {
         // `interrupted` and reads its journal for the real burn count.
         // We do this only here, for the small handful of such records,
         // not on every indexed entry.
+        let was_running = rec.status == "running";
         let may_be_interrupted = matches!(rec.status.as_str(), "running" | "damaged");
         // Asked only of a record that could be interrupted: a process
         // lookup for each of ten thousand finished runs was most of the
@@ -224,7 +226,14 @@ pub fn list() -> io::Result<Vec<RunRecord>> {
                 .map(|pid| super::runs::pid_alive(pid, rec.pid_started.as_deref()))
                 .unwrap_or(false);
         if dead {
-            rec.refresh_from_journal();
+            rec.refresh_from_journal_known_dead();
+            // A process that died stays dead: the verdict goes into the
+            // index, so the next listing reads it and does not ask the
+            // system again. Asked for every dead record on every listing,
+            // it was a process start each on Windows and macOS (cigo#119).
+            if was_running && rec.status == "interrupted" {
+                flipped = true;
+            }
         }
         out.push(rec);
     }
@@ -233,7 +242,7 @@ pub fn list() -> io::Result<Vec<RunRecord>> {
     // If we reloaded any record, or found folders not in the index,
     // rewrite the index so the next list is faster. Best effort; a
     // failure means a longer file next time, not a wrong view.
-    if reloaded || indexed.as_ref().is_none_or(|m| m.len() != out.len()) {
+    if reloaded || flipped || indexed.as_ref().is_none_or(|m| m.len() != out.len()) {
         let _ = write_fresh(&out);
     }
     Ok(out)
@@ -823,6 +832,58 @@ mod tests {
         fs::write(&p, "{\"op\":\"set\",\"id\":\"half").unwrap();
         let e = read_index_as_map().expect_err("torn index is a cache miss");
         assert_eq!(e.kind(), io::ErrorKind::InvalidData);
+        match old {
+            Some(v) => std::env::set_var("CIGSCRIPT_HOME", v),
+            None => std::env::remove_var("CIGSCRIPT_HOME"),
+        }
+    }
+
+    /// A run left "running" by a process that died is told to be
+    /// interrupted once: the verdict is kept in the index, and the next
+    /// listing does not ask the system about that pid again (cigo#119: on
+    /// Windows each ask was a PowerShell start, per dead record, per listing).
+    #[test]
+    fn a_dead_runs_verdict_is_asked_once_and_kept() {
+        use std::sync::atomic::Ordering;
+        let tmp = tempfile::tempdir().unwrap();
+        let _g = crate::burn::test_env_lock();
+        let old = std::env::var_os("CIGSCRIPT_HOME");
+        std::env::set_var("CIGSCRIPT_HOME", tmp.path().join("home"));
+        // A pid that is gone: a child that has exited and been waited for.
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--list")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let dead = child.id();
+        child.wait().unwrap();
+        for n in 0..3 {
+            let mut rec = RunRecord::damaged(
+                &format!("20260101T00000{n}-00000{n}"),
+                &io::Error::other("stub"),
+            );
+            rec.format = crate::burn::runs::RECORD_FORMAT;
+            rec.status = "running".to_string();
+            rec.started = format!("2026-01-01T00:00:0{n}.000Z");
+            rec.error = None;
+            rec.pid = Some(dead);
+            rec.pid_started = None;
+            rec.save().unwrap();
+        }
+        let before = crate::burn::runs::PID_CHECKS.load(Ordering::Relaxed);
+        let first = list().unwrap();
+        let asked = crate::burn::runs::PID_CHECKS.load(Ordering::Relaxed) - before;
+        assert_eq!(asked, 3, "the first listing asks once per dead record");
+        assert!(first.iter().all(|r| r.status == "interrupted"));
+        let before = crate::burn::runs::PID_CHECKS.load(Ordering::Relaxed);
+        let second = list().unwrap();
+        let again = crate::burn::runs::PID_CHECKS.load(Ordering::Relaxed) - before;
+        assert_eq!(
+            again, 0,
+            "the second listing asks nothing: the verdict is in the index"
+        );
+        assert!(second.iter().all(|r| r.status == "interrupted"));
         match old {
             Some(v) => std::env::set_var("CIGSCRIPT_HOME", v),
             None => std::env::remove_var("CIGSCRIPT_HOME"),
