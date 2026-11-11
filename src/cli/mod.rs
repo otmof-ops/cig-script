@@ -354,6 +354,15 @@ pub struct BenchArgs {
     /// A Markdown table instead of the plain one.
     #[arg(long)]
     pub markdown: bool,
+    /// Keep this run as the baseline of that name (`.cig-bench/baselines/NAME.json`).
+    #[arg(long, value_name = "NAME")]
+    pub save: Option<String>,
+    /// Compare, interleaved, against a saved baseline, a git ref (built with `[bench].build`), a release version (sha256 checked first) or a binary.
+    #[arg(long, value_name = "WHAT")]
+    pub against: Option<String>,
+    /// Rerun the cases when a file in `[bench].watch` changes: a live table on a terminal, one line per case without one, JSON lines with `--json`. Keys: q, r, space.
+    #[arg(long)]
+    pub watch: bool,
 }
 
 #[derive(Args)]
@@ -567,6 +576,9 @@ fn dispatch(ctx: Ctx, command: Command) -> i32 {
                 per: a.per,
                 warmup: a.warmup,
                 markdown: a.markdown,
+                save: a.save,
+                against: a.against,
+                watch: a.watch,
             },
         ),
         Command::Light(a) => run::run(

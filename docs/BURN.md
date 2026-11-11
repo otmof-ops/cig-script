@@ -809,6 +809,35 @@ proc.run("npm", ["ci"], {box: {
   that ignores proxies has no network at all. A network of its own asked
   for where the box cannot be made is a refusal (`E777`), not a fallback:
   running code you do not trust unprotected to check it defeats the point.
+- **The watch.** `box: { watch: true }` reports what the hop does as it
+  does it: a file opened for writing (`open`, with `mode: "write"`), every
+  `connect` and `sendto` with an address (`host` and `port`, or the Unix
+  socket's `path`), every `exec` (`path`, `argv0`). `watch: "reads"` adds
+  every file it opens. One JSON line each in the hop's event log
+  (`runs/<id>/events/<hop>.jsonl`, the file `$CIG_EVENTS` names in the
+  hop's environment), `{t, pid, call, path | host, port, mode, exe,
+  result}` with `result: "seen"`, and the list of them is `r.events`. The
+  mechanism is a seccomp filter in the hop that answers `USER_NOTIF` for
+  those calls and allows the rest, so an ordinary call costs one filter
+  run; a thread in cig reads each notification, writes the event, and
+  lets the call go. The filter is installed last, after the mounts and
+  the contain filter, and a different architecture is killed as under
+  `contain`. **The watch is for seeing, not for enforcing:** a path read
+  out of another process's memory can change before the call uses it, so
+  nothing here is a boundary. The boundaries are the namespaces and the
+  mounts, which have no such race; the watch says what was tried, the
+  mounts see that it did not work. Where the kernel has no user
+  notification (before 5.0, or a container that forbids it) the same calls
+  are traced with `ptrace` (cig seizes the hop; it stops at the filter's
+  trace answer): the same events, slower, and one note says so (`E779`).
+  A watch that was asked for and cannot be had either way refuses the hop
+  (`E777`), never runs it unwatched. A contained hop always has the part
+  of the watch that answers io_uring: `io_uring_setup`, `_enter` and
+  `_register` return `EPERM` and leave an event with `code: "E776"` (a note,
+  `E776`), since their operations pass no call the watch could see; where
+  not even that part can be had the refusal stands with no event.
+  Windows and macOS have no seccomp: the gap is stated, user-space levels
+  only (`#106`, `#105`).
 - **No burn protocol for an isolated hop.** A hop with a network of its own
   is code its caller does not trust, so it is given no `CIG_JOURNAL`: an
   undo it declared there would be a command cig runs later, outside every
@@ -934,6 +963,59 @@ if r.outside.is_empty() { proc.apply_layer(r.layer) } else { proc.discard_layer(
   hands its work to a daemon (a container build) does that work outside
   the box, where nothing here sees it. Kernel exploits and root escape
   namespaces.
+
+## The tin parcel
+
+`cig parcel` carries one run. `cig tin parcel` carries the whole tin, as a
+backup that is checked on the way out and again on the way back.
+
+```
+cig tin parcel [--to <dir> | --git [<ref>]] [--since <parcel>] [--repo <dir>]
+cig tin unparcel <dir> | --git <ref> [--repo <dir>]
+```
+
+A parcel is a folder (default `cig-tin-parcel-<date>`, always new, never
+merged into another) holding every live run's record and journal under
+`runs/<id>/`, the objects their before-states need under `tin/objects`,
+`tin/recipes`, `tin/sealed` and `tin/keeps`, the ledger as `ledger.jsonl`,
+and `manifest.json`: the SHA-256 of every file, the ledger's head, the
+state directory it came from, and the parent parcel it builds on.
+
+- **Incremental.** With `--since <parcel>` a folder parcel carries only the
+  objects the parent does not hold and names the rest as inherited, so a
+  second backup takes seconds. A plain object is named by its hash and is
+  not read again when the parent holds that name; a sealed object is
+  always read, since a rekey rewrites it in place. The manifest records
+  the parent's location and the SHA-256 of its manifest; restoring finds
+  the parent where it was, or beside the child, and refuses a parent that
+  is not the one the child was built on.
+- **Git is opt-in.** Nothing is written to git unless `--git` is given.
+  `--git [<ref>]` writes an orphan commit (no parent, no branch) under
+  `refs/cig/backup/<ref>` (default: today's date) in the repository the
+  current folder is in, or `--repo`. A name outside `refs/cig/backup/` is
+  refused, an existing ref is never moved, and the repository's index and
+  work tree are not touched. A git parcel is always a whole tree: git
+  stores an unchanged blob once, so only new blobs cost anything. Sealed
+  objects are copied as they sit, ciphertext, and never opened: a pushed
+  ref shows no secret. Keep the tin's key (`cig tin key export`) apart
+  from the parcel.
+- **Verify before write.** `unparcel` hashes every file against the
+  manifest, refuses a file the manifest does not name, checks each run's
+  journal chain and the ledger's chain (with the tin's key) and that every
+  object a journal needs is in the parcel, its parents, or the tin. Any
+  failure is E722 and nothing is written.
+- **Never overwrites a different run.** A run that is here with the same
+  journal is left alone (so unparcel can be repeated); one with another
+  journal, a sealed object or kept copy with other bytes, or a ledger with
+  another history, is E723 and nothing is written. A ledger that is a
+  prefix of the parcel's is extended; the parcel's older one is kept out.
+- **Another state directory.** Runs restored into a state directory other
+  than the one that wrote the parcel read their tin paths through a path
+  map, as an imported run does. The ledger's lines still name the origin
+  tin.
+- **`--json`** on both: runs, objects carried and inherited, bytes, the
+  parent, the manifest's digest and the ledger head; for a restore, what
+  was written and what was already here.
 
 ## The parcel
 

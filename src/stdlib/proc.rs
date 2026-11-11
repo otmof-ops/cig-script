@@ -402,11 +402,19 @@ struct Judgement {
     outside: Vec<crate::burn::overlay::Unexpected>,
     refused: Vec<String>,
     changed: [usize; 4],
+    /// The watch's event log, for a hop that was watched (`r.events`).
+    events: Option<Vec<serde_json::Value>>,
 }
 
 impl Judgement {
+    fn with_events(mut self, events: Option<Vec<serde_json::Value>>) -> Judgement {
+        self.events = events;
+        self
+    }
+
     fn of(j: crate::burn::overlay::Judged, refused: Vec<String>) -> Judgement {
         Judgement {
+            events: None,
             changed: [j.written, j.removed, j.home_written, j.home_removed],
             outside: j.outside,
             refused,
@@ -426,6 +434,18 @@ impl Judgement {
             })
             .collect();
         m.insert("outside".to_string(), Value::list(outside));
+        if let Some(events) = &self.events {
+            m.insert(
+                "events".to_string(),
+                Value::list(
+                    events
+                        .iter()
+                        .cloned()
+                        .map(crate::stdlib::json::to_value)
+                        .collect(),
+                ),
+            );
+        }
         m.insert(
             "refused".to_string(),
             Value::list(self.refused.iter().map(Value::str).collect()),
@@ -911,7 +931,61 @@ fn command(
                 .map(|p| crate::burn::normalize_root(&p.to_string_lossy()))
                 .unwrap_or_else(|| std::path::PathBuf::from("/"));
             match crate::burn::overlay::Setup::new(p, &here, &o.box_spec) {
-                Ok(setup) => {
+                Ok(mut setup) => {
+                    // The watch: its supervisor is up before the hop
+                    // exists, since the hop's own exec is the first call
+                    // it answers. A contained hop always has the part that
+                    // gives the io_uring refusal its event.
+                    let mode = if o.box_spec.watch != crate::burn::watch::Mode::Off {
+                        o.box_spec.watch
+                    } else if setup.contain.is_some() {
+                        crate::burn::watch::Mode::Refusals
+                    } else {
+                        crate::burn::watch::Mode::Off
+                    };
+                    if mode != crate::burn::watch::Mode::Off {
+                        let events = crate::burn::overlay::events_path(&p.run_dir(), p.seq());
+                        match crate::burn::watch::Watch::start(&events, mode) {
+                            Ok(w) => {
+                                let notify = crate::burn::watch::filter(
+                                    mode,
+                                    crate::burn::watch::RET_USER_NOTIF,
+                                );
+                                let trace =
+                                    crate::burn::watch::filter(mode, crate::burn::watch::RET_TRACE);
+                                match (notify, trace) {
+                                    (Ok(notify), Ok(trace)) => {
+                                        setup.watch = Some(crate::burn::watch::WatchChild {
+                                            sock: w.child_fd(),
+                                            mode,
+                                            notify,
+                                            trace,
+                                            required: o.box_spec.watch
+                                                != crate::burn::watch::Mode::Off,
+                                            force_ptrace: std::env::var_os("CIG_WATCH_ROUTE")
+                                                .is_some_and(|v| v == "ptrace"),
+                                        });
+                                        if o.box_spec.watch != crate::burn::watch::Mode::Off {
+                                            c.env("CIG_EVENTS", &events);
+                                        }
+                                        PENDING_WATCH.with(|x| *x.borrow_mut() = Some(w));
+                                    }
+                                    (Err(e), _) | (_, Err(e)) => {
+                                        let _ =
+                                            std::fs::write(p.base().join("why"), format!("{e}\n"));
+                                        return None;
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                let _ = std::fs::write(
+                                    p.base().join("why"),
+                                    format!("the watch could not be started: {e}\n"),
+                                );
+                                return None;
+                            }
+                        }
+                    }
                     if let Some(g) = &setup.guard {
                         c.env("CIGSCRIPT_HOME", g.inbox.join("home"));
                         c.env("CIG_KEYS_DIR", g.inbox.join("keys"));
@@ -1019,6 +1093,14 @@ fn command(
     Some(c)
 }
 
+#[cfg(target_os = "linux")]
+thread_local! {
+    /// The watch `command` started for the hop about to run: `run_child`
+    /// takes it, holds it until the hop is over, and drops it.
+    static PENDING_WATCH: std::cell::RefCell<Option<crate::burn::watch::Watch>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 /// `apply: "ask"`: at a terminal, the layer's summary and one question;
 /// away from one, the layer is kept and that is said.
 fn ask_to_apply(i: &mut Interp, l: &crate::burn::overlay::Layers, label: &str) -> bool {
@@ -1061,7 +1143,7 @@ fn e777(name: &str, why: &str) -> Diagnostic {
     .with_hint("on Linux with user namespaces and overlayfs the box is made; `box: true` alone falls back to the tin with a warning")
 }
 
-/// `box: {network, allow_hosts, pidns, apply}`.
+/// `box: {network, allow_hosts, pidns, apply, contain, expect, quiet, watch}`.
 fn parse_box_spec(
     m: &std::rc::Rc<std::cell::RefCell<IndexMap<String, Value>>>,
     name: &str,
@@ -1101,6 +1183,24 @@ fn parse_box_spec(
             ("pidns", v) => spec.pidns = v.truthy(),
             ("contain", v) => spec.contain = v.truthy(),
             ("quiet", v) => spec.quiet = v.truthy(),
+            // The watch: events for what the hop opens for writing,
+            // connects to and runs; "reads" adds every file it opens.
+            ("watch", Value::Str(w)) if w.to_string() == "reads" => {
+                spec.watch = crate::burn::watch::Mode::Reads
+            }
+            ("watch", Value::Str(w)) => {
+                return Err(type_error(format!(
+                    "{name}: box.watch is `{w}`; want true, false or \"reads\""
+                ))
+                .at(s))
+            }
+            ("watch", v) => {
+                spec.watch = if v.truthy() {
+                    crate::burn::watch::Mode::Calls
+                } else {
+                    crate::burn::watch::Mode::Off
+                }
+            }
             ("expect", Value::List(l)) => {
                 for item in l.borrow().iter() {
                     match item {
@@ -1130,7 +1230,7 @@ fn parse_box_spec(
             }
             (other, _) => {
                 return Err(type_error(format!(
-                    "{name}: box has no option `{other}` (network, allow_hosts, pidns, apply, contain, expect, quiet)"
+                    "{name}: box has no option `{other}` (network, allow_hosts, pidns, apply, contain, expect, quiet, watch)"
                 ))
                 .at(s))
             }
@@ -1643,6 +1743,8 @@ fn run_child(
     let deadline = started + Duration::from_millis(o.timeout_ms);
     check_cwd(name, o, s)?;
     install_signal_forwarding();
+    #[cfg(target_os = "linux")]
+    drop(PENDING_WATCH.with(|x| x.borrow_mut().take()));
     let mut c = command(cmd, args, o, journal, plan).ok_or_else(|| {
         // The box or the guard could not be set up for this hop: its setup
         // wrote why, and that is the answer, not "not found". The callers
@@ -1662,6 +1764,9 @@ fn run_child(
             s,
         )
     })?;
+    // Held to the end of this function: the log is complete when it goes.
+    #[cfg(target_os = "linux")]
+    let _watch = PENDING_WATCH.with(|x| x.borrow_mut().take());
     let job = Job::new();
     let mut child = start(&mut c, job.as_ref()).map_err(|e| spawn_error(name, cmd, e, s))?;
     let _guard = ChildGuard::register(child.id());
@@ -2257,7 +2362,35 @@ fn hop_run(
         }
         // The judgement, for a hop that asked for one: what its layers hold
         // outside `expect` (the home's too, under `contain`).
-        let wants_judgement = contained || !o.box_spec.expect.is_empty();
+        let wants_judgement = contained
+            || !o.box_spec.expect.is_empty()
+            || o.box_spec.watch != crate::burn::watch::Mode::Off;
+        // What the watch said about the box itself: a refused io_uring
+        // (E776), the ptrace route (E779).
+        if o.box_spec.watch != crate::burn::watch::Mode::Off || contained {
+            let log = crate::burn::watch::read_events(&events);
+            for code in crate::burn::watch::codes(&log) {
+                if o.box_spec.quiet {
+                    break;
+                }
+                match code.as_str() {
+                    "E776" => {
+                        let _ = writeln!(
+                            i.err,
+                            "note[E776 burn]: `{}` tried io_uring, which the box refuses",
+                            hop_label(cmd, args)
+                        );
+                    }
+                    "E779" => {
+                        let _ = writeln!(
+                            i.err,
+                            "note[E779 burn]: seccomp notification is unavailable here; the watch runs on ptrace, which sees the same calls, slower"
+                        );
+                    }
+                    _ => {}
+                }
+            }
+        }
         let judge_now = |l: &crate::burn::overlay::Layers, refused: &[String]| {
             let home = crate::burn::overlay::home_layer_of(&l.dir);
             let j = crate::burn::overlay::judge(
@@ -2265,7 +2398,9 @@ fn hop_run(
                 home.as_ref().map(|(h, u)| (h.as_path(), u.as_path())),
                 &o.box_spec.expect,
             );
+            let watched = o.box_spec.watch != crate::burn::watch::Mode::Off;
             Judgement::of(j, refused.to_vec())
+                .with_events(watched.then(|| crate::burn::watch::read_events(&events)))
         };
         // Evidence: a rehearsal (`apply: "never"`) or a contained hop keeps
         // its layer whatever became of the hop, so what it did can be read.
