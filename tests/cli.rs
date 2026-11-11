@@ -4542,7 +4542,7 @@ fn two_op_run(sb: &Sandbox) -> String {
 
 #[cfg(unix)]
 #[test]
-fn a_journal_is_signed_and_a_recomputed_chain_does_not_verify() {
+fn a_recomputed_chain_does_not_verify() {
     use sha2::Digest;
     let sb = Sandbox::new();
     let id = two_op_run(&sb);
@@ -4579,7 +4579,7 @@ fn a_journal_is_signed_and_a_recomputed_chain_does_not_verify() {
 
 #[cfg(unix)]
 #[test]
-fn a_journal_cut_short_is_caught_by_the_ledger() {
+fn a_cut_short_journal_is_caught() {
     let sb = Sandbox::new();
     let id = two_op_run(&sb);
     let path = journal_path(&sb, &id);
@@ -4598,7 +4598,7 @@ fn a_journal_cut_short_is_caught_by_the_ledger() {
 
 #[cfg(unix)]
 #[test]
-fn an_older_copy_of_the_journal_is_caught_by_the_ledger() {
+fn an_older_journal_is_caught() {
     let sb = Sandbox::new();
     let id = two_op_run(&sb);
     let path = journal_path(&sb, &id);
@@ -5134,7 +5134,7 @@ fn a_hop_gets_no_session_bus_while_the_key_may_be_in_the_keyring() {
 /// is taken in as a child, listed under its parent, and unburned with it.
 #[cfg(target_os = "linux")]
 #[test]
-fn a_cig_inside_a_boxed_hop_is_a_child_run_unburned_with_its_parent() {
+fn cig_inside_a_boxed_hop_records_its_run_and_unburns_with_the_parent() {
     let sb = Sandbox::new();
     sb.write("p/keep.txt", "v1\n");
     sb.write(
@@ -11571,7 +11571,7 @@ fn a_journal_cut_short_is_reported_as_a_ledger_tripwire() {
 /// case) and its raw bytes.
 #[cfg(unix)]
 #[test]
-fn the_key_is_in_no_record_report_or_log() {
+fn no_report_or_log_contains_the_key() {
     let sb = Sandbox::new();
     let hexkey = "c19a5e7d0b3f4e21a7c6d8e9f0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3";
     let key_file = sb.path().join("key.hex");
@@ -16524,6 +16524,584 @@ fn explain_layers_is_cigars_answer() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("needs cigar, which is not installed"), "{err}");
     assert!(err.contains("ciginstaller install stick cigar"), "{err}");
+}
+
+// ----- #105: the Tests table, by name -----------------------------------------
+
+/// Every file under `dir` with its bytes, for a before and after.
+#[cfg(unix)]
+fn tree_bytes(dir: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+    let mut out = std::collections::BTreeMap::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let Ok(rd) = fs::read_dir(&d) else { continue };
+        for e in rd.flatten() {
+            let p = e.path();
+            match fs::symlink_metadata(&p) {
+                Ok(m) if m.is_dir() => stack.push(p),
+                Ok(m) if m.is_file() => {
+                    out.insert(p.clone(), fs::read(&p).unwrap_or_default());
+                }
+                _ => {}
+            }
+        }
+    }
+    out
+}
+
+/// A hop that goes for the tin with everything a script can try: write
+/// beside it, overwrite and delete what it can find, remove the folders. It
+/// finishes (exit 0) so its own report can be read; the tin is then compared
+/// byte for byte with what it was before, and the rollbacks still restore.
+#[cfg(target_os = "linux")]
+fn a_hop_goes_for_the_tin(boxed: bool) {
+    let sb = Sandbox::new();
+    if !boxed {
+        sb.run_ok(&["config", "tin_guard", "on"]);
+    }
+    sb.write("p/keep.txt", "v1\n");
+    let hop = if boxed {
+        "{cwd: \"p\", box: true}"
+    } else {
+        "{cwd: \"p\", touches: [\"**\"]}"
+    };
+    // A first run leaves a before-copy in the tin for the attack to find.
+    sb.write(
+        "first.cig",
+        "pack { \"./p\" }\nburn {\n  proc.run(\"sh\", [\"-c\", \"echo v2 > p/keep.txt\"], {touches: [\"*\"]})\n}\n",
+    );
+    let out = sb.cig(&["run", "first.cig"]);
+    let err = String::from_utf8_lossy(&out.stderr).to_string();
+    if !out.status.success() && err.contains("E712") && err.contains("cannot be made here") {
+        // The guard needs a user namespace; where the container refuses one
+        // (an unprivileged CI job running as root) there is nothing to prove.
+        eprintln!("the tin guard cannot be made here; skipped: {err}");
+        return;
+    }
+    assert!(out.status.success(), "{err}");
+    let first = sb.runs()[0]["id"].as_str().unwrap().to_string();
+    let tin_before = tree_bytes(&sb.home().join("tin"));
+    let record_before = tree_bytes(&sb.home().join("runs").join(&first));
+    assert!(
+        !tin_before.is_empty(),
+        "the first run left nothing in the tin"
+    );
+    let home = sb.home().display().to_string();
+    let attack = format!(
+        "{{ echo HACKED > {home}/probe; }} 2>/dev/null; echo write=$? > att.txt; \
+         for f in $(find {home}/tin {home}/runs/{first} -type f 2>/dev/null); do chmod u+w $f 2>/dev/null; echo HACKED > $f 2>/dev/null; rm -f $f 2>/dev/null; done; \
+         rm -rf {home}/tin {home}/runs/{first} 2>/dev/null; \
+         echo seen=$(find {home}/tin {home}/runs/{first} -type f 2>/dev/null | wc -l) >> att.txt"
+    );
+    sb.write(
+        "second.cig",
+        &format!(
+            "pack {{ \"./p\" }}\nburn {{\n  proc.run(\"sh\", [\"-c\", \"{attack}\"], {hop})\n}}\n"
+        ),
+    );
+    let out = sb.cig(&["run", "second.cig"]);
+    let err = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(out.status.success(), "{err}");
+    if boxed && fell_back(&err) {
+        allow_fallback(&err);
+        return;
+    }
+    if !boxed && !out.status.success() {
+        assert!(!box_expected_here(), "{err}");
+        return;
+    }
+    assert!(
+        !err.contains("E712"),
+        "the guard fell back where the namespaces were allowed: {err}"
+    );
+    let att = sb.read("p/att.txt");
+    assert!(
+        !att.contains("write=0") && att.contains("seen=0"),
+        "the hop got at the tin: {att}\n{err}"
+    );
+    assert!(!sb.home().join("probe").exists());
+    // Not one byte of the tin or the first run's record changed, and none
+    // went missing.
+    let tin_after = tree_bytes(&sb.home().join("tin"));
+    for (p, bytes) in &tin_before {
+        assert_eq!(
+            tin_after.get(p),
+            Some(bytes),
+            "{} changed or went missing",
+            p.display()
+        );
+    }
+    let record_after = tree_bytes(&sb.home().join("runs").join(&first));
+    for (p, bytes) in &record_before {
+        assert_eq!(
+            record_after.get(p).map(|b| b.len()),
+            Some(bytes.len()),
+            "{} changed or went missing",
+            p.display()
+        );
+    }
+    sb.run_ok(&["tin", "verify"]);
+    // The rollbacks still restore, newest first.
+    let second = sb
+        .runs()
+        .iter()
+        .find(|r| r["id"] != first.as_str())
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    sb.run_ok(&["unburn", &second]);
+    sb.run_ok(&["unburn", &first]);
+    assert_eq!(sb.read("p/keep.txt"), "v1\n");
+}
+
+/// A hop in the box overwrites and deletes what it can reach of the tin;
+/// it can do neither, and the rollback still restores.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_boxed_hop_cannot_write_the_tin() {
+    a_hop_goes_for_the_tin(true);
+}
+
+/// The same without the box: `tin_guard = on` guards an unboxed hop.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_guarded_unboxed_hop_cannot_write_the_tin() {
+    a_hop_goes_for_the_tin(false);
+}
+
+/// A hop that goes looking for the key finds an empty folder, no file to
+/// read, and no way to it in its environment.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_boxed_hop_cannot_see_the_key() {
+    let sb = Sandbox::new();
+    sb.write("p/.env", "SECRET=hunter2\n");
+    sb.write(
+        "first.cig",
+        "pack { \"./p\" }\nburn {\n  fs.write_text(\"p/.env\", \"SECRET=changed\")\n}\n",
+    );
+    sb.run_ok(&["run", "first.cig"]);
+    let keys = sb.path().join(".cigscript-keys");
+    let key = fs::read_to_string(keys.join("seal.key")).unwrap();
+    let key = key.trim().to_string();
+    assert_eq!(key.len(), 64, "no key to hide");
+    let keys_s = keys.display().to_string();
+    let attack = format!(
+        "echo listed=$(ls -A {keys_s} 2>/dev/null | wc -l) > att.txt; \
+         echo bytes=$(cat {keys_s}/seal.key 2>/dev/null | wc -c) >> att.txt; \
+         echo env=$(env | grep -c {key}) >> att.txt; \
+         echo keyfile=$(printenv CIG_SEAL_KEY_FILE || echo none) >> att.txt"
+    );
+    sb.write(
+        "second.cig",
+        &format!(
+            "pack {{ \"./p\" }}\nburn {{\n  proc.run(\"sh\", [\"-c\", \"{attack}\"], {{cwd: \"p\", box: true}})\n}}\n"
+        ),
+    );
+    let out = sb.cig(&["run", "second.cig"]);
+    let err = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(out.status.success(), "{err}");
+    if fell_back(&err) {
+        allow_fallback(&err);
+        return;
+    }
+    let att = sb.read("p/att.txt");
+    assert!(
+        att.contains("listed=0")
+            && att.contains("bytes=0")
+            && att.contains("env=0")
+            && att.contains("keyfile=none"),
+        "a hop reached the key: {att}\n{err}"
+    );
+    assert!(!att.contains(&key));
+}
+
+/// A hop that fills its inbox with an object that is not what its name says
+/// loses the inbox: dropped with a note, nothing of it reaches the tin, and
+/// the run carries on.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_poisoned_inbox_is_dropped() {
+    let sb = Sandbox::new();
+    sb.write("p/exists.txt", "old\n");
+    sb.write(
+        "p/inner.cig",
+        "pack { \".\" }\nburn {\n  proc.run(\"sh\", [\"-c\", \"echo new > exists.txt\"], {touches: [\"*\"]})\n}\n",
+    );
+    let cig = env!("CARGO_BIN_EXE_cig");
+    let poison = "for f in $(find \\\"$CIGSCRIPT_HOME/tin/objects\\\" -type f); do chmod u+w \\\"$f\\\"; echo POISON > \\\"$f\\\"; done";
+    sb.write(
+        "outer.cig",
+        &format!(
+            "pack {{ \"./p\" }}\nburn {{\n  proc.run(\"sh\", [\"-c\", \"{cig} run inner.cig; {poison}\"], {{cwd: \"p\", box: true}})\n}}\n"
+        ),
+    );
+    let out = sb.cig(&["run", "outer.cig"]);
+    let err = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(out.status.success(), "{err}");
+    if fell_back(&err) {
+        allow_fallback(&err);
+        return;
+    }
+    assert!(
+        err.contains("note[E713 burn]") && err.contains("does not hash to its name"),
+        "{err}"
+    );
+    let runs = sb.runs();
+    assert_eq!(runs.len(), 1, "a poisoned child run was taken in: {runs:?}");
+    assert!(runs[0]["parent"].is_null());
+    // Nothing poisoned reached the tin.
+    for (p, bytes) in tree_bytes(&sb.home().join("tin")) {
+        assert!(
+            !String::from_utf8_lossy(&bytes).contains("POISON"),
+            "{} holds the poison",
+            p.display()
+        );
+    }
+    sb.run_ok(&["tin", "verify"]);
+    assert!(
+        !sb.home().join("inbox").exists()
+            || fs::read_dir(sb.home().join("inbox"))
+                .unwrap()
+                .next()
+                .is_none(),
+        "the inbox was left behind"
+    );
+}
+
+/// A copy of the tin folder (a backup, a disk) carries no key and opens no
+/// sealed object.
+#[cfg(unix)]
+#[test]
+fn the_key_is_not_in_the_tin() {
+    let a = Sandbox::new();
+    a.write(".env", "SECRET=hunter2\n");
+    a.write(
+        "s.cig",
+        "pack { \".\" }\nburn {\n  fs.write_text(\".env\", \"SECRET=changed\")\n}\n",
+    );
+    a.run_ok(&["run", "s.cig"]);
+    let id = a.runs()[0]["id"].as_str().unwrap().to_string();
+    let key = fs::read_to_string(a.path().join(".cigscript-keys").join("seal.key")).unwrap();
+    let key = key.trim().to_string();
+    assert_eq!(key.len(), 64);
+    // The copy, on a machine with no key.
+    let b = Sandbox::new();
+    let copy = tree_bytes(&a.home());
+    assert!(!copy.is_empty());
+    for (p, bytes) in &copy {
+        let rel = p.strip_prefix(a.home()).unwrap();
+        let to = b.home().join(rel);
+        fs::create_dir_all(to.parent().unwrap()).unwrap();
+        fs::write(&to, bytes).unwrap();
+        assert!(
+            rel.file_name().is_none_or(|n| n != "seal.key"),
+            "a key file is in the tin: {}",
+            p.display()
+        );
+        let text = String::from_utf8_lossy(bytes);
+        assert!(!text.contains(&key), "the key's hex is in {}", p.display());
+        let raw = hex::decode(&key).unwrap();
+        assert!(
+            !bytes.windows(raw.len()).any(|w| w == raw.as_slice()),
+            "the key's bytes are in {}",
+            p.display()
+        );
+    }
+    assert!(!b.path().join(".cigscript-keys").exists());
+    // And nothing sealed opens from it: the restore is refused and the
+    // secret is not in the clear anywhere in the copy.
+    let out = b.cig(&["unburn", &id]);
+    assert!(
+        !out.status.success(),
+        "a sealed object opened without the key"
+    );
+    assert_eq!(
+        a.read(".env"),
+        "SECRET=changed",
+        "the refused restore touched the pack"
+    );
+    for (p, bytes) in &copy {
+        assert!(
+            !String::from_utf8_lossy(bytes).contains("hunter2"),
+            "the secret is readable in {}",
+            p.display()
+        );
+    }
+}
+
+/// The key, exported with a passphrase, opens a tin restored on a machine
+/// that never had it.
+#[cfg(unix)]
+#[test]
+fn an_exported_key_opens_a_restored_backup() {
+    let sb = Sandbox::new();
+    sb.write(".env", "SECRET=hunter2\n");
+    sb.write(
+        "s.cig",
+        "pack { \".\" }\nburn {\n  fs.write_text(\".env\", \"SECRET=changed\")\n}\n",
+    );
+    sb.run_ok(&["run", "s.cig"]);
+    let id = sb.runs()[0]["id"].as_str().unwrap().to_string();
+    let export = sb.path().join("key.export");
+    let out = sb.cig_in(
+        ".",
+        &["tin", "key", "export", "--out", export.to_str().unwrap()],
+        &[("CIG_KEY_PASSPHRASE", "correct horse")],
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // A fresh machine: the tin restored from a backup, no key folder.
+    fs::remove_dir_all(sb.path().join(".cigscript-keys")).unwrap();
+    let out = sb.cig(&["unburn", &id]);
+    assert!(
+        !out.status.success(),
+        "the restore opened a sealed object without the key"
+    );
+    assert_eq!(sb.read(".env"), "SECRET=changed");
+    let ok = sb.cig_in(
+        ".",
+        &["tin", "key", "import", export.to_str().unwrap()],
+        &[("CIG_KEY_PASSPHRASE", "correct horse")],
+    );
+    assert!(
+        ok.status.success(),
+        "{}",
+        String::from_utf8_lossy(&ok.stderr)
+    );
+    let out = sb.cig(&["unburn", &id, "--accept-unsigned"]);
+    assert!(
+        out.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(sb.read(".env"), "SECRET=hunter2\n");
+}
+
+/// Three sealed runs over one secret, a rekey, and every one of them
+/// restores, newest first, each to what it found.
+#[cfg(unix)]
+#[test]
+fn rekey_keeps_every_run_restorable() {
+    let sb = Sandbox::new();
+    sb.write(".env", "SECRET=0\n");
+    let mut ids = Vec::new();
+    for n in 1..=3 {
+        sb.write(
+            "s.cig",
+            &format!("pack {{ \".\" }}\nburn {{\n  fs.write_text(\".env\", \"SECRET={n}\")\n}}\n"),
+        );
+        sb.run_ok(&["run", "s.cig"]);
+        ids.insert(0, sb.runs()[0]["id"].as_str().unwrap().to_string());
+    }
+    assert_eq!(ids.len(), 3);
+    assert_eq!(sb.read(".env"), "SECRET=3");
+    let key = sb.path().join(".cigscript-keys").join("seal.key");
+    let old = key_hex_of(&key);
+    sb.run_ok(&["tin", "rekey"]);
+    assert_ne!(old, key_hex_of(&key), "the key did not change");
+    sb.run_ok(&["tin", "verify"]);
+    for (i, id) in ids.iter().enumerate() {
+        let plan = sb.run_ok(&["runs", id, "--verify"]);
+        assert!(plan.contains("intact"), "{plan}");
+        sb.run_ok(&["unburn", id]);
+        assert_eq!(sb.read(".env").trim(), format!("SECRET={}", 2 - i), "{id}");
+    }
+}
+
+/// `cig parcel` then `cig unparcel` on another machine: the journal comes in
+/// under that machine's own key, not the one it was made under, and the
+/// ledger records where it came from.
+#[cfg(unix)]
+#[test]
+fn a_parcel_is_resigned_on_import() {
+    let a = Sandbox::new();
+    let id = parcelled_run(&a);
+    a.run_ok(&["parcel", &id, "--out", "run.cigparcel"]);
+    let parcel = a.path().join("run.cigparcel");
+    let made = fs::read_to_string(journal_path(&a, &id)).unwrap();
+    let b = machine_b(&a);
+    let root = format!("p={}", b.path().join("p").display());
+    b.run_ok(&["unparcel", parcel.to_str().unwrap(), "--root", &root]);
+    let landed = fs::read_to_string(journal_path(&b, &id)).unwrap();
+    assert!(
+        landed.lines().next().unwrap().contains("\"format\":3"),
+        "{landed}"
+    );
+    let mac_of = |text: &str| {
+        let last: serde_json::Value =
+            serde_json::from_str(text.lines().rfind(|l| !l.trim().is_empty()).unwrap()).unwrap();
+        last["prev"].as_str().unwrap_or_default().to_string()
+    };
+    assert_ne!(
+        mac_of(&made),
+        mac_of(&landed),
+        "the journal was not re-signed"
+    );
+    assert_ne!(
+        key_hex_of(&a.path().join(".cigscript-keys").join("seal.key")),
+        key_hex_of(&b.path().join(".cigscript-keys").join("seal.key")),
+        "the two machines share a key"
+    );
+    let shown = b.run_ok(&["runs", &id, "--verify"]);
+    assert!(shown.contains("chain     intact"), "{shown}");
+    let ledger = fs::read_to_string(b.path().join(".cigscript-keys").join("ledger.jsonl")).unwrap();
+    assert!(
+        ledger.contains("\"kind\":\"origin\"") && ledger.contains(&id),
+        "{ledger}"
+    );
+}
+
+/// A run made under a pinned version is that version's to read: the run goes
+/// to the pinned cig, its record goes back to the cig that wrote it, and the
+/// current cig reads a format 2 journal itself where no such cig is kept.
+#[cfg(unix)]
+#[test]
+fn a_pinned_version_reads_its_own_runs() {
+    let sb = Sandbox::new();
+    shelf_fake(&sb, "1.6.2", 0);
+    sb.write("s.cig", "# cig 1.6.2\nexhale \"never here\"\n");
+    let out = sb.cig(&["run", "s.cig"]);
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "fake cig 1.6.2: run s.cig (dispatched=1)\n",
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // A record that cig 1.6.2 wrote, in a journal this cig cannot read: its
+    // unburn is handed back to the cig that wrote it.
+    let id = "20260102T000000-162162";
+    write_run(
+        &sb,
+        id,
+        serde_json::json!({"id": id, "format": 1, "version": "1.6.2", "script": "s.cig", "script_sha256": "",
+            "args": [], "cwd": "", "mode": "run", "started": "2026-01-02T00:00:00.000Z", "status": "ok",
+            "burns": 1, "irreversible": 0}),
+        "{\"format\":99}\n",
+    );
+    let out = sb.cig(&["unburn", id]);
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        format!("fake cig 1.6.2: unburn {id} (dispatched=1)\n"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // Where no such cig is kept, this one reads the format 2 journal a run
+    // under `journal_sign = off` leaves (what 1.6.2 wrote).
+    let other = Sandbox::new();
+    other.run_ok(&["config", "journal_sign", "off"]);
+    let run = two_op_run(&other);
+    let text = fs::read_to_string(journal_path(&other, &run)).unwrap();
+    assert!(
+        text.lines().next().unwrap().contains("\"format\":2"),
+        "{text}"
+    );
+    other.run_ok(&["runs", &run, "--verify"]);
+    other.run_ok(&["unburn", &run]);
+    assert_eq!(other.read("a.txt"), "one\n");
+}
+
+/// `key_reminder` takes effect: doctor tells a user with sealed objects and
+/// no export to back up the key, once exported or switched off it does not.
+#[cfg(unix)]
+#[test]
+fn key_reminder_tells_once_and_off_silences_it() {
+    let sb = Sandbox::new();
+    sb.write(".env", "SECRET=a\n");
+    sb.write(
+        "s.cig",
+        "pack { \".\" }\nburn {\n  fs.write_text(\".env\", \"SECRET=b\")\n}\n",
+    );
+    sb.run_ok(&["run", "s.cig"]);
+    let has = |sb: &Sandbox| {
+        doctor_findings(sb)
+            .iter()
+            .any(|f| f["check"] == "tin-key-backup")
+    };
+    assert!(has(&sb), "no reminder with sealed objects and no export");
+    sb.run_ok(&["config", "key_reminder", "off"]);
+    assert!(!has(&sb), "key_reminder off still reminded");
+    sb.run_ok(&["config", "key_reminder", "on"]);
+    assert!(has(&sb));
+    let export = sb.path().join("k.export");
+    let out = sb.cig_in(
+        ".",
+        &["tin", "key", "export", "--out", export.to_str().unwrap()],
+        &[("CIG_KEY_PASSPHRASE", "correct horse")],
+    );
+    assert!(out.status.success());
+    assert!(!has(&sb), "the reminder came back after an export");
+}
+
+/// `box_hide_keyring = on` cuts the session bus from a guarded hop even when
+/// the key is in a file; off leaves a hop that bus.
+#[cfg(target_os = "linux")]
+#[test]
+fn box_hide_keyring_cuts_the_session_bus_from_a_hop() {
+    let sb = Sandbox::new();
+    sb.write("p/keep.txt", "v1\n");
+    sb.write(
+        "s.cig",
+        "pack { \"./p\" }\nburn {\n  proc.run(\"sh\", [\"-c\", \"echo bus=$(printenv DBUS_SESSION_BUS_ADDRESS || echo none) > bus.txt\"], {cwd: \"p\", box: true})\n}\n",
+    );
+    let addr = "unix:path=/nonexistent/cig-test-bus";
+    let bad = sb.cig_env(&["config", "box_hide_keyring", "maybe"], &[]);
+    assert!(!bad.status.success());
+    // Off (the default) with the key in a file: the hop keeps the bus.
+    let out = sb.cig_env(
+        &["run", "s.cig"],
+        &[("DBUS_SESSION_BUS_ADDRESS", addr), ("CIG_SEAL_KEY", "file")],
+    );
+    let err = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(out.status.success(), "{err}");
+    if fell_back(&err) {
+        allow_fallback(&err);
+        return;
+    }
+    assert_eq!(sb.read("p/bus.txt").trim(), format!("bus={addr}"), "{err}");
+    sb.run_ok(&["config", "box_hide_keyring", "on"]);
+    let out = sb.cig_env(
+        &["run", "s.cig"],
+        &[("DBUS_SESSION_BUS_ADDRESS", addr), ("CIG_SEAL_KEY", "file")],
+    );
+    let err = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(out.status.success(), "{err}");
+    assert_eq!(sb.read("p/bus.txt").trim(), "bus=none", "{err}");
+}
+
+/// Every setting the issue's table names is a `cig config` key, and the
+/// settings table in docs/BURN.md has a row for it.
+#[test]
+fn the_tin_settings_are_known_and_documented() {
+    let sb = Sandbox::new();
+    let listed = sb.run_ok(&["config"]);
+    let docs =
+        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/BURN.md")).unwrap();
+    for key in [
+        "tin_guard",
+        "tin_perms",
+        "seal",
+        "seal_key",
+        "key_reminder",
+        "journal_sign",
+        "keep_runs",
+        "keep_days",
+        "verify_sample",
+        "box_hide_keyring",
+        "vault",
+    ] {
+        assert!(listed.contains(key), "`cig config` does not list {key}");
+        assert!(
+            docs.lines()
+                .any(|l| l.starts_with('|') && l.contains(&format!("`{key}`"))),
+            "docs/BURN.md settings table has no row for {key}"
+        );
+    }
 }
 
 // ----- bench: --timings, --stats, --syscalls (#179 step 4) --------------------
