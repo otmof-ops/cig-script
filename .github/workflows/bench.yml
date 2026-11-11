@@ -15,6 +15,9 @@
 #       uses: otmof-ops/cig-script/.github/workflows/bench.yml@main
 #       with:
 #         cig-version: "1.20.0"        # leave empty in cig-script itself: it builds its own cig
+#         prepare: |                   # optional: what the suite needs beside cig
+#           cargo build --release --locked --bin <product>
+#           echo "$PWD/target/release" >> "$GITHUB_PATH"
 #       permissions:
 #         contents: write              # the nightly appends to the bench-history branch
 #         pull-requests: write         # the PR comment
@@ -78,6 +81,10 @@ on:
         description: "Gates that fail the run (cig bench --gate): correctness, disk, start-up, regression or all. The rest are printed."
         type: string
         default: correctness
+      prepare:
+        description: "Shell lines run from the repository root once cig is on PATH, before the suite: what it needs beside cig (a sibling checkout, the product's own build on GITHUB_PATH). A failing line fails the run."
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -123,7 +130,7 @@ jobs:
           echo "mode=$mode" >> "$GITHUB_OUTPUT"
 
       - uses: dtolnay/rust-toolchain@stable
-        if: inputs.cig-version == ''
+        if: inputs.cig-version == '' || inputs.prepare != ''
 
       - name: Build cig from this repository
         if: inputs.cig-version == ''
@@ -195,6 +202,14 @@ jobs:
           esac
           echo "FS_TYPE=${fs:-unknown}" >> "$GITHUB_ENV"
           echo "filesystem: ${fs:-unknown}"
+
+      # The calling repository's own preparation, as it wrote it (its text
+      # reaches bash through the environment, never through the expression).
+      - name: Prepare the suite
+        if: inputs.prepare != ''
+        env:
+          PREPARE: ${{ inputs.prepare }}
+        run: bash -eu -c "$PREPARE"
 
       - name: Pull request, A/B against the base
         if: steps.mode.outputs.mode == 'pr'
