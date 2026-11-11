@@ -5,6 +5,29 @@ project follows semantic versioning.
 
 ## Unreleased
 
+- **The tin's tests carry the names the issue gave them, and `box_hide_keyring` exists** (#105).
+  Every row of the issue's Tests table is now a test of that name, in
+  `tests/cli.rs` or `tests/attack/`. Renamed, behavior unchanged:
+  `cig_inside_a_boxed_hop_records_its_run_and_unburns_with_the_parent`,
+  `a_recomputed_chain_does_not_verify`, `a_cut_short_journal_is_caught`,
+  `an_older_journal_is_caught`, `no_report_or_log_contains_the_key`. New:
+  `a_boxed_hop_cannot_write_the_tin` and `a_guarded_unboxed_hop_cannot_write_the_tin`
+  (a hop overwrites, deletes and removes what it can reach; not a byte of the
+  tin changes and the rollbacks still restore), `a_boxed_hop_cannot_see_the_key`,
+  `a_poisoned_inbox_is_dropped` (an object in a child run's inbox that does not
+  hash to its name), `the_key_is_not_in_the_tin` (a copy of the tin holds no
+  key and opens nothing), `an_exported_key_opens_a_restored_backup`,
+  `rekey_keeps_every_run_restorable` (three runs, newest first),
+  `a_parcel_is_resigned_on_import` and `a_pinned_version_reads_its_own_runs`.
+  The setting `box_hide_keyring` (off by default) is new: on, a guarded or boxed
+  hop gets no session bus even when the key is in a file (with the key in the
+  keyring the bus was always cut). docs/BURN.md gains the settings table, with
+  a test that every setting in it is a `cig config` key; `key_reminder`,
+  `journal_sign` and `verify_sample` each have a test that they take effect.
+  SECURITY.md and docs/BURN.md no longer say the vault's installer is not
+  shipped, and say plainly that the macOS launchd install has not been run on
+  a Mac.
+
 - **Listing runs no longer starts a process for every run that died** (cigo#119).
   A run left `running` by a process that is gone is now told to be
   `interrupted` once and the verdict is kept in the run index, where it was

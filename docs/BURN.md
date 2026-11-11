@@ -711,7 +711,8 @@ out of reach of what cig runs.
   start a process outside the box that could ask. A credential helper that
   needs the session bus (libsecret, `gh`'s keyring) does not work in a
   guarded hop; `cig config seal_key file` keeps the key in a file the guard
-  hides and leaves hops the bus. A process in the hop's user namespace
+  hides and leaves hops the bus, unless `box_hide_keyring` is `on`, which
+  cuts the bus from every guarded hop whatever keeps the key. A process in the hop's user namespace
   cannot open `/proc/<pid>/root` or `/proc/<pid>/environ` of your other
   processes (the kernel asks for a capability in theirs), so those are no
   way around a cover. What the guard does not do is confine the hop: it
@@ -772,8 +773,9 @@ out of reach of what cig runs.
   so a hop that means harm can rewrite or delete the tin while it runs. What
   stands in for the kernel there: the owner-only mode, `PT_DENY_ATTACH`, the
   signed journal and the ledger (any rewrite is caught, never silently
-  restored from), the key kept out of the tin, the vault for the objects, and
-  the box, which on macOS gives a hop the overlay and a hidden pack but not
+  restored from), the key kept out of the tin, the vault for the objects (its
+  launchd install is written and unit-tested but has not been run on a Mac
+  yet), and the box, which on macOS gives a hop the overlay and a hidden pack but not
   the read-only tin mount or the syscall filter (those are Linux kernel
   features). On Windows the state directory (tin, runs, keys) gets a
   protected DACL for the user and SYSTEM alone, set when it is made and
@@ -786,6 +788,29 @@ out of reach of what cig runs.
   `PT_DENY_ATTACH`), so a hop cannot read the key out of cig. It resets for
   every program cig starts. `CIG_ALLOW_DEBUG=1` turns it off for anyone
   debugging cig, and says so every run.
+
+### The settings
+
+All through `cig config <key> <value>` (or `CIG_<KEY>` in the environment);
+the defaults suit someone who never changes them. The table is the whole
+set that shapes the tin's protection.
+
+| setting | values (default first) | what it does |
+|---|---|---|
+| `tin_guard` | `auto`, `on`, `off` | the read-only tin for hops; `auto` = boxed hops, wherever the OS allows, `on` = every hop, and refuse to run one unguarded |
+| `tin_perms` | `strict`, `warn`, `off` | what a loose state directory does; `strict` refuses on a terminal and only warns in CI and containers |
+| `seal` | `secrets`, `all`, `never` | what is encrypted at rest |
+| `seal_key` | `keyring`, `file`, `passphrase` | where the master key lives |
+| `key_reminder` | `on`, `off` | `cig doctor`'s one-time "back up your key" tip (sealed objects exist, the key never exported) |
+| `journal_sign` | `on`, `off` | format 3 signed journals and the ledger; `off` writes format 2 |
+| `keep_runs`, `keep_days` | `0` (keep all) | retention; every pruned run is a ledger line |
+| `verify_sample` | `auto` (3), `0`, `N` | objects drawn at random from the whole tin and checked after a burn |
+| `box_hide_keyring` | `off`, `on` | cut the session bus (the Secret Service) from every guarded hop, even with the key in a file; off by default because some tasks need D-Bus (with the key in the keyring the bus is always cut) |
+| `vault` | `auto`, `on`, `off` | use the vault when installed (`cig tin vault install`) |
+
+`CIG_TIN_GUARD=0` turns the guard off for one run; `CIG_SEAL_KEY_FILE` and
+`--seal-key-fd N` carry the key in CI; `CIG_ALLOW_DEBUG=1` lets a debugger
+attach (and says so on every run).
 
 ## The box
 
