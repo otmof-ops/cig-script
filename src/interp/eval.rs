@@ -10,6 +10,7 @@ use crate::syntax::ast::*;
 use crate::syntax::span::Span;
 use crate::value::{FnBody, Function, Value};
 use indexmap::IndexMap;
+use std::cell::Cell;
 use std::rc::Rc;
 
 /// Non-local control flow.
@@ -57,7 +58,9 @@ impl Interp {
             self.tick(span)?;
             let scope = Scope::child(env);
             scope.declare(var, item, true);
-            match self.exec_block_in(&body.stmts, &scope) {
+            let result = self.exec_block_in(&body.stmts, &scope);
+            Scope::release(scope);
+            match result {
                 Ok(()) | Err(Signal::Continue(_)) => {}
                 Err(Signal::Break(_)) => break,
                 Err(other) => return Err(other),
@@ -81,7 +84,9 @@ impl Interp {
             self.tick(span)?;
             let scope = Scope::child(env);
             scope.declare(var, Value::Int(i), true);
-            match self.exec_block_in(&body.stmts, &scope) {
+            let result = self.exec_block_in(&body.stmts, &scope);
+            Scope::release(scope);
+            match result {
                 Ok(()) | Err(Signal::Continue(_)) => {}
                 Err(Signal::Break(_)) => break,
                 Err(other) => return Err(other),
@@ -147,8 +152,18 @@ impl Interp {
     }
 
     fn exec_block(&mut self, block: &Block, env: &Env) -> Exec {
+        if !block.declares() {
+            // Nothing can be declared here, so no scope is made (the
+            // checker counts it the same way): no hoisting to look for either.
+            for stmt in &block.stmts {
+                self.exec(stmt, env)?;
+            }
+            return Ok(());
+        }
         let scope = Scope::child(env);
-        self.exec_block_in(&block.stmts, &scope)
+        let result = self.exec_block_in(&block.stmts, &scope);
+        Scope::release(scope);
+        result
     }
 
     fn exec(&mut self, stmt: &Stmt, env: &Env) -> Exec {
@@ -160,7 +175,7 @@ impl Interp {
                 value,
                 span,
             } => {
-                let v = self.eval(value, env)?;
+                let v = self.operand(value, env)?;
                 if !env.declare(name, v, *mutable) {
                     return Err(crate::diagnostics::check(format!(
                         "`{name}` is already declared in this scope"
@@ -180,6 +195,46 @@ impl Interp {
                 value,
                 span,
             } => self.assign(target, *op, value, env, *span),
+            Stmt::Snuff { value, .. } => {
+                let v = match value {
+                    Some(e) => self.eval(e, env)?,
+                    None => Value::Null,
+                };
+                Err(Signal::Return(v))
+            }
+            Stmt::If {
+                branches,
+                otherwise,
+                ..
+            } => {
+                for (cond, body) in branches {
+                    if self.eval(cond, env)?.truthy() {
+                        return self.exec_block(body, env);
+                    }
+                }
+                if let Some(block) = otherwise {
+                    self.exec_block(block, env)?;
+                }
+                Ok(())
+            }
+            Stmt::Expr(e) => {
+                self.eval(e, env)?;
+                Ok(())
+            }
+            _ => self.exec_rare(stmt, env),
+        }
+    }
+
+    /// The statements that are not on every hot path: kept out of `exec`,
+    /// whose frame (and prologue) every statement pays for.
+    #[inline(never)]
+    fn exec_rare(&mut self, stmt: &Stmt, env: &Env) -> Exec {
+        match stmt {
+            Stmt::Declare { .. }
+            | Stmt::Assign { .. }
+            | Stmt::Snuff { .. }
+            | Stmt::If { .. }
+            | Stmt::Expr(_) => unreachable!("handled in exec"),
             Stmt::Pull(_) => Ok(()), // hoisted
             Stmt::Chain(decl) => {
                 let mut steps = Vec::with_capacity(decl.steps.len());
@@ -227,13 +282,6 @@ impl Interp {
                 }
                 Ok(())
             }
-            Stmt::Snuff { value, .. } => {
-                let v = match value {
-                    Some(e) => self.eval(e, env)?,
-                    None => Value::Null,
-                };
-                Err(Signal::Return(v))
-            }
             Stmt::Exhale { values, .. } => {
                 let mut line = String::new();
                 for (i, e) in values.iter().enumerate() {
@@ -265,21 +313,6 @@ impl Interp {
                 };
                 self.cough_payload = Some(v);
                 Err(Diagnostic::new(Kind::Cough, message).at(*span).into())
-            }
-            Stmt::If {
-                branches,
-                otherwise,
-                ..
-            } => {
-                for (cond, body) in branches {
-                    if self.eval(cond, env)?.truthy() {
-                        return self.exec_block(body, env);
-                    }
-                }
-                if let Some(block) = otherwise {
-                    self.exec_block(block, env)?;
-                }
-                Ok(())
             }
             Stmt::While { cond, body, span } => {
                 self.loop_depth += 1;
@@ -475,13 +508,10 @@ impl Interp {
                 result?;
                 Ok(())
             }
-            Stmt::Expr(e) => {
-                self.eval(e, env)?;
-                Ok(())
-            }
         }
     }
 
+    #[inline(never)]
     fn assign(
         &mut self,
         target: &AssignTarget,
@@ -490,7 +520,7 @@ impl Interp {
         env: &Env,
         span: Span,
     ) -> Exec {
-        let rhs = self.eval(value, env)?;
+        let rhs = self.operand(value, env)?;
         match target {
             AssignTarget::Var(name, res) => {
                 if self.recording() {
@@ -536,8 +566,8 @@ impl Interp {
                 }
             }
             AssignTarget::Index { object, index } => {
-                let obj = self.eval(object, env)?;
-                let idx = self.eval(index, env)?;
+                let obj = self.operand(object, env)?;
+                let idx = self.operand(index, env)?;
                 match (&obj, &idx) {
                     (Value::List(list), Value::Int(i)) => {
                         let len = list.borrow().len();
@@ -593,22 +623,29 @@ impl Interp {
                     .into()),
                 }
             }
-            AssignTarget::Member { object, name } => {
-                let obj = self.eval(object, env)?;
+            AssignTarget::Member { object, name, hint } => {
+                let obj = self.operand(object, env)?;
                 match &obj {
                     Value::Map(map) => {
                         let new = match op {
                             AssignOp::Set => rhs,
                             _ => {
-                                let current = map.borrow().get(name).cloned().ok_or_else(|| {
-                                    runtime(format!("map has no key `{name}`"))
-                                        .code("E505")
-                                        .at(span)
-                                })?;
+                                let current =
+                                    field(&map.borrow(), name, hint).cloned().ok_or_else(|| {
+                                        runtime(format!("map has no key `{name}`"))
+                                            .code("E505")
+                                            .at(span)
+                                    })?;
                                 self.binary(compound_op(op), current, rhs, span)?
                             }
                         };
-                        map.borrow_mut().insert(name.clone(), new);
+                        let mut map = map.borrow_mut();
+                        match field_index(&map, name, hint) {
+                            Some(i) => map[i] = new,
+                            None => {
+                                map.insert(name.clone(), new);
+                            }
+                        }
                         Ok(())
                     }
                     other => Err(type_error(format!(
@@ -624,6 +661,28 @@ impl Interp {
 
     // ----- expressions ---------------------------------------------------------
 
+    /// `eval`, with the leaves that need no recursion (a number, a name the
+    /// checker placed) answered here: `eval`'s frame is large and most nodes
+    /// of a hot loop are leaves.
+    #[inline(always)]
+    fn operand(&mut self, e: &Expr, env: &Env) -> Eval {
+        match &e.kind {
+            ExprKind::Int(i) => return Ok(Value::Int(*i)),
+            ExprKind::Float(f) => return Ok(Value::Float(*f)),
+            ExprKind::Ident(name) => {
+                if let Res::Local { depth, idx } = e.res.get() {
+                    if !self.recording() {
+                        if let Some(v) = env.get_at(depth, idx, name) {
+                            return Ok(v);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        self.eval(e, env)
+    }
+
     pub(crate) fn eval(&mut self, expr: &Expr, env: &Env) -> Eval {
         let span = expr.span;
         match &expr.kind {
@@ -631,16 +690,6 @@ impl Interp {
             ExprKind::Bool(b) => Ok(Value::Bool(*b)),
             ExprKind::Int(i) => Ok(Value::Int(*i)),
             ExprKind::Float(f) => Ok(Value::Float(*f)),
-            ExprKind::Str(pieces) => {
-                let mut s = String::new();
-                for piece in pieces {
-                    match piece {
-                        StrPiece::Lit(l) => s.push_str(l),
-                        StrPiece::Expr(e) => s.push_str(&self.eval(e, env)?.display()),
-                    }
-                }
-                Ok(Value::str(s))
-            }
             ExprKind::Ident(name) => {
                 if self.recording() {
                     return match self.recorded_get(env, name, span) {
@@ -664,6 +713,86 @@ impl Interp {
                     Res::Unresolved => {}
                 }
                 env.get(name).ok_or_else(|| unknown_name(name, env, span))
+            }
+            ExprKind::Binary { op, lhs, rhs } => match op {
+                BinOp::And => {
+                    let l = self.eval(lhs, env)?;
+                    if !l.truthy() {
+                        return Ok(l);
+                    }
+                    self.eval(rhs, env)
+                }
+                BinOp::Or => {
+                    let l = self.eval(lhs, env)?;
+                    if l.truthy() {
+                        return Ok(l);
+                    }
+                    self.eval(rhs, env)
+                }
+                BinOp::Coalesce => {
+                    let l = self.eval(lhs, env)?;
+                    if !l.is_null() {
+                        return Ok(l);
+                    }
+                    self.eval(rhs, env)
+                }
+                _ => {
+                    let l = self.operand(lhs, env)?;
+                    let r = self.operand(rhs, env)?;
+                    if let Some(v) = fast_binary(*op, &l, &r) {
+                        return Ok(v);
+                    }
+                    self.binary(*op, l, r, span)
+                }
+            },
+            ExprKind::Call { callee, args } => {
+                let f = self.eval(callee, env)?;
+                if let Value::Func(func) = &f {
+                    if func.params.len() == args.len() {
+                        // The arguments go straight into the callee's frame:
+                        // no list, no allocation (cig-script#146).
+                        let scope = Scope::child(&func.closure);
+                        for (param, a) in func.params.iter().zip(args) {
+                            let v = self.operand(a, env)?;
+                            scope.declare(param, v, true);
+                        }
+                        return self.run_call(func, scope, span);
+                    }
+                }
+                let mut argv = Vec::with_capacity(args.len());
+                for a in args {
+                    argv.push(self.eval(a, env)?);
+                }
+                self.call(&f, argv, span)
+            }
+            ExprKind::Member {
+                object,
+                name,
+                safe,
+                hint,
+            } => {
+                let obj = self.operand(object, env)?;
+                if let Value::Map(map) = &obj {
+                    if let Some(v) = field(&map.borrow(), name, hint) {
+                        return Ok(v.clone());
+                    }
+                }
+                self.member(obj, name, *safe, span)
+            }
+            ExprKind::Index { object, index } => {
+                let obj = self.operand(object, env)?;
+                let idx = self.operand(index, env)?;
+                self.index(obj, idx, span, index.span)
+            }
+            ExprKind::Str(pieces) => {
+                let mut s = String::new();
+                for piece in pieces {
+                    match piece {
+                        StrPiece::Lit(l) => s.push_str(l),
+                        StrPiece::Expr(e) => s.push_str(&self.eval(e, env)?.display()),
+                    }
+                }
+                Ok(Value::str(s))
             }
             ExprKind::List(items) => {
                 let mut out = Vec::with_capacity(items.len());
@@ -711,42 +840,6 @@ impl Interp {
                     },
                 }
             }
-            ExprKind::Binary { op, lhs, rhs } => match op {
-                BinOp::And => {
-                    let l = self.eval(lhs, env)?;
-                    if !l.truthy() {
-                        return Ok(l);
-                    }
-                    self.eval(rhs, env)
-                }
-                BinOp::Or => {
-                    let l = self.eval(lhs, env)?;
-                    if l.truthy() {
-                        return Ok(l);
-                    }
-                    self.eval(rhs, env)
-                }
-                BinOp::Coalesce => {
-                    let l = self.eval(lhs, env)?;
-                    if !l.is_null() {
-                        return Ok(l);
-                    }
-                    self.eval(rhs, env)
-                }
-                _ => {
-                    let l = self.eval(lhs, env)?;
-                    let r = self.eval(rhs, env)?;
-                    self.binary(*op, l, r, span)
-                }
-            },
-            ExprKind::Call { callee, args } => {
-                let f = self.eval(callee, env)?;
-                let mut argv = Vec::with_capacity(args.len());
-                for a in args {
-                    argv.push(self.eval(a, env)?);
-                }
-                self.call(&f, argv, span)
-            }
             ExprKind::Method {
                 receiver,
                 name,
@@ -762,15 +855,6 @@ impl Interp {
                     argv.push(self.eval(a, env)?);
                 }
                 self.call_method(recv, name, argv, span)
-            }
-            ExprKind::Member { object, name, safe } => {
-                let obj = self.eval(object, env)?;
-                self.member(obj, name, *safe, span)
-            }
-            ExprKind::Index { object, index } => {
-                let obj = self.eval(object, env)?;
-                let idx = self.eval(index, env)?;
-                self.index(obj, idx, span, index.span)
             }
             ExprKind::Lambda { params, body } => Ok(Value::Func(Rc::new(Function {
                 name: None,
@@ -819,6 +903,7 @@ impl Interp {
         }
     }
 
+    #[inline(never)]
     pub(crate) fn binary(&mut self, op: BinOp, l: Value, r: Value, span: Span) -> Eval {
         use Value::*;
         let type_err = |what: &str| {
@@ -954,6 +1039,7 @@ impl Interp {
         }
     }
 
+    #[inline(never)]
     fn member(&mut self, obj: Value, name: &str, safe: bool, span: Span) -> Eval {
         match &obj {
             Value::Null if safe => Ok(Value::Null),
@@ -999,6 +1085,7 @@ impl Interp {
         }
     }
 
+    #[inline(never)]
     fn index(&mut self, obj: Value, idx: Value, span: Span, idx_span: Span) -> Eval {
         match (&obj, &idx) {
             (Value::List(list), Value::Int(i)) => {
@@ -1097,6 +1184,7 @@ impl Interp {
         }
     }
 
+    #[inline(never)]
     fn call_function(&mut self, func: &Rc<Function>, args: Vec<Value>, span: Span) -> Eval {
         if args.len() != func.params.len() {
             let name = func.name.as_deref().unwrap_or("this pack");
@@ -1109,6 +1197,15 @@ impl Interp {
             .code("E401")
             .at(span));
         }
+        let scope = Scope::child(&func.closure);
+        for (param, arg) in func.params.iter().zip(args) {
+            scope.declare(param, arg, true);
+        }
+        self.run_call(func, scope, span)
+    }
+
+    /// Run `func`'s body in `scope`, which already holds its arguments.
+    fn run_call(&mut self, func: &Rc<Function>, scope: Env, span: Span) -> Eval {
         if self.call_depth >= MAX_CALL_DEPTH {
             return Err(runtime(format!(
                 "call depth exceeded {MAX_CALL_DEPTH}; is there unbounded recursion?"
@@ -1116,16 +1213,13 @@ impl Interp {
             .code("E506")
             .at(span));
         }
-        let scope = Scope::child(&func.closure);
-        for (param, arg) in func.params.iter().zip(args) {
-            scope.declare(param, arg, true);
-        }
         self.call_depth += 1;
         let result = match &func.body {
             FnBody::Expr(e) => self.eval(e, &scope).map_err(Signal::Error),
             FnBody::Block(b) => self.exec_block_in(&b.stmts, &scope).map(|()| Value::Null),
         };
         self.call_depth -= 1;
+        Scope::release(scope);
         match result {
             Ok(v) => Ok(v),
             Err(Signal::Return(v)) => Ok(v),
@@ -1135,6 +1229,7 @@ impl Interp {
         }
     }
 
+    #[inline(never)]
     fn call_method(&mut self, recv: Value, name: &str, args: Vec<Value>, span: Span) -> Eval {
         // A map holding a function under that key is called as a plain function.
         if let Value::Map(map) = &recv {
@@ -1181,6 +1276,69 @@ impl Interp {
 }
 
 // ----- helpers -----------------------------------------------------------------
+
+/// Where `name` is in `map`, trying the position the node found it at last
+/// time first. The hint is only a guess: it is believed when the key at that
+/// position is `name`, and otherwise the lookup runs and the hint moves, so a
+/// key removed, added or moved since cannot give a wrong answer.
+#[inline]
+fn field_index(map: &IndexMap<String, Value>, name: &str, hint: &Cell<u32>) -> Option<usize> {
+    let guess = hint.get() as usize;
+    if let Some((k, _)) = map.get_index(guess) {
+        if k == name {
+            return Some(guess);
+        }
+    }
+    let i = map.get_index_of(name)?;
+    hint.set(i as u32);
+    Some(i)
+}
+
+#[inline]
+fn field<'m>(map: &'m IndexMap<String, Value>, name: &str, hint: &Cell<u32>) -> Option<&'m Value> {
+    field_index(map, name, hint).map(|i| &map[i])
+}
+
+/// The common cases of a binary operator, on two ints or two floats, without
+/// the general match. `None` is "not here": the general `binary` runs, and
+/// gives the same answer or the same error (overflow, division by zero, a
+/// NaN in an ordering) as before.
+#[inline(always)]
+fn fast_binary(op: BinOp, l: &Value, r: &Value) -> Option<Value> {
+    use Value::{Bool, Float, Int};
+    match (l, r) {
+        (Int(a), Int(b)) => match op {
+            BinOp::Add => a.checked_add(*b).map(Int),
+            BinOp::Sub => a.checked_sub(*b).map(Int),
+            BinOp::Mul => a.checked_mul(*b).map(Int),
+            BinOp::Rem if *b != 0 => Some(Int(a.wrapping_rem(*b))),
+            BinOp::Lt => Some(Bool(a < b)),
+            BinOp::Le => Some(Bool(a <= b)),
+            BinOp::Gt => Some(Bool(a > b)),
+            BinOp::Ge => Some(Bool(a >= b)),
+            BinOp::Eq => Some(Bool(a == b)),
+            BinOp::Ne => Some(Bool(a != b)),
+            _ => None,
+        },
+        (Float(a), Float(b)) => match op {
+            BinOp::Add => Some(Float(a + b)),
+            BinOp::Sub => Some(Float(a - b)),
+            BinOp::Mul => Some(Float(a * b)),
+            BinOp::Div if *b != 0.0 => Some(Float(a / b)),
+            BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
+                let ord = a.partial_cmp(b)?;
+                Some(Bool(match op {
+                    BinOp::Lt => ord.is_lt(),
+                    BinOp::Le => ord.is_le(),
+                    BinOp::Gt => ord.is_gt(),
+                    _ => ord.is_ge(),
+                }))
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
 
 fn compound_op(op: AssignOp) -> BinOp {
     match op {

@@ -61,6 +61,9 @@ pub struct Checker<'a> {
     /// Inside an `unburn { }` block: the scope index the block starts at.
     /// Names resolved below it (other than the prelude) are E754.
     comp_floor: Option<usize>,
+    /// Blocks open right now that have no scope of their own (they declare
+    /// nothing); they still count as nesting for `pack`.
+    elided: usize,
     /// The pack's literal roots, for E750.
     pack_roots: Vec<std::path::PathBuf>,
     pack_seen: bool,
@@ -150,6 +153,7 @@ impl<'a> Checker<'a> {
             scopes: vec![root, Scope::new(false)],
             prelude,
             comp_floor: None,
+            elided: 0,
             pack_roots: Vec::new(),
             pack_seen: false,
             hoisted_chains: Vec::new(),
@@ -456,6 +460,13 @@ impl<'a> Checker<'a> {
     }
 
     fn block(&mut self, block: &'a Block) {
+        // The evaluator makes no scope for a block that declares nothing.
+        if !block.declares() {
+            self.elided += 1;
+            self.block_stmts(&block.stmts);
+            self.elided -= 1;
+            return;
+        }
         self.push();
         self.block_stmts(&block.stmts);
         self.pop();
@@ -645,7 +656,7 @@ impl<'a> Checker<'a> {
             }
             Stmt::Pack(p) => {
                 // Two scopes are the top level: the prelude and the script's own.
-                if self.scopes.len() > 2 {
+                if self.scopes.len() + self.elided > 2 {
                     self.error_code("E753", "pack { } cannot be declared inside a block", p.span)
                         .hint = Some("declare it once, at the top of the script".to_string());
                 } else if self.pack_seen {
