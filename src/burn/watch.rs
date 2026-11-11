@@ -85,15 +85,15 @@ mod linux {
     pub const RET_TRACE: u32 = 0x7ff0_0000;
     const RET_ALLOW: u32 = 0x7fff_0000;
     const RET_KILL: u32 = 0x8000_0000;
-    const IOCTL_RECV: libc::c_ulong = 0xc050_2100;
-    const IOCTL_SEND: libc::c_ulong = 0xc018_2101;
-    const IOCTL_ID_VALID: libc::c_ulong = 0x4008_2102;
+    // ioctl's request is c_ulong on glibc and c_int on musl: libc::Ioctl
+    // is whichever this target has, and the kernel reads 32 bits either way.
+    const IOCTL_RECV: libc::Ioctl = 0xc050_2100_u32 as libc::Ioctl;
+    const IOCTL_SEND: libc::Ioctl = 0xc018_2101_u32 as libc::Ioctl;
+    const IOCTL_ID_VALID: libc::Ioctl = 0x4008_2102_u32 as libc::Ioctl;
     const RESP_FLAG_CONTINUE: u32 = 1;
 
-    const PTRACE_SEIZE: libc::c_uint = 0x4206;
-    const PTRACE_CONT: libc::c_uint = 7;
-    const PTRACE_GETREGSET: libc::c_uint = 0x4204;
-    const PTRACE_SETREGSET: libc::c_uint = 0x4205;
+    // libc's own: ptrace's request is c_uint on glibc and c_int on musl.
+    use libc::{PTRACE_CONT, PTRACE_GETREGSET, PTRACE_SEIZE, PTRACE_SETREGSET};
     const PTRACE_EVENT_SECCOMP: i32 = 7;
     const OPT_TRACEFORK: usize = 0x2;
     const OPT_TRACEVFORK: usize = 0x4;
