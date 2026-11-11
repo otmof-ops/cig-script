@@ -15,6 +15,7 @@
 //! The `cig` command line is [`cli`]; `src/main.rs` only starts it.
 
 pub mod ashtray;
+pub mod benchstats;
 pub mod burn;
 pub mod check;
 pub mod cli;
@@ -33,6 +34,7 @@ pub mod repro;
 pub mod since;
 pub mod stdlib;
 pub mod syntax;
+pub mod timings;
 pub mod tracker;
 pub mod trial;
 pub mod tripwire;

@@ -9,6 +9,7 @@
 //! appends a journal entry; in dry-run mode (and inside `burn unlit`) it
 //! records the intent and tells the builtin to simulate.
 
+pub mod foreign;
 pub mod ghost;
 pub mod git;
 pub mod hopwatch;

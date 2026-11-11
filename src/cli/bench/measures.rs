@@ -296,7 +296,7 @@ fn block_bytes(md: &std::fs::Metadata) -> u64 {
 }
 
 /// The syscalls that ask the disk to make data durable.
-const SYNC_CALLS: &[&str] = &["fsync", "fdatasync", "sync_file_range", "syncfs"];
+pub(super) const SYNC_CALLS: &[&str] = &["fsync", "fdatasync", "sync_file_range", "syncfs"];
 
 /// Add up the sync calls in a `strace -c` summary.
 pub(super) fn count_syncs(summary: &str) -> u64 {
@@ -313,21 +313,23 @@ pub(super) fn count_syncs(summary: &str) -> u64 {
     total
 }
 
-/// The command that counts one run's sync calls, or why it cannot.
-pub(super) fn strace_argv(out: &Path, argv: &[String]) -> Result<Vec<String>, String> {
+/// The command that counts one run's syscalls with `strace -c`, or why it
+/// cannot. `filter` is a `-e trace=` list; none traces every syscall.
+pub(super) fn strace_argv(
+    out: &Path,
+    argv: &[String],
+    filter: Option<&str>,
+) -> Result<Vec<String>, String> {
     if !cfg!(target_os = "linux") {
         return Err("only counted on Linux".into());
     }
-    let mut v: Vec<String> = vec![
-        "strace".into(),
-        "-f".into(),
-        "-qq".into(),
-        "-c".into(),
-        "-e".into(),
-        format!("trace={}", SYNC_CALLS.join(",")),
-        "-o".into(),
-        out.to_string_lossy().into_owned(),
-    ];
+    let mut v: Vec<String> = vec!["strace".into(), "-f".into(), "-qq".into(), "-c".into()];
+    if let Some(f) = filter {
+        v.push("-e".into());
+        v.push(format!("trace={f}"));
+    }
+    v.push("-o".into());
+    v.push(out.to_string_lossy().into_owned());
     v.extend(argv.iter().cloned());
     Ok(v)
 }
