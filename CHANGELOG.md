@@ -5,6 +5,8 @@ project follows semantic versioning.
 
 ## Unreleased
 
+- **A box says which cover failed, and skips one whose target is gone.** The box covers the session bus sockets with /dev/null. A refusal now names the path and the errno (`covering a way to the key refused: /run/user/1000/bus (errno 2)`), never a bare `Operation not supported`. After any failed bind the target is looked at again: if it, or the folder it sat in, is gone (a login session's runtime folder when its last session ends), there is nothing left to hide and it is skipped; a path made again is bound again, a few times; one that still exists and cannot be covered refuses as before. The regression test now also removes the runtime folder itself.
+
 - **A box no longer refuses a hop because a path it covers has gone.** The box covers the session bus sockets in the runtime folder with /dev/null; when a login session ended between the plan and the mount (other work on the machine), the bind failed with ENOENT and the hop was refused (`covering a way to the key refused`, seen as `could not start: Operation not supported`). A cover whose target is gone has nothing left to hide, so it is skipped. Test: `contained_boxes_run_together_while_a_cover_path_comes_and_goes`.
 
 - **`cig tin parcel` and `cig tin unparcel` (#141): the whole tin as a verifiable,

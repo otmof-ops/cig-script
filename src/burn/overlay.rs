@@ -1849,19 +1849,8 @@ impl Setup {
         // cover locked.
         if let Some(g) = &self.guard {
             for c in &g.covers {
-                if libc::mount(
-                    c"/dev/null".as_ptr(),
-                    c.as_ptr(),
-                    std::ptr::null(),
-                    libc::MS_BIND,
-                    std::ptr::null(),
-                ) != 0
-                    // A path that is gone by now (a session's bus socket
-                    // when its login ends, between the plan and this mount)
-                    // has nothing left to hide.
-                    && *libc::__errno_location() != libc::ENOENT
-                {
-                    self.note(&g.why, b"covering a way to the key refused");
+                if let Err(errno) = cover_path(c) {
+                    write_why(&g.why, b"covering a way to the key refused", Some(c), errno);
                     if g.required {
                         return Err(io::Error::from_raw_os_error(libc::ENOTSUP));
                     }
@@ -2219,18 +2208,14 @@ impl Setup {
             }
         }
         for cover in &c.covers {
-            if libc::mount(
-                c"/dev/null".as_ptr(),
-                cover.as_ptr(),
-                null,
-                libc::MS_BIND,
-                std::ptr::null(),
-            ) != 0
-                // Gone between the plan and the mount (a login session's
-                // bus socket when it ends): nothing left to hide.
-                && *libc::__errno_location() != libc::ENOENT
-            {
-                return self.fail(b"covering a way to the key refused");
+            if let Err(errno) = cover_path(cover) {
+                write_why(
+                    &self.why,
+                    b"covering a way to the key refused",
+                    Some(cover),
+                    errno,
+                );
+                return Err(io::Error::from_raw_os_error(libc::ENOTSUP));
             }
         }
         let tmp_at = if c.tmp_over {
@@ -2691,6 +2676,81 @@ unsafe fn write_file(path: &std::ffi::CStr, bytes: &[u8]) -> bool {
     let n = libc::write(fd, bytes.as_ptr() as *const libc::c_void, bytes.len());
     libc::close(fd);
     n == bytes.len() as isize
+}
+
+/// Cover `path` with /dev/null (a bind mount). A path that is gone by the
+/// time of the mount, or whose parent mount is (a login session's runtime
+/// folder when its last session ends, between the plan and this call), has
+/// nothing left to hide: it is skipped, whatever errno the bind gave. A path
+/// that still exists and could not be covered (after a few tries) is the
+/// error, with the errno.
+///
+/// # Safety
+///
+/// Async-signal-safe: `mount` and `lstat`.
+#[cfg(target_os = "linux")]
+unsafe fn cover_path(path: &std::ffi::CString) -> Result<(), i32> {
+    let mut errno = 0;
+    // A path made again between the failed bind and the look (a new login
+    // session's socket) is bound again, a few times.
+    for _ in 0..5 {
+        if libc::mount(
+            c"/dev/null".as_ptr(),
+            path.as_ptr(),
+            std::ptr::null(),
+            libc::MS_BIND,
+            std::ptr::null(),
+        ) == 0
+        {
+            return Ok(());
+        }
+        errno = *libc::__errno_location();
+        let mut st: libc::stat = std::mem::zeroed();
+        if libc::lstat(path.as_ptr(), &mut st) != 0 {
+            return Ok(());
+        }
+    }
+    Err(errno)
+}
+
+/// Write why the box could not be made: the reason, the path it concerns
+/// (control bytes shown as `?`) and the errno, so a bare "Operation not
+/// supported" never hides the cause.
+///
+/// # Safety
+///
+/// Async-signal-safe (`open`, `write` on stack buffers).
+#[cfg(target_os = "linux")]
+unsafe fn write_why(
+    at: &std::ffi::CString,
+    what: &[u8],
+    path: Option<&std::ffi::CString>,
+    errno: i32,
+) {
+    let fd = libc::open(
+        at.as_ptr(),
+        libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC | libc::O_CLOEXEC,
+        0o644,
+    );
+    if fd < 0 {
+        return;
+    }
+    let put = |b: &[u8]| {
+        let _ = libc::write(fd, b.as_ptr() as *const libc::c_void, b.len());
+    };
+    put(what);
+    if let Some(p) = path {
+        put(b": ");
+        for &c in p.as_bytes() {
+            put(&[if c < 0x20 || c == 0x7f { b'?' } else { c }]);
+        }
+    }
+    let mut buf = [0u8; 32];
+    let n = itoa(errno, &mut buf);
+    put(b" (errno ");
+    put(&buf[..n]);
+    put(b")\n");
+    libc::close(fd);
 }
 
 #[cfg(target_os = "linux")]

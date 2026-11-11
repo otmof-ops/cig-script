@@ -6476,17 +6476,31 @@ fn contained_boxes_run_together_while_a_cover_path_comes_and_goes() {
         return;
     }
     let rt = tempfile::tempdir().unwrap();
-    let rts = rt.path().display().to_string();
+    let rts = rt.path().join("run").display().to_string();
     let stop = Arc::new(AtomicBool::new(false));
     let flapper = {
         let stop = stop.clone();
-        let bus = rt.path().join("bus");
+        let dir = rt.path().join("run");
+        let bus = dir.join("bus");
         std::thread::spawn(move || {
+            let mut round = 0u32;
             while !stop.load(Ordering::Relaxed) {
-                if let Ok(l) = std::os::unix::net::UnixListener::bind(&bus) {
-                    drop(l);
+                round += 1;
+                if round % 2 == 0 {
+                    // The runtime folder itself goes, as when logind removes
+                    // it at the last session's end.
+                    let _ = fs::create_dir_all(&dir);
+                    if let Ok(l) = std::os::unix::net::UnixListener::bind(dir.join("bus")) {
+                        drop(l);
+                    }
+                    let _ = fs::remove_dir_all(&dir);
+                } else {
+                    let _ = fs::create_dir_all(&dir);
+                    if let Ok(l) = std::os::unix::net::UnixListener::bind(&bus) {
+                        drop(l);
+                    }
+                    let _ = fs::remove_file(&bus);
                 }
-                let _ = fs::remove_file(&bus);
             }
         })
     };
