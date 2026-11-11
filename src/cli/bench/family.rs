@@ -188,6 +188,7 @@ fn measure_all<'a>(
             warmup: o.warmup.or(m.defaults.warmup).unwrap_or(1),
             env,
             home: m.bench.home,
+            keep: false,
         };
         if defaults.samples == 0 || defaults.per == 0 {
             return Err("`samples` and `per` are at least 1".into());
@@ -226,6 +227,7 @@ fn o_wants(o: &Opts) -> super::debug::Wants {
         timings: o.timings,
         stats: o.stats,
         syscalls: o.syscalls,
+        ..Default::default()
     }
 }
 

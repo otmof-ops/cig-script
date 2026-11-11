@@ -22,6 +22,47 @@ project follows semantic versioning.
   `the_object_index_answers_as_object_for_does`,
   `same_stat_proves_a_quiet_tree_and_nothing_else`. `docs/HOPS.md` says what
   makes an unchanged hop cheap.
+- **`cig bench --profile`, `--diff`, `--keep` and `--repeat-until-slow`**
+  (#179 step 8). `--profile` takes one extra run under `perf record -F 999 -g`
+  and draws a flamegraph SVG into `.cig-bench/profiles/<case>.svg` (the five
+  hottest frames in the table, `debug.profile` in `--json`); where perf is not
+  installed or not allowed it says `not measured: perf is not available here`
+  and why, and there is no second sampler. `--diff NAME` sets this run's phases,
+  counters and syscalls against a baseline's, most changed first (save the
+  baseline with `--save NAME --timings --stats --syscalls`: a saved case now
+  carries its `insight`). `--keep` leaves the isolated homes and work folders and
+  prints where, and how to rerun a case by hand. `--repeat-until-slow` reruns a
+  case under perf (or with its phases) until a run is over p90 x 1.5 and keeps
+  that run's profile. Tests: `profile_draws_a_flamegraph_from_perf`,
+  `profile_without_perf_says_so_and_builds_no_second_sampler`,
+  `diff_sets_two_runs_side_by_side_most_changed_first`,
+  `keep_leaves_the_isolated_home_and_says_where`,
+  `repeat_until_slow_keeps_the_slow_runs_profile`,
+  `repeat_until_slow_without_perf_keeps_the_phases`; #179's tests table is
+  now there by name (`wrong_output_gets_no_time_and_fails`,
+  `isolated_home_leaves_nothing` which also checks the user's cig and
+  orchestrator state and keys byte for byte, `watch_reruns_on_change`,
+  `watch_plain_is_line_based`, `against_a_release_checks_its_sha256`,
+  `manifest_schema_is_versioned`).
+
+- **Benchmark gates and the nightly filesystem matrix** (#145). A case's `gate`
+  key (`correctness`, `regression`, `disk`, `start-up`) and `cig bench --gate
+  LIST` (or `all`): every gate is evaluated and printed, and the exit is 1 only
+  for the gates named. `regression` is a case more than 5% slower than the
+  baseline (significantly) or the set's geometric mean more than 2% slower
+  (`--against`); `disk` is bytes on disk per byte burned more than 10% above the
+  case's `reference` (what main stores); `start-up` is a median over the case's
+  `budget` (hello 5 ms; a new `burn one write` case, 7 ms). CI fails a pull
+  request on `--gate correctness,disk` and prints the timing gates (#153). The
+  `bench-nightly.yml` workflow runs the whole suite on ext4, btrfs and XFS
+  (loop devices formatted on the runner), APFS and NTFS (the runners' own
+  disks), and appends to `history/cig.<series>.jsonl` on `bench-history`
+  (`cig bench history --series btrfs`). Tests: `the_regression_gate_trips`,
+  `disk_and_start_up_gates_fail_only_when_named`,
+  `cigs_own_suite_declares_its_gates`, `ci_gates_and_the_nightly_matrix_are_wired`;
+  `every_benchmark_matches_its_expect_file`,
+  `kernel_benchmarks_restore_exact_bytes` and `disk_per_byte_is_reported` cover
+  the rest of #145's table.
 - **`cig runs adopt <dir>`: undo an installer update with `cig unburn`** (cig-installer#7). A committed `ciginstaller` transaction (`<home>/installer/txn/<id>`) becomes a run: each saved file is checked against its recorded sha256, every path is confined to the installer home the folder names, the snapshots go into the tin, the journal is written in cig's format (chained and signed), and its head goes into the ledger as an `origin` line. The ordinary `cig unburn <id>` then puts the home back byte for byte: mkdir, link, move, write, block and delete, and the `shim-index` flip as a write of the saved index. An open, cut-off or rolled-back transaction is `E716`, a changed or missing saved file `E717`, a path outside the home (or through a link, or with `..`) `E718`, a folder that is not a readable transaction `E719`. Store objects are left (they may be in use). Adopting twice is one run. `docs/BURN.md` has the section; tests in `tests/foreign.rs`.
 
 - **Listing runs no longer starts a process for every run that died** (cigo#119).

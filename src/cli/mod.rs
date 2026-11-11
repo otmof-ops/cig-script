@@ -81,7 +81,7 @@ pub enum Command {
     /// Run a script for real: every burn journaled, rolled back if it fails (execute).
     Run(RunArgs),
     /// Measure cases from `bench/bench.toml`: samples in batches, median, p10 to p90, CV, peak RSS (benchmark).
-    Bench(BenchArgs),
+    Bench(Box<BenchArgs>),
     /// Typos, sticks, effects: refuse before anything runs (static analysis).
     Check {
         /// Script to check.
@@ -379,6 +379,21 @@ pub struct BenchArgs {
     /// Count each case's syscalls with strace (Linux), the top ten by time, and flag an mmap/munmap thrash.
     #[arg(long)]
     pub syscalls: bool,
+    /// A sampling profile of each case as a flamegraph SVG in `.cig-bench/profiles/` (perf; one extra, untimed run). Says `not measured: perf is not available here` where perf is not.
+    #[arg(long)]
+    pub profile: bool,
+    /// Set this run's phases, counters and syscalls against a saved baseline's, most changed first. Save the baseline with `--save NAME --timings --stats --syscalls`.
+    #[arg(long, value_name = "BASELINE")]
+    pub diff: Option<String>,
+    /// Keep the isolated homes and the work folders after the run, and print where they are and how to rerun a case in one.
+    #[arg(long)]
+    pub keep: bool,
+    /// Rerun each case, one invocation at a time under perf (or with its phases), until a run is over p90 x 1.5, and keep that run's profile.
+    #[arg(long)]
+    pub repeat_until_slow: bool,
+    /// Gates that fail the run: correctness, regression (needs --against), disk, start-up, or all. The gates not named are printed and never fail it.
+    #[arg(long, value_name = "GATES", value_delimiter = ',')]
+    pub gate: Vec<String>,
     /// Run every product's suite (cig, cigo, cigcompile, cigar, ciginstaller) found through the installer's layout, `~/.config/cigscript/bench-family.toml` or `--product`.
     #[arg(long)]
     pub family: bool,
@@ -394,6 +409,9 @@ pub struct BenchArgs {
     /// With `history`: the branch the nightly workflow appends to (default `bench-history`).
     #[arg(long, value_name = "BRANCH")]
     pub branch: Option<String>,
+    /// With `history`: one series of the nightly matrix, a filesystem (`ext4`, `btrfs`, `xfs`, `apfs`, `ntfs`): reads `history/<product>.<series>.jsonl`.
+    #[arg(long, value_name = "SERIES")]
+    pub series: Option<String>,
     /// With `--family`: where a product's checkout (or bench folder, or manifest) is, as `cigo=~/cig-orchestrator`; repeatable.
     #[arg(long = "product", value_name = "NAME=PATH")]
     pub products: Vec<String>,
@@ -621,6 +639,7 @@ fn dispatch(ctx: Ctx, command: Command) -> i32 {
                 a.manifest,
                 a.file,
                 a.branch,
+                a.series,
             )
         }
         Command::Bench(a) if a.path.len() > 1 => {
@@ -646,6 +665,11 @@ fn dispatch(ctx: Ctx, command: Command) -> i32 {
                 timings: a.timings,
                 stats: a.stats,
                 syscalls: a.syscalls,
+                profile: a.profile,
+                diff: a.diff,
+                keep: a.keep,
+                repeat_until_slow: a.repeat_until_slow,
+                gate: a.gate,
                 family: a.family,
                 with: a.with,
                 matrix: a.matrix,
