@@ -2081,12 +2081,18 @@ mod tests {
             let denied = fs::write(objects_dir().join(".probe"), b"x").is_err();
             let ran = prepare_chunked_parallel(&f, &meta, 3);
             fs::set_permissions(objects_dir(), fs::Permissions::from_mode(0o755)).unwrap();
-            if denied {
-                assert!(
-                    ran.is_err(),
-                    "a tin that cannot be written to was written to"
+            if !denied {
+                // Root writes through 0555: the failure cannot be made here,
+                // and a prepare that succeeds keeps its chunks for the commit.
+                eprintln!(
+                    "this user writes through a read-only folder; the failure is not reached"
                 );
+                return;
             }
+            assert!(
+                ran.is_err(),
+                "a tin that cannot be written to was written to"
+            );
             let left: Vec<_> = fs::read_dir(objects_dir())
                 .unwrap()
                 .flatten()
