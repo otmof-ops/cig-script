@@ -2327,6 +2327,9 @@ the box for untrusted code: its network, the watch, kept layers, the kill switch
 | code | title | kind of no | what to type next |
 |---|---|---|---|
 | [`E771`](#e771-a-host-outside-the-allow-list) | a host outside the allow list | these are MY ciggies | if the host is legitimate, add it to box.allow_hosts (a name or *.suffix, on 443, or host:port); if not, that is the finding |
+| [`E773`](#e773-a-decoy-was-read) | a decoy was read | not one of the four | nothing to fix for the hop; read the events in cig runs <id> and treat the read as the finding it is: the program the hop ran asked for a credential the box said it must not have |
+| [`E774`](#e774-a-decoy-marker-was-written-out) | a decoy marker was written out *(planned)* | not one of the four | nothing to fix in the hop; the write is in r.events and in the hop's log, with the file's path; treat it as the finding it is |
+| [`E775`](#e775-a-passed-credential-was-read-by-the-wrong-program) | a passed credential was read by the wrong program | these are MY ciggies | if the reader is legitimate, name it under box.pass_reads; otherwise this is the finding, and the hop should not be run outside the box until it is explained |
 | [`E776`](#e776-io_uring-refused) | io_uring refused | these are MY ciggies | nothing to fix for a tool that falls back by itself; if the hop needs io_uring to work at all, it cannot be rehearsed in the box, and that is itself worth knowing about code you did not write |
 | [`E777`](#e777-no-isolation-for-untrusted-code) | no isolation for untrusted code | these are MY ciggies | on Linux, allow unprivileged user namespaces and have overlayfs; otherwise run it on a machine that has the box, or drop the isolation knowing what that means |
 | [`E779`](#e779-the-watch-fell-back-to-ptrace) | the watch fell back to ptrace | can't see any ciggies bro | nothing to do; a kernel from 5.0 on, and a container that allows seccomp(2) with a listener, gives the fast route |
@@ -2349,6 +2352,61 @@ A boxed hop with network: registry tried to connect somewhere its allow_hosts do
 1. the tool reached for a host the toolchain's footprint does not name (a mirror, a telemetry endpoint, or an exfiltration attempt) (no probe; a suggestion, not a finding). **Remedy:** read the events in cig runs <id>; allow the host only if you meant it
 
 Related: `E777`, `E763`.
+
+
+### E773 a decoy was read
+
+*burn · since 1.21.0 · arises in run*
+
+**Kind of no:** not one of the four (a mistake in the text, in the arithmetic, or in CigScript; syntax, type or logic error; an internal error).
+
+The box ran with box.decoys naming a credential path (~/.ssh/id_*, ~/.aws/credentials, .env, a browser store), a hop opened the path, and the watch served a decoy fd in place of the real file. The hop saw a plausible fake carrying this run's unique marker; the real bytes never left the host. The read is in the event log and in r.events; it is evidence, not a refusal, and the hop runs on.
+
+**What to type next:** nothing to fix for the hop; read the events in cig runs <id> and treat the read as the finding it is: the program the hop ran asked for a credential the box said it must not have
+
+**Known causes**, ranked; doctor checks them in this order:
+
+1. the tool or a library it loads reaches for a well-known credential path (ssh, aws, gcloud, docker, a browser store, .env), asked for or not (no probe; a suggestion, not a finding). **Remedy:** read the events; a credential a tool needs is passed with box.pass_reads so only that program reads it
+2. an exfiltration attempt in the hop's dependency tree (a build script, a postinstall, a parser plugin) (no probe; a suggestion, not a finding). **Remedy:** treat it as the finding it is; cig-orchestrator's guard raises it on a rehearsal
+
+Related: `E774`, `E775`, `E777`.
+
+
+### E774 a decoy marker was written out
+
+*burn · since 1.21.0 · arises in run · planned*
+
+**Kind of no:** not one of the four (a mistake in the text, in the arithmetic, or in CigScript; syntax, type or logic error; an internal error).
+
+A file the hop wrote under the pack holds the marker a decoy carried into the box, so the hop read a credential-sized decoy and tried to carry the marker back out. Exfiltration gets its first evidence, and the hop runs on: the pack reader for the run names the file.
+
+**What to type next:** nothing to fix in the hop; the write is in r.events and in the hop's log, with the file's path; treat it as the finding it is
+
+**Known causes**, ranked; doctor checks them in this order:
+
+1. the hop read a decoy and copied its bytes into a build output, a report, a telemetry payload or a lockfile (no probe; a suggestion, not a finding). **Remedy:** stop running the tool outside the box until the behaviour is explained, and share the marker and the file with the maintainer
+
+Related: `E773`, `E775`.
+
+
+### E775 a passed credential was read by the wrong program
+
+*burn · since 1.21.0 · arises in run*
+
+**Kind of no:** these are MY ciggies (the door: it knows you and said no; 403 Forbidden; permission denied; a lock; a refusal by policy).
+
+box.pass_reads named a program that may read a credential (npm reads ~/.npmrc, cargo reads ~/.cargo/credentials.toml), and a different process in the hop's tree opened the same path. The decoy mount served the decoy to that process (the real bytes never left the host). The real file descriptor the supervisor hands into the allowed program is a plain fd: it is inherited on fork and reachable via /proc/<pid>/fd by same-uid processes in the hop, so pass_reads is for a cooperating program, not an adversarial one.
+
+**What to type next:** if the reader is legitimate, name it under box.pass_reads; otherwise this is the finding, and the hop should not be run outside the box until it is explained
+
+**Known causes**, ranked; doctor checks them in this order:
+
+1. a postinstall or build script in the hop's tree reads a passed credential (a postinstall that curls to a server, a bundler that reads ~/.npmrc for a token the install does not need) (no probe; a suggestion, not a finding). **Remedy:** read the event's exe field; name the legitimate reader under box.pass_reads by its absolute path, or treat the read as the finding
+2. the allowed program forks and a child in the hop reaches the inherited real fd via /proc/<pid>/fd or by inheritance (no probe; a suggestion, not a finding). **Remedy:** a hop is a trust boundary around a program, not around its children; keep pass_reads for cooperating programs, and rotate the credential if a hostile child in the hop is a concern
+3. the pass_reads entry resolved the program against PATH to a different binary (a shadow tool a corrupted PATH names) and the real tool missed the filter (no probe; a suggestion, not a finding). **Remedy:** name the program by its absolute path in box.pass_reads; cig doctor says which paths are on PATH
+4. the allowed program opened the credential through a relative path, a symlink, or a dirfd-relative name whose string did not match the pass_reads entry (no probe; a suggestion, not a finding). **Remedy:** open the credential by its absolute path (as box.pass_reads names it); the decoy mount still shadows the real file either way, so this is a convenience for the allowed program, not a leak
+
+Related: `E773`, `E774`, `E777`.
 
 
 ### E776 io_uring refused

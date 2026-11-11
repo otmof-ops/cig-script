@@ -210,6 +210,19 @@ pub struct BoxSpec {
     /// to and runs, as events (`super::watch`). A contained hop always has
     /// the part that gives the io_uring refusal its event (`E776`).
     pub watch: super::watch::Mode,
+    /// Credential paths (`decoys:`) the box replaces with realistic fakes,
+    /// each read seen by the watch and recorded as `E773`. Resolved
+    /// against the caller's home; `~/` is expanded. A path that resolves
+    /// outside the pack roots and the home is refused, and symlinks are
+    /// not followed.
+    pub decoys: Vec<String>,
+    /// Programs that may read their one credential (`pass_reads:`); the
+    /// watch supervisor answers an open of the path from the named
+    /// program with the real file and from any other with the decoy,
+    /// recording `E775`. The program is matched by `/proc/<pid>/exe` at
+    /// the time of the call. Fail closed: an unresolvable exe, or the
+    /// kernel refusing the fd injection, gives the decoy and the event.
+    pub pass_reads: Vec<(String, String)>,
 }
 
 impl Default for BoxSpec {
@@ -223,6 +236,8 @@ impl Default for BoxSpec {
             expect: Vec::new(),
             quiet: false,
             watch: super::watch::Mode::Off,
+            decoys: Vec::new(),
+            pass_reads: Vec::new(),
         }
     }
 }
@@ -260,6 +275,12 @@ impl BoxSpec {
         }
         if !self.expect.is_empty() {
             t.push(format!("expect {}", self.expect.join(" ")));
+        }
+        if !self.decoys.is_empty() {
+            t.push(format!("decoys {}", self.decoys.len()));
+        }
+        if !self.pass_reads.is_empty() {
+            t.push(format!("pass_reads {}", self.pass_reads.len()));
         }
         t
     }
@@ -623,6 +644,27 @@ pub struct Setup {
     /// The watch, once the parent has started its supervisor (the caller
     /// sets it between `new` and the fork).
     pub watch: Option<super::watch::WatchChild>,
+    /// Decoys and pass_reads as read-only bind mounts: the decoy file
+    /// (source, in the run's scratch) shadows the real path in the box's
+    /// mount namespace. A path missing at mount time is skipped (nothing
+    /// to protect); a bind that fails for any other reason refuses the
+    /// hop, the way the covers do. The real file is never bound anywhere
+    /// in the box: the supervisor serves pass_reads itself, from outside
+    /// the namespace.
+    pub decoy_mounts: Vec<DecoyMount>,
+}
+
+/// One decoy to bind-mount in the box, with both ends held before the
+/// fork so `apply` only reads async-signal-safe pointers.
+#[cfg(target_os = "linux")]
+#[derive(Clone, Debug)]
+pub struct DecoyMount {
+    /// The decoy's host path (in the run's scratch).
+    pub source: std::ffi::CString,
+    /// The real credential's path inside the box (the overlays and
+    /// contain's home have already landed by the time of the bind, so
+    /// the target here is what the hop sees).
+    pub target: std::ffi::CString,
 }
 
 /// What `contain` adds to the box, planned in the parent and applied in the
@@ -1660,6 +1702,7 @@ impl Setup {
             forward_env,
             contain,
             watch: None,
+            decoy_mounts: Vec::new(),
         })
     }
 
@@ -1859,6 +1902,36 @@ impl Setup {
                     if g.required {
                         return Err(io::Error::from_raw_os_error(libc::ENOTSUP));
                     }
+                }
+            }
+        }
+        // Decoys (and pass_reads' decoy half): bind-mount the planted
+        // fake read-only over each real credential path, in this box's
+        // mount namespace only. The real file is then unreachable by
+        // any path in the box — a symlink, a dirfd, /proc/self/root/...
+        // — because the inode at this path is the decoy's. A path
+        // missing at mount time has nothing to protect and is skipped;
+        // a bind that fails for any other reason refuses the hop, the
+        // way the covers do. The real file is never bound anywhere in
+        // the box: the supervisor serves pass_reads from outside the
+        // namespace. Done BEFORE the hide step (which tmpfs-covers
+        // `runs/`, under which the decoy sources sit), so the sources
+        // are still reachable here.
+        for dm in &self.decoy_mounts {
+            match decoy_cover(&dm.source, &dm.target) {
+                DecoyOutcome::Covered | DecoyOutcome::Skipped => {}
+                DecoyOutcome::Err(errno) => {
+                    let why_file = match &self.guard {
+                        Some(g) => &g.why,
+                        None => &self.why,
+                    };
+                    write_why(
+                        why_file,
+                        b"binding a decoy over a credential refused",
+                        Some(&dm.target),
+                        errno,
+                    );
+                    return Err(io::Error::from_raw_os_error(errno));
                 }
             }
         }
@@ -2681,6 +2754,114 @@ unsafe fn write_file(path: &std::ffi::CStr, bytes: &[u8]) -> bool {
     let n = libc::write(fd, bytes.as_ptr() as *const libc::c_void, bytes.len());
     libc::close(fd);
     n == bytes.len() as isize
+}
+
+/// The result of a decoy cover: `Covered` if the bind took, `Skipped` if
+/// the real credential was never there in the first place (nothing to
+/// protect), or `Err(errno)` if it still exists and could not be covered.
+#[cfg(target_os = "linux")]
+pub enum DecoyOutcome {
+    Covered,
+    Skipped,
+    Err(i32),
+}
+
+/// Bind-mount `source` (a decoy file in the run's scratch) read-only
+/// over `target` (a real credential path inside the box). Same retry
+/// logic as `cover_path`: a target that has gone by the time of the
+/// mount is `Skipped` (nothing to protect). After the bind takes, the
+/// mount is remounted read-only + nosuid + nodev + noexec, **carrying
+/// the source mount's locked flags** (statvfs on the source gives
+/// MS_NOATIME / MS_NODEV / MS_NOSUID flags that the kernel locks in a
+/// user namespace: a remount that drops one fails EPERM, and the
+/// decoy would stay writable). A failed remount refuses the hop: the
+/// mount is then unreliable as a boundary.
+///
+/// # Safety
+///
+/// Async-signal-safe: `mount`, `lstat`, `statvfs`.
+#[cfg(target_os = "linux")]
+unsafe fn decoy_cover(source: &std::ffi::CString, target: &std::ffi::CString) -> DecoyOutcome {
+    let mut errno = 0;
+    // Locked flags on the source mount: in a user namespace a bind
+    // remount must carry MS_NODEV / MS_NOSUID / MS_NOATIME etc that the
+    // kernel locked on the parent, or EPERM. statvfs gives them as
+    // f_flag bits, which map 1:1 to the MS_* constants. The ST_* values
+    // are the kernel's (fs.h): glibc exposes most but not RELATIME /
+    // NODIRATIME under every libc (musl hides them), so each bit is
+    // written out here.
+    const ST_NOSUID_: libc::c_ulong = 0x0002;
+    const ST_NODEV_: libc::c_ulong = 0x0004;
+    const ST_NOEXEC_: libc::c_ulong = 0x0008;
+    const ST_NOATIME_: libc::c_ulong = 0x0400;
+    const ST_NODIRATIME_: libc::c_ulong = 0x0800;
+    const ST_RELATIME_: libc::c_ulong = 0x1000;
+    let locked: libc::c_ulong = {
+        let mut st: libc::statvfs = std::mem::zeroed();
+        if libc::statvfs(source.as_ptr(), &mut st) == 0 {
+            let f = st.f_flag;
+            let mut m: libc::c_ulong = 0;
+            if f & ST_NODEV_ != 0 {
+                m |= libc::MS_NODEV;
+            }
+            if f & ST_NOSUID_ != 0 {
+                m |= libc::MS_NOSUID;
+            }
+            if f & ST_NOEXEC_ != 0 {
+                m |= libc::MS_NOEXEC;
+            }
+            if f & ST_NOATIME_ != 0 {
+                m |= libc::MS_NOATIME;
+            }
+            if f & ST_NODIRATIME_ != 0 {
+                m |= libc::MS_NODIRATIME;
+            }
+            if f & ST_RELATIME_ != 0 {
+                m |= libc::MS_RELATIME;
+            }
+            m
+        } else {
+            0
+        }
+    };
+    for _ in 0..5 {
+        let r = libc::mount(
+            source.as_ptr(),
+            target.as_ptr(),
+            std::ptr::null(),
+            libc::MS_BIND,
+            std::ptr::null(),
+        );
+        if r == 0 {
+            // A decoy never needs device nodes, setuid bits or exec
+            // permission; the credential file never did either.
+            let remount_flags = libc::MS_BIND
+                | libc::MS_REMOUNT
+                | libc::MS_RDONLY
+                | libc::MS_NOSUID
+                | libc::MS_NODEV
+                | libc::MS_NOEXEC
+                | locked;
+            if libc::mount(
+                std::ptr::null(),
+                target.as_ptr(),
+                std::ptr::null(),
+                remount_flags,
+                std::ptr::null(),
+            ) != 0
+            {
+                return DecoyOutcome::Err(*libc::__errno_location());
+            }
+            return DecoyOutcome::Covered;
+        }
+        errno = *libc::__errno_location();
+        let mut st: libc::stat = std::mem::zeroed();
+        if libc::lstat(target.as_ptr(), &mut st) != 0 {
+            // The real credential is gone: nothing to protect, so skip.
+            return DecoyOutcome::Skipped;
+        }
+    }
+    DecoyOutcome::Err(errno)
 }
 
 /// Cover `path` with /dev/null (a bind mount). A path that is gone by the

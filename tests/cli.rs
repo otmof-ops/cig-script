@@ -5790,6 +5790,358 @@ fn a_hop_cannot_use_io_uring() {
     }
 }
 
+/// Off Linux the watch is refused where `box:` is parsed, before the box
+/// runs. The message names the knob and the OS (`the watch is Linux's
+/// seccomp`), and the hop exits with the parser's error code (1).
+#[cfg(not(target_os = "linux"))]
+#[test]
+fn the_watch_is_refused_off_linux() {
+    let sb = Sandbox::new();
+    sb.write("p/keep.txt", "v1\n");
+    sb.write(
+        "s.cig",
+        "pack { \"./p\" }\nburn {\n  proc.run(\"sh\", [\"-c\", \"echo x\"], {cwd: \"p\", box: {watch: true}})\n}\n",
+    );
+    let err = sb.run_err(&["run", "s.cig"], 1);
+    assert!(
+        err.contains("watch") && err.contains("Linux"),
+        "a non-Linux refusal of box.watch must name the knob and the OS: {err}"
+    );
+}
+
+/// Off Linux `box.decoys` is refused where `box:` is parsed, the same
+/// way `watch` is: the mount boundary that `decoys` would need is
+/// Linux's mount namespace, so a hop on macOS or Windows is refused
+/// before the box is built.
+#[cfg(not(target_os = "linux"))]
+#[test]
+fn decoys_are_refused_off_linux() {
+    let sb = Sandbox::new();
+    sb.write("p/keep.txt", "v1\n");
+    sb.write(
+        "s.cig",
+        "pack { \"./p\" }\nburn {\n  proc.run(\"sh\", [\"-c\", \"echo x\"], {cwd: \"p\", box: {decoys: [\"~/.ssh/id_ed25519\"]}})\n}\n",
+    );
+    let err = sb.run_err(&["run", "s.cig"], 1);
+    assert!(
+        err.contains("decoys") && err.contains("Linux"),
+        "a non-Linux refusal of box.decoys must name the knob and the OS: {err}"
+    );
+}
+
+/// Off Linux `box.pass_reads` is refused where `box:` is parsed too,
+/// since the supervisor is seccomp(2) user notification's.
+#[cfg(not(target_os = "linux"))]
+#[test]
+fn pass_reads_are_refused_off_linux() {
+    let sb = Sandbox::new();
+    sb.write("p/keep.txt", "v1\n");
+    sb.write(
+        "s.cig",
+        "pack { \"./p\" }\nburn {\n  proc.run(\"sh\", [\"-c\", \"echo x\"], {cwd: \"p\", box: {pass_reads: {\"~/.npmrc\": \"npm\"}}})\n}\n",
+    );
+    let err = sb.run_err(&["run", "s.cig"], 1);
+    assert!(
+        err.contains("pass_reads") && err.contains("Linux"),
+        "a non-Linux refusal of box.pass_reads must name the knob and the OS: {err}"
+    );
+}
+
+/// `decoys:` fakes a credential path: the hop sees the decoy's bytes and
+/// never the real ones, and the read lands in the log as `E773`.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_decoy_is_read_instead_of_the_real_key() {
+    // The decoy supervisor uses SECCOMP_IOCTL_NOTIF_ADDFD with the SEND
+    // flag (Linux 5.14+). Older kernels: the supervisor fails closed
+    // (EPERM); the test prints why and skips.
+    if !has_addfd_send() {
+        eprintln!("no SECCOMP_ADDFD_FLAG_SEND here (needs Linux 5.14+); skipped");
+        return;
+    }
+    let sb = Sandbox::new();
+    sb.write("p/keep.txt", "v1\n");
+    // The real key, planted where HOME will point at it during the run.
+    let home = sb.path().to_path_buf();
+    let key_dir = home.join(".ssh");
+    fs::create_dir_all(&key_dir).unwrap();
+    let key = key_dir.join("id_ed25519");
+    fs::write(
+        &key,
+        b"-----BEGIN OPENSSH PRIVATE KEY-----\nREALREALREAL\n-----END OPENSSH PRIVATE KEY-----\n",
+    )
+    .unwrap();
+    // The hop opens the key by its home-relative path and writes its
+    // first line somewhere the test can read back.
+    sb.write(
+        "p/probe.sh",
+        "cat \"$HOME/.ssh/id_ed25519\" 2>&1 || echo refused\n",
+    );
+    sb.write(
+        "s.cig",
+        "pack { \"./p\" }\nburn {\n  stick r = proc.run(\"sh\", [\"probe.sh\"], {cwd: \"p\", box: {network: \"off\", decoys: [\"~/.ssh/id_ed25519\"], apply: \"never\"}})\n  fs.write_text(\"p/seen.txt\", r.out)\n}\n",
+    );
+    let out = sb.cig_env(&["run", "s.cig"], &[("HOME", home.to_str().unwrap())]);
+    let err = String::from_utf8_lossy(&out.stderr).to_string();
+    if !out.status.success() {
+        assert!(err.contains("E777"), "{err}");
+        assert!(!box_expected_here(), "{err}");
+        return;
+    }
+    if fell_back(&err) {
+        allow_fallback(&err);
+        return;
+    }
+    let seen = sb.read("p/seen.txt");
+    assert!(
+        !seen.contains("REALREALREAL"),
+        "the hop saw the real key bytes: {seen}"
+    );
+    assert!(
+        seen.contains("cig-decoy") || seen.contains("not the real credential"),
+        "the hop did not see the decoy: {seen}"
+    );
+    // The log carries the E773 event for the key path.
+    let ev = watch_events(&sb);
+    assert!(
+        ev.iter().any(|e| e["code"] == "E773"
+            && e["path"]
+                .as_str()
+                .is_some_and(|p| p.ends_with("/.ssh/id_ed25519"))),
+        "no E773 event on the key path: {ev:?}"
+    );
+}
+
+/// The decoy mount, not the supervisor, is the boundary: a hop that
+/// reaches the real path through a symlink made in the pack, through
+/// `openat` with a dirfd of the parent directory, or through
+/// `/proc/self/root/<path>` sees the decoy every time. The supervisor
+/// still writes an E773 event for each read, but the mount is what
+/// stops the real bytes leaving the host.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_decoy_holds_against_a_link_and_a_dirfd() {
+    if !has_addfd_send() {
+        eprintln!("no SECCOMP_ADDFD_FLAG_SEND here (needs Linux 5.14+); skipped");
+        return;
+    }
+    if Command::new("python3").arg("--version").output().is_err() {
+        eprintln!("no python3 here; skipped");
+        return;
+    }
+    let sb = Sandbox::new();
+    sb.write("p/keep.txt", "v1\n");
+    let home = sb.path().to_path_buf();
+    let key_dir = home.join(".ssh");
+    fs::create_dir_all(&key_dir).unwrap();
+    let key = key_dir.join("id_ed25519");
+    fs::write(&key, b"REAL-KEY-BYTES-SENTINEL\n").unwrap();
+    // A symlink in the pack, pointing at the real path: the resolution
+    // lands inside the box on the decoy, since the real path is bound.
+    std::os::unix::fs::symlink(&key, sb.path().join("p/key_link")).unwrap();
+    // A python probe: openat with a dirfd of the parent directory, a
+    // read through /proc/self/root, and the symlink. Each read goes to
+    // stdout prefixed with how it reached the file.
+    sb.write(
+        "p/probe.py",
+        r#"import os, sys
+home = os.environ['HOME']
+real = home + '/.ssh/id_ed25519'
+def tagged(name, body):
+    sys.stdout.write('===' + name + '===\n')
+    sys.stdout.write(body)
+    sys.stdout.write('\n')
+# 1. symlink in the pack
+tagged('link', open('key_link').read())
+# 2. openat with a dirfd of the parent (os.open with dir_fd)
+fd = os.open(home + '/.ssh', os.O_RDONLY | os.O_DIRECTORY)
+f = os.open('id_ed25519', os.O_RDONLY, dir_fd=fd)
+tagged('dirfd', os.read(f, 4096).decode('utf-8', 'replace'))
+os.close(f); os.close(fd)
+# 3. /proc/self/root/<real>
+tagged('proc', open('/proc/self/root' + real).read())
+# 4. the plain openat (for completeness; this is the path the two other
+#    tests already exercise)
+tagged('plain', open(real).read())
+"#,
+    );
+    sb.write(
+        "s.cig",
+        "pack { \"./p\" }\nburn {\n  stick r = proc.run(\"python3\", [\"probe.py\"], {cwd: \"p\", box: {network: \"off\", decoys: [\"~/.ssh/id_ed25519\"], apply: \"never\"}})\n  fs.write_text(\"p/out.txt\", r.out)\n}\n",
+    );
+    let out = sb.cig_env(&["run", "s.cig"], &[("HOME", home.to_str().unwrap())]);
+    let err = String::from_utf8_lossy(&out.stderr).to_string();
+    if !out.status.success() {
+        assert!(err.contains("E777"), "{err}");
+        assert!(!box_expected_here(), "{err}");
+        return;
+    }
+    if fell_back(&err) {
+        allow_fallback(&err);
+        return;
+    }
+    let text = sb.read("p/out.txt");
+    assert!(
+        !text.contains("REAL-KEY-BYTES-SENTINEL"),
+        "a path into the real key bypassed the decoy mount: {text}"
+    );
+    // Split into per-route blocks on the `===name===` headers. Each
+    // route's bytes must carry the decoy marker (`cig-decoy`) or the
+    // generic one (`not the real credential`); together that covers
+    // the shaped and the generic decoy bodies.
+    let mut blocks: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    let mut current: Option<String> = None;
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("===").and_then(|r| r.strip_suffix("===")) {
+            current = Some(rest.to_string());
+            blocks.entry(rest.to_string()).or_default();
+            continue;
+        }
+        if let Some(c) = &current {
+            let entry = blocks.entry(c.clone()).or_default();
+            entry.push_str(line);
+            entry.push('\n');
+        }
+    }
+    for route in ["link", "dirfd", "proc", "plain"] {
+        let body = blocks
+            .get(route)
+            .unwrap_or_else(|| panic!("route {route} did not appear: {text}"));
+        assert!(
+            body.contains("cig-decoy") || body.contains("not the real credential"),
+            "route `{route}` did not serve the decoy's bytes: {body}"
+        );
+    }
+    // The supervisor still writes at least one E773 event for the
+    // direct path read; the other routes pass symlink and dirfd-relative
+    // strings the supervisor does not match literally, so the mount
+    // (not the supervisor) is what stops the real bytes leaking there.
+    let ev = watch_events(&sb);
+    assert!(
+        ev.iter().any(|e| e["code"] == "E773"),
+        "expected at least one E773 event on the plain path: {ev:?}"
+    );
+}
+
+/// `pass_reads:` gives the real file to one program and the decoy to
+/// every other process, each in the event log with the matching code.
+/// Two distinct binaries are copied into the sandbox so the test holds
+/// on merged-usr distros (where `/bin/cat` and `/usr/bin/cat` share one
+/// inode) and on Alpine (where `cat`, `head` and `sh` are all applets
+/// of busybox). `pass_reads` names the allowed program by the copy's
+/// absolute path.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_passed_read_reaches_only_its_program() {
+    if !has_addfd_send() {
+        eprintln!("no SECCOMP_ADDFD_FLAG_SEND here (needs Linux 5.14+); skipped");
+        return;
+    }
+    let cat_src = which("cat").unwrap_or("/bin/cat".to_string());
+    let head_src = which("head").unwrap_or("/usr/bin/head".to_string());
+    let sb = Sandbox::new();
+    sb.write("p/keep.txt", "v1\n");
+    let home = sb.path().to_path_buf();
+    let rc = home.join(".npmrc");
+    fs::write(&rc, b"//registry.npmjs.org/:_authToken=REAL-ONLY-FOR-NPM\n").unwrap();
+    // Copy two distinct binaries into the sandbox. A merged-usr
+    // `/bin/cat` symlink to `/usr/bin/cat` canonicalises to one file
+    // the `pass_reads` matcher sees as both; on Alpine `cat` and `head`
+    // both canonicalise to `busybox` and the matcher refuses it. The
+    // copy defeats both.
+    let allowed = sb.path().join("bin/allowed_reader");
+    let denied = sb.path().join("bin/denied_reader");
+    fs::create_dir_all(sb.path().join("bin")).unwrap();
+    let canon_cat = fs::canonicalize(&cat_src).unwrap_or_else(|_| cat_src.clone().into());
+    let canon_head = fs::canonicalize(&head_src).unwrap_or_else(|_| head_src.clone().into());
+    if canon_cat == canon_head
+        || canon_cat.file_name().and_then(|n| n.to_str()) == Some("busybox")
+        || canon_head.file_name().and_then(|n| n.to_str()) == Some("busybox")
+    {
+        eprintln!("cat and head share one binary here (merged-usr or busybox); skipped");
+        return;
+    }
+    fs::copy(&canon_cat, &allowed).unwrap();
+    fs::copy(&canon_head, &denied).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&allowed, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(&denied, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let allowed_s = allowed.to_string_lossy().into_owned();
+    let denied_s = denied.to_string_lossy().into_owned();
+    sb.write(
+        "p/probe.sh",
+        &format!(
+            "echo '== via allowed =='\n\
+             {allowed_s} \"$HOME/.npmrc\" 2>&1 || echo refused\n\
+             echo '== via denied =='\n\
+             {denied_s} -n1 \"$HOME/.npmrc\" 2>&1 || echo refused\n"
+        ),
+    );
+    sb.write(
+        "s.cig",
+        &format!(
+            "pack {{ \"./p\" }}\nburn {{\n  stick r = proc.run(\"sh\", [\"probe.sh\"], {{cwd: \"p\", box: {{network: \"off\", pass_reads: {{\"~/.npmrc\": \"{allowed_s}\"}}, apply: \"never\"}}}})\n  fs.write_text(\"p/out.txt\", r.out)\n}}\n"
+        ),
+    );
+    let out = sb.cig_env(&["run", "s.cig"], &[("HOME", home.to_str().unwrap())]);
+    let err = String::from_utf8_lossy(&out.stderr).to_string();
+    if !out.status.success() {
+        assert!(err.contains("E777"), "{err}");
+        assert!(!box_expected_here(), "{err}");
+        return;
+    }
+    if fell_back(&err) {
+        allow_fallback(&err);
+        return;
+    }
+    let text = sb.read("p/out.txt");
+    let (via_allowed, via_denied) = {
+        let mut parts = text.split("== via denied ==");
+        let a = parts.next().unwrap_or("").to_string();
+        let b = parts.next().unwrap_or("").to_string();
+        (a, b)
+    };
+    assert!(
+        via_allowed.contains("REAL-ONLY-FOR-NPM"),
+        "the allowed program did not see the real token: {text}"
+    );
+    assert!(
+        !via_denied.contains("REAL-ONLY-FOR-NPM"),
+        "the other program saw the real token: {text}"
+    );
+    // The event log carries both: one pass, one E775.
+    let ev = watch_events(&sb);
+    let passed = ev.iter().filter(|e| e["result"] == "passed").count();
+    let e775 = ev.iter().filter(|e| e["code"] == "E775").count();
+    assert!(passed >= 1, "no `passed` event in the log: {ev:?}");
+    assert!(e775 >= 1, "no E775 event in the log: {ev:?}");
+}
+
+/// Does this kernel have `SECCOMP_ADDFD_FLAG_SEND`? It landed in 5.14.
+#[cfg(target_os = "linux")]
+fn has_addfd_send() -> bool {
+    let kernel = fs::read_to_string("/proc/sys/kernel/osrelease").unwrap_or_default();
+    let mut parts = kernel.trim().split(|c: char| !c.is_ascii_digit());
+    let major: u32 = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
+    let minor: u32 = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
+    (major, minor) >= (5, 14)
+}
+
+/// `which <name>` (the first entry on PATH that is a file), or `None`.
+#[cfg(target_os = "linux")]
+fn which(name: &str) -> Option<String> {
+    for d in std::env::split_paths(&std::env::var_os("PATH")?) {
+        let p = d.join(name);
+        if p.is_file() {
+            return Some(p.to_string_lossy().into_owned());
+        }
+    }
+    None
+}
+
 /// `network: "registry"`: the proxy lets `allow_hosts` through and
 /// refuses the rest, each refusal recorded and said.
 #[cfg(target_os = "linux")]
