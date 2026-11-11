@@ -317,12 +317,27 @@ pub enum TailHead {
 /// (`cig runs --verify`) stays quick at ten thousand runs (#177, #149).
 pub fn tail_head(run_dir: &Path) -> io::Result<TailHead> {
     let path = run_dir.join("journal.jsonl");
-    let mut f = match fs::File::open(&path) {
-        Ok(f) => f,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(TailHead::Missing),
-        Err(e) => return Err(e),
-    };
-    let len = f.metadata()?.len();
+    match fs::File::open(&path) {
+        Ok(mut f) => {
+            let len = f.metadata()?.len();
+            tail_head_of(&mut f, len)
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            // A compressed journal: its tail is read from the stream.
+            match super::pack::read_journal_text(run_dir) {
+                Ok(text) => {
+                    let len = text.len() as u64;
+                    tail_head_of(&mut io::Cursor::new(text.into_bytes()), len)
+                }
+                Err(z) if z.kind() == io::ErrorKind::NotFound => Ok(TailHead::Missing),
+                Err(z) => Err(z),
+            }
+        }
+        Err(e) => Err(e),
+    }
+}
+
+fn tail_head_of<F: Read + Seek>(f: &mut F, len: u64) -> io::Result<TailHead> {
     if len == 0 {
         return Ok(TailHead::Empty);
     }
@@ -373,9 +388,7 @@ pub fn tail_head(run_dir: &Path) -> io::Result<TailHead> {
         let off = len.saturating_sub(window);
         f.seek(SeekFrom::Start(off))?;
         let mut buf = Vec::with_capacity((len - off) as usize);
-        io::Read::by_ref(&mut f)
-            .take(len - off)
-            .read_to_end(&mut buf)?;
+        io::Read::by_ref(f).take(len - off).read_to_end(&mut buf)?;
         // Strip a torn tail (a crashed append left half a line without
         // a newline). A journal that ends mid-line is truncated; the
         // last *complete* line is the one we report.
@@ -471,6 +484,7 @@ pub fn resign_in_place_under(
     run_dir: &Path,
     mac_key: &super::seal::Key,
 ) -> io::Result<Option<String>> {
+    super::pack::ensure_plain(run_dir)?;
     let path = run_dir.join("journal.jsonl");
     let text = match fs::read_to_string(&path) {
         Ok(t) => t,
@@ -498,6 +512,7 @@ pub fn resign_signed_in_place_under(
     run_dir: &Path,
     mac_key: &super::seal::Key,
 ) -> io::Result<Option<String>> {
+    super::pack::ensure_plain(run_dir)?;
     let path = run_dir.join("journal.jsonl");
     let text = match fs::read_to_string(&path) {
         Ok(t) => t,
@@ -598,6 +613,14 @@ pub struct Journal {
     pending: bool,
 }
 
+impl Drop for Journal {
+    fn drop(&mut self) {
+        // Snapshots flushed in a group are never left unflushed past the
+        // journal that points at them.
+        let _ = super::tin::sync_deferred();
+    }
+}
+
 #[derive(Debug, Default, Serialize)]
 pub struct RollbackReport {
     pub restored: Vec<String>,
@@ -634,6 +657,7 @@ impl Journal {
         let file = match &run_dir {
             Some(dir) => {
                 fs::create_dir_all(dir.join("snapshots"))?;
+                super::pack::ensure_plain(dir)?;
                 let f = fs::OpenOptions::new()
                     .create(true)
                     .append(true)
@@ -646,11 +670,11 @@ impl Journal {
                     chain.format = format;
                 } else {
                     // Reopened: the chain goes on from the last intact line.
-                    let loaded = Self::load(dir)?;
-                    head = loaded.head;
-                    chain = loaded.chain;
+                    let mut loaded = Self::load(dir)?;
+                    head = std::mem::take(&mut loaded.head);
+                    chain = std::mem::take(&mut loaded.chain);
                     format = loaded.format;
-                    mac_key = loaded.mac_key;
+                    mac_key = loaded.mac_key.take();
                 }
                 sync_dir(dir)?;
                 Some(f)
@@ -725,7 +749,7 @@ impl Journal {
         // head. Shared lock, held once per process; a verify-only
         // call pays the cost once and later `key()` calls skip it.
         super::seal::hold_shared_rekey_lock().map_err(io::Error::other)?;
-        let text = fs::read_to_string(run_dir.join("journal.jsonl"))?;
+        let text = super::pack::read_journal_text(run_dir)?;
         // A run that came in a parcel reads through its path map: the
         // lines stay as written (the chain holds), the paths are ours.
         let map = super::parcel::path_map_of(run_dir);
@@ -742,6 +766,10 @@ impl Journal {
         let mut mac_key: Option<super::seal::Key> = None;
         let mut unverifiable = false;
         let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+        // Where each entry sits, by its number: a marker finds its entry in
+        // one lookup, not a walk over every entry before it.
+        let mut index: std::collections::HashMap<u64, usize> =
+            std::collections::HashMap::with_capacity(lines.len());
         for (i, line) in lines.iter().enumerate() {
             let parsed: Result<serde_json::Value, _> = serde_json::from_str(line);
             let v = match parsed {
@@ -828,7 +856,9 @@ impl Journal {
             // the compensation recorded after it covers the op.
             if v.get("op").is_none() {
                 let seq = v.get("seq").and_then(|n| n.as_u64());
-                let target = seq.and_then(|seq| entries.iter_mut().find(|e| e.seq == seq));
+                let target = seq
+                    .and_then(|seq| index.get(&seq).copied())
+                    .and_then(|at| entries.get_mut(at));
                 if let Some(e) = target {
                     if v.get("undone").and_then(|u| u.as_bool()) == Some(true) {
                         e.undone = true;
@@ -865,6 +895,7 @@ impl Journal {
             if !map.is_empty() {
                 remap_entry(&mut e, &map);
             }
+            index.entry(e.seq).or_insert(entries.len());
             entries.push(e);
         }
         // A journal with no line is a run that burned nothing (#129): read
@@ -973,6 +1004,16 @@ impl Journal {
     /// holding the exclusive lock cannot sign anything out from under a
     /// run that lives (SEC-004 H1). This method itself is lock-free.
     fn append_line(&mut self, mut v: serde_json::Value) -> io::Result<()> {
+        // A finished run's journal may have been compressed under an open
+        // handle: lines go to the plain file, made again from the stream.
+        if let Some(dir) = &self.run_dir {
+            if self.file.is_some() && !dir.join("journal.jsonl").exists() {
+                self.file = None;
+            }
+            if self.file.is_none() {
+                super::pack::ensure_plain(dir)?;
+            }
+        }
         if self.file.is_none() {
             if let Some(dir) = &self.run_dir {
                 self.file = Some(
@@ -1075,6 +1116,14 @@ impl Journal {
         compensation: Option<Compensation>,
         compensated: bool,
     ) -> Result<(), io::Error> {
+        // The snapshots kept since the last flush are flushed together: when
+        // the group is due, and always before a process runs. The line below
+        // is still synced on its own, as every line is.
+        if matches!(op, Op::Proc { .. }) {
+            super::tin::sync_deferred()?;
+        } else {
+            super::tin::sync_deferred_if_due()?;
+        }
         let entry = Entry {
             seq,
             at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
@@ -1261,18 +1310,17 @@ impl Journal {
                 },
             })
         } else {
-            copy_file_with_mode(path, &snap)?;
-            sync_file(&snap)?;
-            sync_dir(&dir.join("snapshots"))?;
-            let sha256 = sha256_file(&snap)?;
+            // The bytes go into the tin, like a hop's: chunked when large,
+            // deduplicated by content, flushed with the group (#147).
+            let st = super::tin::stash_grouped(path)?;
             Ok(BeforeState {
                 path: path.to_path_buf(),
                 before: Before::File {
-                    snapshot: snap,
-                    sha256,
-                    bytes: meta.len(),
-                    mode: None,
-                    mtime_ns: mtime_ns(&meta),
+                    snapshot: st.object,
+                    sha256: st.sha256,
+                    bytes: st.bytes,
+                    mode: st.mode,
+                    mtime_ns: st.mtime_ns,
                     git: None,
                 },
             })
@@ -1283,17 +1331,24 @@ impl Journal {
     /// Returns one line per problem; empty means safe to proceed.
     pub fn verify(&self) -> Vec<String> {
         let mut problems = Vec::new();
+        // The newest entry that puts each path back: "does a later entry
+        // restore this path" is then one lookup, not a walk over every
+        // later entry (the walk was quadratic in the run's length).
+        let mut newest: std::collections::HashMap<&Path, usize> = std::collections::HashMap::new();
+        for (idx, e) in self.entries.iter().enumerate() {
+            if e.reversible && !e.undone {
+                for b in &e.before {
+                    newest.insert(b.path.as_path(), idx);
+                }
+            }
+        }
         for (idx, entry) in self.entries.iter().enumerate() {
             if !entry.reversible || entry.undone {
                 continue;
             }
             // Rollback runs newest-first, so a later entry's before-state
             // for a path puts it back before this entry needs it.
-            let later_restores = |path: &Path| {
-                self.entries[idx + 1..]
-                    .iter()
-                    .any(|e| e.reversible && !e.undone && e.before.iter().any(|b| b.path == *path))
-            };
+            let later_restores = |path: &Path| newest.get(path).is_some_and(|n| *n > idx);
             for state in &entry.before {
                 match &state.before {
                     Before::File {
@@ -1816,6 +1871,7 @@ impl Journal {
             return;
         }
         let mut markers = Vec::new();
+        let seqs: std::collections::HashSet<u64> = seqs.iter().copied().collect();
         for e in self.entries.iter_mut() {
             if seqs.contains(&e.seq) && !e.restored {
                 e.restored = true;
@@ -3157,10 +3213,39 @@ pub fn sha256_file(path: &Path) -> Result<String, io::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A native snapshot lives in the tin, so a test that records ops has a
+    /// home of its own for as long as it runs; every test that names a home
+    /// takes the same lock.
+    struct ScratchHome {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        _dir: tempfile::TempDir,
+        old: Option<std::ffi::OsString>,
+    }
+    impl Drop for ScratchHome {
+        fn drop(&mut self) {
+            match self.old.take() {
+                Some(v) => std::env::set_var("CIGSCRIPT_HOME", v),
+                None => std::env::remove_var("CIGSCRIPT_HOME"),
+            }
+        }
+    }
+    fn scratch_home() -> ScratchHome {
+        let lock = super::super::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let old = std::env::var_os("CIGSCRIPT_HOME");
+        std::env::set_var("CIGSCRIPT_HOME", dir.path().join("home"));
+        ScratchHome {
+            _lock: lock,
+            _dir: dir,
+            old,
+        }
+    }
     use std::collections::BTreeMap;
 
     #[test]
     fn write_delete_move_roll_back() {
+        let _home = scratch_home();
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         let run_dir = root.join("run");
@@ -3232,6 +3317,7 @@ mod tests {
 
     #[test]
     fn directory_delete_rolls_back() {
+        let _home = scratch_home();
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         let d = root.join("dir");
@@ -3248,6 +3334,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn symlink_restore_is_a_symlink() {
+        let _home = scratch_home();
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         fs::write(root.join("target.txt"), "t").unwrap();
@@ -3297,6 +3384,7 @@ mod tests {
 
     #[test]
     fn changed_since_sees_edits_after_the_run() {
+        let _home = scratch_home();
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         let run_dir = root.join("run");
@@ -3336,6 +3424,7 @@ mod tests {
 
     #[test]
     fn verify_refuses_before_a_partial_restore() {
+        let _home = scratch_home();
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         let run_dir = root.join("run");
@@ -3360,13 +3449,16 @@ mod tests {
         )
         .unwrap();
         fs::write(root.join("m2.txt"), "two").unwrap();
-        // Lose the second snapshot.
-        for e in fs::read_dir(run_dir.join("snapshots")).unwrap().flatten() {
-            if e.file_name().to_string_lossy().starts_with("00002") {
-                fs::remove_file(e.path()).unwrap();
+        // Lose the second snapshot (a tin object now: the journal names it).
+        let loaded = Journal::load(&run_dir).unwrap();
+        for e in loaded.entries().iter().filter(|e| e.seq == 2) {
+            for b in &e.before {
+                if let Before::File { snapshot, .. } = &b.before {
+                    super::super::tin::lift_read_only(snapshot);
+                    fs::remove_file(snapshot).unwrap();
+                }
             }
         }
-        let loaded = Journal::load(&run_dir).unwrap();
         let problems = loaded.verify();
         assert_eq!(problems.len(), 1, "{problems:?}");
         assert!(problems[0].contains("snapshot missing for"), "{problems:?}");
@@ -3510,6 +3602,7 @@ mod tests {
 
     #[test]
     fn rollback_property_over_random_trees() {
+        let _home = scratch_home();
         for seed in 1..=60u64 {
             let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15));
             let tmp = tempfile::tempdir().unwrap();

@@ -103,6 +103,7 @@ CigScript's binary links the Rust crates below, pulled from crates.io as package
 | inout | 0.1.4 | RustCrypto Developers | https://github.com/RustCrypto/utils |
 | is_terminal_polyfill | 1.70.2 | unrecorded | https://github.com/polyfill-rs/is_terminal_polyfill |
 | itoa | 1.0.18 | David Tolnay <dtolnay@gmail.com> | https://github.com/dtolnay/itoa |
+| jobserver | 0.1.35 | Alex Crichton <alex@alexcrichton.com> | https://github.com/rust-lang/jobserver-rs |
 | js-sys | 0.3.106 | The wasm-bindgen Developers | https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/js-sys |
 | keyring | 3.6.3 | Walther Chen <walther.chen@gmail.com>, Daniel Brotsky <dev@brotsky.com> | https://github.com/hwchen/keyring-rs.git |
 | libc | 0.2.189 | unrecorded | https://github.com/rust-lang/libc |
@@ -276,6 +277,9 @@ CigScript's binary links the Rust crates below, pulled from crates.io as package
 | curve25519-dalek | 4.1.3 | Isis Lovecruft <isis@patternsinthevoid.net>, Henry de Valence <hdevalence@hdevalence.ca> | https://github.com/dalek-cryptography/curve25519-dalek/tree/main/curve25519-dalek |
 | ed25519-dalek | 2.2.0 | isis lovecruft <isis@patternsinthevoid.net>, Tony Arcieri <bascule@gmail.com>, Michael Rosenberg <michael@mrosenberg.pub> | https://github.com/dalek-cryptography/curve25519-dalek/tree/main/ed25519-dalek |
 | subtle | 2.6.1 | Isis Lovecruft <isis@patternsinthevoid.net>, Henry de Valence <hdevalence@hdevalence.ca> | https://github.com/dalek-cryptography/subtle |
+| zstd | 0.13.4 | Alexandre Bury <alexandre.bury@gmail.com> | https://github.com/gyscos/zstd-rs |
+| zstd-safe | 7.4.0 | Alexandre Bury <alexandre.bury@gmail.com> | https://github.com/gyscos/zstd-rs |
+| zstd-sys | 2.1.2+zstd.1.5.7 | Alexandre Bury <alexandre.bury@gmail.com> | https://github.com/gyscos/zstd-rs |
 
 ## Apache-2.0 OR BSD-1-Clause OR MIT
 

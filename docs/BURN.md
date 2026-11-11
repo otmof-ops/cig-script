@@ -123,6 +123,41 @@ can act on. What "flushed" means is the platform's:
   directory is flushed through a handle opened with backup semantics where
   NTFS allows it, and left to the filesystem's own journal where it does not.
 
+### Where a before-state is kept, and when it is flushed
+
+A native op's before-state (the file an overwrite, an append, a delete or a
+copy is about to change) is kept in the tin, as a hop's is: whole when the
+file is under 64 KiB, as content-defined chunks under a recipe above that, and
+named by its hash, so the same bytes kept fifty times are stored once and a
+one-byte change in a large file stores one new chunk. The journal entry names
+the tin object (or recipe), with the file's mode and modification time beside
+it. Secrets stay sealed and directories are still copied into the run's own
+`snapshots/` folder. A run from cig 1.20 or earlier has its snapshots in
+`runs/<id>/snapshots/` and unburns exactly as before: the restore reads either
+form.
+
+A finished run's journal is kept as `journal.jsonl.zst` (zstd, level 3). Its
+lines are unchanged; the chain is checked over the decompressed lines, so
+`cig runs --verify` judges it as it judges a plain file and a line edited
+inside the stream breaks the chain. `cig unburn` makes it plain, appends its
+marks, and compresses it again when it ends. `CIG_JOURNAL_ZST=off` keeps
+finished journals plain.
+
+**The group sync, and the window it leaves.** The journal's write-ahead sync
+is per line, as always: an op's line is durable before the op runs. What
+changed is the flush of the before-state's own bytes. It is no longer one
+`fsync` of the object and one of its folder per op: the flushes are collected
+and done together, when 64 snapshots have been kept or 10 ms have passed since
+the first unflushed one (checked at the next op), and always before a process
+is run, before the run record is written, and when the journal closes. So after
+a power loss or an operating-system crash (a killed cig is not one: the
+kernel keeps what it was given), the last few ops, at most 64 and 10 ms of
+them, can have a durable journal line whose snapshot did not reach the disk.
+The unburn then refuses that op with `E703` (the snapshot is missing or does
+not hash to its name) instead of restoring wrong bytes; nothing is written
+over the file. `CIG_SNAPSHOT_SYNC=op` flushes every snapshot as it is kept,
+as before, for a machine where that window is not acceptable.
+
 ## Rollback
 
 Rollback replays the journal newest entry first. For each recorded before-state:

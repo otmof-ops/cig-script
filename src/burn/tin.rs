@@ -327,6 +327,116 @@ pub(crate) fn make_read_only(p: &Path) -> io::Result<()> {
     }
 }
 
+/// Group sync (#147). While a native snapshot is being kept, the object's
+/// data and its bucket are not flushed one by one: they are noted here and
+/// flushed together by `sync_deferred`, at most every `GROUP_OPS` snapshots
+/// or `GROUP_MS` milliseconds, and always before the run's record is
+/// written, before a process runs, and when the journal is dropped. The
+/// journal's own write-ahead sync stays per line (cig-script#153).
+pub const GROUP_OPS: usize = 64;
+pub const GROUP_MS: u64 = 10;
+
+thread_local! {
+    static DEFER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+struct Deferred {
+    files: Vec<PathBuf>,
+    dirs: Vec<PathBuf>,
+    ops: usize,
+    since: Option<std::time::Instant>,
+}
+
+static DEFERRED: std::sync::Mutex<Deferred> = std::sync::Mutex::new(Deferred {
+    files: Vec::new(),
+    dirs: Vec::new(),
+    ops: 0,
+    since: None,
+});
+
+/// `CIG_SNAPSHOT_SYNC=op` turns the group off: every snapshot is flushed
+/// as it is kept, as before 1.21.
+fn group_sync_wanted() -> bool {
+    std::env::var("CIG_SNAPSHOT_SYNC").as_deref() != Ok("op")
+}
+
+fn defer_file(p: &Path) {
+    if let Ok(mut d) = DEFERRED.lock() {
+        d.files.push(p.to_path_buf());
+    }
+}
+
+fn defer_dir(p: &Path) {
+    if let Ok(mut d) = DEFERRED.lock() {
+        if d.dirs.last().map(|l| l.as_path()) != Some(p) {
+            d.dirs.push(p.to_path_buf());
+        }
+    }
+}
+
+/// Flush now what the group holds: every deferred file, then every
+/// directory that learned a name. Safe to call with nothing held.
+pub fn sync_deferred() -> io::Result<()> {
+    let (mut files, mut dirs) = match DEFERRED.lock() {
+        Ok(mut d) => {
+            d.ops = 0;
+            d.since = None;
+            (std::mem::take(&mut d.files), std::mem::take(&mut d.dirs))
+        }
+        Err(_) => return Ok(()),
+    };
+    files.sort();
+    files.dedup();
+    dirs.sort();
+    dirs.dedup();
+    for f in &files {
+        match super::journal::sync_file(f) {
+            Ok(()) => {}
+            // Named away or collected since: nothing left to flush.
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+    }
+    for d in &dirs {
+        super::journal::sync_dir_pub(d)?;
+    }
+    Ok(())
+}
+
+/// Count one snapshot kept in the group and flush when the group is due.
+pub fn sync_deferred_if_due() -> io::Result<()> {
+    let due = match DEFERRED.lock() {
+        Ok(mut d) => {
+            if d.files.is_empty() && d.dirs.is_empty() {
+                false
+            } else {
+                d.ops += 1;
+                let since = *d.since.get_or_insert_with(std::time::Instant::now);
+                d.ops >= GROUP_OPS || since.elapsed() >= std::time::Duration::from_millis(GROUP_MS)
+            }
+        }
+        Err(_) => false,
+    };
+    if due {
+        sync_deferred()
+    } else {
+        Ok(())
+    }
+}
+
+/// Flush one object's data and name: now, or into the group.
+fn durable(file: &Path, bucket: &Path) -> io::Result<()> {
+    if DEFER.with(|d| d.get()) {
+        defer_file(file);
+        defer_dir(bucket);
+        Ok(())
+    } else {
+        super::journal::sync_file(file)?;
+        let _ = super::journal::sync_dir_pub(bucket);
+        Ok(())
+    }
+}
+
 /// Is the object already there, whole and hashing to its name?
 fn pressed_ok(object: &Path, len: u64, sha256: &str) -> bool {
     object.is_file()
@@ -348,14 +458,22 @@ fn press(tmp: &Path, object: &Path, len: u64, sha256: &str) -> io::Result<()> {
         return Ok(());
     }
     let done = (|| {
-        super::journal::sync_file(tmp)?;
+        let grouped = DEFER.with(|d| d.get());
+        if !grouped {
+            super::journal::sync_file(tmp)?;
+        }
         make_read_only(tmp)?;
         if object.exists() {
             lift_read_only(object);
             let _ = fs::remove_file(object);
         }
         fs::rename(tmp, object)?;
-        let _ = super::journal::sync_dir_pub(bucket);
+        if grouped {
+            // The data is flushed through its new name with the group.
+            durable(object, bucket)?;
+        } else {
+            let _ = super::journal::sync_dir_pub(bucket);
+        }
         Ok(())
     })();
     if done.is_err() {
@@ -1073,14 +1191,21 @@ impl Staged {
             if let Some(tmp) = &self.recipe_tmp {
                 let bucket = object.parent().expect("a recipe has a bucket");
                 fs::create_dir_all(bucket)?;
-                super::journal::sync_file(tmp)?;
+                let grouped = DEFER.with(|d| d.get());
+                if !grouped {
+                    super::journal::sync_file(tmp)?;
+                }
                 if object.exists() {
                     lift_read_only(&object);
                     let _ = fs::remove_file(&object);
                 }
                 fs::rename(tmp, &object)?;
                 let _ = make_read_only(&object);
-                let _ = super::journal::sync_dir_pub(bucket);
+                if grouped {
+                    durable(&object, bucket)?;
+                } else {
+                    let _ = super::journal::sync_dir_pub(bucket);
+                }
             }
         } else if let Some(tmp) = &self.tmp {
             press(tmp, &object, self.bytes, &self.sha256)?;
@@ -1118,6 +1243,24 @@ pub(crate) fn lift_read_only(p: &Path) {
 /// mode and modification time travel in the journal and are put back on
 /// restore. A symbolic link is kept as a link.
 pub fn stash(path: &Path) -> io::Result<Stashed> {
+    prepare(path)?.commit()
+}
+
+/// `stash` for a native op's before-state (#147): the bytes are kept in the
+/// tin, chunked and deduplicated like a hop's, and their flush joins the
+/// group (`sync_deferred`) instead of costing one of its own.
+pub fn stash_grouped(path: &Path) -> io::Result<Stashed> {
+    if !group_sync_wanted() {
+        return stash(path);
+    }
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            DEFER.with(|d| d.set(false));
+        }
+    }
+    DEFER.with(|d| d.set(true));
+    let _reset = Reset;
     prepare(path)?.commit()
 }
 

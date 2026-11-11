@@ -84,37 +84,47 @@ pub fn after_rollback(journal: &Journal, report: &RollbackReport) -> Option<Trip
             }
         }
     }
-    let was_there = |p: &Path| {
-        let p = whole(p);
-        first.iter().any(|(_, s)| {
-            whole(&s.path) == p
-                && matches!(
-                    s.before,
-                    Before::File { .. }
-                        | Before::Dir { .. }
-                        | Before::Directory { .. }
-                        | Before::Symlink { .. }
-                )
+    // Looked up by path, not found by walking every first before-state for
+    // every path (that walk was quadratic in the run's length).
+    let was_there_set: std::collections::HashSet<std::path::PathBuf> = first
+        .iter()
+        .filter(|(_, s)| {
+            matches!(
+                s.before,
+                Before::File { .. }
+                    | Before::Dir { .. }
+                    | Before::Directory { .. }
+                    | Before::Symlink { .. }
+            )
         })
-    };
+        .map(|(_, s)| whole(&s.path))
+        .collect();
+    let was_there = |p: &Path| was_there_set.contains(&whole(p));
+    let absent_first: std::collections::HashMap<
+        std::path::PathBuf,
+        (
+            &crate::burn::journal::Entry,
+            &crate::burn::journal::BeforeState,
+        ),
+    > = first
+        .iter()
+        .filter(|(_, s)| matches!(s.before, Before::Absent))
+        .map(|(e, s)| (whole(&s.path), (*e, *s)))
+        .collect();
+    let own_seq: std::collections::HashMap<std::path::PathBuf, u64> =
+        first.iter().map(|(e, s)| (whole(&s.path), e.seq)).collect();
     // A path under a folder that did not exist before the run is absent
     // after a full rollback, whatever a later entry recorded for the path
     // itself: the folder's own entry, the earliest to cover it, says so.
     let made_folder_over = |p: &Path| -> Option<&crate::burn::journal::Entry> {
         let p = whole(p);
-        first
-            .iter()
-            .filter(|(_, s)| {
-                let q = whole(&s.path);
-                q != p && p.starts_with(&q) && matches!(s.before, Before::Absent)
-            })
+        p.ancestors()
+            .skip(1)
+            .filter_map(|q| absent_first.get(q))
             .min_by_key(|(e, _)| e.seq)
             .filter(|(e, s)| {
                 // Only when nothing earlier recorded the path itself.
-                let own = first
-                    .iter()
-                    .find(|(_, t)| whole(&t.path) == p)
-                    .map(|(f, _)| f.seq);
+                let own = own_seq.get(&p).copied();
                 own.is_none_or(|seq| e.seq < seq) && !s.path.as_os_str().is_empty()
             })
             .map(|(e, _)| *e)

@@ -11,6 +11,21 @@ use std::path::{Path, PathBuf};
 /// Where CigScript keeps its state. `CIGSCRIPT_HOME` overrides the default
 /// of `~/.cigscript`.
 pub fn home_dir() -> PathBuf {
+    // A unit test that never named a home gets one of its own, so what the
+    // kernel keeps in the tin (native snapshots live there now) never lands
+    // in the developer's real one.
+    #[cfg(test)]
+    {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            if std::env::var_os("CIGSCRIPT_HOME").is_none() {
+                let dir =
+                    std::env::temp_dir().join(format!("cig-unit-home-{}", std::process::id()));
+                let _ = fs::create_dir_all(&dir);
+                std::env::set_var("CIGSCRIPT_HOME", dir);
+            }
+        });
+    }
     if let Some(p) = std::env::var_os("CIGSCRIPT_HOME") {
         return PathBuf::from(p);
     }
@@ -261,6 +276,8 @@ impl RunRecord {
     }
 
     pub fn save(&self) -> io::Result<()> {
+        // A record is never written ahead of the snapshots it stands for.
+        super::tin::sync_deferred()?;
         let dir = self.dir();
         fs::create_dir_all(&dir)?;
         let json = serde_json::to_string_pretty(self)

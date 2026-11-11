@@ -1194,8 +1194,8 @@ fn restore_from(dir: &Path, home: &Path, label: String) -> Result<Restored, Erro
         if !live.exists() {
             continue;
         }
-        let theirs = sha256_file(&dir.join("runs").join(id).join("journal.jsonl")).ok();
-        let mine = sha256_file(&live.join("journal.jsonl")).ok();
+        let theirs = super::pack::journal_digest(&dir.join("runs").join(id));
+        let mine = super::pack::journal_digest(&live);
         if theirs.is_some() && theirs == mine {
             same_runs.insert(id.clone());
         } else {

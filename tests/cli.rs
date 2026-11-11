@@ -100,6 +100,9 @@ impl Sandbox {
             .env("CIGSCRIPT_HOME", self.home())
             .env("NO_COLOR", "1")
             .env("CIG_SEAL_KEY", "file")
+            // The tests that read or edit a run's journal by hand read it
+            // plain; the ones about the compressed journal turn it back on.
+            .env("CIG_JOURNAL_ZST", "off")
             .env("CIG_BUDGET_SYNC", "1")
             // Every cig a test starts, and every background flush it spawns,
             // files into the sandbox's own tracker, never a real one.
@@ -148,6 +151,9 @@ impl Sandbox {
             .env("HOME", self.path())
             .env("NO_COLOR", "1")
             .env("CIG_SEAL_KEY", "file")
+            // The tests that read or edit a run's journal by hand read it
+            // plain; the ones about the compressed journal turn it back on.
+            .env("CIG_JOURNAL_ZST", "off")
             .env("CIG_BUDGET_SYNC", "1")
             // Every cig a test starts, and every background flush it spawns,
             // files into the sandbox's own tracker, never a real one.
@@ -166,6 +172,9 @@ impl Sandbox {
             .env("CIGSCRIPT_HOME", self.home())
             .env("NO_COLOR", "1")
             .env("CIG_SEAL_KEY", "file")
+            // The tests that read or edit a run's journal by hand read it
+            // plain; the ones about the compressed journal turn it back on.
+            .env("CIG_JOURNAL_ZST", "off")
             .env("CIG_BUDGET_SYNC", "1")
             // Every cig a test starts, and every background flush it spawns,
             // files into the sandbox's own tracker, never a real one.
@@ -191,6 +200,9 @@ impl Sandbox {
             .env("CIGSCRIPT_HOME", self.home())
             .env("NO_COLOR", "1")
             .env("CIG_SEAL_KEY", "file")
+            // The tests that read or edit a run's journal by hand read it
+            // plain; the ones about the compressed journal turn it back on.
+            .env("CIG_JOURNAL_ZST", "off")
             .env("CIG_BUDGET_SYNC", "1")
             // Every cig a test starts, and every background flush it spawns,
             // files into the sandbox's own tracker, never a real one.
@@ -868,11 +880,11 @@ fn unburn_checks_every_snapshot_before_touching_anything() {
     );
     sb.run_ok(&["run", "s.cig"]);
     let id = sb.runs()[0]["id"].as_str().unwrap().to_string();
-    let snaps = sb.home().join("runs").join(&id).join("snapshots");
+    // The before-states are tin objects now: lose the one that holds m2.txt's.
     let mut removed = 0;
-    for e in fs::read_dir(&snaps).unwrap().flatten() {
-        if e.file_name().to_string_lossy().contains("m2.txt") {
-            fs::remove_file(e.path()).unwrap();
+    for p in tin_objects(&sb) {
+        if fs::read(&p).unwrap() == b"old2" {
+            force_remove(&p);
             removed += 1;
         }
     }
@@ -7929,9 +7941,14 @@ fn verify_and_unburn_agree() {
             },
         ),
         ("a snapshot gone", Some("E703"), |sb, id, _| {
+            // Native before-states are tin objects; the run's own folder
+            // holds only what is sealed or a directory.
             let snaps = sb.home().join("runs").join(id).join("snapshots");
             for e in fs::read_dir(&snaps).unwrap().flatten() {
                 fs::remove_file(e.path()).unwrap();
+            }
+            for p in tin_objects(sb) {
+                force_remove(&p);
             }
         }),
     ];
@@ -9601,6 +9618,9 @@ fn a_key_handed_over_on_a_descriptor_seals_and_is_never_written() {
             .env("CIGSCRIPT_HOME", sb.home())
             .env("NO_COLOR", "1")
             .env("CIG_SEAL_KEY", "file")
+            // The tests that read or edit a run's journal by hand read it
+            // plain; the ones about the compressed journal turn it back on.
+            .env("CIG_JOURNAL_ZST", "off")
             .env("CIG_BUDGET_SYNC", "1")
             .env("CIG_INTERNAL_TRACKER_DIR", sb.path().join("tracker"))
             .env("CIG_UPDATE_MANIFEST", sb.path().join("no-releases.json"))
@@ -15326,6 +15346,9 @@ fn bench_bounded(sb: &Sandbox, args: &[&str], secs: u64) -> (Option<i32>, String
             .env("CIGSCRIPT_HOME", sb.home())
             .env("NO_COLOR", "1")
             .env("CIG_SEAL_KEY", "file")
+            // The tests that read or edit a run's journal by hand read it
+            // plain; the ones about the compressed journal turn it back on.
+            .env("CIG_JOURNAL_ZST", "off")
             .env("CIG_BUDGET_SYNC", "1")
             .env("CIG_INTERNAL_TRACKER_DIR", sb.path().join("tracker"))
             .env("CIG_UPDATE_MANIFEST", sb.path().join("no-releases.json"))
@@ -15668,6 +15691,9 @@ impl SharedParentSandbox {
             .env("CIGSCRIPT_HOME", self.home())
             .env("NO_COLOR", "1")
             .env("CIG_SEAL_KEY", "file")
+            // The tests that read or edit a run's journal by hand read it
+            // plain; the ones about the compressed journal turn it back on.
+            .env("CIG_JOURNAL_ZST", "off")
             .env("CIG_BUDGET_SYNC", "1")
             .env("CIG_INTERNAL_TRACKER_DIR", self.path().join("tracker"))
             .env("CIG_UPDATE_MANIFEST", self.path().join("no-releases.json"))
@@ -16403,4 +16429,492 @@ fn explain_layers_is_cigars_answer() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("needs cigar, which is not installed"), "{err}");
     assert!(err.contains("ciginstaller install stick cigar"), "{err}");
+}
+
+// ----- #147: the burn kernel's storage and sync ---------------------------------
+
+/// Every file under `dir`, by path relative to it, with its bytes.
+#[cfg(unix)]
+fn tree_of(dir: &Path) -> std::collections::BTreeMap<String, Vec<u8>> {
+    fn walk(root: &Path, at: &Path, out: &mut std::collections::BTreeMap<String, Vec<u8>>) {
+        let Ok(rd) = fs::read_dir(at) else { return };
+        for e in rd.flatten() {
+            let p = e.path();
+            let rel = p.strip_prefix(root).unwrap().to_string_lossy().to_string();
+            let ft = e.file_type().unwrap();
+            if ft.is_dir() {
+                out.insert(format!("{rel}/"), Vec::new());
+                walk(root, &p, out);
+            } else {
+                out.insert(rel, fs::read(&p).unwrap_or_default());
+            }
+        }
+    }
+    let mut out = std::collections::BTreeMap::new();
+    walk(dir, dir, &mut out);
+    out
+}
+
+/// `cig`, with the environment given, under a hard wall-clock limit: a
+/// child that hangs is killed and the test fails instead of waiting.
+#[cfg(unix)]
+fn cig_timed(sb: &Sandbox, args: &[&str], envs: &[(&str, &str)]) -> Output {
+    use std::process::Stdio;
+    use std::time::Duration;
+    use wait_timeout::ChildExt;
+    let mut child = Command::new(cig_bin())
+        .args(args)
+        .current_dir(sb.path())
+        .env("CIGSCRIPT_HOME", sb.home())
+        .env("NO_COLOR", "1")
+        .env("CIG_SEAL_KEY", "file")
+        .env("CIG_JOURNAL_ZST", "off")
+        .env("CIG_BUDGET_SYNC", "1")
+        .env("CIG_INTERNAL_TRACKER_DIR", sb.path().join("tracker"))
+        .env("CIG_UPDATE_MANIFEST", sb.path().join("no-releases.json"))
+        .env_remove("CI")
+        .envs(envs.iter().copied())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn cig");
+    match child.wait_timeout(Duration::from_secs(120)).unwrap() {
+        Some(_) => child.wait_with_output().unwrap(),
+        None => {
+            let _ = child.kill();
+            panic!("cig {args:?} did not finish in 120 s");
+        }
+    }
+}
+
+/// Remove a tin object: they are kept read-only.
+fn force_remove(p: &Path) {
+    let mut perms = fs::metadata(p).unwrap().permissions();
+    #[cfg(unix)]
+    std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o644);
+    #[cfg(not(unix))]
+    #[allow(clippy::permissions_set_readonly_false)]
+    perms.set_readonly(false);
+    fs::set_permissions(p, perms).unwrap();
+    fs::remove_file(p).unwrap();
+}
+
+/// The files a sandbox's `tin/objects` holds (named objects, no temporaries).
+fn tin_objects(sb: &Sandbox) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let root = sb.home().join("tin").join("objects");
+    if let Ok(buckets) = fs::read_dir(&root) {
+        for b in buckets.flatten() {
+            if let Ok(files) = fs::read_dir(b.path()) {
+                for f in files.flatten() {
+                    if !f.file_name().to_string_lossy().starts_with('.') {
+                        out.push(f.path());
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Deterministic pseudo-random text of about `n` bytes, one seed per file.
+#[cfg(unix)]
+fn noise_text(seed: u64, n: usize) -> String {
+    let mut x = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+    let mut s = String::with_capacity(n + 16);
+    while s.len() < n {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        s.push_str(&format!("{x:016x}"));
+    }
+    s.truncate(n);
+    s
+}
+
+#[cfg(unix)]
+#[test]
+fn native_snapshots_dedupe_in_the_tin() {
+    let sb = Sandbox::new();
+    let first = noise_text(1, 300_000);
+    let second = noise_text(2, 300_000);
+    sb.write("w/big.txt", &first);
+    sb.write("src.txt", &second);
+    // The same bytes written over the file fifty times: the first
+    // before-state is `first`, the other forty-nine are `second`.
+    sb.write(
+        "s.cig",
+        "stick body = fs.read_text(\"src.txt\")\nburn {\n  for i in 0..50 {\n    fs.write_text(\"w/big.txt\", body)\n  }\n}\n",
+    );
+    let out = cig_timed(&sb, &["run", "s.cig"], &[]);
+    assert!(out.status.success(), "{out:?}");
+    let id = sb.runs()[0]["id"].as_str().unwrap().to_string();
+    // Nothing went into the run's own snapshots folder: the tin holds it.
+    let snaps: Vec<_> = fs::read_dir(sb.home().join("runs").join(&id).join("snapshots"))
+        .unwrap()
+        .flatten()
+        .collect();
+    assert!(snaps.is_empty(), "{snaps:?}");
+    // 300 KB cuts into a handful of 16-256 KiB chunks. Fifty whole copies
+    // would be fifty-odd objects; two states, chunked, are a few.
+    let objects = tin_objects(&sb);
+    assert!(
+        objects.len() <= 16,
+        "{} objects for two distinct states: {objects:?}",
+        objects.len()
+    );
+    // And the before-state is the tin's: every entry names a tin path.
+    let journal = fs::read_to_string(journal_path(&sb, &id)).unwrap();
+    assert!(journal.contains("/tin/"), "{journal}");
+    let out = cig_timed(&sb, &["unburn", &id], &[]);
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(sb.read("w/big.txt"), first);
+}
+
+/// Put a run's tin-backed whole-file snapshots back where cig 1.15 kept
+/// them, in the run's `snapshots/` folder, and re-chain the journal.
+#[cfg(unix)]
+fn age_the_run_to_1_15(sb: &Sandbox, id: &str) {
+    let run = sb.home().join("runs").join(id);
+    let text = fs::read_to_string(run.join("journal.jsonl")).unwrap();
+    let mut out: Vec<String> = Vec::new();
+    for (n, line) in text.lines().enumerate() {
+        let mut v: serde_json::Value = serde_json::from_str(line).unwrap();
+        if let Some(before) = v.get_mut("before").and_then(|b| b.as_array_mut()) {
+            for b in before {
+                let Some(snap) = b
+                    .get("snapshot")
+                    .and_then(|s| s.as_str())
+                    .map(PathBuf::from)
+                else {
+                    continue;
+                };
+                if !snap.starts_with(sb.home().join("tin")) {
+                    continue;
+                }
+                let name = format!("{n:05}-1-{}", snap.file_name().unwrap().to_string_lossy());
+                let to = run.join("snapshots").join(name);
+                fs::copy(&snap, &to).unwrap();
+                b["snapshot"] = serde_json::Value::String(to.to_string_lossy().to_string());
+                b.as_object_mut().unwrap().remove("mode");
+            }
+        }
+        out.push(serde_json::to_string(&v).unwrap());
+    }
+    let (chained, head) = cigscript::burn::journal::rechain(&(out.join("\n") + "\n"), None);
+    fs::write(run.join("journal.jsonl"), chained).unwrap();
+    let rp = run.join("run.json");
+    let mut rec: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&rp).unwrap()).unwrap();
+    rec["journal_head"] = serde_json::Value::String(head);
+    fs::write(&rp, serde_json::to_string_pretty(&rec).unwrap()).unwrap();
+    // The tin is gone: only the run's own folder can restore it now.
+    fs::remove_dir_all(sb.home().join("tin")).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn old_snapshot_folders_still_unburn() {
+    let sb = Sandbox::new();
+    sb.run_ok(&["config", "journal_sign", "off"]);
+    sb.write("w/a.txt", "one\n");
+    sb.write("w/b.txt", &noise_text(7, 40_000));
+    let before = tree_of(&sb.path().join("w"));
+    sb.write(
+        "s.cig",
+        "burn {\n  fs.write_text(\"w/a.txt\", \"two\")\n  fs.write_text(\"w/b.txt\", \"x\")\n  fs.write_text(\"w/c.txt\", \"new\")\n  fs.rm(\"w/a.txt\")\n}\n",
+    );
+    let out = cig_timed(&sb, &["run", "s.cig"], &[]);
+    assert!(out.status.success(), "{out:?}");
+    let id = sb.runs()[0]["id"].as_str().unwrap().to_string();
+    age_the_run_to_1_15(&sb, &id);
+    let out = cig_timed(&sb, &["unburn", &id], &[]);
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(tree_of(&sb.path().join("w")), before);
+}
+
+#[cfg(unix)]
+#[test]
+fn compressed_journals_verify() {
+    let sb = Sandbox::new();
+    sb.write("w/a.txt", "one\n");
+    sb.write(
+        "s.cig",
+        "burn {\n  fs.write_text(\"w/a.txt\", \"two\")\n  fs.write_text(\"w/b.txt\", \"new\")\n  fs.append_text(\"w/a.txt\", \"more\")\n}\n",
+    );
+    let on = [("CIG_JOURNAL_ZST", "on")];
+    let out = cig_timed(&sb, &["run", "s.cig"], &on);
+    assert!(out.status.success(), "{out:?}");
+    let id = sb.runs()[0]["id"].as_str().unwrap().to_string();
+    let run = sb.home().join("runs").join(&id);
+    assert!(run.join("journal.jsonl.zst").is_file());
+    assert!(!run.join("journal.jsonl").exists());
+    // The chain is judged through the stream.
+    let out = cig_timed(&sb, &["--json", "runs", &id, "--verify"], &on);
+    assert!(out.status.success(), "{out:?}");
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(
+        v["verify"]["head"].as_str().is_some_and(|h| !h.is_empty()),
+        "{v}"
+    );
+    // Bytes per op once finished: far under what a plain line costs.
+    let packed = fs::metadata(run.join("journal.jsonl.zst")).unwrap().len();
+    let plain = zstd::stream::decode_all(fs::File::open(run.join("journal.jsonl.zst")).unwrap())
+        .unwrap()
+        .len() as u64;
+    assert!(packed < plain, "{packed} !< {plain}");
+    // A line edited inside the stream is caught like one in a plain file.
+    let text = String::from_utf8(
+        zstd::stream::decode_all(fs::File::open(run.join("journal.jsonl.zst")).unwrap()).unwrap(),
+    )
+    .unwrap();
+    let edited = text.replacen("w/b.txt", "w/c.txt", 1);
+    assert_ne!(edited, text);
+    fs::write(
+        run.join("journal.jsonl.zst"),
+        zstd::bulk::compress(edited.as_bytes(), 3).unwrap(),
+    )
+    .unwrap();
+    let out = cig_timed(&sb, &["runs", &id, "--verify"], &on);
+    assert!(!out.status.success(), "{out:?}");
+    // Put it right again, and the unburn reads it, appends its marks, and
+    // leaves the journal compressed.
+    fs::write(
+        run.join("journal.jsonl.zst"),
+        zstd::bulk::compress(text.as_bytes(), 3).unwrap(),
+    )
+    .unwrap();
+    let out = cig_timed(&sb, &["unburn", &id], &on);
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(sb.read("w/a.txt"), "one\n");
+    assert!(run.join("journal.jsonl.zst").is_file());
+    assert!(!run.join("journal.jsonl").exists());
+    let out = cig_timed(&sb, &["runs", &id, "--verify"], &on);
+    assert!(out.status.success(), "{out:?}");
+}
+
+/// The script for `kill_at_every_op_rolls_back_exactly`: `ops` journaled
+/// ops of five kinds over a small tree, one of them on a chunked file.
+#[cfg(unix)]
+fn kill_script(ops: usize) -> String {
+    let mut s = String::from("burn {\n");
+    for i in 0..ops {
+        match i % 5 {
+            0 => s.push_str(&format!(
+                "  fs.write_text(\"w/f{}.txt\", \"v{i}\")\n",
+                i % 3
+            )),
+            1 => s.push_str(&format!("  fs.write_text(\"w/new{i}.txt\", \"n{i}\")\n")),
+            2 => s.push_str(&format!("  fs.append_text(\"w/f1.txt\", \"+{i}\")\n")),
+            3 => s.push_str(&format!("  fs.rm(\"w/new{}.txt\")\n", i - 2)),
+            _ => s.push_str(&format!(
+                "  fs.write_text(\"w/big.bin\", \"{}\".repeat(70000))\n",
+                (b'a' + (i % 20) as u8) as char
+            )),
+        }
+    }
+    s.push_str("}\n");
+    s
+}
+
+#[cfg(unix)]
+#[test]
+fn kill_at_every_op_rolls_back_exactly() {
+    // 1,000 on the VM and in the nightly (CIG_KILL_OPS=1000); a short burn
+    // by default, so the whole suite stays quick.
+    let ops: usize = std::env::var("CIG_KILL_OPS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(25);
+    let script = kill_script(ops);
+    for phase in ["journaled", "done"] {
+        for k in 1..=ops {
+            let sb = Sandbox::new();
+            sb.write("w/f0.txt", "zero\n");
+            sb.write("w/f1.txt", "one\n");
+            sb.write("w/f2.txt", "two\n");
+            sb.write("w/big.bin", &noise_text(3, 180_000));
+            sb.write("s.cig", &script);
+            let before = tree_of(&sb.path().join("w"));
+            let at = format!("{k}:{phase}");
+            let out = cig_timed(&sb, &["run", "s.cig"], &[("CIG_INTERNAL_KILL", &at)]);
+            let finished = out.status.success();
+            // `N:done` on the last op never fires (the script has ended).
+            assert!(
+                !finished || (phase == "done" && k == ops),
+                "kill at {at} did not kill: {out:?}"
+            );
+            let runs = sb.runs();
+            let id = runs[0]["id"].as_str().unwrap().to_string();
+            let out = cig_timed(&sb, &["unburn", &id], &[]);
+            assert!(out.status.success(), "unburn after kill at {at}: {out:?}");
+            assert_eq!(
+                tree_of(&sb.path().join("w")),
+                before,
+                "the tree differs after a kill at {at}"
+            );
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn parallel_unburn_keeps_per_path_order() {
+    // Many ops on one path, interleaved with ops on others: the restore of
+    // each path runs newest first, so the oldest before-state lands last.
+    // (Parallel unburn itself is not built, cig-script#147; this is the
+    // order any restore must keep.)
+    let sb = Sandbox::new();
+    sb.write("w/hot.txt", "origin\n");
+    sb.write("w/cold.txt", "cold\n");
+    let mut s = String::from("burn {\n");
+    for i in 0..60 {
+        s.push_str(&format!("  fs.write_text(\"w/hot.txt\", \"hot {i}\")\n"));
+        s.push_str(&format!("  fs.append_text(\"w/hot.txt\", \" tail {i}\")\n"));
+        if i % 7 == 0 {
+            s.push_str(&format!("  fs.write_text(\"w/cold.txt\", \"cold {i}\")\n"));
+        }
+        s.push_str(&format!("  fs.write_text(\"w/other{i}.txt\", \"o\")\n"));
+    }
+    s.push_str("}\n");
+    sb.write("s.cig", &s);
+    let before = tree_of(&sb.path().join("w"));
+    let out = cig_timed(&sb, &["run", "s.cig"], &[]);
+    assert!(out.status.success(), "{out:?}");
+    let id = sb.runs()[0]["id"].as_str().unwrap().to_string();
+    let out = cig_timed(&sb, &["unburn", &id], &[]);
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(tree_of(&sb.path().join("w")), before);
+    assert_eq!(sb.read("w/hot.txt"), "origin\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn the_stress_test_rolls_back_bit_for_bit() {
+    // Runs of mixed native ops over a tree of small, medium and chunked
+    // files, then every run unburned newest first: the tree must be the one
+    // it started as, byte for byte. 300 runs in the nightly and on the VM
+    // (CIG_STRESS_RUNS=300); fewer by default.
+    let runs: usize = std::env::var("CIG_STRESS_RUNS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(30);
+    let sb = Sandbox::new();
+    let sizes = [
+        0usize, 1, 700, 1500, 9000, 15_999, 16_000, 40_000, 70_000, 150_000,
+    ];
+    for f in 0..30 {
+        sb.write(
+            &format!("w/d{}/f{f}.txt", f % 3),
+            &noise_text(f as u64 + 10, sizes[f % sizes.len()]),
+        );
+    }
+    let before = tree_of(&sb.path().join("w"));
+    let mut rng = 0x2545_F491_4F6C_DD1Du64;
+    let mut next = |n: usize| {
+        rng ^= rng << 13;
+        rng ^= rng >> 7;
+        rng ^= rng << 17;
+        (rng % n as u64) as usize
+    };
+    let mut ids: Vec<String> = Vec::new();
+    for r in 0..runs {
+        let mut s = String::from("burn {\n");
+        for i in 0..40 {
+            let f = next(30);
+            let path = format!("w/d{}/f{f}.txt", f % 3);
+            match next(6) {
+                0 | 1 => s.push_str(&format!(
+                    "  fs.write_text(\"{path}\", \"{}\")\n",
+                    noise_text((r * 100 + i) as u64, sizes[next(sizes.len())].min(80_000))
+                )),
+                2 => s.push_str(&format!("  fs.append_text(\"{path}\", \"+{r}.{i}\")\n")),
+                3 => s.push_str(&format!(
+                    "  fs.write_text(\"w/new/r{r}-{i}.txt\", \"{}\")\n",
+                    noise_text(i as u64, 300)
+                )),
+                4 => s.push_str(&format!(
+                    "  fs.cp(\"{path}\", \"w/d{}/copy{r}-{i}.txt\")\n",
+                    next(3)
+                )),
+                _ => s.push_str(&format!("  fs.rm(\"{path}\")\n")),
+            }
+        }
+        s.push_str("}\n");
+        sb.write("s.cig", &s);
+        let out = cig_timed(&sb, &["run", "s.cig"], &[]);
+        // A removed file may be named again by a later op in the same run:
+        // that run fails and rolls itself back; either way the tree holds.
+        let runs_now = sb.runs();
+        assert!(
+            !runs_now.is_empty(),
+            "run {r} left no record: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let id = runs_now[0]["id"].as_str().unwrap().to_string();
+        // A run that failed rolled itself back: nothing left to unburn.
+        if out.status.success() && !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
+    for id in ids.iter().rev() {
+        let out = cig_timed(&sb, &["unburn", id], &[]);
+        assert!(out.status.success(), "unburn {id}: {out:?}");
+    }
+    // Directories the runs made (w/new) go with their files.
+    assert_eq!(tree_of(&sb.path().join("w")), before);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_missing_or_short_snapshot_is_refused_with_e703_never_restored_wrong() {
+    for damage in ["missing", "short"] {
+        let sb = Sandbox::new();
+        sb.write("w/a.txt", "the original bytes\n");
+        sb.write(
+            "s.cig",
+            "burn {\n  fs.write_text(\"w/a.txt\", \"changed\")\n}\n",
+        );
+        let out = cig_timed(&sb, &["run", "s.cig"], &[]);
+        assert!(out.status.success(), "{out:?}");
+        let id = sb.runs()[0]["id"].as_str().unwrap().to_string();
+        let objects = tin_objects(&sb);
+        assert_eq!(objects.len(), 1, "{objects:?}");
+        let object = &objects[0];
+        let mut perms = fs::metadata(object).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o644);
+        fs::set_permissions(object, perms).unwrap();
+        if damage == "missing" {
+            fs::remove_file(object).unwrap();
+        } else {
+            fs::write(object, "the orig").unwrap();
+        }
+        let out = cig_timed(&sb, &["unburn", &id], &[]);
+        assert!(!out.status.success(), "{damage}: {out:?}");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.contains("E703"), "{damage}: {err}");
+        // Nothing was put back wrong: the file is what the run left.
+        assert_eq!(sb.read("w/a.txt"), "changed", "{damage}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn snapshot_sync_op_still_works() {
+    let sb = Sandbox::new();
+    sb.write("w/a.txt", "one\n");
+    sb.write("w/big.bin", &noise_text(5, 200_000));
+    let before = tree_of(&sb.path().join("w"));
+    sb.write(
+        "s.cig",
+        "burn {\n  fs.write_text(\"w/a.txt\", \"two\")\n  fs.write_text(\"w/big.bin\", \"x\")\n  fs.rm(\"w/a.txt\")\n}\n",
+    );
+    let op = [("CIG_SNAPSHOT_SYNC", "op")];
+    let out = cig_timed(&sb, &["run", "s.cig"], &op);
+    assert!(out.status.success(), "{out:?}");
+    let id = sb.runs()[0]["id"].as_str().unwrap().to_string();
+    let out = cig_timed(&sb, &["unburn", &id], &op);
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(tree_of(&sb.path().join("w")), before);
 }

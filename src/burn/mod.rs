@@ -17,6 +17,7 @@ pub mod journal;
 pub mod ledger;
 pub mod lock;
 pub mod overlay;
+pub mod pack;
 pub mod parcel;
 pub mod passkeep;
 pub mod protocol;
@@ -2550,12 +2551,19 @@ impl Kernel {
         if !op.reversible() {
             self.irreversible += 1;
         }
+        // Test hook (`kill_at_every_op_rolls_back_exactly`): the process dies
+        // by SIGKILL, like a `kill -9`, at op N's journal line (`N:journaled`:
+        // the line is durable and the op has not run) or just before op N+1
+        // is looked at (`N:done`: ops 1..N ran whole).
+        kill_hook(self.executed, "done");
         self.executed += 1;
+        let executed = self.executed;
         self.journal.record_with(self.seq, op, None, false).map_err(|e| {
             burn_error(format!("could not journal the burn: {e}"))
                 .code("E702")
                 .with_hint("free space or fix permissions under ~/.cigscript (CIGSCRIPT_HOME), then run again; nothing was changed")
         })?;
+        kill_hook(executed, "journaled");
         if self.executed == 2 && std::env::var("CIG_INTERNAL_PANIC").as_deref() == Ok("after-burn")
         {
             // Test hook for the crash reporter: the process dies with a burn
@@ -2601,4 +2609,19 @@ impl Kernel {
     pub fn dry_run_plan(&self) -> impl Iterator<Item = &PlannedOp> {
         self.planned.iter().filter(|p| p.class == BurnClass::Burn)
     }
+}
+
+/// The kill hook's check: `CIG_INTERNAL_KILL=<n>:<journaled|done>`.
+fn kill_hook(n: usize, phase: &str) {
+    #[cfg(unix)]
+    if let Ok(v) = std::env::var("CIG_INTERNAL_KILL") {
+        if v == format!("{n}:{phase}") {
+            // SAFETY: raise(SIGKILL) ends this process; nothing runs after it.
+            unsafe {
+                libc::raise(libc::SIGKILL);
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (n, phase);
 }

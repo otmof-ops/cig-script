@@ -88,6 +88,7 @@ fn take_one(
     let inbox_home = inbox.join("home");
     let real_home = super::runs::home_dir();
     let real_home = std::path::absolute(&real_home).unwrap_or(real_home);
+    super::pack::ensure_plain(dir).map_err(|e| e.to_string())?;
     let journal_path = dir.join("journal.jsonl");
     if journal_path.is_file() {
         let text = fs::read_to_string(&journal_path).map_err(|e| e.to_string())?;
@@ -126,6 +127,7 @@ fn take_one(
     }
     reseal_snapshots(&dest.join("snapshots"), from_key)?;
     // Under this machine's key now, like any run recorded here.
+    super::pack::ensure_plain(&dest).map_err(|e| e.to_string())?;
     let head = if dest.join("journal.jsonl").is_file() {
         journal::resign_in_place(&dest).map_err(|e| e.to_string())?
     } else {

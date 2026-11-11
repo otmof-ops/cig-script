@@ -455,7 +455,7 @@ fn show(ctx: &Ctx, id: &str, all: &[RunRecord], verify: bool) -> i32 {
     // said nothing and exited 0 for one.
     if verify {
         if let Err(e) = &loaded {
-            if rec.dir().join("journal.jsonl").exists() {
+            if crate::burn::pack::journal_exists(&rec.dir()) {
                 eprintln!(
                     "{} the journal of {} cannot be read: {e}",
                     ctx.red("error[E760 burn]:"),
@@ -2581,6 +2581,8 @@ pub fn unburn(ctx: &Ctx, id: &str, dry_run: bool, force: bool, accept_unsigned: 
     trips.extend(crate::tripwire::after_rollback(&journal, &report));
     trips.extend(crate::tripwire::tin_sample(&journal));
     super::run::settle_trips(ctx, trips, &rec, &journal);
+    drop(journal);
+    crate::burn::pack::settle(&rec.dir());
     if report.clean() {
         exit::OK
     } else {
