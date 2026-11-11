@@ -5,14 +5,16 @@ cases in `bench/bench.toml`; `cig bench` reads that manifest, checks each
 case's output first, samples it in batches, and reports median, p10 to
 p90, CV and peak resident set in one of three formats.
 
-This page covers steps 1 to 3 and 5 of the issue (#179): the manifest, the
+This page covers steps 1 to 7 of the issue (#179): the manifest, the
 harness, `--json` and `--markdown`; `--save` and `--against` (A and B
-interleaved, with a significance test); `--watch`; and cig's own suite with
-the kernel measures (what a burn leaves on disk, how often it syncs). Later
-steps bring the debugging flags (`--timings`, `--stats`, `--syscalls`,
-`--profile`), the family runner (`--family`, `--with`, `--matrix`) and the
-reusable CI workflow. A manifest written with fields reserved for those steps still
-parses today: the reserved keys are accepted and ignored for now.
+interleaved, with a significance test); `--watch`; cig's own suite with
+the kernel measures (what a burn leaves on disk, how often it syncs); the
+debugging flags `--timings`, `--stats` and `--syscalls` with the timings line
+format; the family runner (`--family`, `--with`, `--matrix`); and the reusable
+CI workflow with `cig bench history`. `--profile` and `--diff` (step 8) come
+later. A manifest written with fields reserved for later steps still parses
+today: the reserved keys are accepted and ignored for now. The manifest's
+`format` is still 1; step 4 to 7 added no manifest key.
 
 ## The manifest
 
@@ -158,7 +160,7 @@ cig bench --watch                   # rerun when a watched file changes
   build).
 
 A comparison that finds a regression still exits `0`: the verdict is in
-the report. Failing a build on one is the gate, which comes with step 6.
+the report. Failing a build on one is the `gate` key, which is not built yet.
 
 ### Example
 
@@ -409,15 +411,227 @@ from a file or a pipe no key is read, and the end of that input does not
 end the watch: it runs until it is killed, or its stdout closes.
 `--save` does not combine with `--watch`.
 
+## Where the time went: `--timings`, `--stats` and `--syscalls`
+
+Each flag takes **one extra run** of the case after its samples, never timed,
+so asking does not change a case's numbers. They describe one build: they do
+not combine with `--against` or `--watch`. All of it is reported, never gated
+(#153).
+
+```
+$ cig bench --timings
+timings: hello (one extra run, 94.4 ms; the case's median is 119.3 ms)
+  phase                                ms    wall
+  start                              6.76    7.2%
+  lower                              0.10    0.1%
+  check                              0.66    0.7%
+  begin                             41.48   43.9%
+  run                                0.05    0.0%
+  burn                              38.27   40.5%
+  retain                             0.07    0.1%
+  other                              7.06    7.5%
+  wall                              94.44  100.0%
+```
+
+(A debug build on a cold scratch home: the real numbers are yours to read.)
+
+### The timings line format, version 1
+
+A product writes its phases to the descriptor named by the environment
+variable `CIG_TIMINGS_FD`, one JSON object per line:
+
+```
+{"v":1,"product":"cig","phase":"check","ms":0.412}
+```
+
+| key | meaning |
+|---|---|
+| `v` | the format's version, `1`. A reader refuses a line whose `v` it does not know and says so; it never guesses |
+| `product` | who wrote it: `cig`, `cigo`, `cigcompile`, ... |
+| `phase` | a short name: lower-case letters, digits and `-` |
+| `ms` | milliseconds the phase took, a number |
+
+Rules, so that `cig`, `cigo` (cig-orchestrator#112) and `cigcompile`
+(cig-compile#68) write the same thing:
+
+- **Phases are flat and in the order they ended.** One line when a phase
+  ends. A phase written twice by the same product is one phase, the times
+  added. A phase that contains another is not allowed: the harness adds the
+  lines up, and a sum over the run's wall time by more than 5% is flagged
+  (`overlap`).
+- **What is not written is `other`.** The harness takes the run's wall time,
+  adds the phases, and shows the rest as `other`, so the breakdown always adds
+  up to the wall time. Process start-up and exit are in it. A product that
+  wants `other` small writes a `start` phase from the first instruction of
+  `main`.
+- **A reader ignores keys it does not know** (a later version 1 line may carry
+  more) and every line it cannot read is listed as `unread`.
+- **Write one line with one `write`.** A line is far under `PIPE_BUF`, so lines
+  from processes that share the descriptor never mix.
+- **Do not pass the variable on.** A product removes `CIG_TIMINGS_FD` and
+  `CIG_STATS_FD` from its own environment once read (cig does), so a child
+  process does not write the same phases a second time inside the parent's.
+- **A descriptor below 3, or one that is not open, is ignored**, never an
+  error: a stale variable must not break a run.
+- **Counters** go to `CIG_STATS_FD` (the same descriptor may be named by
+  both): `{"v":1,"product":"cig","counter":"allocs","value":3934}`; a counter
+  the product cannot give is `{"v":1,"product":"cig","counter":"allocs","unavailable":"built without the bench-stats feature"}`.
+- **Unix only.** A descriptor cannot be handed over the same way on Windows,
+  so `--timings` and `--stats` say `not measured` there. The harness hands
+  descriptor 9 (3 is the seal key's, `--seal-key-fd 3`).
+
+cig writes these phases when `cig run --timings[=FD]` is asked or the variable
+is set:
+
+| phase | what it covers |
+|---|---|
+| `start` | from the first instruction of `main` to the start of the run: arguments, configuration, reading the script |
+| `lower` | parsing the source into the program |
+| `check` | the static check (not written with `--no-check`) |
+| `begin` | the trial's plan comparison, the run's record and the kernel |
+| `run` | the interpreter, the script itself |
+| `burn` | what a run leaves behind once the program has ended: rollback, the record, the journal's head, the ledger, the report |
+| `retain` | `keep_runs`, `keep_days` and the history budget |
+
+`--timings` with no `=FD` and no variable writes the lines to stderr; `=FD`
+names a descriptor handed over as `9>file`. With neither the flag nor the
+variable cig reads no clock and writes nothing.
+
+### `--stats`: allocations
+
+`cig bench --stats` shows each case's counters. cig counts allocations and
+bytes through a counting allocator that wraps the one the platform uses
+(mimalloc on musl); it is behind the `bench-stats` cargo feature and **off in
+release builds**:
+
+```
+cargo build --features bench-stats
+```
+
+A cig built without it writes the `unavailable` line, and the harness shows
+`not measured: built without the bench-stats feature`; `cig run --stats` says
+the same on stderr. The counters are `allocs`, `alloc_bytes` and `frees`,
+since the process started.
+
+### `--syscalls`: where the system calls went
+
+One extra run goes under `strace -f -c`, the same way `fsyncs-per-op` counts
+syncs (one shared code path). The report is the total, and the top ten by
+time with their calls. **It flags an mmap/munmap thrash** (#153): at least 100
+mmap/munmap pairs and more than 1,000 a second of the case's own median wall
+time, in the report as `FLAG` and in `--json` as `thrash`. Linux with `strace`
+only; elsewhere, or where `ptrace` is forbidden, it is `not measured` and the
+reason is printed.
+
+In `--json` a case carries `debug.timings`, `debug.stats` and
+`debug.syscalls` (`measured`, and the numbers or the `note`).
+
+## The family: `--family`, `--with` and `--matrix`
+
+```
+cig bench --family                                     every product's suite
+cig bench --family --with cig@1.16.0                   cig swapped under the others
+cig bench --family --with cigo@./old/cigo              cigo swapped
+cig bench --family --matrix cig=1.16.0,1.18.0          one column per cig
+cig bench --family --product cigo=~/cig-orchestrator   where a checkout is
+```
+
+**Finding the products** (cig, cigo, cigcompile, cigar, ciginstaller), for each
+in turn:
+
+1. `--product NAME=PATH`: a checkout, its `bench` folder or a manifest;
+2. `[products]` in `~/.config/cigscript/bench-family.toml` (or under
+   `$XDG_CONFIG_HOME`), the same paths: `[products]` then `cigo = "~/cig-orchestrator"`;
+3. the installer's layout: `NAME` on the `PATH` as `<prefix>/bin/NAME` and its
+   suite in `<prefix>/share/NAME/bench/bench.toml`.
+
+A product not found is named and skipped; none at all is a usage error. A
+`--product` name outside the five is a product like any other. A manifest
+whose `[bench].product` is not the name it was found under is refused.
+
+**A product's binary** is its manifest's `[bench].binary` (in a family run,
+relative to the checkout's root, the folder above `bench/`), else the installed
+one on the `PATH` (for cig, the running cig).
+
+**Swapping.** Every product's binary is put, under its own name, in a folder
+that goes **first on the `PATH` of every command** a suite runs. cigo's suite,
+which runs `cig`, finds the cig the family names or the one `--with` swapped
+in; with `--with cig@1.16.0` the cig suite measures 1.16.0 and cigo's runs on
+it. A command written by absolute path is not swapped. `--with cig@1.16.0` is
+fetched like `--against v1.16.0` (sha256 checked before anything runs); only
+cig releases can be fetched, so any other product takes a path. A value that
+is neither a file nor (for cig) a release is refused, naming it.
+
+**`--matrix PRODUCT=V1,V2,...`** runs every product's suite once per value,
+each with that value swapped in, and prints one table per product with a
+column per value and the last over the first:
+
+```
+== cigo (median ms, cig = ...)
+case                                   1.16.0         1.18.0 last/first
+hook, benign command                      5.1            4.8     x0.94
+```
+
+A case that is `WRONG` under one value shows `WRONG` in its column and fails
+the run (a correct answer is gated; a time is not). `--family` does not
+combine with `--save`, `--against` or `--watch`. `--timings`, `--stats` and
+`--syscalls` apply to every case in it.
+
+## The reusable workflow and `cig bench history`
+
+`.github/workflows/bench.yml` is a `workflow_call` workflow every repository
+with a `bench/bench.toml` calls:
+
+```yaml
+jobs:
+  bench:
+    uses: otmof-ops/cig-script/.github/workflows/bench.yml@main
+    with:
+      cig-version: "1.20.0"     # empty builds cig from the calling repository
+    permissions: { contents: write, pull-requests: write }
+```
+
+- **On a pull request** it runs the fast groups (`fast-groups`, default
+  `start-up compute`) A/B against the base branch on the same runner,
+  interleaved, and comments the Markdown table. Heavy suites do not run there.
+- **Nightly** (a `schedule` or a manual run of the caller) it runs the whole
+  suite and appends one JSON line to `history/<product>.jsonl` on the
+  `bench-history` branch.
+- **What fails it** is a case whose output is `WRONG` (exit 1), or a suite that
+  cannot be read or built (exit 3). A timing never fails it: timings are
+  reported, never gated, on shared runners (#153).
+- The cig it measures with is a release, its sha256 checked before it runs.
+
+The history line, format 1:
+
+```
+{"format":1,"at":"2026-11-11T02:00:00Z","commit":"1a2b3c...","product":"cig",
+ "cig_version":"1.20.0","machine":"CPU, 4 cores, linux 6.8",
+ "cases":{"hello":{"group":"start-up","median_ms":3.4,"p10_ms":3.3,"p90_ms":3.6,"cv":0.02,"rss_bytes":7340032}}}
+```
+
+```
+cig bench history                      the cases the history has
+cig bench history hello                that case: a sparkline, then a table
+cig bench history hello --file h.jsonl   a file instead of the branch
+cig bench history hello --branch other   another branch
+```
+
+It reads `history/<product>.jsonl` from the branch (local, else `origin/`),
+the product from the manifest in `bench/bench.toml`. A case matches by exact
+name, else by one substring. A line in another `format` is skipped and counted.
+A change across two different machines is marked `*`: a hosted runner is not
+the same CPU every night.
+
 ## What is here now, and what is next
 
-This page describes **steps 1 to 3 and 5** of #179. The upcoming steps, with the
-same statistics and the same manifest, add:
+This page describes **steps 1 to 7** of #179. What is left, with the same
+statistics and the same manifest:
 
-- **step 4** `--timings`, `--stats` and `--syscalls` for one case;
-- **step 6** the reusable CI workflow and the gates;
-- **step 7** `--family`, `--with` and `--matrix`;
-- **step 8** `--profile` and `--diff`.
+- **step 8** `--profile` and `--diff`;
+- the `gate` key of a case (a relative gate on a significant change), which
+  the workflow will read when it is built: until then the manifest's `gate`,
+  `score` and `config` are accepted and ignored.
 
 ## Passes (`cig-pass`)
 

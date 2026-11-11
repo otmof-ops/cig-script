@@ -439,7 +439,7 @@ fn classify(spec: &str) -> Kind {
     Kind::Ref(spec.to_string())
 }
 
-fn looks_like_version(s: &str) -> bool {
+pub(super) fn looks_like_version(s: &str) -> bool {
     let core = s.strip_prefix('v').unwrap_or(s);
     let mut n = 0;
     for part in core.split('.') {
@@ -564,7 +564,7 @@ fn resolve(job: &Job, spec: &str, scratch: &Path) -> Result<Resolved, String> {
 /// A release's binary for this platform: downloaded, its sha256 checked
 /// against the release's sidecar, and only then made runnable. A binary that
 /// does not verify is deleted and nothing runs.
-fn fetch_release(spec: &str, scratch: &Path) -> Result<(PathBuf, String), String> {
+pub(super) fn fetch_release(spec: &str, scratch: &Path) -> Result<(PathBuf, String), String> {
     let version = Version::parse(spec).ok_or_else(|| format!("`{spec}` is not a version"))?;
     let release = update::find(update::DEFAULT_REPO, &format!("v{version}"))?;
     let name = update::asset_name(&version);
