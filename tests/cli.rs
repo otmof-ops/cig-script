@@ -17382,10 +17382,19 @@ fn repeat_until_slow_without_perf_keeps_the_phases() {
             .is_some_and(|n| n.starts_with("not measured: perf is not available here")),
         "{s}"
     );
-    let phases = &s["found"]["phases"];
+    let found = &s["found"];
+    let phases = &found["phases"];
     assert_eq!(phases["measured"], true, "{s}");
     assert_eq!(phases["phases"][0]["phase"], "work", "{s}");
-    assert_eq!(phases["phases"][0]["ms"], 900.0, "{s}");
+    // The run over the threshold keeps its own phases. That is the designed
+    // slow run (900 ms) unless a loaded machine made an earlier run slow first,
+    // and then it is that run's reading (30 ms) that is kept.
+    let ms = phases["phases"][0]["ms"].as_f64().unwrap_or(-1.0);
+    assert!(ms == 900.0 || ms == 30.0, "{s}");
+    assert!(
+        found["ms"].as_f64().unwrap_or(0.0) > s["threshold_ms"].as_f64().unwrap_or(f64::MAX),
+        "{s}"
+    );
 }
 
 #[test]
