@@ -201,6 +201,8 @@ mod linux {
                 // An open: all of them under `Reads`, otherwise those that
                 // can write (a write mode, create or truncate).
                 let writes = (libc::O_ACCMODE | libc::O_CREAT | libc::O_TRUNC) as u32;
+                // `open` itself exists only on x86_64; other targets have `openat` alone
+                #[cfg_attr(not(target_arch = "x86_64"), allow(unused_mut))]
                 let mut opens = vec![(libc::SYS_openat, ARG2)];
                 #[cfg(target_arch = "x86_64")]
                 opens.push((libc::SYS_open, 24));
