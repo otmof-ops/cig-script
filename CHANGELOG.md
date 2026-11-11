@@ -5,6 +5,48 @@ project follows semantic versioning.
 
 ## Unreleased
 
+- **`cig bench --profile`, `--diff`, `--keep` and `--repeat-until-slow`**
+  (#179 step 8). `--profile` takes one extra run under `perf record -F 999 -g`
+  and draws a flamegraph SVG into `.cig-bench/profiles/<case>.svg` (the five
+  hottest frames in the table, `debug.profile` in `--json`); where perf is not
+  installed or not allowed it says `not measured: perf is not available here`
+  and why, and there is no second sampler. `--diff NAME` sets this run's phases,
+  counters and syscalls against a baseline's, most changed first (save the
+  baseline with `--save NAME --timings --stats --syscalls`: a saved case now
+  carries its `insight`). `--keep` leaves the isolated homes and work folders and
+  prints where, and how to rerun a case by hand. `--repeat-until-slow` reruns a
+  case under perf (or with its phases) until a run is over p90 x 1.5 and keeps
+  that run's profile. Tests: `profile_draws_a_flamegraph_from_perf`,
+  `profile_without_perf_says_so_and_builds_no_second_sampler`,
+  `diff_sets_two_runs_side_by_side_most_changed_first`,
+  `keep_leaves_the_isolated_home_and_says_where`,
+  `repeat_until_slow_keeps_the_slow_runs_profile`,
+  `repeat_until_slow_without_perf_keeps_the_phases`; #179's tests table is
+  now there by name (`wrong_output_gets_no_time_and_fails`,
+  `isolated_home_leaves_nothing` which also checks the user's cig and
+  orchestrator state and keys byte for byte, `watch_reruns_on_change`,
+  `watch_plain_is_line_based`, `against_a_release_checks_its_sha256`,
+  `manifest_schema_is_versioned`).
+
+- **Benchmark gates and the nightly filesystem matrix** (#145). A case's `gate`
+  key (`correctness`, `regression`, `disk`, `start-up`) and `cig bench --gate
+  LIST` (or `all`): every gate is evaluated and printed, and the exit is 1 only
+  for the gates named. `regression` is a case more than 5% slower than the
+  baseline (significantly) or the set's geometric mean more than 2% slower
+  (`--against`); `disk` is bytes on disk per byte burned more than 10% above the
+  case's `reference` (what main stores); `start-up` is a median over the case's
+  `budget` (hello 5 ms; a new `burn one write` case, 7 ms). CI fails a pull
+  request on `--gate correctness,disk` and prints the timing gates (#153). The
+  `bench-nightly.yml` workflow runs the whole suite on ext4, btrfs and XFS
+  (loop devices formatted on the runner), APFS and NTFS (the runners' own
+  disks), and appends to `history/cig.<series>.jsonl` on `bench-history`
+  (`cig bench history --series btrfs`). Tests: `the_regression_gate_trips`,
+  `disk_and_start_up_gates_fail_only_when_named`,
+  `cigs_own_suite_declares_its_gates`, `ci_gates_and_the_nightly_matrix_are_wired`;
+  `every_benchmark_matches_its_expect_file`,
+  `kernel_benchmarks_restore_exact_bytes` and `disk_per_byte_is_reported` cover
+  the rest of #145's table.
+
 - **A box says which cover failed, and skips one whose target is gone.** The box covers the session bus sockets with /dev/null. A refusal now names the path and the errno (`covering a way to the key refused: /run/user/1000/bus (errno 2)`), never a bare `Operation not supported`. After any failed bind the target is looked at again: if it, or the folder it sat in, is gone (a login session's runtime folder when its last session ends), there is nothing left to hide and it is skipped; a path made again is bound again, a few times; one that still exists and cannot be covered refuses as before. The regression test now also removes the runtime folder itself.
 
 - **A box no longer refuses a hop because a path it covers has gone.** The box covers the session bus sockets in the runtime folder with /dev/null; when a login session ended between the plan and the mount (other work on the machine), the bind failed with ENOENT and the hop was refused (`covering a way to the key refused`, seen as `could not start: Operation not supported`). A cover whose target is gone has nothing left to hide, so it is skipped. Test: `contained_boxes_run_together_while_a_cover_path_comes_and_goes`.

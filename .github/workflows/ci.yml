@@ -41,6 +41,16 @@ jobs:
         run: cargo test --release --test cli -- --ignored
       - run: cargo run --release -- run examples/hello.cig -- ci
       - run: cargo run --release -- chains examples/tasks.cig
+      # The benchmark gates (#145): every case's output is its expect file and
+      # every unburn restores the exact bytes (correctness), and no kernel case
+      # stores more than 10% above main's bytes per byte burned (disk). A trip
+      # fails the pull request. The timing gates (regression, start-up) are
+      # printed in the log and never fail it: a shared runner's clock is not a
+      # gate (#153). One sample: the disk ratio is a count of bytes, not a time.
+      - name: benchmark gates
+        if: matrix.os == 'ubuntu-latest'
+        timeout-minutes: 30
+        run: target/release/cig bench bench/bench.toml --samples 1 --gate correctness,disk
       # The portability probe: the kernel's promises checked on disk the way
       # a user would, one scenario each. A FAIL line fails the job.
       - name: portability probe
