@@ -6460,6 +6460,66 @@ fn a_boxed_shell_hop_returns_its_layer_and_judgement() {
 /// held before the mounts, not by its path (found rehearsing npm with a cig
 /// built under /tmp: the hop had no network and npm fell back to a stale
 /// cache after a minute of retries).
+/// Two cigs set up contained boxes at the same time while a path the box
+/// covers with /dev/null (a session bus socket in the runtime folder) comes
+/// and goes, as it does when a login session ends: a cover whose target is
+/// gone between the plan and the mount has nothing left to hide, and must
+/// not refuse the hop (it surfaced as `could not start: Operation not
+/// supported` while other work ran on the machine).
+#[cfg(target_os = "linux")]
+#[test]
+fn contained_boxes_run_together_while_a_cover_path_comes_and_goes() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    if !contain_expected_here() {
+        eprintln!("contain not here; skipped");
+        return;
+    }
+    let rt = tempfile::tempdir().unwrap();
+    let rts = rt.path().display().to_string();
+    let stop = Arc::new(AtomicBool::new(false));
+    let flapper = {
+        let stop = stop.clone();
+        let bus = rt.path().join("bus");
+        std::thread::spawn(move || {
+            while !stop.load(Ordering::Relaxed) {
+                if let Ok(l) = std::os::unix::net::UnixListener::bind(&bus) {
+                    drop(l);
+                }
+                let _ = fs::remove_file(&bus);
+            }
+        })
+    };
+    let workers: Vec<_> = (0..2)
+        .map(|_| {
+            let rts = rts.clone();
+            std::thread::spawn(move || {
+                let mut failures = Vec::new();
+                for _ in 0..8 {
+                    let sb = Sandbox::new();
+                    sb.write("p/keep.txt", "v1\n");
+                    sb.write(
+                        "s.cig",
+                        "pack { \"./p\" }\nburn {\n  proc.run(\"sh\", [\"-c\", \"echo ok > ran.txt\"], {cwd: \"p\", box: {network: \"off\", contain: true, expect: [\"ran.txt\"]}})\n}\n",
+                    );
+                    let out = sb.cig_env(&["run", "s.cig"], &[("XDG_RUNTIME_DIR", &rts)]);
+                    if !out.status.success() {
+                        failures.push(String::from_utf8_lossy(&out.stderr).to_string());
+                    }
+                }
+                failures
+            })
+        })
+        .collect();
+    let failures: Vec<String> = workers
+        .into_iter()
+        .flat_map(|w| w.join().unwrap())
+        .collect();
+    stop.store(true, Ordering::Relaxed);
+    flapper.join().unwrap();
+    assert!(failures.is_empty(), "{}", failures.join("\n---\n"));
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn a_contained_hops_network_works_with_cig_under_tmp() {

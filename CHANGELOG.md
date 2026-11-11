@@ -5,6 +5,8 @@ project follows semantic versioning.
 
 ## Unreleased
 
+- **A box no longer refuses a hop because a path it covers has gone.** The box covers the session bus sockets in the runtime folder with /dev/null; when a login session ended between the plan and the mount (other work on the machine), the bind failed with ENOENT and the hop was refused (`covering a way to the key refused`, seen as `could not start: Operation not supported`). A cover whose target is gone has nothing left to hide, so it is skipped. Test: `contained_boxes_run_together_while_a_cover_path_comes_and_goes`.
+
 - **`cig tin parcel` and `cig tin unparcel` (#141): the whole tin as a verifiable,
   incremental backup.** One parcel holds every live run's record and journal,
   the objects their before-states need, the ledger and its head, and a SHA-256

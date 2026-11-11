@@ -1856,6 +1856,10 @@ impl Setup {
                     libc::MS_BIND,
                     std::ptr::null(),
                 ) != 0
+                    // A path that is gone by now (a session's bus socket
+                    // when its login ends, between the plan and this mount)
+                    // has nothing left to hide.
+                    && *libc::__errno_location() != libc::ENOENT
                 {
                     self.note(&g.why, b"covering a way to the key refused");
                     if g.required {
@@ -2222,6 +2226,9 @@ impl Setup {
                 libc::MS_BIND,
                 std::ptr::null(),
             ) != 0
+                // Gone between the plan and the mount (a login session's
+                // bus socket when it ends): nothing left to hide.
+                && *libc::__errno_location() != libc::ENOENT
             {
                 return self.fail(b"covering a way to the key refused");
             }
