@@ -129,25 +129,32 @@ impl Interp {
 
     /// Count one step; over the budget, the loop (or the script) is stopped
     /// with E515 at `span`.
+    #[inline(always)]
     pub(crate) fn tick(&mut self, span: Span) -> Result<(), Diagnostic> {
         self.steps += 1;
         if self.max_steps != 0 && self.steps > self.max_steps {
-            let message = if self.loop_depth > 0 {
-                format!(
-                    "your loop never ends: {} steps and still going",
-                    self.max_steps
-                )
-            } else {
-                format!("the script needs more than {} steps", self.max_steps)
-            };
-            return Err(crate::diagnostics::runtime(message)
-                .code("E515")
-                .at(span)
-                .with_hint(
-                    "check what changes the loop condition at this line; --max-steps N or CIG_MAX_STEPS=N raises the budget (0 disables it)",
-                ));
+            return Err(self.over_budget(span));
         }
         Ok(())
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn over_budget(&self, span: Span) -> Diagnostic {
+        let message = if self.loop_depth > 0 {
+            format!(
+                "your loop never ends: {} steps and still going",
+                self.max_steps
+            )
+        } else {
+            format!("the script needs more than {} steps", self.max_steps)
+        };
+        crate::diagnostics::runtime(message)
+            .code("E515")
+            .at(span)
+            .with_hint(
+                "check what changes the loop condition at this line; --max-steps N or CIG_MAX_STEPS=N raises the budget (0 disables it)",
+            )
     }
 
     /// Expose the script's own arguments as `args`.
