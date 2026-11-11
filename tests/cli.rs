@@ -16579,7 +16579,7 @@ fn bench_timings_and_stats_read_cig_itself() {
 
 /// A stand-in `strace` that writes a canned `-c` table to the `-o` file and
 /// then runs the command, so the whole path is exercised on any Linux.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn fake_strace(sb: &Sandbox, rows: &str) -> PathBuf {
     fake_cig(
         sb,
