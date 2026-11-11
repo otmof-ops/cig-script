@@ -5,6 +5,23 @@ project follows semantic versioning.
 
 ## Unreleased
 
+- **A hop over 10,000 unchanged files costs 91 ms, not 228** (#148, the 100 ms
+  target). With `hop_statcache on` the hop asked the file system about each file
+  six times; it now asks twice, once for each scan. The scan keeps the inode and
+  ctime of every file it reads, so the stat cache and the check after the hop
+  use the scan's own `lstat`; the tin's objects are checked by listing the
+  directories the hits fall in (512 hits or more) instead of one `stat` each;
+  and two scans that agree on every stat tuple, with nothing inside the racy
+  margin, prove no file was written to, so the per-file hash check after the hop
+  is not run. `statx` calls per hop: 60,775 to 20,777 (best of 7, 16 cores:
+  228 ms to 91 ms at load 5, 223 to 101 ms at load 10; with `hop_watch on`,
+  145 to 87 ms at load 6-7). The journal,
+  the objects and the restore are the same bytes: the same three hops over a
+  tree gave journals equal entry for entry. Tests:
+  `an_unchanged_hop_asks_each_file_once_per_scan` (counts questions, not time),
+  `the_object_index_answers_as_object_for_does`,
+  `same_stat_proves_a_quiet_tree_and_nothing_else`. `docs/HOPS.md` says what
+  makes an unchanged hop cheap.
 - **The tin's tests carry the names the issue gave them, and `box_hide_keyring` exists** (#105).
   Every row of the issue's Tests table is now a test of that name, in
   `tests/cli.rs` or `tests/attack/`. Renamed, behavior unchanged:
