@@ -12,6 +12,7 @@ use crate::diagnostics::{Diagnostic, Kind};
 use crate::syntax::ast::*;
 use crate::syntax::span::Span;
 use crate::value::{Effect, Value};
+use std::cell::Cell;
 use std::collections::HashMap;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -21,12 +22,39 @@ enum Binding {
     Function,
 }
 
-struct Scope {
-    names: HashMap<String, Binding>,
+struct Scope<'a> {
+    /// Each name, its binding and its position among the names this scope
+    /// declares, in the order the evaluator declares them (hoisted pulls
+    /// first, then each `roll`, `stick` and `chain` as it runs).
+    names: HashMap<String, (Binding, u16)>,
+    /// The scope of a `pull` or a lambda: what runs in it runs when called.
+    is_fn: bool,
+    /// Reads made from inside a function body that passed over this scope
+    /// without finding their name. If this scope declares the name later, a
+    /// call after that finds the new one, so the read is not resolved.
+    misses: Vec<(String, &'a Cell<Res>)>,
 }
 
-pub struct Checker {
-    scopes: Vec<Scope>,
+impl Scope<'_> {
+    fn add(&mut self, name: &str, binding: Binding) {
+        let idx = match self.names.get(name) {
+            Some((_, i)) => *i,
+            None => u16::try_from(self.names.len()).unwrap_or(u16::MAX),
+        };
+        self.names.insert(name.to_string(), (binding, idx));
+    }
+
+    fn new(is_fn: bool) -> Self {
+        Scope {
+            names: HashMap::new(),
+            is_fn,
+            misses: Vec::new(),
+        }
+    }
+}
+
+pub struct Checker<'a> {
+    scopes: Vec<Scope<'a>>,
     /// Names the prelude provides (modules and builtins), which a
     /// compensation may use.
     prelude: std::collections::HashSet<String>,
@@ -87,15 +115,13 @@ pub fn check(program: &Program, extra_globals: &[String]) -> Report {
     }
 }
 
-impl Checker {
+impl<'a> Checker<'a> {
     fn new(extra_globals: &[String]) -> Self {
-        let mut root = Scope {
-            names: HashMap::new(),
-        };
+        let mut root = Scope::new(false);
         let mut effectful = HashMap::new();
         let mut modules = HashMap::new();
         for (name, value) in crate::stdlib::prelude() {
-            root.names.insert(name.to_string(), Binding::Immutable);
+            root.add(name, Binding::Immutable);
             match &value {
                 Value::Module(m) => {
                     let mut items = Vec::new();
@@ -115,18 +141,13 @@ impl Checker {
                 _ => {}
             }
         }
-        root.names.insert("args".to_string(), Binding::Immutable);
+        root.add("args", Binding::Immutable);
         for g in extra_globals {
-            root.names.insert(g.clone(), Binding::Mutable);
+            root.add(g, Binding::Mutable);
         }
         let prelude: std::collections::HashSet<String> = root.names.keys().cloned().collect();
         Self {
-            scopes: vec![
-                root,
-                Scope {
-                    names: HashMap::new(),
-                },
-            ],
+            scopes: vec![root, Scope::new(false)],
             prelude,
             comp_floor: None,
             pack_roots: Vec::new(),
@@ -330,9 +351,12 @@ impl Checker {
     }
 
     fn push(&mut self) {
-        self.scopes.push(Scope {
-            names: HashMap::new(),
-        });
+        self.scopes.push(Scope::new(false));
+    }
+
+    /// The scope of a function body: the one `call_function` makes.
+    fn push_fn(&mut self) {
+        self.scopes.push(Scope::new(true));
     }
 
     fn pop(&mut self) {
@@ -350,14 +374,55 @@ impl Checker {
             .hint = Some(format!("assign with `{name} = ...`, or pick another name"));
             return;
         }
-        scope.names.insert(name.to_string(), binding);
+        scope.add(name, binding);
+        // A function body that read this name from further out, before it
+        // was declared here, finds this one when it is called after.
+        scope.misses.retain(|(n, cell)| {
+            if n == name {
+                cell.set(Res::Unresolved);
+                false
+            } else {
+                true
+            }
+        });
     }
 
     fn lookup(&self, name: &str) -> Option<Binding> {
         self.scopes
             .iter()
             .rev()
-            .find_map(|s| s.names.get(name).copied())
+            .find_map(|s| s.names.get(name).map(|(b, _)| *b))
+    }
+
+    /// Record where a name is found: how many scopes up and which of the
+    /// names declared there (#146). The scopes here are the ones the
+    /// evaluator makes, one for one; what could differ at run time is left
+    /// `Unresolved`, and the evaluator looks it up by name.
+    fn resolve(&mut self, name: &str, cell: &'a Cell<Res>) {
+        if self.comp_floor.is_some() {
+            // An `unburn { }` runs later from the journal, never from this tree.
+            return;
+        }
+        let top = self.scopes.len() - 1;
+        let mut inside_fn = false;
+        for i in (0..=top).rev() {
+            if let Some((_, idx)) = self.scopes[i].names.get(name) {
+                let found = if i == 0 {
+                    Res::Prelude
+                } else {
+                    match u16::try_from(top - i) {
+                        Ok(depth) => Res::Local { depth, idx: *idx },
+                        Err(_) => Res::Unresolved,
+                    }
+                };
+                cell.set(found);
+                return;
+            }
+            if inside_fn {
+                self.scopes[i].misses.push((name.to_string(), cell));
+            }
+            inside_fn |= self.scopes[i].is_fn;
+        }
     }
 
     fn all_names(&self) -> Vec<String> {
@@ -375,7 +440,7 @@ impl Checker {
         d.hint = hint;
     }
 
-    fn block_stmts(&mut self, stmts: &[Stmt]) {
+    fn block_stmts(&mut self, stmts: &'a [Stmt]) {
         // Hoist functions so calls before the definition resolve.
         for stmt in stmts {
             if let Stmt::Pull(f) = stmt {
@@ -390,13 +455,13 @@ impl Checker {
         }
     }
 
-    fn block(&mut self, block: &Block) {
+    fn block(&mut self, block: &'a Block) {
         self.push();
         self.block_stmts(&block.stmts);
         self.pop();
     }
 
-    fn stmt(&mut self, stmt: &Stmt) {
+    fn stmt(&mut self, stmt: &'a Stmt) {
         match stmt {
             Stmt::Declare {
                 name,
@@ -423,35 +488,38 @@ impl Checker {
             } => {
                 self.expr(value);
                 match target {
-                    AssignTarget::Var(name) => match self.lookup(name) {
-                        None => {
-                            self.unknown(name, *span);
-                            if let Some(last) = self.errors.last_mut() {
-                                if last.hint.is_none() {
-                                    last.hint =
-                                        Some(format!("declare it first: roll {name} = ..."));
+                    AssignTarget::Var(name, cell) => {
+                        self.resolve(name, cell);
+                        match self.lookup(name) {
+                            None => {
+                                self.unknown(name, *span);
+                                if let Some(last) = self.errors.last_mut() {
+                                    if last.hint.is_none() {
+                                        last.hint =
+                                            Some(format!("declare it first: roll {name} = ..."));
+                                    }
                                 }
                             }
+                            Some(Binding::Immutable) => {
+                                self.error_code(
+                                    "E302",
+                                    format!("`{name}` is a stick and cannot be reassigned"),
+                                    *span,
+                                )
+                                .hint = Some(format!(
+                                    "declare it with `roll {name} = ...` if it needs to change"
+                                ));
+                            }
+                            Some(Binding::Function) => {
+                                self.error_code(
+                                    "E302",
+                                    format!("`{name}` is a pull and cannot be reassigned"),
+                                    *span,
+                                );
+                            }
+                            Some(Binding::Mutable) => {}
                         }
-                        Some(Binding::Immutable) => {
-                            self.error_code(
-                                "E302",
-                                format!("`{name}` is a stick and cannot be reassigned"),
-                                *span,
-                            )
-                            .hint = Some(format!(
-                                "declare it with `roll {name} = ...` if it needs to change"
-                            ));
-                        }
-                        Some(Binding::Function) => {
-                            self.error_code(
-                                "E302",
-                                format!("`{name}` is a pull and cannot be reassigned"),
-                                *span,
-                            );
-                        }
-                        Some(Binding::Mutable) => {}
-                    },
+                    }
                     AssignTarget::Index { object, index } => {
                         self.expr(object);
                         self.expr(index);
@@ -605,8 +673,8 @@ impl Checker {
         }
     }
 
-    fn function(&mut self, params: &[String], body: &[Stmt]) {
-        self.push();
+    fn function(&mut self, params: &[String], body: &'a [Stmt]) {
+        self.push_fn();
         self.fn_depth += 1;
         let saved_loop = self.loop_depth;
         let saved_burn = self.burn_depth;
@@ -623,7 +691,7 @@ impl Checker {
         self.pop();
     }
 
-    fn expr(&mut self, expr: &Expr) {
+    fn expr(&mut self, expr: &'a Expr) {
         match &expr.kind {
             ExprKind::Null | ExprKind::Bool(_) | ExprKind::Int(_) | ExprKind::Float(_) => {}
             ExprKind::Str(pieces) => {
@@ -634,6 +702,7 @@ impl Checker {
                 }
             }
             ExprKind::Ident(name) => {
+                self.resolve(name, &expr.res);
                 if self.lookup(name).is_none() {
                     if !(self.fn_depth > 0 && self.hoisted_chains.iter().any(|c| c == name)) {
                         self.unknown(name, expr.span);
@@ -740,7 +809,7 @@ impl Checker {
             }
             ExprKind::Lambda { params, body } => match body {
                 LambdaBody::Expr(e) => {
-                    self.push();
+                    self.push_fn();
                     self.fn_depth += 1;
                     for p in params {
                         self.declare(p, Binding::Mutable, Span::default());

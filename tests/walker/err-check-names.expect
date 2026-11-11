@@ -1,0 +1,63 @@
+$ cig run err-check-names.cig
+exit 2
+--- stdout
+--- stderr
+Don't see any cigarettes.
+error[E306 check]: `twice` is already declared in this scope
+  --> err-check-names.cig:5:1
+  |
+5 | roll twice = 2
+  | ^^^^^^^^^^^^^^
+  = hint: assign with `twice = ...`, or pick another name
+  = explain: cig explain E306
+error[E302 check]: `fixed` is a stick and cannot be reassigned
+  --> err-check-names.cig:6:1
+  |
+6 | fixed = 2
+  | ^^^^^^^^^
+  = hint: declare it with `roll fixed = ...` if it needs to change
+  = explain: cig explain E302
+error[E301 check]: unknown name `missing`
+  --> err-check-names.cig:7:8
+  |
+7 | exhale missing + fixed
+  |        ^^^^^^^
+  = explain: cig explain E301
+error[E301 check]: unknown name `zz`
+  --> err-check-names.cig:9:9
+  |
+9 |   snuff zz
+  |         ^^
+  = explain: cig explain E301
+
+$ cig check err-check-names.cig
+exit 2
+--- stdout
+--- stderr
+Don't see any cigarettes.
+error[E306 check]: `twice` is already declared in this scope
+  --> err-check-names.cig:5:1
+  |
+5 | roll twice = 2
+  | ^^^^^^^^^^^^^^
+  = hint: assign with `twice = ...`, or pick another name
+  = explain: cig explain E306
+error[E302 check]: `fixed` is a stick and cannot be reassigned
+  --> err-check-names.cig:6:1
+  |
+6 | fixed = 2
+  | ^^^^^^^^^
+  = hint: declare it with `roll fixed = ...` if it needs to change
+  = explain: cig explain E302
+error[E301 check]: unknown name `missing`
+  --> err-check-names.cig:7:8
+  |
+7 | exhale missing + fixed
+  |        ^^^^^^^
+  = explain: cig explain E301
+error[E301 check]: unknown name `zz`
+  --> err-check-names.cig:9:9
+  |
+9 |   snuff zz
+  |         ^^
+  = explain: cig explain E301

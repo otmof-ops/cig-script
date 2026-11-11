@@ -861,12 +861,15 @@ fn plan_contain(
         ));
     }
     // The temp: over /tmp, unless something cig needs lives there (a pack
-    // root, the state root, the working directory, the proxy's socket).
+    // root, the state root, the working directory, the proxy's socket, or
+    // your home: a home under /tmp would vanish under a new /tmp, and making
+    // it writable again would then find nothing).
     let under_tmp = |p: &Path| p.starts_with("/tmp");
     let tmp_over = !(roots.iter().any(|r| under_tmp(r))
         || under_tmp(&state)
         || under_tmp(&scratch)
         || under_tmp(cwd)
+        || home.as_ref().map(|h| under_tmp(h)).unwrap_or(false)
         || sock.map(under_tmp).unwrap_or(false));
     let hidden = |p: &Path| tmp_over && under_tmp(p);
     // The key folder and the other ways to the key, in the final view.

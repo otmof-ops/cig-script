@@ -1329,7 +1329,7 @@ impl Journal {
                                 entry.seq,
                                 state.path.display()
                             ));
-                        } else if !snapshot.is_file() {
+                        } else if !snapshot.is_file() && !super::vault::heal(snapshot) {
                             problems.push(format!(
                                 "op {}: snapshot missing for {} (expected {})",
                                 entry.seq,
@@ -1337,7 +1337,13 @@ impl Journal {
                                 snapshot.display()
                             ));
                         } else if super::seal::is_sealed_path(snapshot) {
-                            for p in super::tin::check_sealed(snapshot, sha256) {
+                            let mut found = super::tin::check_sealed(snapshot, sha256);
+                            // A tin object that no longer opens: the vault's
+                            // copy goes back in its place, and is checked again.
+                            if !found.is_empty() && super::vault::heal(snapshot) {
+                                found = super::tin::check_sealed(snapshot, sha256);
+                            }
+                            for p in found {
                                 problems.push(format!(
                                     "op {}: {} for {}",
                                     entry.seq,
@@ -1346,7 +1352,11 @@ impl Journal {
                                 ));
                             }
                         } else if super::tin::is_recipe(snapshot) {
-                            for p in super::tin::check_recipe(snapshot, sha256) {
+                            let mut found = super::tin::check_recipe(snapshot, sha256);
+                            if !found.is_empty() && super::vault::heal(snapshot) {
+                                found = super::tin::check_recipe(snapshot, sha256);
+                            }
+                            for p in found {
                                 problems.push(format!(
                                     "op {}: {} for {}",
                                     entry.seq,
@@ -1355,7 +1365,13 @@ impl Journal {
                                 ));
                             }
                         } else if !sha256.is_empty() {
-                            match sha256_file(snapshot) {
+                            let mut now = sha256_file(snapshot);
+                            if now.as_ref().map_or(true, |a| a != sha256)
+                                && super::vault::heal(snapshot)
+                            {
+                                now = sha256_file(snapshot);
+                            }
+                            match now {
                                 Ok(actual) if &actual == sha256 => {}
                                 Ok(actual) => problems.push(format!(
                                     "op {}: snapshot for {} is corrupt (sha256 {} recorded, {} on disk)",

@@ -6536,6 +6536,50 @@ fn contained_boxes_run_together_while_a_cover_path_comes_and_goes() {
 
 #[cfg(target_os = "linux")]
 #[test]
+fn a_contained_hop_works_with_home_under_tmp() {
+    if !contain_expected_here() {
+        eprintln!("contain not here; skipped");
+        return;
+    }
+    // A home under /tmp: the box must not put a new /tmp over it, or making
+    // the home writable again finds nothing and the hop is refused.
+    let home = tempfile::tempdir().unwrap();
+    let proj = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    if !home.path().starts_with("/tmp") || proj.path().starts_with("/tmp") {
+        eprintln!("needs the system temp at /tmp and the build tree elsewhere; skipped");
+        return;
+    }
+    let root = proj.path();
+    fs::create_dir_all(root.join("p")).unwrap();
+    fs::write(root.join("p/keep.txt"), "v1\n").unwrap();
+    fs::write(
+        root.join("s.cig"),
+        "pack { \"./p\" }\nburn {\n  proc.run(\"sh\", [\"-c\", \"echo ok > out.txt\"], {cwd: \"p\", box: {network: \"off\", contain: true, expect: [\"out.txt\"]}})\n}\n",
+    )
+    .unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_cig"))
+        .args(["run", "s.cig"])
+        .current_dir(root)
+        .env("HOME", home.path())
+        .env("CIGSCRIPT_HOME", root.join("home"))
+        .env("NO_COLOR", "1")
+        .env("CIG_SEAL_KEY", "file")
+        .env("CIG_BUDGET_SYNC", "1")
+        .env("CIG_UPDATE_MANIFEST", root.join("no-releases.json"))
+        .env_remove("CI")
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(out.status.success(), "{err}");
+    assert_eq!(
+        fs::read_to_string(root.join("p/out.txt")).unwrap_or_default(),
+        "ok\n",
+        "{err}"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
 fn a_contained_hops_network_works_with_cig_under_tmp() {
     if !contain_expected_here() || Command::new("python3").arg("--version").output().is_err() {
         eprintln!("contain or python3 not here; skipped");
@@ -15111,6 +15155,397 @@ fn bench_watch_needs_something_to_watch() {
     assert!(err.contains("[bench].watch"), "{err}");
     let err = sb.run_err(&["bench", "--watch", "--save", "x"], 3);
     assert!(err.contains("--save"), "{err}");
+}
+
+// ----- #179 step 5, #145: cig's own suite and the kernel measures ------------
+
+/// Run a child with a hard deadline: past it the child is killed and the
+/// test fails, so a stuck benchmark cannot hang the suite.
+fn bounded(cmd: &mut Command, secs: u64) -> Output {
+    use std::io::Read;
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+    let mut child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start cig");
+    let mut out = child.stdout.take().unwrap();
+    let mut err = child.stderr.take().unwrap();
+    let out_t = std::thread::spawn(move || {
+        let mut v = Vec::new();
+        let _ = out.read_to_end(&mut v);
+        v
+    });
+    let err_t = std::thread::spawn(move || {
+        let mut v = Vec::new();
+        let _ = err.read_to_end(&mut v);
+        v
+    });
+    let deadline = Instant::now() + Duration::from_secs(secs);
+    let status = loop {
+        if let Some(s) = child.try_wait().expect("wait") {
+            break s;
+        }
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("cig did not finish in {secs} s and was killed");
+        }
+        std::thread::park_timeout(Duration::from_millis(25));
+    };
+    Output {
+        status,
+        stdout: out_t.join().unwrap(),
+        stderr: err_t.join().unwrap(),
+    }
+}
+
+fn copy_tree(from: &Path, to: &Path) {
+    fs::create_dir_all(to).unwrap();
+    for e in fs::read_dir(from).unwrap() {
+        let e = e.unwrap();
+        let dest = to.join(e.file_name());
+        if e.file_type().unwrap().is_dir() {
+            copy_tree(&e.path(), &dest);
+        } else {
+            fs::copy(e.path(), &dest).unwrap();
+        }
+    }
+}
+
+/// A copy of cig's own suite in the sandbox (`bench/`), its `binary` pointing
+/// at the cig under test, and the manifest's path.
+fn own_suite(sb: &Sandbox) -> PathBuf {
+    copy_tree(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("bench"),
+        &sb.path().join("bench"),
+    );
+    let path = sb.path().join("bench").join("bench.toml");
+    let text = fs::read_to_string(&path).unwrap();
+    let mut seen = false;
+    let text: String = text
+        .lines()
+        .map(|l| {
+            if l.starts_with("binary") {
+                seen = true;
+                format!("binary = '{}'", cig_bin().display())
+            } else {
+                l.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(seen, "the suite names the product's binary");
+    fs::write(&path, text + "\n").unwrap();
+    path
+}
+
+/// `cig bench` in the sandbox, under a deadline: the exit code, stdout and
+/// stderr.
+fn bench_bounded(sb: &Sandbox, args: &[&str], secs: u64) -> (Option<i32>, String, String) {
+    let out = bounded(
+        Command::new(cig_bin())
+            .args(args)
+            .current_dir(sb.path())
+            .env("CIGSCRIPT_HOME", sb.home())
+            .env("NO_COLOR", "1")
+            .env("CIG_SEAL_KEY", "file")
+            .env("CIG_BUDGET_SYNC", "1")
+            .env("CIG_INTERNAL_TRACKER_DIR", sb.path().join("tracker"))
+            .env("CIG_UPDATE_MANIFEST", sb.path().join("no-releases.json"))
+            .env_remove("CI"),
+        secs,
+    );
+    (
+        out.status.code(),
+        String::from_utf8_lossy(&out.stdout).to_string(),
+        String::from_utf8_lossy(&out.stderr).to_string(),
+    )
+}
+
+#[test]
+fn every_benchmark_matches_its_expect_file() {
+    let sb = Sandbox::new();
+    let manifest = own_suite(&sb);
+    let text = fs::read_to_string(&manifest).unwrap();
+    let doc: toml::Value = text.parse().expect("the suite is TOML");
+    assert_eq!(doc["format"].as_integer(), Some(1), "the suite is format 1");
+    let cases = doc["case"].as_array().expect("cases");
+    assert!(
+        cases.len() >= 30,
+        "the compute and kernel sets: {}",
+        cases.len()
+    );
+
+    // Every case names an expect file that exists, and no .expect file is
+    // left that no case reads.
+    let mut names = std::collections::BTreeSet::new();
+    let mut read = std::collections::BTreeSet::new();
+    for c in cases {
+        let name = c["name"].as_str().unwrap();
+        assert!(names.insert(name.to_string()), "{name} twice");
+        let e = c
+            .get("expect")
+            .and_then(|e| e.as_table())
+            .unwrap_or_else(|| panic!("{name} has no `expect`"));
+        let file = e
+            .get("stdout")
+            .or_else(|| e.get("after_stdout"))
+            .and_then(|f| f.as_str())
+            .unwrap_or_else(|| panic!("{name} has no expect file"));
+        assert!(
+            sb.exists(&format!("bench/{file}")),
+            "{name}: {file} is missing"
+        );
+        read.insert(file.to_string());
+    }
+    fn expect_files(dir: &Path, root: &Path, out: &mut Vec<String>) {
+        for e in fs::read_dir(dir).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_dir() {
+                expect_files(&p, root, out);
+            } else if p.extension().is_some_and(|x| x == "expect") {
+                out.push(
+                    p.strip_prefix(root)
+                        .unwrap()
+                        .to_string_lossy()
+                        .replace('\\', "/"),
+                );
+            }
+        }
+    }
+    let mut on_disk = Vec::new();
+    expect_files(
+        &sb.path().join("bench"),
+        &sb.path().join("bench"),
+        &mut on_disk,
+    );
+    for f in &on_disk {
+        assert!(read.contains(f), "{f} is read by no case");
+    }
+
+    // The start-up and compute sets, for real: a case whose output is not
+    // its expect file is `wrong`, and gets no time. The kernel set runs in
+    // `kernel_benchmarks_restore_exact_bytes` and in the nightly suite.
+    for group in ["start-up", "compute"] {
+        let (code, stdout, stderr) = bench_bounded(
+            &sb,
+            &[
+                "--json",
+                "bench",
+                "bench/bench.toml",
+                "--group",
+                group,
+                "--samples",
+                "1",
+                "--per",
+                "1",
+            ],
+            600,
+        );
+        assert_eq!(code, Some(0), "{group}:\n{stdout}\n{stderr}");
+        let v: serde_json::Value = serde_json::from_str(&stdout).expect("json");
+        let rows = v["cases"].as_array().unwrap();
+        assert!(!rows.is_empty(), "{group} has cases");
+        for r in rows {
+            assert_eq!(r["outcome"]["state"], "timed", "{}: {r}", r["name"]);
+        }
+    }
+}
+
+#[test]
+fn kernel_benchmarks_restore_exact_bytes() {
+    let sb = Sandbox::new();
+    own_suite(&sb);
+
+    // The harness's own proof: the unburn cases check what was restored
+    // with an `after` script, and a case that restores anything else is WRONG.
+    for only in ["unburn small tree", "restore big file"] {
+        let (code, stdout, stderr) = bench_bounded(
+            &sb,
+            &[
+                "--json",
+                "bench",
+                "bench/bench.toml",
+                "--only",
+                only,
+                "--samples",
+                "1",
+                "--per",
+                "1",
+            ],
+            600,
+        );
+        assert_eq!(code, Some(0), "{only}:\n{stdout}\n{stderr}");
+        let v: serde_json::Value = serde_json::from_str(&stdout).expect("json");
+        assert_eq!(
+            v["cases"][0]["outcome"]["state"], "timed",
+            "{only}: {stdout}"
+        );
+    }
+
+    // And ours, apart from the script that checks: the same scripts, run
+    // by hand, compared byte for byte.
+    let a = "0123456789abcdef".repeat(2_097_152).into_bytes();
+    let b = "fedcba9876543210".repeat(2_097_152).into_bytes();
+    let big = sb.home().join("work").join("big.bin");
+    sb.run_ok(&["run", "bench/kernel/write-big.cig", "--", "a"]);
+    assert!(fs::read(&big).unwrap() == a, "the first version is written");
+    sb.run_ok(&["run", "bench/kernel/write-big.cig", "--", "b"]);
+    assert!(
+        fs::read(&big).unwrap() == b,
+        "the second version is written"
+    );
+    sb.run_ok(&["unburn", "--last", "1", "-y"]);
+    assert!(
+        fs::read(&big).unwrap() == a,
+        "the unburn put back every byte of the first version"
+    );
+
+    // A tree: made, then gone, and made again by the same burn.
+    sb.run_ok(&["run", "bench/kernel/burn-small.cig"]);
+    let tree = sb.home().join("work").join("small");
+    assert_eq!(fs::read_dir(&tree).unwrap().count(), 100);
+    for i in [0usize, 57, 99] {
+        assert_eq!(
+            fs::read(tree.join(format!("f{i}.txt"))).unwrap(),
+            vec![b'x'; 1024]
+        );
+    }
+    sb.run_ok(&["unburn", "--last", "1", "-y"]);
+    assert!(!tree.exists(), "the tree is gone");
+}
+
+#[test]
+fn disk_per_byte_is_reported() {
+    let sb = Sandbox::new();
+    sb.write(
+        "bench/fixtures/burn.cig",
+        "stick p = \"${env.get(\"CIGSCRIPT_HOME\")}/work/out.txt\"\nburn {\n  fs.mkdir(\"${env.get(\"CIGSCRIPT_HOME\")}/work\")\n  fs.write_text(p, \"z\".repeat(10000))\n}\nexhale \"ok\"\n",
+    );
+    sb.write("bench/fixtures/burn.out", "ok\n");
+    let manifest = |measure: &str, burned: &str| {
+        format!(
+            r#"
+[bench]
+product = "cig"
+[defaults]
+samples = 2
+per = 1
+warmup = 1
+[[case]]
+name = "burn ten thousand bytes"
+group = "kernel"
+run = ['{cig}', "run", "fixtures/burn.cig"]
+expect = {{ exit = 0, stdout = "fixtures/burn.out" }}
+{burned}
+measure = {measure}
+"#,
+            cig = cig_bin().display()
+        )
+    };
+    sb.write(
+        "bench/bench.toml",
+        &manifest(
+            r#"["wall", "tin-growth", "disk-per-byte", "fsyncs-per-op", "file:$CIGSCRIPT_HOME/work/out.txt"]"#,
+            "burned = 10000\nops = 2",
+        ),
+    );
+    let (code, stdout, stderr) = bench_bounded(&sb, &["--json", "bench"], 120);
+    assert_eq!(code, Some(0), "{stdout}\n{stderr}");
+    let v: serde_json::Value = serde_json::from_str(&stdout).expect("json");
+    let outcome = &v["cases"][0]["outcome"];
+    assert_eq!(outcome["state"], "timed", "{stdout}");
+    let metrics = outcome["metrics"].as_array().expect("metrics");
+    let get = |name: &str| {
+        metrics
+            .iter()
+            .find(|m| m["name"] == name)
+            .unwrap_or_else(|| panic!("{name} is not reported: {stdout}"))
+    };
+    // Bytes on disk per byte burned: at least the bytes themselves.
+    let ratio = get("disk-per-byte")["value"].as_f64().expect("a number");
+    assert!(
+        ratio >= 1.0,
+        "a burn costs at least the bytes it writes: {ratio}"
+    );
+    assert_eq!(get("disk-per-byte")["unit"], "bytes per byte");
+    // The file's size after the run is exact.
+    assert_eq!(
+        get("file:$CIGSCRIPT_HOME/work/out.txt")["value"].as_f64(),
+        Some(10000.0)
+    );
+    // The tin's growth is a number (this burn keeps nothing in the tin).
+    assert!(get("tin-growth")["value"].as_f64().is_some(), "{stdout}");
+    // Syncs per operation: counted where the kernel can be asked, and said
+    // plainly where it cannot, never guessed.
+    let fs_ = get("fsyncs-per-op");
+    match fs_["value"].as_f64() {
+        Some(n) => assert!(n > 0.0, "a journaled burn syncs: {n}"),
+        None => assert!(
+            fs_["note"]
+                .as_str()
+                .is_some_and(|n| n.starts_with("not measured")),
+            "{fs_}"
+        ),
+    }
+    // The plain table shows them and says they are not gated.
+    let (code, table, _) = bench_bounded(&sb, &["bench"], 120);
+    assert_eq!(code, Some(0), "{table}");
+    assert!(table.contains("disk-per-byte"), "{table}");
+    assert!(table.contains("never gated"), "{table}");
+    let (_, md, _) = bench_bounded(&sb, &["bench", "--markdown"], 120);
+    assert!(
+        md.contains("| `burn ten thousand bytes` | `disk-per-byte` |"),
+        "{md}"
+    );
+
+    // A ratio needs its denominator: a case that asks for one without
+    // `burned` is refused, naming the case.
+    sb.write(
+        "bench/bench.toml",
+        &manifest(r#"["wall", "disk-per-byte"]"#, ""),
+    );
+    let (code, _, err) = bench_bounded(&sb, &["bench"], 60);
+    assert_eq!(code, Some(3), "{err}");
+    assert!(
+        err.contains("disk-per-byte") && err.contains("burned"),
+        "{err}"
+    );
+}
+
+#[test]
+fn bench_after_and_before_lists_check_what_a_command_left() {
+    let sb = Sandbox::new();
+    sb.write(
+        "bench/bench.toml",
+        r#"
+[bench]
+product = "cig"
+[defaults]
+samples = 2
+per = 1
+warmup = 1
+[[case]]
+name = "leaves a file"
+run = ["sh", "-c", "echo two >> \"$HOME/f\""]
+before = [["sh", "-c", "echo one > \"$HOME/f\""]]
+after = ["sh", "-c", "cat \"$HOME/f\""]
+expect = { exit = 0, after_stdout = "after.out" }
+"#,
+    );
+    sb.write("bench/after.out", "one\ntwo\n");
+    let (code, out, err) = bench_bounded(&sb, &["bench"], 60);
+    if cfg!(unix) {
+        assert_eq!(code, Some(0), "{out}\n{err}");
+        // A wrong `after` is WRONG, not timed.
+        sb.write("bench/after.out", "one\n");
+        let (code, _, err) = bench_bounded(&sb, &["bench"], 60);
+        assert_eq!(code, Some(1), "{err}");
+        assert!(err.contains("WRONG") && err.contains("`after`"), "{err}");
+    }
 }
 
 // ----- #176: the keys folder under a shared parent is not shared -----------

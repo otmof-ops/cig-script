@@ -17,6 +17,7 @@ pub mod ledger;
 pub mod lock;
 pub mod overlay;
 pub mod parcel;
+pub mod passkeep;
 pub mod protocol;
 pub mod proxy;
 pub mod rekey;
@@ -27,7 +28,10 @@ pub mod seal;
 pub mod statcache;
 pub mod tin;
 pub mod tinparcel;
+pub mod vault;
 pub mod watch;
+#[cfg(windows)]
+pub mod winacl;
 
 /// The one lock every test in this crate that sets `CIGSCRIPT_HOME` takes:
 /// the tests share a process and an environment, and `home_dir` reads it.
@@ -679,15 +683,21 @@ fn guard_existing(_home: &Path, _mode: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Set a directory to 0700 on Unix; on Windows the user's profile already
-/// grants the user alone (a DACL is a later step).
+/// Set a directory to 0700 on Unix; on Windows to a protected DACL naming
+/// the user and SYSTEM only.
 fn make_private(dir: &Path) {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o700));
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        // A protected DACL: the user and SYSTEM, nobody else, nothing
+        // inherited (#105, K2).
+        let _ = winacl::protect_dir(dir);
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = dir;
     }

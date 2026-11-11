@@ -234,7 +234,9 @@ CigScript's binary links the Rust crates below, pulled from crates.io as package
 | endi | 1.1.1 | Zeeshan Ali Khan <zeenix@gmail.com> | https://github.com/zeenix/endi |
 | fastcdc | 3.2.1 | Nathan Fiedler <nathanfiedler@fastmail.fm> | https://github.com/nlfiedler/fastcdc-rs |
 | generic-array | 0.14.7 | Bartłomiej Kamiński <fizyk20@gmail.com>, Aaron Trent <novacrazy@gmail.com> | https://github.com/fizyk20/generic-array.git |
+| libmimalloc-sys | 0.1.49 | Octavian Oncescu <octavonce@gmail.com> | https://github.com/purpleprotocol/mimalloc_rust/tree/master/libmimalloc-sys |
 | memoffset | 0.9.1 | Gilad Naaman <gilad.naaman@gmail.com> | https://github.com/Gilnaa/memoffset |
+| mimalloc | 0.1.52 | Octavian Oncescu <octavonce@gmail.com>, Vincent Rouillé <vincent@speedy37.fr>, Thom Chiovoloni <chiovolonit@gmail.com> | https://github.com/purpleprotocol/mimalloc_rust |
 | nix | 0.29.0 | The nix-rust Project Developers | https://github.com/nix-rust/nix |
 | simd-adler32 | 0.3.10 | Marvin Countryman <me@maar.vin> | https://github.com/mcountryman/simd-adler32 |
 | slab | 0.4.12 | Carl Lerche <me@carllerche.com> | https://github.com/tokio-rs/slab |
@@ -254,11 +256,12 @@ CigScript's binary links the Rust crates below, pulled from crates.io as package
 | zvariant_derive | 4.2.0 | Zeeshan Ali Khan <zeeshanak@gnome.org> | https://github.com/dbus2/zbus/ |
 | zvariant_utils | 2.1.0 | Zeeshan Ali Khan <zeeshanak@gnome.org>, turbocooler <turbocooler@cocaine.ninja> | https://github.com/dbus2/zbus/ |
 
-## Apache-2.0
+## FSL-1.1-ALv2
 
 | crate | version | holder | source |
 |---|---|---|---|
 | cig-pass | 0.1.0 | unrecorded | https://github.com/otmof-ops/cig-script |
+| cig-vault | 0.1.0 | unrecorded | https://github.com/otmof-ops/cig-script |
 
 ## Apache-2.0 OR CC0-1.0 OR MIT-0
 

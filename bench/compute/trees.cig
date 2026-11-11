@@ -1,0 +1,29 @@
+# SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Binary trees: allocation and recursion.
+pull make(d) {
+  if d == 0 {
+    snuff [null, null]
+  }
+  snuff [make(d - 1), make(d - 1)]
+}
+pull check(t) {
+  if t[0] == null {
+    snuff 1
+  }
+  snuff 1 + check(t[0]) + check(t[1])
+}
+stick maxd = 12
+exhale "stretch", check(make(maxd + 1))
+stick long = make(maxd)
+roll d = 4
+while d <= maxd {
+  stick n = math.pow(2, maxd - d + 4)
+  roll c = 0
+  for i in 0..n {
+    c += check(make(d))
+  }
+  exhale n, d, c
+  d += 2
+}
+exhale "long", check(long)

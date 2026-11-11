@@ -1,0 +1,8 @@
+# SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# A tight numeric loop.
+roll total = 0
+for i in 0..400000 {
+  total += i * i % 7
+}
+exhale total

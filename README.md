@@ -567,6 +567,7 @@ Add a row. The rules for reporting one are in
 | `cig versions [add\|remove\|prune]` | the humidor: every other version of cig, for pinned scripts and old journals |
 | `cig pin <file> [--to 1.2]` | write `# cig 1.2` into a script, so a newer cig hands it to that version |
 | `cig tin [du\|verify\|gc]` | the tin: the before-bytes of files hops may change, outside the project |
+| `cig bench [manifest]` | measure: a manifest's cases, checked first, medians and p10 to p90; `--against` compares interleaved |
 | `cig config [key [value]]` | the few settings there are |
 | `cig language` | the legend and the standard library |
 
@@ -578,6 +579,21 @@ ends is stopped with `E515` and its line; `0` disables it.
 `CIG_DOCTOR=0` gives the bare diagnostic; `NO_COLOR` is honoured. Exit codes
 are stable: `0` ok, `1` the script failed, `2` it did not parse or check, `3`
 usage or environment problem, `70` `cig` itself crashed.
+
+## Measuring cig
+
+cig measures itself with its own benchmark command. The suite is
+`bench/bench.toml`: start-up, the compute programs (checked against their
+expected output first), and the kernel set (a burn, an unburn, a restore of a
+32 MiB file, a hop over 2,000 unchanged files), with the bytes a run leaves on disk and
+its syncs reported next to the time. One command runs it:
+
+```
+cargo build --release && cig bench bench/bench.toml
+```
+
+Medians, p10 to p90 and CV, never a mean alone; sizes are reported and not
+gated. [docs/BENCH.md](docs/BENCH.md) lists the cases and what each number is.
 
 ## Documentation
 
@@ -591,7 +607,7 @@ usage or environment problem, `70` `cig` itself crashed.
 - [docs/BURN.md](docs/BURN.md): effects, modes, the journal, rollback, and what it can't undo and says so.
 - [docs/PROGRAMS.md](docs/PROGRAMS.md): compiled programs: a script appended to the `cig` that runs it, its command line, and what differs from `cig run`.
 - [docs/SCIENCE.md](docs/SCIENCE.md): CigScript in the lab.
-- [docs/BENCH.md](docs/BENCH.md): `cig bench` and the `bench/bench.toml` manifest: samples in batches, medians, p10 to p90, CV and peak RSS.
+- [docs/BENCH.md](docs/BENCH.md): `cig bench` and the `bench/bench.toml` manifest: samples in batches, medians, p10 to p90, CV and peak RSS; cig's own suite and the kernel measures.
 - [docs/STDLIB.md](docs/STDLIB.md): every function with its arity and effect (generated).
 - [docs/ERRORS.md](docs/ERRORS.md): every error code, its kind of no, what to type next, its causes (generated from the registry).
 - [docs/DESIGN.md](docs/DESIGN.md): why it looks like this, the tone, what came before, and the roadmap.

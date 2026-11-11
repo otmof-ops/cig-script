@@ -133,6 +133,27 @@ fn acquire_rekey_lock() -> Result<fs::File, LockBusy> {
         .map_err(LockBusy::Io)
 }
 
+/// How long a command waits for a running rekey (`rekey_wait`, seconds;
+/// 0 = do not wait).
+fn wait_seconds() -> u64 {
+    crate::config::Config::load()
+        .get("rekey_wait")
+        .parse()
+        .unwrap_or(30)
+}
+
+/// The refusal when a rekey outlasts the wait: `E720`, with what to do.
+fn rekey_running(waited: u64) -> String {
+    format!(
+        "E720 burn: a cig tin rekey is running on this tin{}; this command needs the key and cannot read it safely until the rekey is done. Try again when it has finished (rekey_wait sets how long a command waits)",
+        if waited == 0 {
+            String::new()
+        } else {
+            format!(" (waited {waited}s)")
+        }
+    )
+}
+
 /// A process-wide shared (blocking) lock on the rekey lock file: every
 /// cig process that reads the seal key takes this once, through
 /// `seal::key()`, and keeps it for the lifetime of the process. A rekey
@@ -183,20 +204,32 @@ pub fn take_process_shared_lock() -> Result<fs::File, String> {
     }
     let probe_err = io::Error::last_os_error();
     if probe_err.raw_os_error() == Some(libc::EWOULDBLOCK) {
-        eprintln!(
-            "note: cig tin rekey is in progress; waiting for it to finish before this run touches the tin"
-        );
-        // SAFETY: flock on a descriptor this handle owns. Blocking.
-        let rc = unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_SH) };
-        if rc == 0 {
-            return Ok(f);
+        let wait = wait_seconds();
+        if wait == 0 {
+            return Err(rekey_running(0));
         }
-        // The blocking call's own errno, not the probe's.
-        let e = io::Error::last_os_error();
-        return Err(format!(
-            "could not take the rekey lock on {} ({e}); refusing to proceed unprotected against a concurrent cig tin rekey",
-            rekey_lock_path().display()
-        ));
+        eprintln!(
+            "note: cig tin rekey is in progress; waiting up to {wait}s for it to finish before this run touches the tin"
+        );
+        // The blocking lock is asked for on a thread, so the wait has an end:
+        // the thread keeps the descriptor's twin, and the lock belongs to the
+        // open file, so it holds for the process whichever one asked.
+        let twin = f.try_clone().map_err(|e| e.to_string())?;
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            // SAFETY: flock on a descriptor this handle owns. Blocking.
+            let rc = unsafe { libc::flock(twin.as_raw_fd(), libc::LOCK_SH) };
+            let _ = tx.send((rc, io::Error::last_os_error()));
+        });
+        return match rx.recv_timeout(std::time::Duration::from_secs(wait)) {
+            Ok((0, _)) => Ok(f),
+            // The blocking call's own errno, not the probe's.
+            Ok((_, e)) => Err(format!(
+                "could not take the rekey lock on {} ({e}); refusing to proceed unprotected against a concurrent cig tin rekey",
+                rekey_lock_path().display()
+            )),
+            Err(_) => Err(rekey_running(wait)),
+        };
     }
     Err(format!(
         "could not take the rekey lock on {} ({probe_err}); refusing to proceed unprotected against a concurrent cig tin rekey",
@@ -221,7 +254,8 @@ pub fn take_process_shared_lock() -> Result<fs::File, String> {
     // longer than that is an abandoned run that needs operator care;
     // reporting instead of hanging is kinder.
     let mut waited_once = false;
-    for attempt in 0..300 {
+    let wait = wait_seconds();
+    for attempt in 0..(wait * 10) {
         match fs::OpenOptions::new()
             .create(true)
             .truncate(false)
@@ -248,10 +282,7 @@ pub fn take_process_shared_lock() -> Result<fs::File, String> {
             }
         }
     }
-    Err(format!(
-        "the rekey lock {} stayed in a sharing violation for 30s; refusing to proceed unprotected against a concurrent cig tin rekey",
-        rekey_lock_path().display()
-    ))
+    Err(rekey_running(wait))
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -293,6 +324,12 @@ fn rekey_inner() -> Result<Done, String> {
         seal::Keeper::Descriptor => {
             return Err(
                 "the key was handed over on a descriptor for this run only (--seal-key-fd); a rekey cannot write it back there. Store it in the keyring or a key file first (cig config seal_key keyring, or cig tin key import)"
+                    .to_string(),
+            );
+        }
+        seal::Keeper::Passphrase => {
+            return Err(
+                "the tin's key is derived from a passphrase (seal_key = passphrase) and stored nowhere, so a rekey has nowhere to write the new one. Move to the keyring or a key file first (cig config seal_key file), then rekey"
                     .to_string(),
             );
         }
@@ -964,7 +1001,7 @@ fn swap_keeper_if_needed(new_key: &Key, keeper: seal::Keeper) -> Result<(), Stri
             // the next read, and the file is already the source of truth.
             let _ = seal::store_in_keyring(new_key);
         }
-        seal::Keeper::Descriptor => unreachable!("refused up front"),
+        seal::Keeper::Descriptor | seal::Keeper::Passphrase => unreachable!("refused up front"),
     }
     Ok(())
 }

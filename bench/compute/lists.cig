@@ -1,0 +1,11 @@
+# SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Lists: sort, filter and map.
+roll xs = []
+for i in 0..60000 {
+  xs.push((i * 7919) % 10007)
+}
+stick sorted = xs.sort()
+stick evens = sorted.filter(pack(x) => x % 2 == 0)
+stick doubled = evens.map(pack(x) => x * 2)
+exhale doubled.len(), doubled[0], doubled[doubled.len() - 1]

@@ -104,7 +104,7 @@ fn stmt(s: &Stmt, out: &mut Vec<Use>) {
         Stmt::Declare { value, .. } => expr(value, out),
         Stmt::Assign { target, value, .. } => {
             match target {
-                AssignTarget::Var(_) => {}
+                AssignTarget::Var(..) => {}
                 AssignTarget::Index { object, index } => {
                     expr(object, out);
                     expr(index, out);

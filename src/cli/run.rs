@@ -28,7 +28,10 @@ const MAX_SCRIPT_BYTES: u64 = 64 * 1024 * 1024;
 /// strict-mode check (`E721`), emit under that code with a pointer to
 /// `cig explain E721`; otherwise emit under `E802` as before.
 pub(crate) fn emit_lock_or_strict_error(ctx: &Ctx, e: &str) {
-    if let Some(rest) = e.strip_prefix("E721 burn: ") {
+    if let Some(rest) = e.strip_prefix("E720 burn: ") {
+        eprintln!("{} {rest}", ctx.red("error[E720 burn]:"));
+        eprintln!("  = explain: cig explain E720");
+    } else if let Some(rest) = e.strip_prefix("E721 burn: ") {
         eprintln!("{} {rest}", ctx.red("error[E721 burn]:"));
         eprintln!("  = explain: cig explain E721");
     } else {

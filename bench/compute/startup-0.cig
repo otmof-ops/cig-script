@@ -1,0 +1,4 @@
+# SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Startup with no stdlib module touched.
+exhale "hello"

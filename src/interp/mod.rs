@@ -262,3 +262,6 @@ impl Interp {
         }
     }
 }
+
+#[cfg(all(test, debug_assertions))]
+mod resolve_tests;

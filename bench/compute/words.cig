@@ -1,0 +1,25 @@
+# SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Word count: split text, count in a map, top word.
+roll parts = []
+for i in 0..40000 {
+  parts.push("w${(i * 7919) % 997}")
+}
+stick text = parts.join(" ")
+roll counts = {}
+for w in text.split(" ") {
+  if counts.has(w) {
+    counts[w] = counts[w] + 1
+  } else {
+    counts[w] = 1
+  }
+}
+roll best = ""
+roll bestn = 0
+for w in counts.keys() {
+  if counts[w] > bestn or (counts[w] == bestn and w < best) {
+    best = w
+    bestn = counts[w]
+  }
+}
+exhale counts.len(), best, bestn

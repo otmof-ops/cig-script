@@ -1,0 +1,43 @@
+# SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
+# SPDX-License-Identifier: FSL-1.1-ALv2
+roll fs = []
+for n in 0..3 {
+  roll m = n * 10
+  fs.push(pack() => n + m)
+}
+for f in fs {
+  exhale f()
+}
+roll gs = []
+roll w = 0
+while w < 3 {
+  roll here = w
+  gs.push(pack() => here)
+  w += 1
+}
+exhale gs.map(pack(g) => g())
+roll hs = []
+for item in ["a", "b"] {
+  roll tag = "${item}!"
+  hs.push(pack() {
+    tag = tag + "?"
+    snuff tag
+  })
+}
+exhale hs[0](), hs[0](), hs[1]()
+roll es = []
+for i in 0..2 {
+  try {
+    cough "e${i}"
+  } ashtray err {
+    es.push(pack() => err.message)
+  }
+}
+exhale es[0](), es[1]()
+roll ks = []
+for i in 0..3 {
+  roll j = i
+  ks.push(pack() => j)
+  j = j + 100
+}
+exhale ks.map(pack(k) => k())

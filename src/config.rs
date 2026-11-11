@@ -79,7 +79,22 @@ pub const KEYS: &[(&str, &str, &str)] = &[
     (
         "seal_key",
         "keyring",
-        "where the tin's key lives: keyring (the OS keyring, with a key file apart from the tin as the fallback where there is none) or file (that key file, readable by you alone)",
+        "where the tin's key lives: keyring (the OS keyring, with a key file apart from the tin as the fallback where there is none) file (that key file, readable by you alone) or passphrase (no key is stored: it is derived from a passphrase with Argon2id, asked on the terminal or read from --seal-key-fd, for a machine with no keyring)",
+    ),
+    (
+        "vault",
+        "auto",
+        "the vault (#105): auto hands the tin's objects to the vault when one is installed (the _cigtin account exists) and says once, E724, when it does not answer; on says so when none is installed; off never talks to it. The vault is a store under its own account that nothing running as you can delete from",
+    ),
+    (
+        "vault_socket",
+        "",
+        "where the vault listens; empty means the platform's own (/run/cig-vault/vault.sock, /var/run/cig-vault/vault.sock on macOS). cig talks only to a socket the vault's account owns",
+    ),
+    (
+        "rekey_wait",
+        "30",
+        "how many seconds a command waits for a running cig tin rekey before it stops with E720 (0 = do not wait)",
     ),
     (
         "tin_perms",
@@ -233,9 +248,25 @@ impl Config {
             ("seal", other) => {
                 return Err(format!("seal must be secrets, all or never, not `{other}`"))
             }
-            ("seal_key", "keyring" | "file") => {}
+            ("rekey_wait", v) if v.parse::<u64>().is_ok_and(|n| n <= 3600) => {}
+            ("rekey_wait", other) => {
+                return Err(format!(
+                    "rekey_wait is a number of seconds up to 3600, not `{other}`"
+                ))
+            }
+            ("vault", "auto" | "on" | "off") => {}
+            ("vault", other) => {
+                return Err(format!("vault must be auto, on or off, not `{other}`"))
+            }
+            ("vault_socket", v) if v.is_empty() || v.starts_with('/') => {}
+            ("vault_socket", other) => {
+                return Err(format!(
+                    "vault_socket is an absolute path (or empty for the default), not `{other}`"
+                ))
+            }
+            ("seal_key", "keyring" | "file" | "passphrase") => {}
             ("seal_key", other) => {
-                return Err(format!("seal_key must be keyring or file, not `{other}`"))
+                return Err(format!("seal_key must be keyring, file or passphrase, not `{other}`"))
             }
             ("hop_skip", v) => {
                 for g in crate::burn::tin::skip_setting_globs(v) {

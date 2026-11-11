@@ -1,0 +1,13 @@
+# SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Closures: made in a loop and called.
+pull counter(start) {
+  roll n = start
+  snuff pack() => n + 1
+}
+roll total = 0
+for i in 0..100000 {
+  stick f = counter(i)
+  total += f()
+}
+exhale total

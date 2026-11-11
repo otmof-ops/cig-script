@@ -15,6 +15,9 @@
 //! or could not be measured; `USAGE` (3) for a malformed manifest or a
 //! usage mistake.
 //!
+//! The kernel measures (`tin-growth`, `file:<path>`, `disk-per-byte`,
+//! `fsyncs-per-op`) are in `bench/measures.rs`.
+//!
 //! What is here: step 1 (the manifest, the harness, `--json`,
 //! `--markdown`), step 2 (`--save` and `--against`: interleaved A/B and a
 //! Mann-Whitney verdict, in `bench/ab.rs`) and step 3 (`--watch`, in
@@ -26,6 +29,7 @@
 //! refused rather than guessed at.
 
 use super::{exit, Ctx};
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -33,7 +37,10 @@ use std::process::{Command, Stdio};
 use std::time::Instant;
 
 mod ab;
+mod measures;
 mod watch;
+
+use measures::{Kind, Metric};
 
 /// The manifest and baseline format this cig reads and writes.
 pub const FORMAT: i64 = 1;
@@ -319,12 +326,23 @@ struct Case {
     stdin: Option<String>,
     expect: Expect,
     setup: Option<Vec<String>>,
-    before: Option<Vec<String>>,
+    /// Run once per sample, in order, not timed. One command or a list.
+    before: Vec<Vec<String>>,
+    /// Run once after each sample's timed batch, not timed; its stdout is
+    /// checked against `expect.after_stdout`.
+    after: Option<Vec<String>>,
     budget: Option<String>,
+    /// This case's own batch size; wins over the defaults and `--per`.
+    per: Option<usize>,
+    /// Bytes one run burns: what `disk-per-byte` divides by.
+    burned: Option<u64>,
+    /// Operations one run performs: what `fsyncs-per-op` divides by.
+    ops: Option<u64>,
     env: BTreeMap<String, String>,
-    /// Which metrics to record. Step 1 honours "wall" and "rss"; any
-    /// other entry is accepted so a manifest written for a later step
-    /// still parses.
+    /// Which metrics to record. `wall` and `rss` are always taken; the
+    /// kernel measures are `tin-growth`, `file:<path>`, `disk-per-byte` and
+    /// `fsyncs-per-op`; any other entry is accepted so a manifest written
+    /// for a later step still parses.
     measure: Vec<String>,
     /// Globs that narrow which changes rerun this case in `--watch`; empty
     /// means every change does.
@@ -338,6 +356,8 @@ struct Expect {
     /// Path (relative to the manifest) to a file holding the expected
     /// stdout. `None` means no stdout check.
     stdout_file: Option<PathBuf>,
+    /// Path to the expected stdout of the case's `after` command.
+    after_stdout_file: Option<PathBuf>,
 }
 
 impl Default for Expect {
@@ -347,6 +367,7 @@ impl Default for Expect {
         Expect {
             exit: Some(0),
             stdout_file: None,
+            after_stdout_file: None,
         }
     }
 }
@@ -451,8 +472,12 @@ fn parse_manifest(text: &str) -> Result<Manifest, String> {
                 stdin: None,
                 expect: Expect::default(),
                 setup: None,
-                before: None,
+                before: Vec::new(),
+                after: None,
                 budget: None,
+                per: None,
+                burned: None,
+                ops: None,
                 env: BTreeMap::new(),
                 measure: Vec::new(),
                 watch: Vec::new(),
@@ -482,8 +507,15 @@ fn parse_manifest(text: &str) -> Result<Manifest, String> {
                     }
                     "expect" => case.expect = parse_expect(v, i + 1)?,
                     "setup" => case.setup = Some(as_argv(v, &format!("case #{} `setup`", i + 1))?),
-                    "before" => {
-                        case.before = Some(as_argv(v, &format!("case #{} `before`", i + 1))?)
+                    "before" => case.before = as_commands(v, &format!("case #{} `before`", i + 1))?,
+                    "after" => case.after = Some(as_argv(v, &format!("case #{} `after`", i + 1))?),
+                    "per" => case.per = Some(as_usize(v, &format!("case #{} `per`", i + 1))?),
+                    "burned" => {
+                        case.burned =
+                            Some(as_usize(v, &format!("case #{} `burned`", i + 1))? as u64)
+                    }
+                    "ops" => {
+                        case.ops = Some(as_usize(v, &format!("case #{} `ops`", i + 1))? as u64)
                     }
                     "budget" => {
                         case.budget = Some(
@@ -518,6 +550,26 @@ fn parse_manifest(text: &str) -> Result<Manifest, String> {
             if case.run.is_empty() {
                 return Err(format!("case {}: `run` is required", case.name));
             }
+            if case.per == Some(0) || case.ops == Some(0) {
+                return Err(format!(
+                    "case {}: `per` and `ops` are at least 1",
+                    case.name
+                ));
+            }
+            let kinds = measures::kinds_of(&case.measure)
+                .map_err(|e| format!("case {}: {e}", case.name))?;
+            if kinds.contains(&Kind::DiskPerByte) && case.burned.is_none_or(|b| b == 0) {
+                return Err(format!(
+                    "case {}: `disk-per-byte` needs `burned`, the bytes one run burns",
+                    case.name
+                ));
+            }
+            if case.expect.after_stdout_file.is_some() && case.after.is_none() {
+                return Err(format!(
+                    "case {}: `expect.after_stdout` needs an `after` command",
+                    case.name
+                ));
+            }
             cases.push(case);
         }
     }
@@ -547,6 +599,12 @@ fn parse_expect(v: &toml::Value, idx: usize) -> Result<Expect, String> {
                     .ok_or_else(|| format!("case #{idx}: `expect.stdout` is a string"))?;
                 out.stdout_file = Some(PathBuf::from(s));
             }
+            "after_stdout" => {
+                let s = v
+                    .as_str()
+                    .ok_or_else(|| format!("case #{idx}: `expect.after_stdout` is a string"))?;
+                out.after_stdout_file = Some(PathBuf::from(s));
+            }
             _ => return Err(format!("case #{idx}: unknown key `expect.{k}`")),
         }
     }
@@ -569,6 +627,19 @@ fn as_argv(v: &toml::Value, where_: &str) -> Result<Vec<String>, String> {
         return Err(format!("`{where_}` is empty"));
     }
     Ok(out)
+}
+
+/// One command (an array of strings) or a list of commands (an array of
+/// arrays of strings), as a list.
+fn as_commands(v: &toml::Value, where_: &str) -> Result<Vec<Vec<String>>, String> {
+    let arr = v
+        .as_array()
+        .ok_or_else(|| format!("`{where_}` is an array of strings, or an array of those"))?;
+    if arr.first().is_some_and(toml::Value::is_array) {
+        arr.iter().map(|c| as_argv(c, where_)).collect()
+    } else {
+        Ok(vec![as_argv(v, where_)?])
+    }
 }
 
 /// An array of strings, empty allowed (a list of globs).
@@ -703,15 +774,19 @@ struct Row {
     group: Option<String>,
     budget: Option<String>,
     outcome: Outcome,
+    /// The kernel measures the case asked for (`tin-growth`, ...): reported
+    /// next to the timing, never gated.
+    metrics: Vec<Metric>,
 }
 
 fn run_case(side: &Side, scratch_root: &Path, case: &Case, defaults: &Defaults) -> Row {
-    let outcome = measure_case(side, scratch_root, case, defaults);
+    let (outcome, metrics) = measure_case_full(side, scratch_root, case, defaults, true);
     Row {
         name: case.name.clone(),
         group: case.group.clone(),
         budget: case.budget.clone(),
         outcome,
+        metrics,
     }
 }
 
@@ -723,6 +798,11 @@ struct Prepared<'a> {
     defaults: &'a Defaults,
     work: PathBuf,
     expect_stdout: Option<String>,
+    expect_after: Option<String>,
+    /// The kernel measures this case asked for.
+    kinds: Vec<Kind>,
+    /// Per kind, one reading per sample taken so far.
+    readings: RefCell<Vec<Vec<Result<f64, String>>>>,
 }
 
 impl Drop for Prepared<'_> {
@@ -768,7 +848,11 @@ fn prepare<'a>(
         defaults,
         work,
         expect_stdout: None,
+        expect_after: None,
+        kinds: measures::kinds_of(&case.measure).unwrap_or_default(),
+        readings: RefCell::new(Vec::new()),
     };
+    p.readings = RefCell::new(vec![Vec::new(); p.kinds.len()]);
     // The case's expected stdout, read once. Missing is no check.
     if let Some(f) = &case.expect.stdout_file {
         let abs = if f.is_absolute() {
@@ -778,6 +862,22 @@ fn prepare<'a>(
         };
         match std::fs::read_to_string(&abs) {
             Ok(s) => p.expect_stdout = Some(normalise(&s)),
+            Err(e) => {
+                return Err(Outcome::Absent(format!(
+                    "cannot read expected stdout {}: {e}",
+                    abs.display()
+                )))
+            }
+        }
+    }
+    if let Some(f) = &case.expect.after_stdout_file {
+        let abs = if f.is_absolute() {
+            f.clone()
+        } else {
+            side.dir.join(f)
+        };
+        match std::fs::read_to_string(&abs) {
+            Ok(s) => p.expect_after = Some(normalise(&s)),
             Err(e) => {
                 return Err(Outcome::Absent(format!(
                     "cannot read expected stdout {}: {e}",
@@ -810,16 +910,8 @@ fn prepare<'a>(
         let home = p.work.join(format!("warmup-{i}-home"));
         let _ = std::fs::create_dir_all(&home);
         let env = full_env(defaults, &case.env, &home);
-        if let Some(argv) = &case.before {
-            if let Err(e) = run_untimed(
-                &side.argv(argv),
-                &side.dir,
-                &env,
-                &side.dir,
-                case.stdin.as_deref(),
-            ) {
-                return Err(Outcome::Absent(format!("`before` failed in warm-up: {e}")));
-            }
+        if let Err(e) = run_befores(side, case, &env) {
+            return Err(Outcome::Absent(format!("`before` failed in warm-up: {e}")));
         }
         match measure_run(
             &side.argv(&case.run),
@@ -854,6 +946,7 @@ fn prepare<'a>(
                             )));
                         }
                     }
+                    check_after(side, case, &env, p.expect_after.as_deref(), "warm-up")?;
                     checked = true;
                 }
             }
@@ -873,23 +966,18 @@ impl Prepared<'_> {
         let home = self.work.join(format!("sample-{i}-home"));
         let _ = std::fs::create_dir_all(&home);
         let env = full_env(defaults, &case.env, &home);
-        if let Some(argv) = &case.before {
-            if let Err(e) = run_untimed(
-                &side.argv(argv),
-                &side.dir,
-                &env,
-                &side.dir,
-                case.stdin.as_deref(),
-            ) {
-                return Err(Outcome::Absent(format!(
-                    "`before` failed before sample {i}: {e}"
-                )));
-            }
+        if let Err(e) = run_befores(side, case, &env) {
+            return Err(Outcome::Absent(format!(
+                "`before` failed before sample {i}: {e}"
+            )));
         }
         let argv = side.argv(&case.run);
+        let per = case.per.unwrap_or(defaults.per).max(1);
+        // Sizes are read before the clock starts and after it stops.
+        let probe = measures::before(&self.kinds, &env);
         let batch_started = Instant::now();
         let mut batch_rss: Option<u64> = None;
-        for p in 0..defaults.per {
+        for p in 0..per {
             match measure_run(&argv, &side.dir, &env, &side.dir, case.stdin.as_deref()) {
                 Ok(m) => {
                     if let Some(code) = case.expect.exit {
@@ -919,15 +1007,42 @@ impl Prepared<'_> {
             }
         }
         let batch_ms = batch_started.elapsed().as_secs_f64() * 1000.0;
+        if !self.kinds.is_empty() {
+            let got = measures::after(&self.kinds, &probe, &env, &side.dir, per, case.burned);
+            let mut all = self.readings.borrow_mut();
+            for (col, r) in all.iter_mut().zip(got) {
+                col.push(r);
+            }
+        }
+        check_after(
+            side,
+            case,
+            &env,
+            self.expect_after.as_deref(),
+            &format!("sample {i}"),
+        )?;
         let _ = std::fs::remove_dir_all(&home);
-        Ok((batch_ms / defaults.per.max(1) as f64, batch_rss))
+        Ok((batch_ms / per as f64, batch_rss))
     }
 }
 
 fn measure_case(side: &Side, scratch_root: &Path, case: &Case, defaults: &Defaults) -> Outcome {
+    measure_case_full(side, scratch_root, case, defaults, false).0
+}
+
+/// A case measured: its timing and, when `metrics` says so, the kernel
+/// measures it asked for (a comparison and a watch compare timings only, and
+/// skip the extra run that counts syncs).
+fn measure_case_full(
+    side: &Side,
+    scratch_root: &Path,
+    case: &Case,
+    defaults: &Defaults,
+    metrics: bool,
+) -> (Outcome, Vec<Metric>) {
     let prepared = match prepare(side, scratch_root, case, defaults) {
         Ok(p) => p,
-        Err(o) => return o,
+        Err(o) => return (o, Vec::new()),
     };
     let mut ms: Vec<f64> = Vec::with_capacity(defaults.samples);
     let mut rss_max: Option<u64> = None;
@@ -937,10 +1052,124 @@ fn measure_case(side: &Side, scratch_root: &Path, case: &Case, defaults: &Defaul
                 ms.push(t);
                 rss_max = max_opt(rss_max, rss);
             }
-            Err(o) => return o,
+            Err(o) => return (o, Vec::new()),
         }
     }
-    Outcome::Timed(Stats::of(&ms, rss_max))
+    let kernel = if metrics {
+        prepared.metrics()
+    } else {
+        Vec::new()
+    };
+    (Outcome::Timed(Stats::of(&ms, rss_max)), kernel)
+}
+
+/// Run each `before` command of a case, in order.
+fn run_befores(side: &Side, case: &Case, env: &BTreeMap<OsString, OsString>) -> Result<(), String> {
+    for argv in &case.before {
+        run_untimed(
+            &side.argv(argv),
+            &side.dir,
+            env,
+            &side.dir,
+            case.stdin.as_deref(),
+        )?;
+    }
+    Ok(())
+}
+
+/// Run a case's `after` command and check its stdout against the expected
+/// file: this is how a case that prints nothing deterministic itself (an
+/// unburn names its home and its run) proves what it left behind.
+fn check_after(
+    side: &Side,
+    case: &Case,
+    env: &BTreeMap<OsString, OsString>,
+    want: Option<&str>,
+    when: &str,
+) -> Result<(), Outcome> {
+    let Some(argv) = &case.after else {
+        return Ok(());
+    };
+    match measure_run(&side.argv(argv), &side.dir, env, &side.dir, None) {
+        Ok(m) => {
+            if m.exit != Some(0) {
+                return Err(Outcome::Wrong(format!(
+                    "`after` in {when} exited {} (stderr: {})",
+                    m.exit
+                        .map(|c| c.to_string())
+                        .unwrap_or_else(|| "by signal".into()),
+                    clip(m.stderr.trim())
+                )));
+            }
+            if let Some(want) = want {
+                let got = normalise(&m.stdout);
+                if got != want {
+                    return Err(Outcome::Wrong(format!(
+                        "`after` in {when} printed {:?}, not {:?}",
+                        clip(&got),
+                        clip(want)
+                    )));
+                }
+            }
+            Ok(())
+        }
+        Err(e) => Err(Outcome::Absent(format!(
+            "`after` in {when} could not run: {e}"
+        ))),
+    }
+}
+
+impl Prepared<'_> {
+    /// The kernel measures of the samples taken so far, plus the sync
+    /// count, which takes a run of its own.
+    fn metrics(&self) -> Vec<Metric> {
+        let cols = self.readings.borrow();
+        let mut out = Vec::new();
+        for (kind, col) in self.kinds.iter().zip(cols.iter()) {
+            if *kind == Kind::FsyncsPerOp {
+                out.push(measures::summarize(kind, &[self.fsyncs_per_op()]));
+            } else {
+                out.push(measures::summarize(kind, col));
+            }
+        }
+        out
+    }
+
+    /// Sync calls in one run, per operation: counted by `strace` from the
+    /// kernel's own syscall events in one extra run that is never timed.
+    fn fsyncs_per_op(&self) -> Result<f64, String> {
+        let (side, case, defaults) = (self.side, self.case, self.defaults);
+        let home = self.work.join("fsync-home");
+        let _ = std::fs::create_dir_all(&home);
+        let env = full_env(defaults, &case.env, &home);
+        run_befores(side, case, &env)?;
+        let out = self.work.join("fsync-strace.txt");
+        let argv = measures::strace_argv(&out, &side.argv(&case.run))?;
+        let mut c = build_command(&argv, &side.dir, &env, &side.dir, case.stdin.as_deref())?;
+        let res = c
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .output()
+            .map_err(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    "strace is not installed".to_string()
+                } else {
+                    format!("could not start strace: {e}")
+                }
+            })?;
+        let code = res.status.code();
+        if code != case.expect.exit {
+            return Err(format!(
+                "strace ended with {} (stderr: {})",
+                code.map(|c| c.to_string())
+                    .unwrap_or_else(|| "a signal".into()),
+                clip(String::from_utf8_lossy(&res.stderr).trim())
+            ));
+        }
+        let summary = std::fs::read_to_string(&out).unwrap_or_default();
+        let _ = std::fs::remove_dir_all(&home);
+        Ok(measures::count_syncs(&summary) as f64 / case.ops.unwrap_or(1).max(1) as f64)
+    }
 }
 
 fn max_opt(a: Option<u64>, b: Option<u64>) -> Option<u64> {
@@ -1325,6 +1554,24 @@ fn print_table(m: &Manifest, rows: &[Row], c: &Conditions) {
             rss_cell(&r.outcome)
         );
     }
+    let with: Vec<&Row> = rows
+        .iter()
+        .filter(|r| matches!(r.outcome, Outcome::Timed(_)) && !r.metrics.is_empty())
+        .collect();
+    if !with.is_empty() {
+        outln!("");
+        outln!("{:<30} {:<24} {:>14}", "case", "measure", "value");
+        for r in with {
+            for m in &r.metrics {
+                outln!("{:<30} {:<24} {:>14}", r.name, m.name, m.cell());
+                if let Some(n) = &m.note {
+                    outln!("{:<30}   {n}", "");
+                }
+            }
+        }
+        outln!("");
+        outln!("Measures are reported, never gated.");
+    }
 }
 
 fn print_markdown(m: &Manifest, rows: &[Row], c: &Conditions) {
@@ -1348,6 +1595,31 @@ fn print_markdown(m: &Manifest, rows: &[Row], c: &Conditions) {
             rss_cell(&r.outcome)
         );
     }
+    let mut first = true;
+    for r in rows {
+        if !matches!(r.outcome, Outcome::Timed(_)) {
+            continue;
+        }
+        for m in &r.metrics {
+            if first {
+                outln!("");
+                outln!("| case | measure | value |");
+                outln!("|---|---|---:|");
+                first = false;
+            }
+            outln!("| `{}` | `{}` | {} |", r.name, m.name, m.cell());
+        }
+    }
+}
+
+/// One kernel measure as JSON.
+fn metric_json(m: &Metric) -> serde_json::Value {
+    serde_json::json!({
+        "name": m.name,
+        "unit": m.unit,
+        "value": m.value,
+        "note": m.note,
+    })
 }
 
 /// One side's timings as JSON.
@@ -1377,6 +1649,7 @@ fn print_json(m: &Manifest, rows: &[Row], c: &Conditions) {
                     "noisy": s.noisy(),
                     "samples": s.samples,
                     "rss_bytes": s.rss_bytes,
+                    "metrics": r.metrics.iter().map(metric_json).collect::<Vec<_>>(),
                 }),
                 Outcome::Wrong(why) => serde_json::json!({ "state": "wrong", "why": why }),
                 Outcome::Absent(why) => serde_json::json!({ "state": "absent", "why": why }),

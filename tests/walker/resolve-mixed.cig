@@ -1,0 +1,64 @@
+# SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
+# SPDX-License-Identifier: FSL-1.1-ALv2
+roll total = 0
+pull add(a, b) {
+  snuff a + b
+}
+for i in 0..6 {
+  roll sq = i * i
+  if sq % 2 == 0 {
+    total += add(sq, 1)
+  } else {
+    roll t = total
+    total = t + sq
+  }
+}
+exhale total
+roll w = 0
+while w < 3 {
+  roll k = w * 2
+  w += 1
+  exhale k, w
+}
+pull counter() {
+  roll c = 0
+  snuff pack() {
+    c += 1
+    snuff c
+  }
+}
+stick next = counter()
+next()
+exhale next()
+exhale [1, 2, 3].map(pack(x) => x * total)
+try {
+  cough "boom"
+} ashtray e {
+  roll note = "caught ${e.message}"
+  exhale note
+} finally {
+  exhale len("finally")
+}
+burn (state) {
+  state.n = 5
+  exhale state.n
+}
+pull fib(n) {
+  if n < 2 {
+    snuff n
+  }
+  snuff fib(n - 1) + fib(n - 2)
+}
+exhale fib(12)
+pull deep(a) {
+  roll b = a + 1
+  for q in 0..2 {
+    for r in 0..2 {
+      b += q * 10 + r + a
+    }
+  }
+  snuff pack(z) {
+    snuff pack() => z + b + a
+  }
+}
+exhale deep(1)(2)()

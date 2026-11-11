@@ -650,7 +650,7 @@ impl Parser {
             let op_span = self.span();
             self.advance();
             let target = match expr.kind {
-                ExprKind::Ident(name) => AssignTarget::Var(name),
+                ExprKind::Ident(name) => AssignTarget::Var(name, Default::default()),
                 ExprKind::Index { object, index } => AssignTarget::Index {
                     object: *object,
                     index: *index,

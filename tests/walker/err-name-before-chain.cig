@@ -1,0 +1,8 @@
+# SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
+# SPDX-License-Identifier: FSL-1.1-ALv2
+stick lite = pack() => 1
+pull late() {
+  snuff lit
+}
+exhale late()
+chain lit { lite }

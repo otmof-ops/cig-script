@@ -106,6 +106,11 @@ pub enum TinCommand {
         #[command(subcommand)]
         cmd: KeyCommand,
     },
+    /// The vault: a no-delete store under its own account (install, uninstall, gc, update).
+    Vault {
+        #[command(subcommand)]
+        cmd: super::vault_admin::VaultCommand,
+    },
     /// Make a new tin seal key and re-seal every sealed object under it; crash-safe (a `cig tin rekey` after an interruption finishes it).
     Rekey,
     /// Back the whole tin up: every live run and its journal, the objects they need, the ledger and its head, with a manifest of SHA-256s. Sealed objects stay sealed.
@@ -432,6 +437,7 @@ fn unparcel_cmd(
 pub fn tin_cmd(ctx: &Ctx, cmd: Option<TinCommand>) -> i32 {
     match cmd.unwrap_or(TinCommand::Du) {
         TinCommand::Key { cmd } => key_cmd(ctx, cmd),
+        TinCommand::Vault { cmd } => super::vault_admin::vault_cmd(ctx, cmd),
         TinCommand::Rekey => rekey_cmd(ctx),
         TinCommand::Parcel {
             to,

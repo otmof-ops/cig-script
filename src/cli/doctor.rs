@@ -409,6 +409,10 @@ pub fn product_doctor(ctx: &Ctx, fix: bool) -> i32 {
                 "handed over on a descriptor".to_string(),
                 "--seal-key-fd: held in memory, never written".to_string(),
             ),
+            Some(seal::Keeper::Passphrase) => (
+                "derived from a passphrase".to_string(),
+                "seal_key = passphrase: stored nowhere, asked each run".to_string(),
+            ),
             None => (
                 "not made yet".to_string(),
                 "made on the first sealed object".to_string(),
@@ -800,8 +804,22 @@ fn keys_dir_line(dir: &Path) -> KeysDirLine {
     }
 }
 
-/// Is the state directory owner-only (0700, owned by this user) on Unix?
-/// Elsewhere the user's profile already restricts it.
+/// Is the state directory owner-only (0700, owned by this user) on Unix, or
+/// protected to the user and SYSTEM on Windows?
+fn private_fix(home: &Path) -> String {
+    #[cfg(windows)]
+    {
+        format!(
+            "icacls \"{}\" /inheritance:r /grant:r \"%USERNAME%:(OI)(CI)F\" \"SYSTEM:(OI)(CI)F\"",
+            home.display()
+        )
+    }
+    #[cfg(not(windows))]
+    {
+        format!("chmod 700 {}", crate::crash::tilde(home))
+    }
+}
+
 fn home_is_private(home: &Path) -> bool {
     #[cfg(unix)]
     {
@@ -812,7 +830,13 @@ fn home_is_private(home: &Path) -> bool {
             Err(_) => true,
         }
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        // Protected, and the user and SYSTEM alone (#105, K2). A folder not
+        // made yet, or one that cannot be read, is not a finding.
+        crate::burn::winacl::is_private(home).unwrap_or(true)
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = home;
         true
@@ -1191,7 +1215,7 @@ fn json_findings(
                 }
             ),
             "the tin holds the before-bytes of files",
-            (!private).then(|| format!("chmod 700 {}", crate::crash::tilde(home))),
+            (!private).then(|| private_fix(home)),
         ));
         let keeper = match seal::peek_keeper() {
             Some(seal::Keeper::Keyring) => "the OS keyring".to_string(),
@@ -1199,6 +1223,7 @@ fn json_findings(
                 format!("a key file at {}", crate::crash::tilde(&seal::key_path()))
             }
             Some(seal::Keeper::Descriptor) => "handed over on a descriptor".to_string(),
+            Some(seal::Keeper::Passphrase) => "derived from a passphrase".to_string(),
             None => "not made yet; made on the first sealed object".to_string(),
         };
         out.push(finding(

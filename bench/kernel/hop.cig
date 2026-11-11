@@ -1,0 +1,14 @@
+# SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Kernel set: one hop over a pack of 1,000 files that do not change. The command
+# does nothing; what is measured is what cig does around it (watch the pack,
+# keep what `touches` names, find nothing changed).
+pack { "~/work/hop" }
+burn {
+  if cig.os() == "windows" {
+    proc.run("cmd", ["/C", "exit", "0"], {touches: ["**"]})
+  } else {
+    proc.run("true", [], {touches: ["**"]})
+  }
+}
+exhale "hopped"

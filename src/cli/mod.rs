@@ -30,6 +30,7 @@ mod run;
 mod runs;
 mod tin;
 mod update;
+mod vault_admin;
 mod versions;
 
 /// Diagnostics as `cig` prints them (the banner, the render, doctor's
@@ -333,7 +334,10 @@ pub enum Command {
 
 #[derive(Args)]
 pub struct BenchArgs {
-    /// The manifest to read; default `bench/bench.toml`.
+    /// The manifest to read, as `cig bench bench/bench.toml`; default `bench/bench.toml`.
+    #[arg(value_name = "MANIFEST", conflicts_with = "manifest")]
+    pub path: Option<PathBuf>,
+    /// The manifest to read (the same as the argument).
     #[arg(long, value_name = "FILE")]
     pub manifest: Option<PathBuf>,
     /// Only cases whose name contains this substring.
@@ -569,7 +573,7 @@ fn dispatch(ctx: Ctx, command: Command) -> i32 {
         Command::Bench(a) => bench::bench(
             &ctx,
             bench::Opts {
-                manifest: a.manifest,
+                manifest: a.path.or(a.manifest),
                 only: a.only,
                 group: a.group,
                 samples: a.samples,

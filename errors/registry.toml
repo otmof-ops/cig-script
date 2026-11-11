@@ -1993,6 +1993,10 @@ why = "a run's journal, or the ledger, does not verify under the current key"
 probe = "path-exists"
 remedy = "the run is named in the message; investigate the edit and either put the chain back (a backup) or move the run aside before running cig tin rekey again"
 [[code.cause]]
+why = "another command needed the key while a rekey was running, and the rekey outlasted rekey_wait (30 seconds by default)"
+probe = "path-exists"
+remedy = "wait for the rekey to finish and run the command again; cig config rekey_wait N changes how long a command waits"
+[[code.cause]]
 why = "the keeper would not carry the new key (keyring write failed the read-back, or the key file could not be written)"
 probe = "none"
 remedy = "both stashes stay on disk and every sealed object is still readable; fix the keeper (unlock the keyring, free space on the keys filesystem) and run cig tin rekey again to finish"
@@ -2069,6 +2073,29 @@ remedy = "keep the live run and skip that parcel, or move the live run aside and
 why = "the ledger here and the parcel's diverged: neither is a prefix of the other"
 probe = "none"
 remedy = "the parcel is from another tin or another history; restore into an empty tin"
+
+[[code]]
+code = "E724"
+title = "the vault refused or did not answer"
+meaning = "The vault (the helper that keeps a copy of the tin's objects under its own account, where nothing that runs as you can delete them) is installed, but did not take an object: it is stopped, its socket is missing or is not the vault's, it answered no (its reason is in the note: a full share is quota, an object that does not hash to its name is hash-mismatch), or the connection broke part way. The run is not stopped: the objects are in the tin as always and the run unburns from it. What was kept only in the tin because the vault was not there is listed in tin/vault-pending and handed to the vault the next time it answers (the next run, or any run, notes it once); an object the vault refused for a reason that will not change is not listed again. Until the vault has the copy, a process running as you could still delete it from the tin."
+fix = "start the vault (systemctl start cig-vault, or cig tin vault install if it is not installed); the next run hands over what waited. A refusal names its reason: free space (cig tin vault gc), or cig tin verify for an object that does not match its name"
+no = "depends"
+arises = ["run", "unburn"]
+tags = ["kernel"]
+since = "1.21.0"
+related = ["E703", "E707", "E720"]
+[[code.cause]]
+why = "the vault is stopped, or its socket is gone"
+probe = "path-exists"
+remedy = "start it (systemctl start cig-vault); runs in the meantime are kept in the tin and handed over later"
+[[code.cause]]
+why = "the socket is there but is not owned by the vault's account (_cigtin), so cig does not talk to it"
+probe = "path-permissions"
+remedy = "do not trust it: it was not made by the vault. Remove it as an administrator and restart the vault"
+[[code.cause]]
+why = "the vault refused the object (quota, a hash that does not match, a recipe whose chunks it does not have)"
+probe = "none"
+remedy = "the reason is in the note; free the vault's space with cig tin vault gc, or run cig tin verify"
 
 [[code]]
 code = "E730"

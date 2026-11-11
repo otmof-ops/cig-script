@@ -1,0 +1,10 @@
+# SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# String building: s += piece, the quadratic trap a compiler turns into a builder.
+stick scale = int(args.get(0, "1"))
+stick n = 10000 * scale
+roll s = ""
+for i in 0..n {
+  s += "x"
+}
+exhale s.len()

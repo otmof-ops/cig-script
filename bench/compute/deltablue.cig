@@ -1,0 +1,28 @@
+# SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# DeltaBlue-like: a constraint chain, method-heavy and polymorphic.
+stick scale = int(args.get(0, "1"))
+stick n = 20 * scale
+stick iters = 500
+stick MOD = 1000003
+roll vars = []
+for i in 0..n {
+  vars.push(0)
+}
+roll changes = 0
+for k in 0..iters {
+  vars[0] = k
+  for i in 1..n {
+    stick prev = vars[i - 1]
+    stick want = (prev * 2 + i * 7 + 1) % MOD
+    if vars[i] != want {
+      vars[i] = want
+      changes += 1
+    }
+  }
+}
+roll total = 0
+for v in vars {
+  total = (total + v) % MOD
+}
+exhale total, changes

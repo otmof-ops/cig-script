@@ -1,0 +1,14 @@
+# SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Maps: inserts and lookups.
+roll m = {}
+for i in 0..50000 {
+  m["k${i}"] = i
+}
+roll hits = 0
+for i in 0..50000 {
+  if m.has("k${i * 2}") {
+    hits += 1
+  }
+}
+exhale hits
