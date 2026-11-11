@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: FSL-1.1-ALv2
 
 //! `cig language`: the legend and the library surface, generated from the
 //! same tables the interpreter uses so it can never drift.

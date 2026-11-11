@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: FSL-1.1-ALv2
 
 //! `cig pin`: write the version a script was written for into the script,
 //! and the dispatch that honours a pin before any command runs.

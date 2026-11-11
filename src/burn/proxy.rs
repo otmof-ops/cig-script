@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: FSL-1.1-ALv2
 
 //! The way out of a boxed hop's network namespace: a CONNECT proxy the
 //! parent runs on a Unix socket, which the forwarder inside the namespace

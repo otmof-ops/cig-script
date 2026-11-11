@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: FSL-1.1-ALv2
 
 //! The tin: the before-bytes of files a hop may change, kept outside the
 //! project under `~/.cigscript/tin/objects/<sha256>`, one object per

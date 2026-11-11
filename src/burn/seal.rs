@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: FSL-1.1-ALv2
 
 //! Sealed: tin objects and snapshots encrypted at rest, so a tin that is on
 //! for a whole project never keeps an old `.env`, a private key or a

@@ -8,10 +8,10 @@ SPDX-PackageDownloadLocation = "https://github.com/otmof-ops/cig-script"
 path = ["src/**", "tests/**", "crates/**", "bench/**", "Cargo.toml", "Cargo.lock", "clippy.toml", "install.sh", "install.ps1", "YANKED", "scripts/**", "REUSE.toml", ".gitignore", ".gitattributes", ".github/**"]
 precedence = "aggregate"
 SPDX-FileCopyrightText = "2026 Jay Taylor (https://github.com/otmof-ops/cig-script)"
-SPDX-License-Identifier = "Apache-2.0"
+SPDX-License-Identifier = "FSL-1.1-ALv2"
 
 [[annotations]]
-path = ["docs/**", "README.md", "CHANGELOG.md", "CONTRIBUTING.md", "ROADMAP.md", "TRADEMARKS.md", "SECURITY.md", "NOTICE", "THIRD-PARTY-NOTICES.md", "HAMMER.md"]
+path = ["docs/**", "README.md", "CHANGELOG.md", "CONTRIBUTING.md", "LICENSING.md", "ROADMAP.md", "TRADEMARKS.md", "SECURITY.md", "NOTICE", "THIRD-PARTY-NOTICES.md", "HAMMER.md"]
 precedence = "aggregate"
 SPDX-FileCopyrightText = "2026 Jay Taylor (https://github.com/otmof-ops/cig-script)"
 SPDX-License-Identifier = "CC-BY-4.0"

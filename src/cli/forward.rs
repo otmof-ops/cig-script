@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: FSL-1.1-ALv2
 
 //! `cig internal-forward <sock> <port>`: the forwarder inside a boxed hop's
 //! network namespace. It listens on `127.0.0.1:<port>` and relays each

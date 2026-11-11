@@ -1,6 +1,6 @@
 <!--
 SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
-SPDX-License-Identifier: Apache-2.0
+SPDX-License-Identifier: FSL-1.1-ALv2
 -->
 
 # cig-pass
@@ -24,4 +24,4 @@ look at each input, whatever the work it stands for.
   verifier's questions through `Ctx` (`MemCtx` answers them from memory).
 
 cig's guide is `docs/PASS.md` in this repository; the threat model is
-[THREAT-MODEL.md](THREAT-MODEL.md). Licensed under Apache-2.0.
+[THREAT-MODEL.md](THREAT-MODEL.md). Licensed under FSL-1.1-ALv2.

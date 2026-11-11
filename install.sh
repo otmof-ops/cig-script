@@ -1,6 +1,6 @@
 #!/bin/sh
 # SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: FSL-1.1-ALv2
 # A redirect, kept for one release. cig is installed by ciginstaller now.
 # It prints how, and stops: it installs nothing and exits 1 so a script that
 # still calls it fails loudly instead of carrying on without cig.

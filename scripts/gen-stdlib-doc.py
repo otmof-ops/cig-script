@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: FSL-1.1-ALv2
 """Regenerate docs/STDLIB.md from `cig --json language` so the reference can never drift."""
 import json, subprocess, sys, pathlib
 root = pathlib.Path(__file__).resolve().parent.parent

@@ -93,7 +93,8 @@ A bot records it; you will not be asked again.
 
 1. Fork, branch from `main`, make the change.
 2. Every source file carries SPDX headers; `REUSE.toml` maps the rest.
-   Code is `Apache-2.0`, documentation is `CC-BY-4.0`, examples are `CC0-1.0`.
+   Code is `FSL-1.1-ALv2`, documentation is `CC-BY-4.0`, examples are `CC0-1.0`; see
+   [LICENSING.md](LICENSING.md) for which versions carry which license.
    New files get the header of their kind (copy one from a neighbour).
 3. Run the gate locally, exactly as CI does:
 

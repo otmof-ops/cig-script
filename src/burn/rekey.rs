@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: FSL-1.1-ALv2
 
 //! `cig tin rekey`: make a new master seal key and re-seal every sealed
 //! object the tin or a run's snapshots hold under it, then swap the keeper.

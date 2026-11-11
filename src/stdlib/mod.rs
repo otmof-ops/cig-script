@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: FSL-1.1-ALv2
 
 //! The standard library: global functions, modules (`fs`, `path`, `json`,
 //! `text`, `proc`, `time`, `hash`, `math`, `env`, `csv`, `log`) and the

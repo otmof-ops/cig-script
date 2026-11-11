@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: FSL-1.1-ALv2
 #
 # Each example, checked under a pass (cig-script#186): CI exports them, and
 # a later job verifies them against this job's key without checking again.
