@@ -935,17 +935,75 @@ fn command(
                     // The watch: its supervisor is up before the hop
                     // exists, since the hop's own exec is the first call
                     // it answers. A contained hop always has the part that
-                    // gives the io_uring refusal its event.
-                    let mode = if o.box_spec.watch != crate::burn::watch::Mode::Off {
+                    // gives the io_uring refusal its event. Decoys and
+                    // pass_reads (even without `watch: true`) need every
+                    // open to notify, so the mode widens to Reads for them.
+                    let has_decoys =
+                        !o.box_spec.decoys.is_empty() || !o.box_spec.pass_reads.is_empty();
+                    let mode = if has_decoys {
+                        crate::burn::watch::Mode::Reads
+                    } else if o.box_spec.watch != crate::burn::watch::Mode::Off {
                         o.box_spec.watch
                     } else if setup.contain.is_some() {
                         crate::burn::watch::Mode::Refusals
                     } else {
                         crate::burn::watch::Mode::Off
                     };
+                    // pass_reads needs ADDFD_FLAG_SEND (Linux 5.14+): a
+                    // check at plan time refuses the hop here rather
+                    // than letting every pass open fail EPERM. On the
+                    // ptrace route (CIG_WATCH_ROUTE=ptrace or a kernel
+                    // < 5.0) pass_reads is dead; refuse there too.
+                    if !o.box_spec.pass_reads.is_empty() {
+                        if !has_addfd_send() {
+                            let _ = std::fs::write(
+                                p.base().join("why"),
+                                b"box.pass_reads needs Linux 5.14+ (SECCOMP_ADDFD_FLAG_SEND); this kernel is older\n",
+                            );
+                            return None;
+                        }
+                        if std::env::var_os("CIG_WATCH_ROUTE").is_some_and(|v| v == "ptrace") {
+                            let _ = std::fs::write(
+                                p.base().join("why"),
+                                b"box.pass_reads needs the seccomp user notification route; the ptrace route cannot inject file descriptors\n",
+                            );
+                            return None;
+                        }
+                    }
                     if mode != crate::burn::watch::Mode::Off {
                         let events = crate::burn::overlay::events_path(&p.run_dir(), p.seq());
-                        match crate::burn::watch::Watch::start(&events, mode) {
+                        let pack_roots: Vec<std::path::PathBuf> = match p {
+                            crate::burn::overlay::Plan::Boxed(l) => {
+                                l.roots.iter().map(|(r, _, _)| r.clone()).collect()
+                            }
+                            crate::burn::overlay::Plan::GuardOnly { .. } => Vec::new(),
+                        };
+                        let decoys = match prepare_decoys(&o.box_spec, &p.base(), &pack_roots) {
+                            Ok(d) => d,
+                            Err(why) => {
+                                let _ = std::fs::write(p.base().join("why"), format!("{why}\n"));
+                                return None;
+                            }
+                        };
+                        // The mount boundary: bind each decoy over its
+                        // real path in the box's mount namespace. The
+                        // CStrings land in `setup.decoy_mounts` so the
+                        // fork's apply sees pointers planned here.
+                        setup.decoy_mounts = decoys
+                            .iter()
+                            .filter_map(|d| {
+                                use std::os::unix::ffi::OsStrExt;
+                                let src =
+                                    std::ffi::CString::new(d.decoy_source.as_os_str().as_bytes())
+                                        .ok()?;
+                                let tgt = std::ffi::CString::new(d.path.as_bytes()).ok()?;
+                                Some(crate::burn::overlay::DecoyMount {
+                                    source: src,
+                                    target: tgt,
+                                })
+                            })
+                            .collect();
+                        match crate::burn::watch::Watch::start_with(&events, mode, decoys.clone()) {
                             Ok(w) => {
                                 let notify = crate::burn::watch::filter(
                                     mode,
@@ -961,11 +1019,15 @@ fn command(
                                             notify,
                                             trace,
                                             required: o.box_spec.watch
-                                                != crate::burn::watch::Mode::Off,
+                                                != crate::burn::watch::Mode::Off
+                                                || has_decoys,
                                             force_ptrace: std::env::var_os("CIG_WATCH_ROUTE")
                                                 .is_some_and(|v| v == "ptrace"),
+                                            decoys,
                                         });
-                                        if o.box_spec.watch != crate::burn::watch::Mode::Off {
+                                        if o.box_spec.watch != crate::burn::watch::Mode::Off
+                                            || has_decoys
+                                        {
                                             c.env("CIG_EVENTS", &events);
                                         }
                                         PENDING_WATCH.with(|x| *x.borrow_mut() = Some(w));
@@ -1143,7 +1205,8 @@ fn e777(name: &str, why: &str) -> Diagnostic {
     .with_hint("on Linux with user namespaces and overlayfs the box is made; `box: true` alone falls back to the tin with a warning")
 }
 
-/// `box: {network, allow_hosts, pidns, apply, contain, expect, quiet, watch}`.
+/// `box: {network, allow_hosts, pidns, apply, contain, expect, quiet, watch,
+/// decoys, pass_reads}`.
 fn parse_box_spec(
     m: &std::rc::Rc<std::cell::RefCell<IndexMap<String, Value>>>,
     name: &str,
@@ -1185,8 +1248,22 @@ fn parse_box_spec(
             ("quiet", v) => spec.quiet = v.truthy(),
             // The watch: events for what the hop opens for writing,
             // connects to and runs; "reads" adds every file it opens.
+            // Off Linux the watch is seccomp(2)'s, which is Linux's alone:
+            // refuse `watch: true` there with a plain message where every
+            // other os knob is parsed, so the refusal says which knob and
+            // which os before the box is built.
             ("watch", Value::Str(w)) if w.to_string() == "reads" => {
-                spec.watch = crate::burn::watch::Mode::Reads
+                #[cfg(not(target_os = "linux"))]
+                {
+                    return Err(type_error(format!(
+                        "{name}: box.watch: \"reads\" is not available on this OS (the watch is Linux's seccomp)"
+                    ))
+                    .at(s));
+                }
+                #[cfg(target_os = "linux")]
+                {
+                    spec.watch = crate::burn::watch::Mode::Reads
+                }
             }
             ("watch", Value::Str(w)) => {
                 return Err(type_error(format!(
@@ -1195,10 +1272,22 @@ fn parse_box_spec(
                 .at(s))
             }
             ("watch", v) => {
-                spec.watch = if v.truthy() {
-                    crate::burn::watch::Mode::Calls
-                } else {
-                    crate::burn::watch::Mode::Off
+                #[cfg(not(target_os = "linux"))]
+                {
+                    if v.truthy() {
+                        return Err(type_error(format!(
+                            "{name}: box.watch: true is not available on this OS (the watch is Linux's seccomp)"
+                        ))
+                        .at(s));
+                    }
+                }
+                #[cfg(target_os = "linux")]
+                {
+                    spec.watch = if v.truthy() {
+                        crate::burn::watch::Mode::Calls
+                    } else {
+                        crate::burn::watch::Mode::Off
+                    }
                 }
             }
             ("expect", Value::List(l)) => {
@@ -1228,9 +1317,64 @@ fn parse_box_spec(
                     }
                 }
             }
+            // `decoys:` ([..]): credential paths the box fakes. Each
+            // entry is a string, resolved against the caller's home and
+            // the pack roots in `prepare_decoys`; the fake is bound
+            // read-only over the real path in the box's mount
+            // namespace. Linux-only: the mount is CLONE_NEWNS's.
+            ("decoys", Value::List(l)) => {
+                #[cfg(not(target_os = "linux"))]
+                {
+                    let _ = l;
+                    return Err(type_error(format!(
+                        "{name}: box.decoys is not available on this OS (the box's mount namespace is Linux's)"
+                    ))
+                    .at(s));
+                }
+                #[cfg(target_os = "linux")]
+                for item in l.borrow().iter() {
+                    match item {
+                        Value::Str(p) => spec.decoys.push(p.to_string()),
+                        other => {
+                            return Err(type_error(format!(
+                                "{name}: box.decoys holds a {}; want paths as strings",
+                                other.type_name()
+                            ))
+                            .at(s))
+                        }
+                    }
+                }
+            }
+            // `pass_reads:` ({ path: program }): the one program that may
+            // read the real file through the watch supervisor; every
+            // other reader gets the decoy and E775. Linux-only: the
+            // supervisor is seccomp(2) user notification's.
+            ("pass_reads", Value::Map(m)) => {
+                #[cfg(not(target_os = "linux"))]
+                {
+                    let _ = m;
+                    return Err(type_error(format!(
+                        "{name}: box.pass_reads is not available on this OS (the watch is Linux's seccomp)"
+                    ))
+                    .at(s));
+                }
+                #[cfg(target_os = "linux")]
+                for (k, v) in m.borrow().iter() {
+                    match v {
+                        Value::Str(prog) => spec.pass_reads.push((k.clone(), prog.to_string())),
+                        other => {
+                            return Err(type_error(format!(
+                                "{name}: box.pass_reads[`{k}`] is a {}; want the program's path as a string",
+                                other.type_name()
+                            ))
+                            .at(s))
+                        }
+                    }
+                }
+            }
             (other, _) => {
                 return Err(type_error(format!(
-                    "{name}: box has no option `{other}` (network, allow_hosts, pidns, apply, contain, expect, quiet, watch)"
+                    "{name}: box has no option `{other}` (network, allow_hosts, pidns, apply, contain, expect, quiet, watch, decoys, pass_reads)"
                 ))
                 .at(s))
             }
@@ -1251,6 +1395,306 @@ fn parse_box_spec(
         }
     }
     Ok(spec)
+}
+
+/// Build the supervisor's pass table (decoys + pass_reads) and plant each
+/// decoy's realistic bytes under the run's scratch (`<base>/decoys/<n>`).
+/// Paths starting `~/` are expanded against `HOME`; otherwise the path is
+/// absolute. A path with a `..` component, a symlinked directory
+/// component, or that resolves outside `$HOME` and the pack roots is
+/// refused with a reason — the same reason a hop needs if it is to be
+/// told what went wrong. The leaf is decided explicitly: a symlink leaf
+/// is accepted and mounted over its target, and the entry's real_source
+/// points at that same target so pass_reads opens it from cig's side.
+/// A directory target is refused ("decoys are files"). A path that
+/// names both a decoy and a pass_read is refused as a duplicate. The
+/// pass_reads program is canonicalised at plan time (merged-usr,
+/// symlinks); busybox-style multicall binaries are refused. Returns
+/// an Err with a short, specific reason that the caller writes to the
+/// run's `why` file.
+#[cfg(target_os = "linux")]
+fn prepare_decoys(
+    spec: &crate::burn::overlay::BoxSpec,
+    base: &std::path::Path,
+    pack_roots: &[std::path::PathBuf],
+) -> Result<Vec<crate::burn::watch::DecoyEntry>, String> {
+    use std::path::{Component, Path, PathBuf};
+    if spec.decoys.is_empty() && spec.pass_reads.is_empty() {
+        return Ok(Vec::new());
+    }
+    // The caller's home (the OS's HOME, not cig's state dir): decoy
+    // paths sit under it (or under a pack root), and `~/` expands
+    // against it. Without HOME nothing resolves and the hop is refused:
+    // a decoy spec whose paths cannot be grounded is a configuration
+    // mistake, not a silent drop.
+    let home: PathBuf = match std::env::var_os("HOME") {
+        Some(h) => PathBuf::from(h),
+        None => {
+            return Err(
+                "box.decoys / box.pass_reads need HOME to resolve `~/` and the roots".to_string(),
+            )
+        }
+    };
+    let dir = base.join("decoys");
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("could not make the run's decoys folder: {e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+    }
+    // Walk each component with symlink_metadata and refuse a symlinked
+    // directory (anywhere above the leaf). The leaf itself may be a
+    // symlink: the bind mounts over the real inode, so the hop sees the
+    // decoy, and we record the real target (not the symlink) as the
+    // real_source. `..` is refused: std::path::absolute does not
+    // resolve it.
+    let resolve = |raw: &str| -> Result<(PathBuf, Option<PathBuf>), String> {
+        let p = if let Some(rest) = raw.strip_prefix("~/") {
+            home.join(rest)
+        } else if raw.starts_with('/') {
+            PathBuf::from(raw)
+        } else {
+            return Err(format!(
+                "`{raw}`: a decoy path must be absolute or `~/<name>`"
+            ));
+        };
+        for c in p.components() {
+            if matches!(c, Component::ParentDir) {
+                return Err(format!("`{raw}`: `..` is not allowed in a decoy path"));
+            }
+        }
+        // Walk the directory components looking for a symlink in a
+        // place other than the leaf; a symlinked dir could reach any
+        // file the caller has read on.
+        let parent = p.parent().unwrap_or(Path::new("/"));
+        let mut acc = PathBuf::new();
+        for c in parent.components() {
+            acc.push(c.as_os_str());
+            if let Ok(m) = std::fs::symlink_metadata(&acc) {
+                if m.file_type().is_symlink() {
+                    return Err(format!(
+                        "`{raw}`: `{}` is a symlinked directory; decoys do not follow symlinks above the leaf",
+                        acc.display()
+                    ));
+                }
+            }
+        }
+        let abs = std::path::absolute(&p).map_err(|e| format!("`{raw}`: {e}"))?;
+        let under_home = abs.starts_with(&home);
+        let under_pack = pack_roots.iter().any(|r| abs.starts_with(r));
+        if !under_home && !under_pack {
+            return Err(format!(
+                "`{raw}`: resolves to `{}`, which is outside your home and the pack roots",
+                abs.display()
+            ));
+        }
+        // Decide the leaf: a real target (for pass_reads to hand out)
+        // or None if the file is not there. A directory is refused.
+        let real = match std::fs::symlink_metadata(&abs) {
+            Ok(m) if m.file_type().is_dir() => {
+                return Err(format!(
+                    "`{raw}`: resolves to a directory; decoys are files"
+                ));
+            }
+            Ok(m) if m.file_type().is_symlink() => {
+                // Follow the symlink's chain once, so pass_reads reads
+                // the same file the mount binds over; a chain that
+                // leaves home or the pack is still fine for the real
+                // read, since cig has the caller's read rights.
+                std::fs::canonicalize(&abs).ok()
+            }
+            Ok(m) if m.file_type().is_file() => Some(abs.clone()),
+            Ok(_) => None,
+            Err(_) => None,
+        };
+        Ok((abs, real))
+    };
+    // A per-hop marker: 16 bytes of kernel randomness, hex-encoded.
+    let marker = {
+        let mut bytes = [0u8; 16];
+        // SAFETY: getrandom reads kernel entropy into a buffer of 16
+        // bytes; a return of -1 falls back to a timing marker, which
+        // still uniques a hop in the common case.
+        let n = unsafe { libc::getrandom(bytes.as_mut_ptr() as *mut libc::c_void, bytes.len(), 0) };
+        if n != bytes.len() as isize {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0);
+            bytes[..8].copy_from_slice(&nanos.to_le_bytes());
+            bytes[8..].copy_from_slice(&(std::process::id() as u64).to_le_bytes());
+        }
+        hex::encode(bytes)
+    };
+    let mut out: Vec<crate::burn::watch::DecoyEntry> = Vec::new();
+    let mut seen_paths: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut plant = |path: PathBuf,
+                     real: Option<PathBuf>,
+                     prog: Option<String>,
+                     idx: usize|
+     -> Result<(), String> {
+        let p_str = path.to_string_lossy().into_owned();
+        if !seen_paths.insert(p_str.clone()) {
+            return Err(format!(
+                "`{p_str}` is named by both box.decoys and box.pass_reads; keep it in one list"
+            ));
+        }
+        let decoy_source = dir.join(format!("{idx:03}"));
+        // Body shaped like the file it stands in for (keyed by basename
+        // extension / name), carrying the hop's marker so a write of
+        // the body elsewhere is caught (E774, a later item).
+        let body = decoy_body(&path, &marker);
+        std::fs::write(&decoy_source, body)
+            .map_err(|e| format!("could not plant the decoy for `{p_str}`: {e}"))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&decoy_source, std::fs::Permissions::from_mode(0o400))
+                .map_err(|e| format!("could not set the decoy file's mode: {e}"))?;
+        }
+        // CString::new checks the path has no NUL byte; a failure here
+        // is a configuration mistake, not a silent drop.
+        std::ffi::CString::new(p_str.as_bytes())
+            .map_err(|_| format!("`{p_str}` holds a NUL byte"))?;
+        out.push(crate::burn::watch::DecoyEntry {
+            path: p_str,
+            real_source: real,
+            decoy_source,
+            only_program: prog,
+        });
+        Ok(())
+    };
+    for (i, raw) in spec.decoys.iter().enumerate() {
+        let (abs, real) = resolve(raw)?;
+        plant(abs, real, None, i)?;
+    }
+    for (i, (raw_path, prog)) in spec.pass_reads.iter().enumerate() {
+        let (abs, real) = resolve(raw_path)?;
+        let prog_path = canonicalise_program(prog)?;
+        plant(abs, real, Some(prog_path), spec.decoys.len() + i)?;
+    }
+    Ok(out)
+}
+
+/// Does this kernel have `SECCOMP_ADDFD_FLAG_SEND`? Landed in 5.14.
+/// Read from `/proc/sys/kernel/osrelease` to avoid a side-effecting
+/// probe at plan time.
+#[cfg(target_os = "linux")]
+fn has_addfd_send() -> bool {
+    let kernel = std::fs::read_to_string("/proc/sys/kernel/osrelease").unwrap_or_default();
+    let mut parts = kernel.trim().split(|c: char| !c.is_ascii_digit());
+    let major: u32 = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
+    let minor: u32 = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
+    (major, minor) >= (5, 14)
+}
+
+/// Canonicalise a pass_reads program at plan time. A relative name is
+/// looked up on `PATH`; the chosen candidate is then `canonicalize`'d
+/// so merged-usr or distro symlinks resolve to the file the supervisor
+/// will see in `/proc/<pid>/exe` (with " (deleted)" stripped). A
+/// well-known multicall binary (busybox, toybox) is refused: it is
+/// shared by many applets and would let the wrong program read the
+/// real file. pass_reads names a binary, not an applet.
+#[cfg(target_os = "linux")]
+fn canonicalise_program(prog: &str) -> Result<String, String> {
+    use std::path::{Path, PathBuf};
+    let picked: PathBuf = if prog.starts_with('/') {
+        PathBuf::from(prog)
+    } else {
+        let hit =
+            std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).find_map(|d| {
+                let c = Path::new(&d).join(prog);
+                if c.is_file() {
+                    Some(c)
+                } else {
+                    None
+                }
+            });
+        match hit {
+            Some(p) => p,
+            None => {
+                return Err(format!(
+                    "box.pass_reads: `{prog}` is not on PATH; name it by its absolute path"
+                ))
+            }
+        }
+    };
+    let canon =
+        std::fs::canonicalize(&picked).map_err(|e| format!("box.pass_reads: `{prog}`: {e}"))?;
+    if is_multicall_binary(&canon) {
+        return Err(format!(
+            "box.pass_reads: `{prog}` canonicalises to `{}`, a multicall binary; name a dedicated binary (pass_reads names a binary, not an applet)",
+            canon.display()
+        ));
+    }
+    Ok(canon.to_string_lossy().into_owned())
+}
+
+/// `true` for a binary that stands in for several applets (busybox,
+/// toybox): they all share one `/proc/<pid>/exe`, so an applet the
+/// caller did not name would match the pass_reads check.
+#[cfg(target_os = "linux")]
+fn is_multicall_binary(p: &std::path::Path) -> bool {
+    matches!(
+        p.file_name().and_then(|n| n.to_str()),
+        Some("busybox") | Some("busybox.static") | Some("busybox.suid") | Some("toybox")
+    )
+}
+
+/// A realistic decoy body for `path`, keyed by its basename or
+/// extension: OpenSSH key skeleton for `id_*`, AWS credentials lines
+/// for `~/.aws/credentials`, an `_authToken` line for `.npmrc`, a
+/// `KEY=value` list for `.env*`. The marker is woven in so a later
+/// write of it (E774) is caught. The generic body stays for anything
+/// else.
+#[cfg(target_os = "linux")]
+fn decoy_body(path: &std::path::Path, marker: &str) -> Vec<u8> {
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if name.starts_with("id_") && !name.ends_with(".pub") {
+        return format!(
+            "-----BEGIN OPENSSH PRIVATE KEY-----\n\
+             b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW\n\
+             QyNTUxOQAAACBjaWctZGVjb3ktey9tYXJrZXItaGVyZS8vXXt7LW99fS8vLWNpZy1kZWMK\n\
+             cig-decoy {marker}\n\
+             -----END OPENSSH PRIVATE KEY-----\n"
+        )
+        .into_bytes();
+    }
+    if name == "credentials"
+        || name == "config" && path.components().any(|c| c.as_os_str() == ".aws")
+    {
+        return format!(
+            "[default]\n\
+             aws_access_key_id = AKIADECOYDECOYDECOYS\n\
+             aws_secret_access_key = cig-decoy-{marker}/not/a/real/secret/key\n"
+        )
+        .into_bytes();
+    }
+    if name == ".npmrc" || name.ends_with("npmrc") {
+        return format!(
+            "//registry.npmjs.org/:_authToken=cig-decoy-{marker}\n\
+             always-auth=true\n"
+        )
+        .into_bytes();
+    }
+    if name == ".env" || name.starts_with(".env.") || name.ends_with(".env") {
+        return format!(
+            "# cig-decoy env\n\
+             API_KEY=cig-decoy-{marker}\n\
+             SECRET=not-the-real-secret-cig-decoy-{marker}\n"
+        )
+        .into_bytes();
+    }
+    format!(
+        "# cig-decoy marker {marker}\n\
+         # not the real credential\n"
+    )
+    .into_bytes()
 }
 
 /// An environment variable that names a proxy, or an exception to one:

@@ -32,12 +32,41 @@ use std::path::Path;
 /// `Refusals` is what a contained hop always has: only the calls the box
 /// refuses by itself (io_uring), so the refusal leaves its event. `Calls`
 /// is `watch: true`. `Reads` adds every file the hop opens, reads included.
+///
+/// Off Linux the parser refuses the knobs that reach anything but `Off`,
+/// so the other variants are never constructed; the attribute keeps
+/// `-D dead_code` quiet on Windows and macOS.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Mode {
     Off,
     Refusals,
     Calls,
     Reads,
+}
+
+/// One entry of the supervisor's pass table: a resolved absolute path the
+/// box pretends holds credentials, its decoy content, and, where
+/// `pass_reads:` names one, the program allowed to read the real file.
+///
+/// The real file's bytes are what the host held at Setup time; the decoy
+/// is realistic for the format (right size range) and carries the hop's
+/// marker. Every entry in `WatchChild::decoys` either names a decoy alone
+/// (every reader gets it, event `E773`) or one program (that program
+/// gets the real file, every other reader gets the decoy, event `E775`).
+#[derive(Clone, Debug)]
+pub struct DecoyEntry {
+    /// The path the hop opens (absolute, canonicalized from the caller's
+    /// home or a pack root).
+    pub path: String,
+    /// Where the real file sits on the host; `None` where the file is
+    /// missing or unreadable (the decoy is the whole answer).
+    pub real_source: Option<std::path::PathBuf>,
+    /// Where the decoy sits on the host, in the run's scratch.
+    pub decoy_source: std::path::PathBuf,
+    /// The one program (`/proc/<pid>/exe` at notification time) that may
+    /// read `real_source`. `None` means every reader gets the decoy.
+    pub only_program: Option<String>,
 }
 
 /// The event log as lines of JSON, in the order they were written; a line
@@ -90,7 +119,22 @@ mod linux {
     const IOCTL_RECV: libc::Ioctl = 0xc050_2100_u32 as libc::Ioctl;
     const IOCTL_SEND: libc::Ioctl = 0xc018_2101_u32 as libc::Ioctl;
     const IOCTL_ID_VALID: libc::Ioctl = 0x4008_2102_u32 as libc::Ioctl;
+    // SECCOMP_IOCTL_NOTIF_ADDFD: _IOW('!', 3, struct seccomp_notif_addfd).
+    // sizeof(struct seccomp_notif_addfd) = 24 (u64 id, u32 flags, u32
+    // srcfd, u32 newfd, u32 newfd_flags). libc may not expose it; define
+    // the value directly from the kernel's macros.
+    pub const IOCTL_ADDFD: libc::Ioctl = 0x4018_2103_u32 as libc::Ioctl;
+    const ADDFD_FLAG_SEND: u32 = 1 << 1;
     const RESP_FLAG_CONTINUE: u32 = 1;
+
+    #[repr(C)]
+    struct AddFd {
+        id: u64,
+        flags: u32,
+        srcfd: u32,
+        newfd: u32,
+        newfd_flags: u32,
+    }
 
     // libc's own: ptrace's request is c_uint on glibc and c_int on musl.
     use libc::{PTRACE_CONT, PTRACE_GETREGSET, PTRACE_SEIZE, PTRACE_SETREGSET};
@@ -114,6 +158,10 @@ mod linux {
         /// Skip the fast route and trace with ptrace (`CIG_WATCH_ROUTE=ptrace`,
         /// a switch for checking the slower route, which says what it is).
         pub force_ptrace: bool,
+        /// Decoys and pass_reads for this hop, by resolved path. The
+        /// supervisor reads this to answer an `openat` with a decoy fd
+        /// (fail-closed: ADDFD failure gives the decoy and the event).
+        pub decoys: Vec<super::DecoyEntry>,
     }
 
     #[repr(C)]
@@ -395,6 +443,17 @@ mod linux {
         /// gets `child_fd()` (close-on-exec; the filter's installer uses it
         /// before the exec).
         pub fn start(events: &Path, mode: Mode) -> std::io::Result<Watch> {
+            Self::start_with(events, mode, Vec::new())
+        }
+
+        /// As `start`, with the pass table the supervisor reads to answer
+        /// an open with a decoy fd (or the real one, for the one allowed
+        /// program, via ADDFD + SEND).
+        pub fn start_with(
+            events: &Path,
+            mode: Mode,
+            decoys: Vec<super::DecoyEntry>,
+        ) -> std::io::Result<Watch> {
             let mut pair = [0 as libc::c_int; 2];
             // SAFETY: socketpair writes two descriptors; eventfd makes one.
             let (parent, child, stop) = unsafe {
@@ -442,7 +501,7 @@ mod linux {
             let thread = std::thread::Builder::new()
                 .name("cig-box-watch".to_string())
                 .spawn(move || {
-                    supervise(parent, stop_raw, log, mode);
+                    supervise(parent, stop_raw, log, mode, decoys);
                     let _ = tx.send(());
                 })?;
             Ok(Watch {
@@ -497,13 +556,19 @@ mod linux {
         let _ = log.write_all(format!("{ev}\n").as_bytes());
     }
 
-    fn supervise(parent: OwnedFd, stop: RawFd, mut log: File, mode: Mode) {
+    fn supervise(
+        parent: OwnedFd,
+        stop: RawFd,
+        mut log: File,
+        mode: Mode,
+        decoys: Vec<super::DecoyEntry>,
+    ) {
         if !readable(parent.as_raw_fd(), stop) {
             return;
         }
         match recv_first(parent.as_raw_fd()) {
             First::Nothing => {}
-            First::Notify(l) => serve_notify(&l, stop, &mut log, mode),
+            First::Notify(l) => serve_notify(&l, stop, &mut log, mode, &decoys),
             First::Trace(pid) => {
                 write_event(
                     &mut log,
@@ -551,7 +616,13 @@ mod linux {
         }
     }
 
-    fn serve_notify(listener: &OwnedFd, stop: RawFd, log: &mut File, mode: Mode) {
+    fn serve_notify(
+        listener: &OwnedFd,
+        stop: RawFd,
+        log: &mut File,
+        mode: Mode,
+        decoys: &[super::DecoyEntry],
+    ) {
         let fd = listener.as_raw_fd();
         loop {
             let mut p = [
@@ -608,7 +679,100 @@ mod linux {
                 // SAFETY: ioctl with a pointer to the id.
                 let valid = unsafe { libc::ioctl(fd, IOCTL_ID_VALID, &mut id as *mut u64) } == 0;
                 if valid {
-                    if let Some(ev) = describe(pid, nr, &n.args, mode) {
+                    if let Some(entry) = decoy_hit(pid, nr, &n.args, decoys) {
+                        // The mount is the boundary: whether the
+                        // supervisor answers or lets the call CONTINUE,
+                        // the hop's open resolves to the decoy. The
+                        // supervisor answers only when the allowed
+                        // program (`pass_reads`) opens the file for
+                        // reading, and only then with ADDFD + SEND; a
+                        // write open, a directory open, an O_PATH open
+                        // (none of which the pass needs) CONTINUEs and
+                        // the mount's EROFS does the rest.
+                        let flags = open_flags(pid, nr, &n.args);
+                        let mode_name = if flags & libc::O_ACCMODE as u64 != libc::O_RDONLY as u64 {
+                            "write"
+                        } else {
+                            "read"
+                        };
+                        let is_read_only = flags & libc::O_ACCMODE as u64 == libc::O_RDONLY as u64
+                            && (flags
+                                & (libc::O_CREAT as u64
+                                    | libc::O_TRUNC as u64
+                                    | libc::O_DIRECTORY as u64
+                                    | libc::O_PATH as u64))
+                                == 0;
+                        let exe = read_exe(pid);
+                        let is_pass = entry
+                            .only_program
+                            .as_deref()
+                            .is_some_and(|p| exe.as_deref() == Some(p));
+                        // Inject the real file only for the allowed
+                        // program's read-only open. Decoys and wrong
+                        // readers always CONTINUE; the mount serves
+                        // the decoy. A failed ADDFD on the pass case
+                        // CONTINUEs too — the mount serves the decoy
+                        // then, not EPERM.
+                        let want_inject = is_pass && is_read_only;
+                        let mut injected = false;
+                        let mut served = true;
+                        if want_inject {
+                            if let Some(real) = entry.real_source.as_deref() {
+                                if let Some(f) = open_source(real) {
+                                    // ID_VALID again, after the two
+                                    // memory reads: if the notification
+                                    // id is no longer valid (the hop
+                                    // was killed, or the open was
+                                    // interrupted) ADDFD would EBADF
+                                    // and the decoy would leak as the
+                                    // answer.
+                                    let mut id2 = n.id;
+                                    let still_valid = unsafe {
+                                        libc::ioctl(fd, IOCTL_ID_VALID, &mut id2 as *mut u64)
+                                    } == 0;
+                                    if still_valid && inject_fd(fd, n.id, f.as_raw_fd()) {
+                                        injected = true;
+                                    } else {
+                                        served = false;
+                                    }
+                                } else {
+                                    served = false;
+                                }
+                            } else {
+                                served = false;
+                            }
+                        }
+                        let code = if entry.only_program.is_some() {
+                            if is_pass && injected {
+                                None
+                            } else {
+                                Some("E775")
+                            }
+                        } else {
+                            Some("E773")
+                        };
+                        write_event(
+                            log,
+                            decoy_event(
+                                &entry.path,
+                                exe.as_deref(),
+                                is_pass,
+                                served,
+                                mode_name,
+                                code,
+                            ),
+                            pid,
+                        );
+                        if injected {
+                            // ADDFD + SEND already answered the call: the
+                            // kernel reaps the notification id itself, so
+                            // this iteration must not send a response.
+                            continue;
+                        }
+                        // CONTINUE: the mount serves the decoy for a
+                        // read, EROFS for a write, ENOENT where the
+                        // real path is gone. No EPERM path here.
+                    } else if let Some(ev) = describe(pid, nr, &n.args, mode) {
                         write_event(log, ev, pid);
                     }
                 }
@@ -616,6 +780,127 @@ mod linux {
             // SAFETY: ioctl with a pointer to the answer.
             unsafe { libc::ioctl(fd, IOCTL_SEND, &mut resp as *mut Resp) };
         }
+    }
+
+    /// The decoy or pass entry an open names, if any: `openat`, `openat2`
+    /// or the x86_64-only `open`/`creat`. The path is read from the hop's
+    /// memory and canonicalized against `/`.
+    fn decoy_hit<'a>(
+        pid: i32,
+        nr: i64,
+        args: &[u64; 6],
+        decoys: &'a [super::DecoyEntry],
+    ) -> Option<&'a super::DecoyEntry> {
+        if decoys.is_empty() {
+            return None;
+        }
+        let path = if nr == libc::SYS_openat || nr == libc::SYS_openat2 {
+            read_cstr(pid, args[1])
+        } else if is_open_legacy(nr) {
+            read_cstr(pid, args[0])
+        } else {
+            return None;
+        }?;
+        // The hop's cwd is not read: decoy paths are kept absolute by the
+        // caller (Setup::new resolves `~/` and the pack roots).
+        decoys.iter().find(|d| d.path == path)
+    }
+
+    /// /proc/<pid>/exe as a path string, with " (deleted)" stripped
+    /// when the kernel appends it (a program whose on-disk file has
+    /// been removed after exec). Without the strip, the suffix would
+    /// never match the canonical path the planner stored.
+    fn read_exe(pid: i32) -> Option<String> {
+        let p = std::fs::read_link(format!("/proc/{pid}/exe")).ok()?;
+        let s = p.to_string_lossy();
+        Some(s.strip_suffix(" (deleted)").unwrap_or(&s).to_string())
+    }
+
+    /// The flags an open-family call passes: `openat`/`openat2` carry
+    /// them in `args[2]` (for openat) or inside `struct open_how` the
+    /// hop pointed `args[2]` at (openat2). Legacy `open` has them in
+    /// `args[1]`, `creat` implies O_WRONLY|O_CREAT|O_TRUNC.
+    fn open_flags(pid: i32, nr: i64, args: &[u64; 6]) -> u64 {
+        if nr == libc::SYS_openat {
+            return args[2] & 0xffff_ffff;
+        }
+        if nr == libc::SYS_openat2 {
+            let how = read_mem(pid, args[2], 8);
+            return how
+                .get(..8)
+                .map(|b| u64::from_ne_bytes(b.try_into().unwrap_or([0; 8])))
+                .unwrap_or(0);
+        }
+        #[cfg(target_arch = "x86_64")]
+        if nr == libc::SYS_open {
+            return args[1] & 0xffff_ffff;
+        }
+        #[cfg(target_arch = "x86_64")]
+        if nr == libc::SYS_creat {
+            return (libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC) as u64;
+        }
+        0
+    }
+
+    fn open_source(p: &std::path::Path) -> Option<OwnedFd> {
+        use std::os::unix::ffi::OsStrExt;
+        let c = std::ffi::CString::new(p.as_os_str().as_bytes()).ok()?;
+        // SAFETY: opening a path in the host for reading, close-on-exec.
+        let fd = unsafe { libc::open(c.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
+        if fd < 0 {
+            None
+        } else {
+            // SAFETY: fd was just made by this process.
+            Some(unsafe { OwnedFd::from_raw_fd(fd) })
+        }
+    }
+
+    /// Inject `srcfd` into the hop as a new fd and atomically answer the
+    /// notification (`SECCOMP_ADDFD_FLAG_SEND`, Linux 5.14+). Returns
+    /// whether the ioctl was accepted.
+    fn inject_fd(listener: RawFd, id: u64, srcfd: RawFd) -> bool {
+        let mut a = AddFd {
+            id,
+            flags: ADDFD_FLAG_SEND,
+            srcfd: srcfd as u32,
+            newfd: 0,
+            newfd_flags: libc::O_CLOEXEC as u32,
+        };
+        // SAFETY: ioctl with a pointer to the struct; the kernel reads
+        // its 24 bytes and treats SEND as atomic add-plus-answer.
+        let r = unsafe { libc::ioctl(listener, IOCTL_ADDFD, &mut a as *mut AddFd) };
+        r >= 0
+    }
+
+    fn decoy_event(
+        path: &str,
+        exe: Option<&str>,
+        pass: bool,
+        served: bool,
+        mode_name: &str,
+        code: Option<&'static str>,
+    ) -> serde_json::Value {
+        let mut m = serde_json::Map::new();
+        m.insert("call".to_string(), "open".into());
+        m.insert("path".to_string(), path.into());
+        m.insert("mode".to_string(), mode_name.into());
+        m.insert(
+            "result".to_string(),
+            if pass && served { "passed" } else { "decoy" }.into(),
+        );
+        if let Some(c) = code {
+            m.insert("code".to_string(), c.into());
+        }
+        if let Some(e) = exe {
+            m.insert("exe".to_string(), e.into());
+        }
+        if pass && !served {
+            m.insert(
+                "note".to_string(),
+                "fd injection refused; the mount served the decoy".into(),
+            );
+        }
+        serde_json::Value::Object(m)
     }
 
     fn is_io_uring(nr: i64) -> bool {
@@ -978,6 +1263,114 @@ mod linux {
             assert_eq!(sees, 3);
             let g = filter(Mode::Calls, RET_USER_NOTIF).unwrap();
             assert!(g.iter().filter(|i| i.k == RET_USER_NOTIF).count() > 3);
+        }
+
+        /// A tiny classic-BPF interpreter: enough for the watch's
+        /// filters (no X register, no indirect loads, immediate-k
+        /// comparisons). Buffer holds the `seccomp_data` the kernel
+        /// would show: nr, arch, ip, args[6], in that order.
+        fn bpf_run(prog: &[libc::sock_filter], data: &[u32; 16]) -> u32 {
+            let mut pc = 0usize;
+            let mut a: u32 = 0;
+            while pc < prog.len() {
+                let ins = prog[pc];
+                let op = ins.code;
+                let klass = op & 0x07;
+                match klass {
+                    0x00 => {
+                        // BPF_LD | BPF_W | BPF_ABS
+                        a = data[(ins.k / 4) as usize];
+                        pc += 1;
+                    }
+                    0x05 => {
+                        let kind = op & 0xF0;
+                        if kind == 0x00 {
+                            // BPF_JA: unconditional jump by k.
+                            pc = pc + 1 + ins.k as usize;
+                        } else {
+                            let taken = match kind {
+                                0x10 => a == ins.k,       // JEQ
+                                0x30 => a >= ins.k,       // JGE
+                                0x40 => (a & ins.k) != 0, // JSET
+                                _ => false,
+                            };
+                            pc = pc + 1 + (if taken { ins.jt } else { ins.jf } as usize);
+                        }
+                    }
+                    0x06 => return ins.k, // RET
+                    _ => panic!("unexpected opcode {:#x}", op),
+                }
+            }
+            RET_ALLOW
+        }
+
+        fn arch_code() -> u32 {
+            #[cfg(target_arch = "x86_64")]
+            {
+                0xC000_003E
+            }
+            #[cfg(target_arch = "aarch64")]
+            {
+                0xC000_00B7
+            }
+            #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+            {
+                // filter() refuses to build on this arch, so the test
+                // would never run; the value only needs to compile.
+                0
+            }
+        }
+
+        /// Every syscall outside the watched set (a Calls-mode filter) is
+        /// `SECCOMP_RET_ALLOW`, so the watch is free for the rest. The
+        /// probe walks the cheap syscalls (getpid, close, read, write,
+        /// gettid, clock_gettime, nanosleep, futex, mmap, mprotect, dup,
+        /// pipe2, lseek, exit, exit_group, plus x86_64's `poll`, and
+        /// `ppoll` everywhere) and asserts the filter returns ALLOW for
+        /// each.
+        #[test]
+        fn the_watch_costs_nothing_for_unwatched_calls() {
+            let f = filter(Mode::Calls, RET_USER_NOTIF).unwrap();
+            #[cfg_attr(not(target_arch = "x86_64"), allow(unused_mut))]
+            let mut cheap: Vec<libc::c_long> = vec![
+                libc::SYS_getpid,
+                libc::SYS_close,
+                libc::SYS_read,
+                libc::SYS_write,
+                libc::SYS_gettid,
+                libc::SYS_clock_gettime,
+                libc::SYS_nanosleep,
+                libc::SYS_futex,
+                libc::SYS_mmap,
+                libc::SYS_mprotect,
+                libc::SYS_dup,
+                libc::SYS_pipe2,
+                libc::SYS_lseek,
+                libc::SYS_exit,
+                libc::SYS_exit_group,
+                libc::SYS_ppoll,
+            ];
+            // `poll` is x86_64-only in libc; aarch64 has `ppoll` alone.
+            #[cfg(target_arch = "x86_64")]
+            cheap.push(libc::SYS_poll);
+            for nr in cheap {
+                let mut data = [0u32; 16];
+                data[0] = nr as u32;
+                data[1] = arch_code();
+                let r = bpf_run(&f, &data);
+                assert_eq!(
+                    r, RET_ALLOW,
+                    "syscall {nr} must be ALLOW under Calls mode (got {r:#x})"
+                );
+            }
+            // sendto with no address is a stream write: ALLOW too.
+            let mut data = [0u32; 16];
+            data[0] = libc::SYS_sendto as u32;
+            data[1] = arch_code();
+            // args[4] (sockaddr) at word 12, args[5] (len) at word 14:
+            // both zero already.
+            let r = bpf_run(&f, &data);
+            assert_eq!(r, RET_ALLOW, "sendto with no address must be ALLOW");
         }
 
         #[test]

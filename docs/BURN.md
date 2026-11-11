@@ -960,8 +960,74 @@ proc.run("npm", ["ci"], {box: {
   `_register` return `EPERM` and leave an event with `code: "E776"` (a note,
   `E776`), since their operations pass no call the watch could see; where
   not even that part can be had the refusal stands with no event.
-  Windows and macOS have no seccomp: the gap is stated, user-space levels
-  only (`#106`, `#105`).
+  Windows and macOS have no seccomp: the box refuses `watch: true` and
+  `watch: "reads"` there before it starts, since the mechanism is Linux's
+  alone (`#106`, `#105`). `cig doctor` has a `box-watch` row that says
+  which route this machine has (user notification, ptrace or neither).
+- **Decoys and `pass_reads`.** `box: { decoys: [...] }` lists credential
+  paths (`~/.ssh/id_*`, `~/.aws/credentials`, `.env`, a browser store)
+  the box should fake. Each name resolves against the caller's home
+  (`~/` is expanded; a path that resolves outside the home is dropped,
+  and symlinks are not followed). For every resolved path the run's
+  scratch holds a realistic fake carrying a marker unique to this hop,
+  and the box bind-mounts the fake read-only over the real path inside
+  its own mount namespace, after the overlays and before the hide step,
+  with the same retry-on-ENOENT logic the covers use: a path missing
+  at mount time has nothing to protect and is skipped; a bind that
+  fails for any other reason refuses the hop. **The mount is the
+  boundary.** The real file is unreachable by any route in the box —
+  a symlink made in the pack, an `openat` with a dirfd of the parent
+  directory, `/proc/self/root/<path>`, the legacy `open` syscall, a
+  path the hop rewrites after the supervisor reads it — because the
+  inode at the path is the decoy's. The real file is never bound
+  anywhere in the box. The watch's supervisor still sees every open
+  and writes an `E773` event (`code: "E773", result: "decoy"`) for
+  each read of a decoy's path; a read reaching the decoy through a
+  symlink lands on the mount all the same but may not match the
+  supervisor's literal path check, so the mount, not the event, is
+  the security guarantee. `box: { pass_reads: { "<path>":
+  "<program>" } }` keeps one program (resolved to `/proc/<pid>/exe`
+  at notification time, with ` (deleted)` stripped) able to read the
+  real file: the supervisor opens the real file from cig's side of
+  the namespace boundary, outside the decoy mount, and hands it
+  through `SECCOMP_IOCTL_NOTIF_ADDFD` with the `SEND` flag (Linux
+  5.14+, atomic add-and-answer). Every other reader sees the decoy
+  through the mount, and the supervisor records `E775`. `pass_reads`
+  is refused at plan time on a kernel older than 5.14, on the ptrace
+  fallback (`CIG_WATCH_ROUTE=ptrace`), on a program not on `PATH`,
+  and on a multicall binary (busybox, toybox) whose `/proc/<pid>/exe`
+  is shared across applets: it names a binary, not an applet. The
+  program is canonicalised at plan time so merged-usr symlinks
+  resolve to the one file the supervisor will see. Fail closed: a
+  stale notification id, a decoy the supervisor cannot open, or an
+  ADDFD refused for any other reason falls through to `CONTINUE`,
+  and the decoy mount still shadows the real file (no `EPERM` path
+  for the hop). A write open (`O_WRONLY`, `O_RDWR`, `O_CREAT`,
+  `O_TRUNC`), an `O_DIRECTORY`/`O_PATH` open, and any open from a
+  reader other than the allowed program all `CONTINUE`: the read-only
+  bind mount answers them (`EROFS` for a write, the decoy for a
+  read), so `npm login` still writes an rc file into the hop's layer
+  rather than the host's. The decoy mount is remounted with the
+  source's locked flags (`MS_NODEV`/`MS_NOSUID`/`MS_NOEXEC`/`MS_NOATIME`
+  and friends), plus `MS_NOSUID|MS_NODEV|MS_NOEXEC`, since a bind
+  remount in a user namespace that drops a locked flag refuses with
+  `EPERM`; a failed remount refuses the hop (the boundary is only as
+  good as the read-only bit). The watch's mode widens to `Reads`
+  whenever `decoys` or `pass_reads` is non-empty, even without
+  `watch: true`, so every open round-trips to the supervisor; it is
+  for seeing, not performance, so tune hops under decoys accordingly.
+  The real file descriptor the supervisor hands into the box is a
+  plain fd: a sibling process in the hop with ptrace or
+  `/proc/<pid>/fd/<n>` access to the allowed program can reach it
+  (ordinary `pidns` and user-namespace confinement are what keeps
+  that in-pack), and the allowed program keeps the fd across `fork`
+  and may pass it to siblings itself; `pass_reads` is for a
+  cooperating program, not an adversarial one. A supervisor match
+  is an exact path string: a `pass_reads` program that opens the
+  file through a relative path (`./.npmrc`), a symlink that
+  rewrites the string, or a dirfd-relative name will match the
+  mount (decoy, safely) but not the supervisor, so the allowed
+  program must open its file by the absolute path given.
 - **No burn protocol for an isolated hop.** A hop with a network of its own
   is code its caller does not trust, so it is given no `CIG_JOURNAL`: an
   undo it declared there would be a command cig runs later, outside every
