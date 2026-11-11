@@ -464,7 +464,7 @@ pub enum Keeper {
 }
 
 /// The key `--seal-key-fd` handed over, read once at start-up.
-static GIVEN: OnceLock<Key> = OnceLock::new();
+static GIVEN: Slot = Slot::new();
 
 /// The most a key descriptor is read for: a key is 64 hex characters, and
 /// a descriptor that streams on must not fill memory.
@@ -526,17 +526,14 @@ pub fn take_key_from_fd(fd: i32) -> Result<(), String> {
             "descriptor {fd} did not hold a tin key, the 64 hex characters a key file holds ({e})"
         )
     })?;
-    let _ = GIVEN.set(key);
-    if let Some(k) = GIVEN.get() {
-        keep_out_of_swap(k);
-    }
+    let _ = GIVEN.put(key, Keeper::Descriptor);
     Ok(())
 }
 
 /// Was the key handed over with `--seal-key-fd`? Its keeper holds it
 /// elsewhere already, so no backup reminder is due.
 pub fn key_was_given() -> bool {
-    GIVEN.get().is_some()
+    GIVEN.is_set()
 }
 
 /// `--seal-key-fd` needs Unix descriptors; on Windows the key file is the
@@ -558,24 +555,20 @@ pub fn take_key_from_fd(_fd: i32) -> Result<(), String> {
 /// rekey is its own lock-holder, so it opts out of the shared lock
 /// before calling `key()` (see `rekey::enter_rekey`).
 pub fn key() -> Result<(Key, Keeper), String> {
-    static K: OnceLock<Result<(Key, Keeper), String>> = OnceLock::new();
+    static K: Slot = Slot::new();
     // Fail closed: a lock that cannot be had leaves every seal/sign call
     // refused with the reason, rather than proceeding unprotected under a
     // rekey a concurrent `cig tin rekey` is about to retire (SEC-004 N3).
     hold_shared_rekey_lock()?;
-    let k = K.get_or_init(key_uncached);
-    keep_out_of_swap(k);
-    k.clone()
+    K.get_or_init(key_uncached)
 }
 
 /// The same as `key()` but without taking the shared rekey lock. For the
 /// rekey itself: it holds the exclusive lock and asks for the key under
 /// it. Everyone else goes through `key()`.
 pub(crate) fn key_no_rekey_lock() -> Result<(Key, Keeper), String> {
-    static K: OnceLock<Result<(Key, Keeper), String>> = OnceLock::new();
-    let k = K.get_or_init(key_uncached);
-    keep_out_of_swap(k);
-    k.clone()
+    static K: Slot = Slot::new();
+    K.get_or_init(key_uncached)
 }
 
 thread_local! {
@@ -642,20 +635,174 @@ fn check_keys_contents() -> Result<(), String> {
     Ok(())
 }
 
-/// The page that holds the key, kept out of swap where the platform allows
-/// it (#105, L5): once, best effort (a small `RLIMIT_MEMLOCK` may say no,
-/// and then it is as before).
-fn keep_out_of_swap<T>(v: &T) {
-    static DONE: OnceLock<()> = OnceLock::new();
-    DONE.get_or_init(|| {
-        #[cfg(unix)]
-        // SAFETY: mlock only pins the pages under a live static.
-        unsafe {
-            libc::mlock((v as *const T).cast(), std::mem::size_of::<T>());
+/// Where the key lives for the life of the process (#105, L5): a page of
+/// its own, mapped anonymously, locked out of swap where the platform allows
+/// it, left out of core dumps, and marked `MADV_WIPEONFORK`, so a child
+/// forked from cig (a boxed hop before its exec) sees zeros there, not the
+/// key. Where the kernel lacks that (before 4.14) the page is marked
+/// `MADV_DONTFORK` instead: the child has no such page at all. Elsewhere,
+/// the key is held in ordinary memory as before. A read from a child that
+/// finds zeros is an error, never a zero key.
+pub struct Slot {
+    cell: OnceLock<Result<Held, String>>,
+}
+
+enum Held {
+    #[cfg(target_os = "linux")]
+    Page(PagePtr, Keeper),
+    Plain(Key, Keeper),
+}
+
+#[cfg(target_os = "linux")]
+struct PagePtr(*mut u8);
+
+// SAFETY: the page is written once, before the pointer is shared, and only
+// read after.
+#[cfg(target_os = "linux")]
+unsafe impl Send for PagePtr {}
+#[cfg(target_os = "linux")]
+unsafe impl Sync for PagePtr {}
+
+/// How the key page is kept from a fork: 0 none, 1 wiped, 2 not inherited.
+#[cfg(target_os = "linux")]
+static PROTECTION: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+#[cfg(target_os = "linux")]
+const MADV_WIPEONFORK: libc::c_int = 18;
+
+/// A fresh page for a secret, and how it is kept from a fork.
+#[cfg(target_os = "linux")]
+fn secret_page() -> Option<(*mut u8, usize, u8)> {
+    // SAFETY: an anonymous private mapping of one page, then advice on it.
+    unsafe {
+        let len = (libc::sysconf(libc::_SC_PAGESIZE).max(4096)) as usize;
+        let p = libc::mmap(
+            std::ptr::null_mut(),
+            len,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+            -1,
+            0,
+        );
+        if p == libc::MAP_FAILED {
+            return None;
         }
-        #[cfg(not(unix))]
-        let _ = v;
-    });
+        let how = if libc::madvise(p, len, MADV_WIPEONFORK) == 0 {
+            1
+        } else if libc::madvise(p, len, libc::MADV_DONTFORK) == 0 {
+            2
+        } else {
+            0
+        };
+        libc::madvise(p, len, libc::MADV_DONTDUMP);
+        // Best effort: a small RLIMIT_MEMLOCK may say no.
+        libc::mlock(p, len);
+        Some((p.cast(), len, how))
+    }
+}
+
+/// What this kernel does for a secret page across a fork, for doctor:
+/// `wipe-on-fork`, `dont-fork` (before Linux 4.14) or `none`.
+pub fn fork_protection() -> &'static str {
+    #[cfg(target_os = "linux")]
+    {
+        match secret_page() {
+            Some((p, len, how)) => {
+                // SAFETY: unmapping the probe page just made.
+                unsafe { libc::munmap(p.cast(), len) };
+                match how {
+                    1 => "wipe-on-fork",
+                    2 => "dont-fork",
+                    _ => "none",
+                }
+            }
+            None => "none",
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        "none"
+    }
+}
+
+impl Held {
+    fn store(key: Key, keeper: Keeper) -> Held {
+        #[cfg(target_os = "linux")]
+        if let Some((p, _len, how)) = secret_page() {
+            PROTECTION.store(how, std::sync::atomic::Ordering::Relaxed);
+            // SAFETY: the page is 4096 bytes or more and ours alone.
+            unsafe { std::ptr::copy_nonoverlapping(key.as_bytes().as_ptr(), p, 32) };
+            return Held::Page(PagePtr(p), keeper);
+        }
+        Held::Plain(key, keeper)
+    }
+
+    fn read(&self) -> Option<(Key, Keeper)> {
+        match self {
+            #[cfg(target_os = "linux")]
+            Held::Page(p, keeper) => {
+                let mut a = [0u8; 32];
+                // SAFETY: 32 bytes of the live page.
+                unsafe { std::ptr::copy_nonoverlapping(p.0, a.as_mut_ptr(), 32) };
+                let zero = a.iter().all(|b| *b == 0);
+                let k = Key::new(a);
+                wipe_bytes(&mut a);
+                if zero {
+                    None
+                } else {
+                    Some((k, keeper.clone()))
+                }
+            }
+            Held::Plain(k, keeper) => Some((k.clone(), keeper.clone())),
+        }
+    }
+}
+
+impl Slot {
+    pub const fn new() -> Slot {
+        Slot {
+            cell: OnceLock::new(),
+        }
+    }
+
+    /// Keep `key`, once; false when a key is already held.
+    pub fn put(&self, key: Key, keeper: Keeper) -> bool {
+        self.cell.set(Ok(Held::store(key, keeper))).is_ok()
+    }
+
+    pub fn is_set(&self) -> bool {
+        matches!(self.cell.get(), Some(Ok(_)))
+    }
+
+    /// A copy of the key held, if there is one and it can be read here.
+    pub fn get(&self) -> Option<Key> {
+        match self.cell.get() {
+            Some(Ok(h)) => h.read().map(|(k, _)| k),
+            _ => None,
+        }
+    }
+
+    /// The key held, made by `init` the first time.
+    pub fn get_or_init(
+        &self,
+        init: impl FnOnce() -> Result<(Key, Keeper), String>,
+    ) -> Result<(Key, Keeper), String> {
+        let held = self
+            .cell
+            .get_or_init(|| init().map(|(k, keeper)| Held::store(k, keeper)));
+        match held {
+            Ok(h) => h.read().ok_or_else(|| {
+                "the key is not held in this process (a forked child sees zeros there)".to_string()
+            }),
+            Err(e) => Err(e.clone()),
+        }
+    }
+}
+
+impl Default for Slot {
+    fn default() -> Self {
+        Slot::new()
+    }
 }
 
 /// Text that held a key (its hex, a keyring's answer), wiped before it is
@@ -669,7 +816,7 @@ fn wipe(s: String) {
 fn key_uncached() -> Result<(Key, Keeper), String> {
     harden_process_memory();
     if let Some(k) = GIVEN.get() {
-        return Ok((k.clone(), Keeper::Descriptor));
+        return Ok((k, Keeper::Descriptor));
     }
     let cfg = crate::config::Config::load();
     if cfg.get("seal_key") != "file" {
@@ -1415,7 +1562,7 @@ pub fn store_in_keyring(k: &Key) -> Result<(), String> {
 /// entry, else the key file when it exists, else nowhere yet. For doctor,
 /// which must not create a key as a side effect of looking.
 pub fn peek_keeper() -> Option<Keeper> {
-    if GIVEN.get().is_some() {
+    if GIVEN.is_set() {
         return Some(Keeper::Descriptor);
     }
     if crate::config::Config::load().get("seal_key") != "file" && keyring_has_entry() {
@@ -2049,6 +2196,44 @@ mod tests {
     /// the task's own rule bans reading freed memory through a raw pointer
     /// to prove that end of it, so this test exercises the wipe function
     /// directly instead, which is what `Drop` calls.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_forked_child_sees_zeros_where_the_key_is_kept() {
+        let slot = Slot::new();
+        let key = Key::new([7u8; 32]);
+        assert!(slot.put(key, Keeper::File));
+        if fork_protection() == "none" {
+            eprintln!("no fork protection for a secret page here; skipped");
+            return;
+        }
+        // SAFETY: the child reads the slot and exits at once, touching no
+        // lock and no allocator.
+        let pid = unsafe { libc::fork() };
+        if pid == 0 {
+            let seen = slot.get().is_some();
+            // SAFETY: leaving the child without running destructors.
+            unsafe { libc::_exit(if seen { 1 } else { 0 }) };
+        }
+        assert!(pid > 0);
+        let mut status = 0;
+        // SAFETY: waiting for the child just made.
+        unsafe { libc::waitpid(pid, &mut status, 0) };
+        // Wiped (zeros, so no key) or not inherited at all (the read
+        // faults): either way the child never got the key.
+        let clean = (libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0)
+            || (libc::WIFSIGNALED(status) && libc::WTERMSIG(status) == libc::SIGSEGV);
+        assert!(clean, "the child read the key: status {status:#x}");
+        // The parent still has it, and seals and unseals with it.
+        let k = slot.get().expect("the parent's key");
+        assert_eq!(k.as_bytes(), &[7u8; 32]);
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("a.sealed");
+        seal_bytes(b"secret text", &dest, b"aad", &k).unwrap();
+        let mut out = Vec::new();
+        unseal_to_with(&k, &dest, b"aad", "", &mut out).unwrap();
+        assert_eq!(out, b"secret text");
+    }
+
     #[test]
     fn wipe_bytes_zeroes_through_a_volatile_store() {
         let mut buf = [0xabu8; 32];

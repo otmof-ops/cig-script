@@ -5593,6 +5593,203 @@ fn a_hop_has_no_network_under_off() {
     drop(listener);
 }
 
+/// The probe the watch tests run in the box: write a file, connect, run a
+/// program, and try io_uring (syscall 425 on both architectures).
+#[cfg(target_os = "linux")]
+fn watch_probe(sb: &Sandbox) {
+    sb.write(
+        "p/probe.py",
+        "import ctypes, socket\n\
+         s = socket.socket()\n\
+         s.settimeout(1)\n\
+         try:\n    s.connect(('127.0.0.1', 9))\n\
+         except OSError:\n    pass\n\
+         libc = ctypes.CDLL(None, use_errno=True)\n\
+         r = libc.syscall(425, 1, ctypes.c_void_p(0))\n\
+         print('ret=%d errno=%d' % (r, ctypes.get_errno()))\n",
+    );
+    sb.write(
+        "p/probe.sh",
+        "echo hi > opened.txt\npython3 probe.py\n/bin/true\n",
+    );
+}
+
+/// The events a hop's log holds, from the run's folder.
+#[cfg(target_os = "linux")]
+fn watch_events(sb: &Sandbox) -> Vec<serde_json::Value> {
+    let id = sb.runs()[0]["id"].as_str().unwrap().to_string();
+    let dir = sb.home().join("runs").join(id).join("events");
+    let mut out = Vec::new();
+    for e in fs::read_dir(dir).unwrap().flatten() {
+        for line in fs::read_to_string(e.path()).unwrap().lines() {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+                out.push(v);
+            }
+        }
+    }
+    out
+}
+
+#[cfg(target_os = "linux")]
+fn watch_script(contain: bool) -> String {
+    format!(
+        "pack {{ \"./p\" }}\nburn {{\n  stick r = proc.run(\"sh\", [\"probe.sh\"], {{cwd: \"p\", box: {{network: \"off\", watch: true{}, apply: \"never\"}}}})\n  fs.write_text(\"p/seen.txt\", r.events.map(pack(u) => u.call).join(\" \"))\n  fs.write_text(\"p/uring.txt\", r.out)\n}}\n",
+        if contain { ", contain: true" } else { "" }
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn check_watch(sb: &Sandbox, out: &Output) -> bool {
+    let err = String::from_utf8_lossy(&out.stderr).to_string();
+    if !out.status.success() {
+        // Asked for and not possible: refused, as it must be.
+        assert!(err.contains("E777"), "{err}");
+        assert!(!box_expected_here(), "{err}");
+        return false;
+    }
+    if fell_back(&err) {
+        allow_fallback(&err);
+        return false;
+    }
+    let ev = watch_events(sb);
+    let has = |call: &str, f: &dyn Fn(&serde_json::Value) -> bool| {
+        ev.iter().any(|e| e["call"] == call && f(e))
+    };
+    assert!(
+        has("open", &|e| e["path"]
+            .as_str()
+            .is_some_and(|p| p.ends_with("opened.txt"))
+            && e["mode"] == "write"),
+        "no open of opened.txt: {ev:?}\n{err}"
+    );
+    assert!(
+        has("connect", &|e| e["host"] == "127.0.0.1" && e["port"] == 9),
+        "no connect to 127.0.0.1:9: {ev:?}\n{err}"
+    );
+    assert!(
+        has("exec", &|e| e["path"]
+            .as_str()
+            .is_some_and(|p| p.ends_with("true"))),
+        "no exec of true: {ev:?}\n{err}"
+    );
+    let seen = sb.read("p/seen.txt");
+    assert!(
+        seen.contains("open") && seen.contains("connect") && seen.contains("exec"),
+        "r.events: {seen}"
+    );
+    true
+}
+
+/// The watch (#106 step 3): what a hop opens for writing, connects to and
+/// runs is an event in the hop's log and in `r.events`.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_watch_reports_open_connect_exec() {
+    if Command::new("python3").arg("--version").output().is_err() {
+        eprintln!("no python3 here; skipped");
+        return;
+    }
+    let sb = Sandbox::new();
+    sb.write("p/keep.txt", "v1\n");
+    watch_probe(&sb);
+    sb.write("s.cig", &watch_script(false));
+    let out = sb.cig(&["run", "s.cig"]);
+    if !check_watch(&sb, &out) {
+        return;
+    }
+    // The fast route says nothing about itself.
+    let err = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(!err.contains("E779") || !has_user_notif(), "{err}");
+}
+
+/// Whether this kernel has seccomp user notification (5.0 or later).
+#[cfg(target_os = "linux")]
+fn has_user_notif() -> bool {
+    let kernel = fs::read_to_string("/proc/sys/kernel/osrelease").unwrap_or_default();
+    let major: u32 = kernel
+        .trim()
+        .split(|c: char| !c.is_ascii_digit())
+        .next()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(0);
+    major >= 5
+}
+
+/// The same events by the slower route, with the note (E779); io_uring is
+/// refused there too, and says so.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_watch_falls_back_to_ptrace() {
+    if Command::new("python3").arg("--version").output().is_err() {
+        eprintln!("no python3 here; skipped");
+        return;
+    }
+    let sb = Sandbox::new();
+    sb.write("p/keep.txt", "v1\n");
+    watch_probe(&sb);
+    sb.write("s.cig", &watch_script(false));
+    let out = sb.cig_env(&["run", "s.cig"], &[("CIG_WATCH_ROUTE", "ptrace")]);
+    if !check_watch(&sb, &out) {
+        return;
+    }
+    let err = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(err.contains("E779"), "{err}");
+    assert!(
+        watch_events(&sb).iter().any(|e| e["code"] == "E779"),
+        "the log carries E779"
+    );
+    assert!(
+        sb.read("p/uring.txt").contains("errno=1"),
+        "{}",
+        sb.read("p/uring.txt")
+    );
+}
+
+/// io_uring is refused in a contained hop (EPERM) whether or not the hop
+/// asked for the watch, and the refusal leaves an event and a note (E776).
+#[cfg(target_os = "linux")]
+#[test]
+fn a_hop_cannot_use_io_uring() {
+    if Command::new("python3").arg("--version").output().is_err() {
+        eprintln!("no python3 here; skipped");
+        return;
+    }
+    for watched in [false, true] {
+        let sb = Sandbox::new();
+        sb.write("p/keep.txt", "v1\n");
+        watch_probe(&sb);
+        let script = if watched {
+            watch_script(true)
+        } else {
+            "pack { \"./p\" }\nburn {\n  stick r = proc.run(\"sh\", [\"probe.sh\"], {cwd: \"p\", box: {network: \"off\", contain: true, apply: \"never\"}})\n  fs.write_text(\"p/uring.txt\", r.out)\n}\n".to_string()
+        };
+        sb.write("s.cig", &script);
+        let out = sb.cig(&["run", "s.cig"]);
+        let err = String::from_utf8_lossy(&out.stderr).to_string();
+        if !out.status.success() {
+            assert!(err.contains("E777"), "{err}");
+            assert!(!box_expected_here(), "{err}");
+            return;
+        }
+        if fell_back(&err) {
+            allow_fallback(&err);
+            return;
+        }
+        let uring = sb.read("p/uring.txt");
+        assert!(
+            uring.contains("ret=-1") && uring.contains("errno=1"),
+            "{uring}\n{err}"
+        );
+        assert!(err.contains("E776"), "{err}");
+        assert!(
+            watch_events(&sb)
+                .iter()
+                .any(|e| e["code"] == "E776" && e["result"] == "denied"),
+            "no E776 event"
+        );
+    }
+}
+
 /// `network: "registry"`: the proxy lets `allow_hosts` through and
 /// refuses the rest, each refusal recorded and said.
 #[cfg(target_os = "linux")]
@@ -14330,6 +14527,509 @@ run = ["cig", "--version"]
     assert_eq!(flag.status.code(), Some(3));
 }
 
+// ----- bench, steps 2 and 3 (#179): --save, --against, --watch -------------
+
+/// A manifest for the A/B and watch tests: one case that runs `cig` on a
+/// script, checked for exit 0 only (a fake binary stands in on side A).
+fn write_bench_ab(sb: &Sandbox, extra_bench: &str, samples: usize) {
+    sb.write("bench/fixtures/hello.cig", "exhale \"hello\"\n");
+    sb.write(
+        "bench/bench.toml",
+        &format!(
+            r#"
+format = 1
+[bench]
+product = "cig"
+{extra_bench}
+[defaults]
+samples = {samples}
+per = 1
+warmup = 1
+[[case]]
+name = "hello"
+group = "start-up"
+run = ["cig", "run", "fixtures/hello.cig"]
+"#
+        ),
+    );
+}
+
+/// An executable shell script standing in for a cig binary.
+#[cfg(unix)]
+fn fake_cig(sb: &Sandbox, name: &str, body: &str) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let p = sb.write(name, &format!("#!/bin/sh\n{body}\n"));
+    fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
+    p
+}
+
+#[test]
+fn bench_manifest_schema_is_versioned() {
+    let sb = Sandbox::new();
+    write_bench_ab(&sb, "", 2);
+    let good = sb.read("bench/bench.toml");
+    // format = 1 is accepted, and so is a manifest with no format at all.
+    sb.run_ok(&["bench"]);
+    sb.write("bench/bench.toml", &good.replace("format = 1\n", ""));
+    sb.run_ok(&["bench"]);
+    // Any other format is refused, naming it, rather than guessed at.
+    sb.write(
+        "bench/bench.toml",
+        &good.replace("format = 1", "format = 2"),
+    );
+    let err = sb.run_err(&["bench"], 3);
+    assert!(err.contains("format 2"), "{err}");
+    sb.write(
+        "bench/bench.toml",
+        &good.replace("format = 1", "format = \"one\""),
+    );
+    let err = sb.run_err(&["bench"], 3);
+    assert!(err.contains("format"), "{err}");
+    // The JSON a run writes says which format it is.
+    sb.write("bench/bench.toml", &good);
+    let v: serde_json::Value = serde_json::from_str(&sb.run_ok(&["--json", "bench"])).unwrap();
+    assert_eq!(v["format"], 1);
+    // A saved baseline carries it too, and one in another format is refused.
+    sb.run_ok(&["bench", "--save", "main"]);
+    let path = sb.path().join(".cig-bench/baselines/main.json");
+    let saved: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(saved["format"], 1);
+    assert_eq!(saved["cases"][0]["name"], "hello");
+    assert_eq!(saved["cases"][0]["samples_ms"].as_array().unwrap().len(), 2);
+    let mut newer = saved.clone();
+    newer["format"] = serde_json::json!(2);
+    fs::write(&path, newer.to_string()).unwrap();
+    let err = sb.run_err(&["bench", "--against", "main"], 3);
+    assert!(err.contains("format 2"), "{err}");
+}
+
+#[test]
+fn bench_save_names_are_plain_file_names() {
+    let sb = Sandbox::new();
+    write_bench_ab(&sb, "", 2);
+    for bad in ["../escape", "a/b", ".hidden"] {
+        let err = sb.run_err(&["bench", "--save", bad], 3);
+        assert!(err.contains("not a baseline name"), "{bad}: {err}");
+    }
+    assert!(!sb.exists(".cig-bench/escape.json"));
+}
+
+#[test]
+#[cfg(unix)]
+fn bench_against_a_binary_runs_interleaved_and_names_the_verdict() {
+    let sb = Sandbox::new();
+    write_bench_ab(&sb, "", 9);
+    // Side A takes 150 ms to do nothing; side B is this cig, far quicker.
+    let slow = fake_cig(&sb, "slow/cig", "sleep 0.15");
+    let out = sb.cig_env(
+        &["--json", "bench", "--against", slow.to_str().unwrap()],
+        &[],
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["against"]["kind"], "binary");
+    let o = &v["cases"][0]["outcome"];
+    assert_eq!(o["state"], "compared", "{v}");
+    assert_eq!(o["interleaved"], true);
+    assert_eq!(o["verdict"], "faster", "{v}");
+    assert!(o["p"].as_f64().unwrap() < 0.01, "{v}");
+    assert!(o["effect"].as_f64().unwrap() < -0.9, "{v}");
+    assert!(o["change"].as_f64().unwrap() < -0.3, "{v}");
+    // The table says it too.
+    let table = sb.run_ok(&["bench", "--against", slow.to_str().unwrap()]);
+    assert!(table.contains("interleaved A/B, Mann-Whitney"), "{table}");
+    assert!(table.contains("faster"), "{table}");
+    // The same two sides the other way round, and a wrong side A: a side
+    // that fails its check gets no time.
+    let broken = fake_cig(&sb, "broken/cig", "exit 7");
+    let err = sb.run_err(&["bench", "--against", broken.to_str().unwrap()], 1);
+    assert!(err.contains("WRONG") && err.contains("side A"), "{err}");
+}
+
+#[test]
+#[cfg(unix)]
+fn bench_save_then_against_a_baseline() {
+    let sb = Sandbox::new();
+    write_bench_ab(&sb, "", 3);
+    sb.run_ok(&["bench", "--save", "main"]);
+    assert!(sb.exists(".cig-bench/baselines/main.json"));
+    // The baseline's binary is still there and unchanged: interleaved.
+    let out = sb.cig_env(&["--json", "bench", "--against", "main"], &[]);
+    assert_eq!(out.status.code(), Some(0));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["against"]["kind"], "baseline");
+    let o = &v["cases"][0]["outcome"];
+    assert_eq!(o["interleaved"], true, "{v}");
+    assert!(
+        ["same", "faster", "slower"].contains(&o["verdict"].as_str().unwrap()),
+        "{v}"
+    );
+    // With the binary gone the saved timings are compared with fresh ones,
+    // and the report says it was not interleaved.
+    let path = sb.path().join(".cig-bench/baselines/main.json");
+    let mut saved: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    saved["binary"]["path"] = serde_json::json!(sb.path().join("gone/cig").to_str().unwrap());
+    fs::write(&path, saved.to_string()).unwrap();
+    let out = sb.cig_env(
+        &["--json", "bench", "--against", "main", "--save", "next"],
+        &[],
+    );
+    assert_eq!(out.status.code(), Some(0));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("not interleaved"), "{err}");
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["cases"][0]["outcome"]["interleaved"], false, "{v}");
+    // `--save` next to `--against` keeps this run's side as the new baseline.
+    assert!(sb.exists(".cig-bench/baselines/next.json"));
+}
+
+#[test]
+#[cfg(unix)]
+fn bench_against_a_release_checks_its_sha256() {
+    let sb = Sandbox::new();
+    write_bench_ab(&sb, "", 2);
+    let version = cigscript::update::Version(1, 0, 0);
+    let name = cigscript::update::asset_name(&version);
+    // The "release" is a local fixture: a program that leaves a marker if
+    // it is ever started. No network is touched.
+    let marker = sb.path().join("ran-the-release");
+    let asset = fake_cig(&sb, "asset.bin", &format!("touch '{}'", marker.display()));
+    let sidecar = sb.write("asset.sha256", &format!("{}  {name}\n", "0".repeat(64)));
+    let manifest = serde_json::json!([{
+        "tag_name": "v1.0.0", "prerelease": false, "draft": false, "html_url": "u", "published_at": "",
+        "assets": [
+            {"name": name, "browser_download_url": format!("file://{}", asset.display())},
+            {"name": format!("{name}.sha256"), "browser_download_url": format!("file://{}", sidecar.display())}
+        ]
+    }]);
+    let manifest_path = sb.write("manifest.json", &manifest.to_string());
+    let envs = [("CIG_UPDATE_MANIFEST", manifest_path.to_str().unwrap())];
+    // A wrong sha256: refused before anything runs.
+    let out = sb.cig_env(&["bench", "--against", "1.0.0"], &envs);
+    assert_eq!(out.status.code(), Some(3));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("checksum mismatch") && err.contains("nothing was run"),
+        "{err}"
+    );
+    assert!(
+        !marker.exists(),
+        "the release ran before its sha256 was checked"
+    );
+    // No sidecar at all is refused too.
+    let no_sidecar = serde_json::json!([{
+        "tag_name": "v1.0.0", "prerelease": false, "draft": false, "html_url": "u", "published_at": "",
+        "assets": [{"name": name, "browser_download_url": format!("file://{}", asset.display())}]
+    }]);
+    let m2 = sb.write("manifest2.json", &no_sidecar.to_string());
+    let out = sb.cig_env(
+        &["bench", "--against", "release:1.0.0"],
+        &[("CIG_UPDATE_MANIFEST", m2.to_str().unwrap())],
+    );
+    assert_eq!(out.status.code(), Some(3));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("no checksum"));
+    assert!(!marker.exists());
+    // With the right sha256 it is run, as side A.
+    let sum = cigscript::burn::journal::sha256_file(&asset).unwrap();
+    fs::write(&sidecar, format!("{sum}  {name}\n")).unwrap();
+    let out = sb.cig_env(&["--json", "bench", "--against", "1.0.0"], &envs);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(marker.exists(), "the verified release never ran");
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["against"]["kind"], "release", "{v}");
+    assert_eq!(v["against"]["label"], "cig 1.0.0", "{v}");
+}
+
+#[test]
+#[cfg(unix)]
+fn bench_against_a_git_ref_builds_it_in_a_temporary_worktree() {
+    // Needs git; a machine without it has nothing to test here.
+    if Command::new("git").arg("--version").output().is_err() {
+        return;
+    }
+    let sb = Sandbox::new();
+    write_bench_ab(
+        &sb,
+        "build = [\"sh\", \"build.sh\"]\nbinary = \"out/cig\"",
+        3,
+    );
+    sb.write(
+        "build.sh",
+        "mkdir -p out && printf '#!/bin/sh\\nexit 0\\n' > out/cig && chmod +x out/cig\n",
+    );
+    // This checkout's own build, then a commit to name as the ref.
+    let ok = |args: &[&str]| {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(sb.path())
+            .env("HOME", sb.path())
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@example.com")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@example.com")
+            .output()
+            .expect("git");
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    ok(&["init", "-q", "."]);
+    ok(&["add", "bench", "build.sh"]);
+    ok(&["commit", "-q", "-m", "base"]);
+    assert!(Command::new("sh")
+        .arg("build.sh")
+        .current_dir(sb.path())
+        .status()
+        .unwrap()
+        .success());
+    let out = sb.cig_env(&["--json", "bench", "--against", "HEAD"], &[]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["against"]["kind"], "ref", "{v}");
+    assert!(
+        v["against"]["label"].as_str().unwrap().starts_with("HEAD@"),
+        "{v}"
+    );
+    assert_eq!(v["cases"][0]["outcome"]["state"], "compared", "{v}");
+    // The temporary worktree is gone afterwards.
+    let list = Command::new("git")
+        .args(["worktree", "list"])
+        .current_dir(sb.path())
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&list.stdout).lines().count(),
+        1,
+        "{}",
+        String::from_utf8_lossy(&list.stdout)
+    );
+    // A name that is no ref is a usage error.
+    let err = sb.run_err(&["bench", "--against", "no-such-ref"], 3);
+    assert!(err.contains("not a git ref"), "{err}");
+}
+
+/// A running `cig bench --watch` whose stdout is read line by line, and
+/// which is killed when the test ends however it ends.
+#[cfg(unix)]
+struct WatchChild {
+    child: std::process::Child,
+    lines: std::sync::mpsc::Receiver<String>,
+}
+
+#[cfg(unix)]
+impl WatchChild {
+    fn start(sb: &Sandbox, args: &[&str]) -> WatchChild {
+        use std::io::BufRead;
+        let mut child = Command::new(cig_bin())
+            .args(args)
+            .current_dir(sb.path())
+            .env("CIGSCRIPT_HOME", sb.home())
+            .env("HOME", sb.path())
+            .env("NO_COLOR", "1")
+            .env("CIG_SEAL_KEY", "file")
+            .env("CIG_INTERNAL_TRACKER_DIR", sb.path().join("tracker"))
+            .env("CIG_UPDATE_MANIFEST", sb.path().join("no-releases.json"))
+            .env_remove("CI")
+            // Not a terminal: no keys are read, and the end of this input
+            // must not end the watch.
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn cig bench --watch");
+        let out = child.stdout.take().unwrap();
+        let (tx, lines) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for line in std::io::BufReader::new(out).lines().map_while(Result::ok) {
+                if tx.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        WatchChild { child, lines }
+    }
+
+    /// Lines up to and including the first one `done` accepts. A hard
+    /// timeout, waited on the channel: no sleeping.
+    fn until(&self, done: impl Fn(&str) -> bool) -> Vec<String> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
+        let mut seen = Vec::new();
+        loop {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            match self.lines.recv_timeout(left) {
+                Ok(l) => {
+                    let stop = done(&l);
+                    seen.push(l);
+                    if stop {
+                        return seen;
+                    }
+                }
+                Err(_) => panic!("timed out; the watch printed:\n{}", seen.join("\n")),
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for WatchChild {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn bench_watch_reruns_on_change() {
+    let sb = Sandbox::new();
+    write_bench_ab(&sb, "watch = [\"watched.txt\"]", 2);
+    // A real cig for the case: `cig` on PATH is replaced by the running one.
+    sb.write("watched.txt", "one");
+    let w = WatchChild::start(&sb, &["--json", "bench", "--watch"]);
+    let first = w.until(|l| l.contains("\"event\":\"cycle\""));
+    let events: Vec<serde_json::Value> = first
+        .iter()
+        .map(|l| serde_json::from_str(l).expect("every line is JSON"))
+        .collect();
+    assert_eq!(events[0]["event"], "start", "{first:?}");
+    let case = events
+        .iter()
+        .find(|e| e["event"] == "case")
+        .expect("a case");
+    assert_eq!(case["build"], 1);
+    assert_eq!(case["state"], "timed", "{case}");
+    assert!(
+        case.get("verdict").is_none(),
+        "build 1 has nothing to compare with"
+    );
+    // Nothing has changed, so nothing reruns until the file does.
+    sb.write("watched.txt", "two, and longer");
+    let second = w.until(|l| l.contains("\"build\":2") && l.contains("\"event\":\"cycle\""));
+    let events: Vec<serde_json::Value> = second
+        .iter()
+        .map(|l| serde_json::from_str(l).expect("every line is JSON"))
+        .collect();
+    let change = events
+        .iter()
+        .find(|e| e["event"] == "change")
+        .expect("change");
+    assert_eq!(change["build"], 2);
+    assert_eq!(
+        change["changed"],
+        serde_json::json!(["watched.txt"]),
+        "{change}"
+    );
+    let case = events
+        .iter()
+        .find(|e| e["event"] == "case")
+        .expect("a case");
+    assert_eq!(case["build"], 2);
+    assert!(case["base_median_ms"].as_f64().is_some(), "{case}");
+    assert!(
+        ["same", "faster", "slower"].contains(&case["verdict"].as_str().unwrap()),
+        "{case}"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn bench_watch_plain_is_line_based() {
+    let sb = Sandbox::new();
+    write_bench_ab(&sb, "watch = [\"watched.txt\"]", 2);
+    sb.write("watched.txt", "one");
+    // Stdout is a pipe: plain lines, no redraws, no escape codes.
+    let mut w = WatchChild::start(&sb, &["bench", "--watch"]);
+    let first = w.until(|l| l.starts_with("bench: build 1 done"));
+    assert_eq!(
+        first
+            .iter()
+            .filter(|l| l.contains("build 1 hello:"))
+            .count(),
+        1,
+        "one line per case per build: {first:?}"
+    );
+    // Closed stdin did not end the watch: it is still waiting for a change.
+    assert!(
+        w.child.try_wait().unwrap().is_none(),
+        "the watch quit on its own"
+    );
+    sb.write("watched.txt", "two, and longer");
+    let second = w.until(|l| l.starts_with("bench: build 2 done"));
+    assert!(
+        second
+            .iter()
+            .any(|l| l == "bench: build 2: changed watched.txt"),
+        "{second:?}"
+    );
+    let line = second
+        .iter()
+        .find(|l| l.contains("build 2 hello:"))
+        .unwrap();
+    assert!(
+        line.contains(" vs "),
+        "build 2 is compared with build 1: {line}"
+    );
+    for l in first.iter().chain(second.iter()) {
+        assert!(l.starts_with("bench: "), "{l:?}");
+        assert!(
+            !l.contains('\x1b') && !l.contains('\r'),
+            "no redraw codes in line mode: {l:?}"
+        );
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn bench_watch_a_failed_build_keeps_the_numbers() {
+    let sb = Sandbox::new();
+    write_bench_ab(
+        &sb,
+        "watch = [\"watched.txt\"]\nbuild = [\"sh\", \"-c\", \"test ! -e break || { echo nope >&2; exit 1; }\"]",
+        2,
+    );
+    sb.write("watched.txt", "one");
+    let w = WatchChild::start(&sb, &["bench", "--watch"]);
+    w.until(|l| l.starts_with("bench: build 1 done"));
+    sb.write("break", "");
+    sb.write("watched.txt", "two, and longer");
+    let second = w.until(|l| l.contains("build 2 failed"));
+    assert!(second.last().unwrap().contains("nope"), "{second:?}");
+    assert!(
+        !second.iter().any(|l| l.contains("build 2 hello:")),
+        "a failed build measured something: {second:?}"
+    );
+}
+
+#[test]
+fn bench_watch_needs_something_to_watch() {
+    let sb = Sandbox::new();
+    write_bench_ab(&sb, "", 2);
+    let err = sb.run_err(&["bench", "--watch"], 3);
+    assert!(err.contains("[bench].watch"), "{err}");
+    let err = sb.run_err(&["bench", "--watch", "--save", "x"], 3);
+    assert!(err.contains("--save"), "{err}");
+}
+
 // ----- #176: the keys folder under a shared parent is not shared -----------
 //
 // With `CIGSCRIPT_HOME` set to a folder under `/tmp` (as tests, CI and
@@ -14716,4 +15416,341 @@ fn a_parcel_carries_a_pass_its_maker_signed() {
         "{stderr}"
     );
     let _ = parcel;
+}
+
+// ---- cig tin parcel / unparcel (cig-script#141) ----
+#[cfg(unix)]
+mod tin_parcel {
+    use super::*;
+
+    /// `cig`, with a hard timeout, in a folder under the sandbox.
+    #[cfg(unix)]
+    fn tin_parcel_cig(sb: &Sandbox, sub: &str, args: &[&str]) -> Output {
+        use wait_timeout::ChildExt;
+        let mut child = Command::new(cig_bin())
+            .args(args)
+            .current_dir(sb.path().join(sub))
+            .env("CIGSCRIPT_HOME", sb.home())
+            .env("HOME", sb.path())
+            .env("NO_COLOR", "1")
+            .env("CIG_SEAL_KEY", "file")
+            .env("CIG_INTERNAL_TRACKER_DIR", sb.path().join("tracker"))
+            .env("CIG_UPDATE_MANIFEST", sb.path().join("no-releases.json"))
+            .env_remove("CI")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn cig");
+        if child
+            .wait_timeout(std::time::Duration::from_secs(120))
+            .expect("wait")
+            .is_none()
+        {
+            let _ = child.kill();
+            panic!("cig {args:?} timed out");
+        }
+        child.wait_with_output().expect("output")
+    }
+
+    #[cfg(unix)]
+    fn tin_parcel_ok(sb: &Sandbox, sub: &str, args: &[&str]) -> String {
+        let out = tin_parcel_cig(sb, sub, args);
+        assert!(
+            out.status.success(),
+            "cig {args:?}: {:?}\n{}\n{}",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).to_string()
+    }
+
+    /// Two runs, one of them sealing a secret. Returns the run ids.
+    #[cfg(unix)]
+    fn tin_parcel_runs(sb: &Sandbox) -> Vec<String> {
+        sb.write("p/.env", "SECRET=original-secret-value\n");
+        sb.write("p/a.txt", "alpha v1\n");
+        sb.write(
+        "one.cig",
+        "pack { \"./p\" }\nburn {\n  proc.run(\"sh\", [\"-c\", \"echo SECRET=after > .env; echo alpha v2 > a.txt\"], {cwd: \"p\", touches: [\"**\"]})\n}\n",
+    );
+        sb.run_ok(&["run", "one.cig"]);
+        sb.write(
+        "two.cig",
+        "pack { \"./p\" }\nburn {\n  proc.run(\"sh\", [\"-c\", \"echo alpha v3 > a.txt\"], {cwd: \"p\", touches: [\"**\"]})\n}\n",
+    );
+        sb.run_ok(&["run", "two.cig"]);
+        let mut ids: Vec<String> = sb
+            .runs()
+            .iter()
+            .map(|r| r["id"].as_str().unwrap().to_string())
+            .collect();
+        ids.sort();
+        ids
+    }
+
+    /// Empty the tin: runs, objects, the run index and the ledger (the key stays).
+    #[cfg(unix)]
+    fn tin_parcel_wipe(sb: &Sandbox) {
+        for d in ["runs", "tin"] {
+            let p = sb.home().join(d);
+            if p.exists() {
+                // Objects are read-only files in read-only folders' worth of care.
+                let _ = Command::new("chmod").args(["-R", "u+w"]).arg(&p).status();
+                fs::remove_dir_all(&p).unwrap();
+            }
+        }
+        let _ = fs::remove_file(sb.home().join("runs-index.jsonl"));
+        let _ = fs::remove_file(sb.path().join(".cigscript-keys/ledger.jsonl"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_tin_parcel_restores_every_run_on_an_empty_tin() {
+        let sb = Sandbox::new();
+        let ids = tin_parcel_runs(&sb);
+        assert_eq!(ids.len(), 2);
+        let out = tin_parcel_ok(&sb, "", &["--json", "tin", "parcel", "--to", "backup"]);
+        let w: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
+        assert_eq!(w["runs"], 2, "{w}");
+        assert!(w["objects_carried"].as_u64().unwrap() >= 2, "{w}");
+        assert!(sb.exists("backup/manifest.json"));
+        tin_parcel_wipe(&sb);
+        assert!(sb.runs().is_empty());
+        let out = tin_parcel_ok(&sb, "", &["--json", "tin", "unparcel", "backup"]);
+        let r: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
+        assert_eq!(r["runs_restored"], 2, "{r}");
+        assert_eq!(r["ledger"], "installed", "{r}");
+        let back: Vec<String> = {
+            let mut v: Vec<String> = sb
+                .runs()
+                .iter()
+                .map(|r| r["id"].as_str().unwrap().to_string())
+                .collect();
+            v.sort();
+            v
+        };
+        assert_eq!(back, ids);
+        // The restored tin undoes both runs, byte for byte, the secret included.
+        tin_parcel_ok(&sb, "", &["tin", "verify"]);
+        let newest_first: Vec<String> = sb
+            .runs()
+            .iter()
+            .map(|r| r["id"].as_str().unwrap().to_string())
+            .collect();
+        for id in &newest_first {
+            tin_parcel_ok(&sb, "", &["unburn", id]);
+        }
+        assert_eq!(sb.read("p/.env"), "SECRET=original-secret-value\n");
+        assert_eq!(sb.read("p/a.txt"), "alpha v1\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_second_parcel_carries_only_new_objects() {
+        let sb = Sandbox::new();
+        tin_parcel_runs(&sb);
+        let first: serde_json::Value = serde_json::from_str(
+            tin_parcel_ok(&sb, "", &["--json", "tin", "parcel", "--to", "b1"]).trim(),
+        )
+        .unwrap();
+        sb.write(
+        "three.cig",
+        "pack { \"./p\" }\nburn {\n  proc.run(\"sh\", [\"-c\", \"echo alpha v4 brand new bytes > a.txt\"], {cwd: \"p\", touches: [\"**\"]})\n}\n",
+    );
+        sb.run_ok(&["run", "three.cig"]);
+        let second: serde_json::Value = serde_json::from_str(
+            tin_parcel_ok(
+                &sb,
+                "",
+                &["--json", "tin", "parcel", "--to", "b2", "--since", "b1"],
+            )
+            .trim(),
+        )
+        .unwrap();
+        assert_eq!(second["runs"], 3, "{second}");
+        assert_eq!(
+            second["objects_carried"], 1,
+            "only the new before-state is carried: {second}"
+        );
+        assert_eq!(
+            second["objects_inherited"].as_u64().unwrap(),
+            first["objects_carried"].as_u64().unwrap(),
+            "{second}"
+        );
+        let m: serde_json::Value = serde_json::from_str(&sb.read("b2/manifest.json")).unwrap();
+        assert!(
+            m["parent"]["manifest_sha256"].as_str().unwrap().len() == 64,
+            "{m}"
+        );
+        // Restored from the child alone (parent beside it) on an empty tin.
+        tin_parcel_wipe(&sb);
+        tin_parcel_ok(&sb, "", &["tin", "unparcel", "b2"]);
+        assert_eq!(sb.runs().len(), 3);
+        tin_parcel_ok(&sb, "", &["tin", "verify"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_tampered_parcel_is_refused_before_anything_is_written() {
+        let sb = Sandbox::new();
+        tin_parcel_runs(&sb);
+        tin_parcel_ok(&sb, "", &["tin", "parcel", "--to", "backup"]);
+        // Flip a byte in one of the journals.
+        let runs_dir = sb.path().join("backup/runs");
+        let first = fs::read_dir(&runs_dir)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let journal = first.join("journal.jsonl");
+        let mut text = fs::read_to_string(&journal).unwrap();
+        text.push_str("{\"tampered\":true}\n");
+        fs::write(&journal, text).unwrap();
+        tin_parcel_wipe(&sb);
+        let out = tin_parcel_cig(&sb, "", &["tin", "unparcel", "backup"]);
+        assert_eq!(out.status.code(), Some(1));
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.contains("E722"), "{err}");
+        assert!(sb.runs().is_empty(), "a run was written");
+        assert!(
+            !sb.home().join("tin").exists()
+                || fs::read_dir(sb.home().join("tin"))
+                    .unwrap()
+                    .next()
+                    .is_none()
+        );
+        // A missing object is the same refusal.
+        let sb2 = Sandbox::new();
+        tin_parcel_runs(&sb2);
+        tin_parcel_ok(&sb2, "", &["tin", "parcel", "--to", "backup"]);
+        let victim = walk_first_file(&sb2.path().join("backup/tin/objects"));
+        fs::remove_file(victim).unwrap();
+        tin_parcel_wipe(&sb2);
+        let out = tin_parcel_cig(&sb2, "", &["tin", "unparcel", "backup"]);
+        assert!(String::from_utf8_lossy(&out.stderr).contains("E722"));
+        assert!(sb2.runs().is_empty());
+    }
+
+    #[cfg(unix)]
+    fn walk_first_file(dir: &Path) -> PathBuf {
+        walkdir::WalkDir::new(dir)
+            .into_iter()
+            .flatten()
+            .find(|e| e.file_type().is_file())
+            .expect("a file")
+            .path()
+            .to_path_buf()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unparcel_never_overwrites_a_different_live_run() {
+        let sb = Sandbox::new();
+        let ids = tin_parcel_runs(&sb);
+        tin_parcel_ok(&sb, "", &["tin", "parcel", "--to", "backup"]);
+        // The same run, identical: nothing to do, and it is not an error.
+        let out = tin_parcel_ok(&sb, "", &["--json", "tin", "unparcel", "backup"]);
+        let r: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
+        assert_eq!(r["runs_restored"], 0, "{r}");
+        assert_eq!(r["runs_present"], 2, "{r}");
+        // Now the live run carries on differently.
+        let live = sb.home().join("runs").join(&ids[0]).join("journal.jsonl");
+        let mut t = fs::read_to_string(&live).unwrap();
+        t.push('\n');
+        t.push_str("{\"note\":\"live\"}\n");
+        fs::write(&live, &t).unwrap();
+        let out = tin_parcel_cig(&sb, "", &["tin", "unparcel", "backup"]);
+        assert_eq!(out.status.code(), Some(1));
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.contains("E723"), "{err}");
+        assert_eq!(
+            fs::read_to_string(&live).unwrap(),
+            t,
+            "the live journal changed"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_sealed_object_stays_sealed_in_a_git_ref() {
+        let sb = Sandbox::new();
+        tin_parcel_runs(&sb);
+        fs::create_dir_all(sb.path().join("repo")).unwrap();
+        let git = |args: &[&str]| {
+            let o = Command::new("git")
+                .args(args)
+                .current_dir(sb.path().join("repo"))
+                .env("HOME", sb.path())
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .output()
+                .expect("git");
+            assert!(
+                o.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&o.stderr)
+            );
+            String::from_utf8_lossy(&o.stdout).to_string()
+        };
+        git(&["init", "-q"]);
+        // Nothing is written to git unless asked: a plain parcel leaves it empty.
+        tin_parcel_ok(&sb, "", &["tin", "parcel", "--to", "dirparcel"]);
+        assert!(git(&["for-each-ref"]).trim().is_empty());
+        let out = tin_parcel_ok(
+            &sb,
+            "repo",
+            &["--json", "tin", "parcel", "--git", "2026-11-11"],
+        );
+        let w: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
+        assert_eq!(w["target"], "refs/cig/backup/2026-11-11", "{w}");
+        let refs = git(&["for-each-ref", "--format=%(refname)"]);
+        assert_eq!(refs.trim(), "refs/cig/backup/2026-11-11");
+        // No branch, no parent: an orphan commit.
+        assert!(
+            git(&["rev-list", "--parents", "-n1", "refs/cig/backup/2026-11-11"])
+                .trim()
+                .split(' ')
+                .count()
+                == 1
+        );
+        let tree = git(&["ls-tree", "-r", "--name-only", "refs/cig/backup/2026-11-11"]);
+        let sealed: Vec<&str> = tree
+            .lines()
+            .filter(|l| l.starts_with("tin/sealed/"))
+            .collect();
+        assert!(!sealed.is_empty(), "{tree}");
+        for s in sealed {
+            let blob = Command::new("git")
+                .args([
+                    "cat-file",
+                    "blob",
+                    &format!("refs/cig/backup/2026-11-11:{s}"),
+                ])
+                .current_dir(sb.path().join("repo"))
+                .output()
+                .unwrap()
+                .stdout;
+            assert!(blob.starts_with(b"CIGSEAL"), "not sealed");
+            assert!(!String::from_utf8_lossy(&blob).contains("original-secret-value"));
+        }
+        // A second backup under the same name is refused, not moved.
+        let out = tin_parcel_cig(&sb, "repo", &["tin", "parcel", "--git", "2026-11-11"]);
+        assert_eq!(out.status.code(), Some(3));
+        // And it restores.
+        tin_parcel_wipe(&sb);
+        tin_parcel_ok(&sb, "repo", &["tin", "unparcel", "--git", "2026-11-11"]);
+        assert_eq!(sb.runs().len(), 2);
+        for id in sb
+            .runs()
+            .iter()
+            .map(|r| r["id"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>()
+            .iter()
+        {
+            tin_parcel_ok(&sb, "", &["unburn", id]);
+        }
+        assert_eq!(sb.read("p/.env"), "SECRET=original-secret-value\n");
+    }
 }

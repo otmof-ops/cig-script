@@ -5,6 +5,50 @@ project follows semantic versioning.
 
 ## Unreleased
 
+- **`cig tin parcel` and `cig tin unparcel` (#141): the whole tin as a verifiable,
+  incremental backup.** One parcel holds every live run's record and journal,
+  the objects their before-states need, the ledger and its head, and a SHA-256
+  manifest that names its parent. `--since <parcel>` carries only the objects the
+  parent lacks; `--git [<ref>]` (opt-in) writes an orphan commit under
+  `refs/cig/backup/<ref>` with sealed objects still sealed. `unparcel` verifies
+  every file, journal chain and the ledger chain before it writes anything,
+  and never overwrites a different live run. `--json` on both. New codes E722
+  (the parcel does not verify) and E723 (a different live run is in the way).
+- **`cig bench --save` and `--against`** (#179, step 2). `--save NAME` keeps a
+  run as the baseline `.cig-bench/baselines/NAME.json` (every sample, the
+  binary's sha256, the machine's conditions). `--against WHAT` measures a
+  saved baseline, a release version, a git ref or a binary against this
+  checkout, **interleaved** (A and B take their samples in turn, the order
+  alternating by pair, so a drift cancels) and judges each case with a
+  Mann-Whitney U test: `faster` or `SLOWER` only when p < 0.01 and the median
+  moved by more than 2%, with the p-value, the rank-biserial effect and the
+  change. A release is fetched and its sha256 checked before anything runs; a
+  git ref is built in a temporary worktree through the manifest's
+  `[bench].build`; a baseline whose binary is gone is compared with its saved
+  samples and reported as not interleaved. The manifest gains `format = 1`
+  (any other format is refused, and baselines carry it too) and
+  `[bench].build`, `[bench].binary` and `[bench].watch`. A plain run now
+  replaces a command named like the product with the running cig (or
+  `[bench].binary`), as the A/B sides do. See `docs/BENCH.md`.
+- **`cig bench --watch`** (#179, step 3) reruns the cases when a file in
+  `[bench].watch` changes, running `[bench].build` first (a failed build keeps
+  the last numbers), cheapest case first, a case's own `watch` globs narrowing
+  what reruns it. A live table on a terminal; one line per case per build
+  without one (or with `--plain`); one JSON object per line with `--json`.
+  Keys `q`, `r` and space are read only when stdin is a terminal.
+- **The box's watch (cig-script#106, step 3).** `box: { watch: true }` reports what a
+  boxed hop opens for writing, connects to, sends to and runs, as it happens: one
+  JSON line each, appended to the hop's event log (`$CIG_EVENTS` in the hop's
+  environment) and given back as `r.events`. `watch: "reads"` adds every file it
+  opens. A seccomp user-notification filter in the hop answers only the calls
+  worth seeing; a supervisor thread in cig reads them and lets them go, since
+  the watch is for seeing and the mounts and namespaces are the boundary.
+  Where the kernel has no user notification the same calls are traced with
+  ptrace, slower, with a note (`E779`); a watch that cannot be had either way
+  refuses the hop. io_uring, already refused in a contained hop, now leaves an
+  event and a note (`E776`). Tests: `the_watch_reports_open_connect_exec`,
+  `the_watch_falls_back_to_ptrace`, `a_hop_cannot_use_io_uring`.
+
 - **License: FSL-1.1-ALv2 from the next release.** The code moves from Apache-2.0 to
   the Functional Source License 1.1 with an Apache-2.0 future license: free to
   use, study, change and share, not to sell or to offer in a competing

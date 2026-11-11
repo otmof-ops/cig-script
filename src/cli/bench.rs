@@ -15,12 +15,15 @@
 //! or could not be measured; `USAGE` (3) for a malformed manifest or a
 //! usage mistake.
 //!
-//! What is here: step 1, as the issue names it (the manifest, the
-//! harness, `--json`, `--markdown`). What is not: `--save` / `--against`,
-//! the watch loop, `--timings` / `--stats` / `--syscalls`, the family
-//! runner. The manifest accepts and ignores the fields reserved for those
-//! steps (`watch`, `gate`, `score`, `measure` beyond wall and RSS), so a
-//! manifest written for the whole feature still parses today.
+//! What is here: step 1 (the manifest, the harness, `--json`,
+//! `--markdown`), step 2 (`--save` and `--against`: interleaved A/B and a
+//! Mann-Whitney verdict, in `bench/ab.rs`) and step 3 (`--watch`, in
+//! `bench/watch.rs`). What is not: `--timings` / `--stats` / `--syscalls`,
+//! the family runner. The manifest accepts and ignores the fields reserved
+//! for those steps (`gate`, `score`, `config`, `measure` beyond wall and
+//! RSS), so a manifest written for the whole feature still parses today.
+//! The manifest's `format` key is 1; a manifest in any other format is
+//! refused rather than guessed at.
 
 use super::{exit, Ctx};
 use std::collections::BTreeMap;
@@ -28,6 +31,12 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Instant;
+
+mod ab;
+mod watch;
+
+/// The manifest and baseline format this cig reads and writes.
+pub const FORMAT: i64 = 1;
 
 /// What `cig bench` was asked to do.
 #[derive(Debug, Default)]
@@ -46,6 +55,23 @@ pub struct Opts {
     pub warmup: Option<usize>,
     /// Write a Markdown table instead of the plain one.
     pub markdown: bool,
+    /// Keep this run as the baseline of that name.
+    pub save: Option<String>,
+    /// Compare, interleaved, against a baseline, release, git ref or binary.
+    pub against: Option<String>,
+    /// Rerun when a watched source changes.
+    pub watch: bool,
+}
+
+/// Everything one `cig bench` invocation shares between its modes.
+struct Job<'a> {
+    ctx: &'a Ctx,
+    opts: &'a Opts,
+    manifest: &'a Manifest,
+    manifest_path: &'a Path,
+    manifest_dir: &'a Path,
+    defaults: &'a Defaults,
+    cases: Vec<&'a Case>,
 }
 
 /// Entry point for `cig bench`.
@@ -117,6 +143,31 @@ pub fn bench(ctx: &Ctx, o: Opts) -> i32 {
         );
         return exit::USAGE;
     }
+    if let Some(name) = &o.save {
+        if let Err(e) = ab::check_baseline_name(name) {
+            eprintln!("{} {e}", ctx.red("error[E800 usage]:"));
+            return exit::USAGE;
+        }
+    }
+    let job = Job {
+        ctx,
+        opts: &o,
+        manifest: &manifest,
+        manifest_path: &path,
+        manifest_dir: &manifest_dir,
+        defaults: &defaults,
+        cases,
+    };
+    if o.watch {
+        if o.save.is_some() {
+            eprintln!(
+                "{} `--save` and `--watch` do not go together: press `b` in a watch to keep the build as the baseline",
+                ctx.red("error[E800 usage]:")
+            );
+            return exit::USAGE;
+        }
+        return watch::watch(&job);
+    }
     let scratch = match scratch_root() {
         Ok(p) => p,
         Err(e) => {
@@ -128,27 +179,53 @@ pub fn bench(ctx: &Ctx, o: Opts) -> i32 {
             return exit::USAGE;
         }
     };
-    let mut rows = Vec::new();
-    for case in &cases {
-        let row = run_case(&manifest_dir, &scratch, case, &defaults);
-        rows.push(row);
-    }
+    let code = match &o.against {
+        Some(spec) => ab::against(&job, spec, &scratch),
+        None => {
+            let side = ab::current_side(&job);
+            let rows = run_rows(&job, &side, &scratch);
+            let conditions = Conditions::here();
+            if ctx.json {
+                print_json(&manifest, &rows, &conditions);
+            } else if o.markdown {
+                print_markdown(&manifest, &rows, &conditions);
+            } else {
+                print_table(&manifest, &rows, &conditions);
+            }
+            report_failures(&rows);
+            let mut code = exit_for(&rows);
+            if let Some(name) = &o.save {
+                if let Err(e) = ab::save_baseline(&job, &side, name, &rows, &conditions) {
+                    eprintln!("{} {e}", ctx.red("error[E800 usage]:"));
+                    code = exit::USAGE;
+                }
+            }
+            code
+        }
+    };
     let _ = std::fs::remove_dir_all(&scratch);
-    let conditions = Conditions::here();
-    if ctx.json {
-        print_json(&manifest, &rows, &conditions);
-    } else if o.markdown {
-        print_markdown(&manifest, &rows, &conditions);
-    } else {
-        print_table(&manifest, &rows, &conditions);
-    }
-    for row in &rows {
+    code
+}
+
+/// Measure every selected case on one side, one after the other.
+fn run_rows(job: &Job, side: &Side, scratch: &Path) -> Vec<Row> {
+    job.cases
+        .iter()
+        .map(|case| run_case(side, scratch, case, job.defaults))
+        .collect()
+}
+
+fn report_failures(rows: &[Row]) {
+    for row in rows {
         match &row.outcome {
             Outcome::Wrong(why) => eprintln!("bench: {} is WRONG: {why}", row.name),
             Outcome::Absent(why) => eprintln!("bench: {}: {why}", row.name),
             Outcome::Timed(_) => {}
         }
     }
+}
+
+fn exit_for(rows: &[Row]) -> i32 {
     if rows
         .iter()
         .any(|r| matches!(r.outcome, Outcome::Wrong(_) | Outcome::Absent(_)))
@@ -156,6 +233,36 @@ pub fn bench(ctx: &Ctx, o: Opts) -> i32 {
         exit::SCRIPT_ERROR
     } else {
         exit::OK
+    }
+}
+
+/// One side of a measurement: the files it runs against and, when the
+/// product is a binary, which binary stands in for the product's name.
+#[derive(Clone, Debug)]
+struct Side {
+    /// "A" / "B" in a comparison; the product's name otherwise.
+    label: String,
+    product: String,
+    /// Replaces any command whose file stem is the product's name.
+    binary: Option<PathBuf>,
+    /// The folder the manifest's relative paths and the cases' working
+    /// directory resolve against.
+    dir: PathBuf,
+}
+
+impl Side {
+    fn argv(&self, argv: &[String]) -> Vec<String> {
+        let Some(bin) = &self.binary else {
+            return argv.to_vec();
+        };
+        let stem = Path::new(&argv[0]).file_stem().and_then(|s| s.to_str());
+        if stem == Some(self.product.as_str()) {
+            let mut out = argv.to_vec();
+            out[0] = bin.to_string_lossy().into_owned();
+            out
+        } else {
+            argv.to_vec()
+        }
     }
 }
 
@@ -173,6 +280,12 @@ struct Bench {
     product: String,
     version_cmd: Option<Vec<String>>,
     home: HomeMode,
+    /// What `--against <git ref>` and `--watch` run before measuring.
+    build: Option<Vec<String>>,
+    /// The product's binary once built, relative to the project folder.
+    binary: Option<String>,
+    /// Globs (relative to the project folder) `--watch` follows.
+    watch: Vec<String>,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
@@ -213,6 +326,9 @@ struct Case {
     /// other entry is accepted so a manifest written for a later step
     /// still parses.
     measure: Vec<String>,
+    /// Globs that narrow which changes rerun this case in `--watch`; empty
+    /// means every change does.
+    watch: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -245,10 +361,18 @@ fn parse_manifest(text: &str) -> Result<Manifest, String> {
         .ok_or_else(|| "the manifest must be a TOML table".to_string())?;
     // A case's reserved fields: accepted and silently ignored in step 1.
     let case_reserved: &[&str] = &["config", "gate", "score"];
-    let bench_reserved: &[&str] = &["build", "watch"];
     for (k, v) in root {
         match k.as_str() {
             "bench" | "defaults" | "case" => {}
+            "format" => match v.as_integer() {
+                Some(FORMAT) => {}
+                Some(n) => {
+                    return Err(format!(
+                        "this manifest is format {n}; this cig reads format {FORMAT} (update cig, or the manifest)"
+                    ))
+                }
+                None => return Err(format!("`format` is the integer {FORMAT}, not {}", v.type_str())),
+            },
             _ => return Err(unknown_key(text, k, v)),
         }
     }
@@ -281,7 +405,15 @@ fn parse_manifest(text: &str) -> Result<Manifest, String> {
                     }
                 };
             }
-            k if bench_reserved.contains(&k) => {}
+            "build" => bench.build = Some(as_argv(v, "bench.build")?),
+            "binary" => {
+                bench.binary = Some(
+                    v.as_str()
+                        .ok_or_else(|| "`bench.binary` must be a string".to_string())?
+                        .to_string(),
+                )
+            }
+            "watch" => bench.watch = as_strings(v, "bench.watch")?,
             _ => return Err(unknown_key(text, &format!("bench.{k}"), v)),
         }
     }
@@ -323,6 +455,7 @@ fn parse_manifest(text: &str) -> Result<Manifest, String> {
                 budget: None,
                 env: BTreeMap::new(),
                 measure: Vec::new(),
+                watch: Vec::new(),
             };
             for (k, v) in t {
                 match k.as_str() {
@@ -360,6 +493,7 @@ fn parse_manifest(text: &str) -> Result<Manifest, String> {
                         );
                     }
                     "env" => case.env = as_env(v, &format!("case #{} `env`", i + 1))?,
+                    "watch" => case.watch = as_strings(v, &format!("case #{} `watch`", i + 1))?,
                     "measure" => {
                         let arr = v
                             .as_array()
@@ -437,6 +571,20 @@ fn as_argv(v: &toml::Value, where_: &str) -> Result<Vec<String>, String> {
     Ok(out)
 }
 
+/// An array of strings, empty allowed (a list of globs).
+fn as_strings(v: &toml::Value, where_: &str) -> Result<Vec<String>, String> {
+    let arr = v
+        .as_array()
+        .ok_or_else(|| format!("`{where_}` is an array of strings"))?;
+    arr.iter()
+        .map(|item| {
+            item.as_str()
+                .map(str::to_string)
+                .ok_or_else(|| format!("`{where_}` holds strings"))
+        })
+        .collect()
+}
+
 fn as_usize(v: &toml::Value, where_: &str) -> Result<usize, String> {
     let n = v
         .as_integer()
@@ -504,6 +652,9 @@ pub struct Stats {
     pub cv: f64,
     pub samples: usize,
     pub rss_bytes: Option<u64>,
+    /// The per-sample timings in the order they were taken, for a baseline
+    /// and for the rank test.
+    pub raw_ms: Vec<f64>,
 }
 
 impl Stats {
@@ -529,6 +680,7 @@ impl Stats {
             },
             samples: v.len(),
             rss_bytes: rss,
+            raw_ms: ms.to_vec(),
         }
     }
 
@@ -553,8 +705,8 @@ struct Row {
     outcome: Outcome,
 }
 
-fn run_case(manifest_dir: &Path, scratch_root: &Path, case: &Case, defaults: &Defaults) -> Row {
-    let outcome = measure_case(manifest_dir, scratch_root, case, defaults);
+fn run_case(side: &Side, scratch_root: &Path, case: &Case, defaults: &Defaults) -> Row {
+    let outcome = measure_case(side, scratch_root, case, defaults);
     Row {
         name: case.name.clone(),
         group: case.group.clone(),
@@ -563,56 +715,91 @@ fn run_case(manifest_dir: &Path, scratch_root: &Path, case: &Case, defaults: &De
     }
 }
 
-fn measure_case(
-    manifest_dir: &Path,
+/// A case made ready on one side: its work folder exists, its `setup` ran
+/// and its output was checked once. Dropping it removes the work folder.
+struct Prepared<'a> {
+    side: &'a Side,
+    case: &'a Case,
+    defaults: &'a Defaults,
+    work: PathBuf,
+    expect_stdout: Option<String>,
+}
+
+impl Drop for Prepared<'_> {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.work);
+    }
+}
+
+/// Setup and warm-up for one case on one side. `Err` is the outcome the
+/// case ends with (WRONG or absent): a wrong answer gets no time.
+fn prepare<'a>(
+    side: &'a Side,
     scratch_root: &Path,
-    case: &Case,
-    defaults: &Defaults,
-) -> Outcome {
-    // The working directory is the manifest's folder, so a case's
+    case: &'a Case,
+    defaults: &'a Defaults,
+) -> Result<Prepared<'a>, Outcome> {
+    // The working directory is the side's folder, so a case's
     // `run = ["cig", "run", "fixtures/hello.cig"]` resolves as
     // written. Isolation is through HOME, not cwd: a case that needs a
     // scratch place puts it under `$CIGSCRIPT_HOME` or an absolute path
     // under `$TMPDIR`.
-    let cwd = manifest_dir.to_path_buf();
-    let safe_name = case.name.replace(
-        |c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_',
-        "_",
-    );
-    let work = scratch_root.join(format!("case-{safe_name}-{}", std::process::id()));
+    let safe = |s: &str| {
+        s.replace(
+            |c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_',
+            "_",
+        )
+    };
+    let work = scratch_root.join(format!(
+        "case-{}-{}-{}",
+        safe(&case.name),
+        safe(&side.label),
+        std::process::id()
+    ));
     let _ = std::fs::remove_dir_all(&work);
     if let Err(e) = std::fs::create_dir_all(&work) {
-        return Outcome::Absent(format!("cannot make the case's work folder: {e}"));
+        return Err(Outcome::Absent(format!(
+            "cannot make the case's work folder: {e}"
+        )));
     }
+    let mut p = Prepared {
+        side,
+        case,
+        defaults,
+        work,
+        expect_stdout: None,
+    };
     // The case's expected stdout, read once. Missing is no check.
-    let expect_stdout = match &case.expect.stdout_file {
-        None => None,
-        Some(p) => {
-            let abs = if p.is_absolute() {
-                p.clone()
-            } else {
-                manifest_dir.join(p)
-            };
-            match std::fs::read_to_string(&abs) {
-                Ok(s) => Some(normalise(&s)),
-                Err(e) => {
-                    return Outcome::Absent(format!(
-                        "cannot read expected stdout {}: {e}",
-                        abs.display()
-                    ))
-                }
+    if let Some(f) = &case.expect.stdout_file {
+        let abs = if f.is_absolute() {
+            f.clone()
+        } else {
+            side.dir.join(f)
+        };
+        match std::fs::read_to_string(&abs) {
+            Ok(s) => p.expect_stdout = Some(normalise(&s)),
+            Err(e) => {
+                return Err(Outcome::Absent(format!(
+                    "cannot read expected stdout {}: {e}",
+                    abs.display()
+                )))
             }
         }
-    };
+    }
     let expect_exit = case.expect.exit;
     // Setup, with its own isolated home.
     if let Some(argv) = &case.setup {
-        let setup_home = work.join("setup-home");
+        let setup_home = p.work.join("setup-home");
         let _ = std::fs::create_dir_all(&setup_home);
         let env = full_env(defaults, &case.env, &setup_home);
-        if let Err(e) = run_untimed(argv, &cwd, &env, manifest_dir, case.stdin.as_deref()) {
-            let _ = std::fs::remove_dir_all(&work);
-            return Outcome::Absent(format!("`setup` failed: {e}"));
+        if let Err(e) = run_untimed(
+            &side.argv(argv),
+            &side.dir,
+            &env,
+            &side.dir,
+            case.stdin.as_deref(),
+        ) {
+            return Err(Outcome::Absent(format!("`setup` failed: {e}")));
         }
     }
     // Warm-up: at least one; `defaults.warmup` of them. The first one is
@@ -620,123 +807,140 @@ fn measure_case(
     let mut checked = false;
     let warmup = defaults.warmup.max(1);
     for i in 0..warmup {
-        let home = work.join(format!("warmup-{i}-home"));
+        let home = p.work.join(format!("warmup-{i}-home"));
         let _ = std::fs::create_dir_all(&home);
         let env = full_env(defaults, &case.env, &home);
         if let Some(argv) = &case.before {
-            if let Err(e) = run_untimed(argv, &cwd, &env, manifest_dir, case.stdin.as_deref()) {
-                let _ = std::fs::remove_dir_all(&work);
-                return Outcome::Absent(format!("`before` failed in warm-up: {e}"));
+            if let Err(e) = run_untimed(
+                &side.argv(argv),
+                &side.dir,
+                &env,
+                &side.dir,
+                case.stdin.as_deref(),
+            ) {
+                return Err(Outcome::Absent(format!("`before` failed in warm-up: {e}")));
             }
         }
-        match measure_run(&case.run, &cwd, &env, manifest_dir, case.stdin.as_deref()) {
+        match measure_run(
+            &side.argv(&case.run),
+            &side.dir,
+            &env,
+            &side.dir,
+            case.stdin.as_deref(),
+        ) {
             Ok(m) => {
                 if !checked {
                     if let Some(code) = expect_exit {
                         if m.exit != Some(code) {
-                            let _ = std::fs::remove_dir_all(&work);
                             let tail = clip(m.stderr.trim());
-                            let why = if tail.is_empty() {
-                                format!(
-                                    "exit {} not {}",
-                                    m.exit
-                                        .map(|c| c.to_string())
-                                        .unwrap_or_else(|| "by signal".into()),
-                                    code
-                                )
+                            let got = m
+                                .exit
+                                .map(|c| c.to_string())
+                                .unwrap_or_else(|| "by signal".into());
+                            return Err(Outcome::Wrong(if tail.is_empty() {
+                                format!("exit {got} not {code}")
                             } else {
-                                format!(
-                                    "exit {} not {} (stderr: {tail})",
-                                    m.exit
-                                        .map(|c| c.to_string())
-                                        .unwrap_or_else(|| "by signal".into()),
-                                    code
-                                )
-                            };
-                            return Outcome::Wrong(why);
+                                format!("exit {got} not {code} (stderr: {tail})")
+                            }));
                         }
                     }
-                    if let Some(want) = &expect_stdout {
+                    if let Some(want) = &p.expect_stdout {
                         let got = normalise(&m.stdout);
                         if &got != want {
-                            let _ = std::fs::remove_dir_all(&work);
-                            return Outcome::Wrong(format!(
+                            return Err(Outcome::Wrong(format!(
                                 "printed {:?}, not {:?}",
                                 clip(&got),
                                 clip(want)
-                            ));
+                            )));
                         }
                     }
                     checked = true;
                 }
             }
-            Err(e) => {
-                let _ = std::fs::remove_dir_all(&work);
-                return Outcome::Absent(format!("could not run in warm-up: {e}"));
-            }
+            Err(e) => return Err(Outcome::Absent(format!("could not run in warm-up: {e}"))),
         }
         let _ = std::fs::remove_dir_all(&home);
     }
-    // Samples.
-    let mut per_sample_ms: Vec<f64> = Vec::with_capacity(defaults.samples);
-    let mut rss_max: Option<u64> = None;
-    for i in 0..defaults.samples {
-        let home = work.join(format!("sample-{i}-home"));
+    Ok(p)
+}
+
+impl Prepared<'_> {
+    /// One sample: `before` once, then `per` runs timed as one batch, the
+    /// batch's time divided by `per`. Returns milliseconds and the peak
+    /// resident set over the batch. Every run is checked again.
+    fn sample(&self, i: usize) -> Result<(f64, Option<u64>), Outcome> {
+        let (side, case, defaults) = (self.side, self.case, self.defaults);
+        let home = self.work.join(format!("sample-{i}-home"));
         let _ = std::fs::create_dir_all(&home);
         let env = full_env(defaults, &case.env, &home);
         if let Some(argv) = &case.before {
-            if let Err(e) = run_untimed(argv, &cwd, &env, manifest_dir, case.stdin.as_deref()) {
-                let _ = std::fs::remove_dir_all(&work);
-                return Outcome::Absent(format!("`before` failed before sample {i}: {e}"));
+            if let Err(e) = run_untimed(
+                &side.argv(argv),
+                &side.dir,
+                &env,
+                &side.dir,
+                case.stdin.as_deref(),
+            ) {
+                return Err(Outcome::Absent(format!(
+                    "`before` failed before sample {i}: {e}"
+                )));
             }
         }
-        // Batch: `per` consecutive invocations of `run`, timed end to end,
-        // divided by `per` for the sample's time. The RSS is the max over
-        // the batch.
+        let argv = side.argv(&case.run);
         let batch_started = Instant::now();
         let mut batch_rss: Option<u64> = None;
         for p in 0..defaults.per {
-            match measure_run(&case.run, &cwd, &env, manifest_dir, case.stdin.as_deref()) {
+            match measure_run(&argv, &side.dir, &env, &side.dir, case.stdin.as_deref()) {
                 Ok(m) => {
-                    if let Some(code) = expect_exit {
+                    if let Some(code) = case.expect.exit {
                         if m.exit != Some(code) {
-                            let _ = std::fs::remove_dir_all(&work);
-                            return Outcome::Wrong(format!(
+                            return Err(Outcome::Wrong(format!(
                                 "sample {i} invocation {p} exited {} not {}",
                                 m.exit
                                     .map(|c| c.to_string())
                                     .unwrap_or_else(|| "by signal".into()),
                                 code
-                            ));
+                            )));
                         }
                     }
-                    if let Some(want) = &expect_stdout {
+                    if let Some(want) = &self.expect_stdout {
                         let got = normalise(&m.stdout);
                         if &got != want {
-                            let _ = std::fs::remove_dir_all(&work);
-                            return Outcome::Wrong(format!(
+                            return Err(Outcome::Wrong(format!(
                                 "sample {i} invocation {p} printed {:?}, not {:?}",
                                 clip(&got),
                                 clip(want)
-                            ));
+                            )));
                         }
                     }
                     batch_rss = max_opt(batch_rss, m.rss_bytes);
                 }
-                Err(e) => {
-                    let _ = std::fs::remove_dir_all(&work);
-                    return Outcome::Absent(format!("sample {i} invocation {p}: {e}"));
-                }
+                Err(e) => return Err(Outcome::Absent(format!("sample {i} invocation {p}: {e}"))),
             }
         }
         let batch_ms = batch_started.elapsed().as_secs_f64() * 1000.0;
-        let per = defaults.per.max(1) as f64;
-        per_sample_ms.push(batch_ms / per);
-        rss_max = max_opt(rss_max, batch_rss);
         let _ = std::fs::remove_dir_all(&home);
+        Ok((batch_ms / defaults.per.max(1) as f64, batch_rss))
     }
-    let _ = std::fs::remove_dir_all(&work);
-    Outcome::Timed(Stats::of(&per_sample_ms, rss_max))
+}
+
+fn measure_case(side: &Side, scratch_root: &Path, case: &Case, defaults: &Defaults) -> Outcome {
+    let prepared = match prepare(side, scratch_root, case, defaults) {
+        Ok(p) => p,
+        Err(o) => return o,
+    };
+    let mut ms: Vec<f64> = Vec::with_capacity(defaults.samples);
+    let mut rss_max: Option<u64> = None;
+    for i in 0..defaults.samples {
+        match prepared.sample(i) {
+            Ok((t, rss)) => {
+                ms.push(t);
+                rss_max = max_opt(rss_max, rss);
+            }
+            Err(o) => return o,
+        }
+    }
+    Outcome::Timed(Stats::of(&ms, rss_max))
 }
 
 fn max_opt(a: Option<u64>, b: Option<u64>) -> Option<u64> {
@@ -1146,6 +1350,19 @@ fn print_markdown(m: &Manifest, rows: &[Row], c: &Conditions) {
     }
 }
 
+/// One side's timings as JSON.
+fn stats_json(s: &Stats) -> serde_json::Value {
+    serde_json::json!({
+        "median_ms": s.median_ms,
+        "p10_ms": s.p10_ms,
+        "p90_ms": s.p90_ms,
+        "cv": s.cv,
+        "noisy": s.noisy(),
+        "samples": s.samples,
+        "rss_bytes": s.rss_bytes,
+    })
+}
+
 fn print_json(m: &Manifest, rows: &[Row], c: &Conditions) {
     let case_json: Vec<serde_json::Value> = rows
         .iter()
@@ -1173,6 +1390,7 @@ fn print_json(m: &Manifest, rows: &[Row], c: &Conditions) {
         })
         .collect();
     let doc = serde_json::json!({
+        "format": FORMAT,
         "product": m.bench.product,
         "cig_version": env!("CARGO_PKG_VERSION"),
         "conditions": {
@@ -1275,5 +1493,41 @@ mod tests {
             m.cases[0].expect.stdout_file,
             Some(PathBuf::from("out.txt"))
         );
+    }
+
+    #[test]
+    fn manifest_schema_is_versioned() {
+        let head = "[bench]\nproduct = \"cig\"\n";
+        // No `format` is format 1; a 1 is accepted.
+        parse_manifest(head).unwrap();
+        parse_manifest(&format!("format = 1\n{head}")).unwrap();
+        // Another format, or a format that is not a number, is refused.
+        let err = parse_manifest(&format!("format = 2\n{head}")).unwrap_err();
+        assert!(
+            err.contains("format 2") && err.contains("reads format 1"),
+            "{err}"
+        );
+        let err = parse_manifest(&format!("format = \"1\"\n{head}")).unwrap_err();
+        assert!(err.contains("format"), "{err}");
+    }
+
+    #[test]
+    fn build_binary_and_watch_keys_parse() {
+        let text = r#"
+            [bench]
+            product = "cig"
+            build = ["cargo", "build"]
+            binary = "target/debug/cig"
+            watch = ["src/**"]
+            [[case]]
+            name = "a"
+            run = ["true"]
+            watch = ["src/lib.rs"]
+        "#;
+        let m = parse_manifest(text).unwrap();
+        assert_eq!(m.bench.build.as_deref().unwrap()[0], "cargo");
+        assert_eq!(m.bench.binary.as_deref(), Some("target/debug/cig"));
+        assert_eq!(m.bench.watch, vec!["src/**"]);
+        assert_eq!(m.cases[0].watch, vec!["src/lib.rs"]);
     }
 }

@@ -647,6 +647,25 @@ fn box_primitives() -> Vec<(&'static str, bool, String)> {
             )),
             Err(e) => out.push(("overlayfs", false, e)),
         }
+        // The tin key's memory, as a forked child (a hop before its exec)
+        // sees it.
+        match crate::burn::seal::fork_protection() {
+            "wipe-on-fork" => out.push((
+                "key memory",
+                true,
+                "the key's page is wiped in a forked child (MADV_WIPEONFORK)".to_string(),
+            )),
+            "dont-fork" => out.push((
+                "key memory",
+                true,
+                "the key's page is not inherited by a forked child (MADV_DONTFORK: the kernel is older than 4.14, no wipe-on-fork)".to_string(),
+            )),
+            _ => out.push((
+                "key memory",
+                false,
+                "a forked child inherits the key's page (no MADV_WIPEONFORK or MADV_DONTFORK here)".to_string(),
+            )),
+        }
         out
     }
     #[cfg(not(target_os = "linux"))]

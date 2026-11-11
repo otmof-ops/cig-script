@@ -194,6 +194,13 @@ pub fn load() -> Result<Loaded, String> {
         }
         Err(e) => return Err(format!("cannot read the ledger: {e}")),
     };
+    verify_text(&text)
+}
+
+/// Verify a ledger's text (the file on disk, or a copy of it that came in
+/// a tin parcel) against the tin's keys, as `load` does for the file in
+/// place. The key unavailable is an error: nothing can be verified without it.
+pub fn verify_text(text: &str) -> Result<Loaded, String> {
     let keys = candidate_keys();
     if keys.is_empty() {
         return Err(

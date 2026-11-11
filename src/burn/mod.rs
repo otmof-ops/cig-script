@@ -26,6 +26,8 @@ pub mod scan;
 pub mod seal;
 pub mod statcache;
 pub mod tin;
+pub mod tinparcel;
+pub mod watch;
 
 /// The one lock every test in this crate that sets `CIGSCRIPT_HOME` takes:
 /// the tests share a process and an environment, and `home_dir` reads it.

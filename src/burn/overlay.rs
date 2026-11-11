@@ -206,6 +206,10 @@ pub struct BoxSpec {
     /// and says what they mean: cig's own lines about the layer (E780,
     /// E781, applied, dropped) are left out. Nothing else changes.
     pub quiet: bool,
+    /// The watch (`watch: true`): what the hop opens for writing, connects
+    /// to and runs, as events (`super::watch`). A contained hop always has
+    /// the part that gives the io_uring refusal its event (`E776`).
+    pub watch: super::watch::Mode,
 }
 
 impl Default for BoxSpec {
@@ -218,6 +222,7 @@ impl Default for BoxSpec {
             contain: false,
             expect: Vec::new(),
             quiet: false,
+            watch: super::watch::Mode::Off,
         }
     }
 }
@@ -244,6 +249,11 @@ impl BoxSpec {
             Apply::OnSuccess => {}
             Apply::Ask => t.push("apply ask".to_string()),
             Apply::Never => t.push("apply never".to_string()),
+        }
+        match self.watch {
+            super::watch::Mode::Calls => t.push("watched".to_string()),
+            super::watch::Mode::Reads => t.push("watched reads".to_string()),
+            _ => {}
         }
         if !self.pidns {
             t.push("pid shared".to_string());
@@ -610,6 +620,9 @@ pub struct Setup {
     /// `contain`: the home layer, the read-only rest, a /dev of its own,
     /// the hop's syscall filter.
     pub contain: Option<Contain>,
+    /// The watch, once the parent has started its supervisor (the caller
+    /// sets it between `new` and the fork).
+    pub watch: Option<super::watch::WatchChild>,
 }
 
 /// What `contain` adds to the box, planned in the parent and applied in the
@@ -640,6 +653,9 @@ pub struct Contain {
     pub writable: Vec<(std::ffi::CString, bool)>,
     /// The hop's syscall filter (classic BPF), installed last in the hop.
     pub filter: Vec<libc::sock_filter>,
+    /// io_uring's refusal alone: the watch answers it with an event; where
+    /// there is no watch this is installed instead, and the refusal stands.
+    pub refusal: Vec<libc::sock_filter>,
 }
 
 #[cfg(target_os = "linux")]
@@ -766,7 +782,8 @@ fn plan_contain(
     if euid == 0 {
         return Err(other("contain runs the hop as you, not as root: a root hop keeps its capabilities in the box and could make the rest writable again"));
     }
-    let filter = hop_filter().map_err(io::Error::other)?;
+    let filter = hop_filter_with(false).map_err(io::Error::other)?;
+    let refusal = refusal_filter().map_err(io::Error::other)?;
     let roots: Vec<PathBuf> = layers.roots.iter().map(|(r, _, _)| r.clone()).collect();
     let state =
         std::path::absolute(super::runs::home_dir()).unwrap_or_else(|_| super::runs::home_dir());
@@ -896,6 +913,7 @@ fn plan_contain(
         covers,
         writable,
         filter,
+        refusal,
     })
 }
 
@@ -932,6 +950,13 @@ const DEV_PARTS: &[&str] = &[
 /// performance counters, userfaultfd, the mount calls.
 #[cfg(target_os = "linux")]
 pub fn hop_filter() -> Result<Vec<libc::sock_filter>, String> {
+    hop_filter_with(true)
+}
+
+/// `hop_filter`, with or without the io_uring refusal in it: without, the
+/// refusal is `refusal_filter`'s, and the watch gives it an event (`E776`).
+#[cfg(target_os = "linux")]
+pub fn hop_filter_with(io_uring: bool) -> Result<Vec<libc::sock_filter>, String> {
     #[cfg(target_arch = "x86_64")]
     const ARCH: u32 = 0xC000_003E;
     #[cfg(target_arch = "aarch64")]
@@ -976,10 +1001,15 @@ pub fn hop_filter() -> Result<Vec<libc::sock_filter>, String> {
             f.push(jmp(JGE, 0x4000_0000, 0, 1));
             f.push(st(RET, KILL));
         }
-        let denied: Vec<libc::c_long> = vec![
-            libc::SYS_io_uring_setup,
-            libc::SYS_io_uring_enter,
-            libc::SYS_io_uring_register,
+        let mut denied: Vec<libc::c_long> = Vec::new();
+        if io_uring {
+            denied.extend([
+                libc::SYS_io_uring_setup,
+                libc::SYS_io_uring_enter,
+                libc::SYS_io_uring_register,
+            ]);
+        }
+        denied.extend([
             libc::SYS_ptrace,
             libc::SYS_process_vm_readv,
             libc::SYS_process_vm_writev,
@@ -999,7 +1029,7 @@ pub fn hop_filter() -> Result<Vec<libc::sock_filter>, String> {
             libc::SYS_fsmount,
             libc::SYS_fspick,
             libc::SYS_mount_setattr,
-        ];
+        ]);
         for nr in denied {
             f.push(jmp(JEQ, nr as u32, 0, 1));
             f.push(st(RET, errno(libc::EPERM)));
@@ -1031,6 +1061,61 @@ pub fn hop_filter() -> Result<Vec<libc::sock_filter>, String> {
         f.push(st(RET, errno(libc::EPERM)));
         f.push(st(RET, ALLOW));
         Ok(f)
+    }
+}
+
+/// Only io_uring's refusal (`EPERM`), for a contained hop whose watch could
+/// not be made: the call stays refused, only its event is missing.
+#[cfg(target_os = "linux")]
+pub fn refusal_filter() -> Result<Vec<libc::sock_filter>, String> {
+    #[cfg(target_arch = "x86_64")]
+    const ARCH: u32 = 0xC000_003E;
+    #[cfg(target_arch = "aarch64")]
+    const ARCH: u32 = 0xC000_00B7;
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        return Err("contain needs x86_64 or aarch64".to_string());
+    }
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    {
+        let st = |code: u16, k: u32| libc::sock_filter {
+            code,
+            jt: 0,
+            jf: 0,
+            k,
+        };
+        let jeq = |k: u32| libc::sock_filter {
+            code: 0x15,
+            jt: 0,
+            jf: 1,
+            k,
+        };
+        let mut f = vec![
+            st(0x20, 4),
+            jeq_arch(ARCH),
+            st(0x06, 0x8000_0000),
+            st(0x20, 0),
+        ];
+        for nr in [
+            libc::SYS_io_uring_setup,
+            libc::SYS_io_uring_enter,
+            libc::SYS_io_uring_register,
+        ] {
+            f.push(jeq(nr as u32));
+            f.push(st(0x06, 0x0005_0000 | libc::EPERM as u32));
+        }
+        f.push(st(0x06, 0x7fff_0000));
+        Ok(f)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn jeq_arch(arch: u32) -> libc::sock_filter {
+    libc::sock_filter {
+        code: 0x15,
+        jt: 1,
+        jf: 0,
+        k: arch,
     }
 }
 
@@ -1569,6 +1654,7 @@ impl Setup {
             forward,
             forward_env,
             contain,
+            watch: None,
         })
     }
 
@@ -1997,6 +2083,75 @@ impl Setup {
             ) != 0
             {
                 return self.fail(b"installing the hop's syscall filter refused");
+            }
+            // No watch: io_uring is refused here, without an event.
+            if self.watch.is_none() && !super::watch::install(&c.refusal) {
+                return self.fail(b"installing the hop's io_uring refusal refused");
+            }
+        }
+        if let Some(w) = &self.watch {
+            return self.install_watch(w);
+        }
+        Ok(())
+    }
+
+    /// The watch's filter in the hop, last of all: by seccomp user
+    /// notification when the kernel has it (the descriptor goes to cig over
+    /// the socket), else, for a watch of calls, by ptrace (cig seizes this
+    /// process and answers once it is held); else the hop is refused when a
+    /// watch was asked for, and runs with the io_uring refusal alone when
+    /// the watch was only the contained box's own.
+    ///
+    /// # Safety
+    ///
+    /// Called from `apply`, between fork and exec: only async-signal-safe
+    /// calls, on data planned in the parent.
+    unsafe fn install_watch(&self, w: &super::watch::WatchChild) -> io::Result<()> {
+        use super::watch as wt;
+        if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
+            return self.fail(b"setting no_new_privs refused");
+        }
+        let fd = if w.force_ptrace {
+            -1
+        } else {
+            wt::try_listener(&w.notify)
+        };
+        if fd >= 0 {
+            let sent = wt::send_msg(w.sock, b'N', fd);
+            libc::close(fd);
+            libc::close(w.sock);
+            if !sent {
+                return self.fail(b"handing the watch to cig refused");
+            }
+            return Ok(());
+        }
+        // The ptrace route only: cig must attach to this process, and the
+        // mm of a hop forked from a cig that holds the tin's key is not
+        // dumpable, so a cig outside this user namespace may not. It is
+        // set here, as late as it can be and only on this route, and the
+        // exec a few calls on resets it. This process still holds a copy
+        // of cig's memory until then (nothing in the child wipes it), so
+        // the fast route, which needs no attach, never sets it.
+        if w.mode >= wt::Mode::Calls {
+            libc::prctl(libc::PR_SET_DUMPABLE, 1, 0, 0, 0);
+        }
+        if w.mode >= wt::Mode::Calls
+            && wt::send_msg(w.sock, b'P', -1)
+            && wt::wait_ack(w.sock)
+            && wt::install(&w.trace)
+        {
+            libc::close(w.sock);
+            return Ok(());
+        }
+        libc::close(w.sock);
+        if w.required {
+            return self.fail(
+                b"the watch cannot be made here (no seccomp user notification and no ptrace)",
+            );
+        }
+        if let Some(c) = &self.contain {
+            if !wt::install(&c.refusal) {
+                return self.fail(b"installing the hop's io_uring refusal refused");
             }
         }
         Ok(())

@@ -5,7 +5,7 @@
 //! no run still needs.
 
 use super::{exit, Ctx};
-use crate::burn::{rekey, seal, statcache, tin};
+use crate::burn::{rekey, seal, statcache, tin, tinparcel};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
@@ -108,6 +108,37 @@ pub enum TinCommand {
     },
     /// Make a new tin seal key and re-seal every sealed object under it; crash-safe (a `cig tin rekey` after an interruption finishes it).
     Rekey,
+    /// Back the whole tin up: every live run and its journal, the objects they need, the ledger and its head, with a manifest of SHA-256s. Sealed objects stay sealed.
+    Parcel {
+        /// Write a new folder here (default: cig-tin-parcel-<date> in the current folder).
+        #[arg(long, value_name = "DIR", conflicts_with = "git")]
+        to: Option<PathBuf>,
+        /// Write an orphan commit under refs/cig/backup/<REF> in the repository instead (default name: today's date). Nothing is written to git unless this is given.
+        #[arg(long, value_name = "REF", num_args = 0..=1, default_missing_value = "")]
+        git: Option<String>,
+        /// The repository --git writes to and reads --since from (default: the one the current folder is in).
+        #[arg(long, value_name = "DIR")]
+        repo: Option<PathBuf>,
+        /// An earlier parcel (a folder, or a ref with --git): carry only the objects it lacks, and name it as the parent.
+        #[arg(long, value_name = "PARCEL")]
+        since: Option<String>,
+    },
+    /// Put a tin parcel back: everything is verified before anything is written, and a live run that differs is never overwritten.
+    Unparcel {
+        /// The parcel folder.
+        #[arg(
+            value_name = "DIR",
+            required_unless_present = "git",
+            conflicts_with = "git"
+        )]
+        dir: Option<PathBuf>,
+        /// Read the parcel from this ref in the repository.
+        #[arg(long, value_name = "REF")]
+        git: Option<String>,
+        /// The repository --git reads from (default: the one the current folder is in).
+        #[arg(long, value_name = "DIR")]
+        repo: Option<PathBuf>,
+    },
 }
 
 #[derive(clap::Subcommand)]
@@ -238,10 +269,177 @@ fn rekey_cmd(ctx: &Ctx) -> i32 {
     }
 }
 
+fn parcel_error(ctx: &Ctx, e: tinparcel::Error) -> i32 {
+    use tinparcel::Error;
+    match e {
+        Error::Usage(m) => {
+            eprintln!("{} {m}", ctx.red("error[E803 usage]:"));
+            exit::USAGE
+        }
+        Error::Unverified(problems) => {
+            eprintln!(
+                "{} the parcel does not verify ({} problem{}); nothing was written:",
+                ctx.red("error[E722 burn]:"),
+                problems.len(),
+                if problems.len() == 1 { "" } else { "s" }
+            );
+            for p in problems.iter().take(20) {
+                eprintln!("  - {p}");
+            }
+            if problems.len() > 20 {
+                eprintln!("  - and {} more", problems.len() - 20);
+            }
+            eprintln!(
+                "  = hint: write the parcel again from the tin, or restore from an earlier one"
+            );
+            eprintln!("  = explain: cig explain E722");
+            exit::SCRIPT_ERROR
+        }
+        Error::Conflict(why) => {
+            eprintln!(
+                "{} a different live run is in the way; nothing was written:",
+                ctx.red("error[E723 burn]:")
+            );
+            for w in &why {
+                eprintln!("  - {w}");
+            }
+            eprintln!("  = hint: restore into an empty tin, or remove what is named (cig runs --prune) and unparcel again");
+            eprintln!("  = explain: cig explain E723");
+            exit::SCRIPT_ERROR
+        }
+        Error::Io(m) => {
+            eprintln!("{} {m}", ctx.red("error[E703 burn]:"));
+            exit::SCRIPT_ERROR
+        }
+    }
+}
+
+fn parcel_repo(repo: Option<PathBuf>) -> PathBuf {
+    repo.unwrap_or_else(|| PathBuf::from("."))
+}
+
+fn parcel_cmd(
+    ctx: &Ctx,
+    to: Option<PathBuf>,
+    git: Option<String>,
+    repo: Option<PathBuf>,
+    since: Option<String>,
+) -> i32 {
+    let target = match git {
+        Some(name) => {
+            let raw = if name.is_empty() {
+                tinparcel::auto_ref()
+            } else {
+                name
+            };
+            match tinparcel::normalize_ref(&raw) {
+                Ok(refname) => tinparcel::Target::Git {
+                    repo: parcel_repo(repo),
+                    refname,
+                },
+                Err(e) => return parcel_error(ctx, e),
+            }
+        }
+        None => tinparcel::Target::Dir(to.unwrap_or_else(|| {
+            PathBuf::from(format!(
+                "cig-tin-parcel-{}",
+                chrono::Utc::now().format("%Y%m%dT%H%M%SZ")
+            ))
+        })),
+    };
+    // --since may name a ref in the repository when the parcel goes there.
+    let since = match (&target, since) {
+        (tinparcel::Target::Git { .. }, s) => s,
+        (tinparcel::Target::Dir(_), s) => s,
+    };
+    match tinparcel::write(&target, since.as_deref()) {
+        Ok(w) => {
+            if ctx.json {
+                outln!("{}", serde_json::to_string(&w).unwrap_or_default());
+            } else {
+                outln!("{}", w.target);
+                eprintln!(
+                    "{} {} run{}, {} object{} carried{}, {} bytes, ledger head {}{}",
+                    ctx.green("ok:"),
+                    w.runs,
+                    if w.runs == 1 { "" } else { "s" },
+                    w.objects_carried,
+                    if w.objects_carried == 1 { "" } else { "s" },
+                    if w.objects_inherited > 0 {
+                        format!(" and {} already in the parent", w.objects_inherited)
+                    } else {
+                        String::new()
+                    },
+                    w.bytes,
+                    if w.ledger_head.is_empty() {
+                        "(none)"
+                    } else {
+                        &w.ledger_head
+                    },
+                    w.commit
+                        .as_deref()
+                        .map(|c| format!(", commit {c}"))
+                        .unwrap_or_default()
+                );
+                eprintln!("  = sealed objects are carried sealed: keep the tin's key (cig tin key export) with the parcel's owner, not in it");
+            }
+            exit::OK
+        }
+        Err(e) => parcel_error(ctx, e),
+    }
+}
+
+fn unparcel_cmd(
+    ctx: &Ctx,
+    dir: Option<PathBuf>,
+    git: Option<String>,
+    repo: Option<PathBuf>,
+) -> i32 {
+    let source = match (dir, git) {
+        (_, Some(name)) => match tinparcel::normalize_ref(&name) {
+            Ok(refname) => tinparcel::Source::Git {
+                repo: parcel_repo(repo),
+                refname,
+            },
+            Err(e) => return parcel_error(ctx, e),
+        },
+        (Some(d), None) => tinparcel::Source::Dir(d),
+        (None, None) => return exit::USAGE,
+    };
+    match tinparcel::restore(&source) {
+        Ok(r) => {
+            if ctx.json {
+                outln!("{}", serde_json::to_string(&r).unwrap_or_default());
+            } else {
+                eprintln!(
+                    "{} verified, then {} run{} put back ({} already here), {} object{} written ({} already here), ledger {}",
+                    ctx.green("ok:"),
+                    r.runs_restored,
+                    if r.runs_restored == 1 { "" } else { "s" },
+                    r.runs_present,
+                    r.objects_written,
+                    if r.objects_written == 1 { "" } else { "s" },
+                    r.objects_present,
+                    r.ledger
+                );
+            }
+            exit::OK
+        }
+        Err(e) => parcel_error(ctx, e),
+    }
+}
+
 pub fn tin_cmd(ctx: &Ctx, cmd: Option<TinCommand>) -> i32 {
     match cmd.unwrap_or(TinCommand::Du) {
         TinCommand::Key { cmd } => key_cmd(ctx, cmd),
         TinCommand::Rekey => rekey_cmd(ctx),
+        TinCommand::Parcel {
+            to,
+            git,
+            repo,
+            since,
+        } => parcel_cmd(ctx, to, git, repo, since),
+        TinCommand::Unparcel { dir, git, repo } => unparcel_cmd(ctx, dir, git, repo),
         TinCommand::Du => {
             let u = tin::du();
             let referenced = tin::referenced().len();

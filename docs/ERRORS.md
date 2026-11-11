@@ -1382,6 +1382,8 @@ the burn kernel and its journal (write-ahead log).
 | [`E715`](#e715-debugging-is-allowed) | debugging is allowed | not one of the four | unset CIG_ALLOW_DEBUG |
 | [`E720`](#e720-a-rekey-cannot-be-done) | a rekey cannot be done | one of the four; the message says which | put the current key back (cig tin key import), or store it where a rekey can swap it (cig config seal_key keyring); after a bad seal.key.old, move it aside and run cig tin rekey again; wait for the holder of the rekey lock; fix the tampered journal cig names before trying again |
 | [`E721`](#e721-the-tin's-key-folder-is-not-private) | the tin's key folder is not private | these are MY ciggies | a folder or file that is yours, made under sudo: chown it back to yourself. One that is not yours: move it aside (it is not your key), or set CIG_KEYS_DIR to a folder only you can write. A seal.key others could read: chmod 600 it, then cig tin rekey if anyone else could have read it; never move your own key aside, a new key opens nothing the old one sealed |
+| [`E722`](#e722-a-tin-parcel-does-not-verify) | a tin parcel does not verify | one of the four; the message says which | restore from an earlier parcel, or write a new one from the tin; for an incremental parcel keep every parent beside it; for a ledger that cannot be checked put the tin's key back first (cig tin key import) and run cig tin unparcel again |
+| [`E723`](#e723-a-different-live-run-is-in-the-way-of-an-unparcel) | a different live run is in the way of an unparcel | one of the four; the message says which | restore into an empty tin (a new CIGSCRIPT_HOME), or move the named run out of the way (cig unburn it, or cig runs --prune) and unparcel again; a ledger with another history belongs to another tin |
 | [`E730`](#e730-a-pass-does-not-hold) | a pass does not hold | these are MY ciggies | cig pass show <id> says which input or caveat failed; redo the work and issue a new pass (pass.memo does both), or ask for a fresh pass from whoever issued this one |
 | [`E731`](#e731-the-work-cannot-be-vouched-for) | the work cannot be vouched for | these are MY ciggies | declare what the program reads: proc.run(cmd, args, {reads: [paths]}); for a clock, give pass.issue an until; otherwise take the call out of the work, or do not issue a pass for it |
 | [`E732`](#e732-the-work-reads-a-variable-from-outside-it) | the work reads a variable from outside it | these are MY ciggies | put the value in the subject, and read it from the argument the work is called with: pass.issue("check", {n: n}, pack(s) => s.n + 1) |
@@ -1709,6 +1711,44 @@ The keys folder beside the state root holds the seal key, the ledger and the rek
 4. seal.key, ledger.jsonl or rekey.lock is owned by another user, or is a symlink or not a file, so a read may be redirected or the file planted (probe `path-exists`). **Remedy:** yours, made under sudo: chown it back; a link: put the real file back in place; not yours: move it aside, or set CIG_KEYS_DIR / CIG_SEAL_KEY_FILE to a path only you can write
 
 Related: `E707`, `E720`.
+
+
+### E722 a tin parcel does not verify
+
+*burn · since 1.21.0 · arises in run*
+
+**Kind of no:** one of the four; the message says which (read the operating-system reason in the message; ENOENT, EACCES, ENOSPC and friends, each mapped in the causes below).
+
+cig tin unparcel (or the check cig tin parcel runs on what it just wrote) found the parcel tampered with or incomplete, and wrote nothing. Every file the manifest names is hashed, every journal's chain and the ledger's chain are checked, and every object a journal needs must be in the parcel, in a parent parcel it names, or already in this tin. The message lists the first problems: a file that no longer hashes to the manifest, one that is missing, one that is there and not named, a parent parcel that is not the one the child was built on, a journal or ledger line that was edited, a ledger that cannot be checked because the tin's key is not here.
+
+**What to type next:** restore from an earlier parcel, or write a new one from the tin; for an incremental parcel keep every parent beside it; for a ledger that cannot be checked put the tin's key back first (cig tin key import) and run cig tin unparcel again
+
+**Known causes**, ranked; doctor checks them in this order:
+
+1. a file in the parcel was changed, truncated or swapped after it was written (probe `file-hash`). **Remedy:** use another copy of the parcel, or an earlier one; the file is named in the message
+2. an incremental parcel's parent is missing, or is not the parcel it was built on (probe `path-exists`). **Remedy:** put the parent parcel folder where the child recorded it, or beside the child, and unparcel again
+3. the tin's key is not available, so the ledger's chain cannot be checked (no probe; a suggestion, not a finding). **Remedy:** cig tin key import the key you exported, then unparcel again
+4. a journal or the ledger was edited, cut short or reordered (no probe; a suggestion, not a finding). **Remedy:** the run or line is named; restore from an earlier parcel that verifies
+
+Related: `E703`, `E708`, `E709`, `E723`.
+
+
+### E723 a different live run is in the way of an unparcel
+
+*burn · since 1.21.0 · arises in run*
+
+**Kind of no:** one of the four; the message says which (read the operating-system reason in the message; ENOENT, EACCES, ENOSPC and friends, each mapped in the causes below).
+
+cig tin unparcel verified the parcel and then found something here that it would have to overwrite: a run with the same id and a different journal, a sealed object or a kept copy with other bytes, or a ledger whose history differs from the parcel's. It writes nothing: a restore puts back what is missing and never replaces a live run with a different one. A run that is here and identical is left alone, so unparcel can be run again after a partial restore.
+
+**What to type next:** restore into an empty tin (a new CIGSCRIPT_HOME), or move the named run out of the way (cig unburn it, or cig runs --prune) and unparcel again; a ledger with another history belongs to another tin
+
+**Known causes**, ranked; doctor checks them in this order:
+
+1. the run exists here with a journal that differs from the parcel's (it carried on after the backup was taken) (probe `run-record`). **Remedy:** keep the live run and skip that parcel, or move the live run aside and restore the backup's
+2. the ledger here and the parcel's diverged: neither is a prefix of the other (no probe; a suggestion, not a finding). **Remedy:** the parcel is from another tin or another history; restore into an empty tin
+
+Related: `E722`, `E709`.
 
 
 ### E730 a pass does not hold
@@ -2190,7 +2230,9 @@ the box for untrusted code: its network, the watch, kept layers, the kill switch
 | code | title | kind of no | what to type next |
 |---|---|---|---|
 | [`E771`](#e771-a-host-outside-the-allow-list) | a host outside the allow list | these are MY ciggies | if the host is legitimate, add it to box.allow_hosts (a name or *.suffix, on 443, or host:port); if not, that is the finding |
+| [`E776`](#e776-io_uring-refused) | io_uring refused | these are MY ciggies | nothing to fix for a tool that falls back by itself; if the hop needs io_uring to work at all, it cannot be rehearsed in the box, and that is itself worth knowing about code you did not write |
 | [`E777`](#e777-no-isolation-for-untrusted-code) | no isolation for untrusted code | these are MY ciggies | on Linux, allow unprivileged user namespaces and have overlayfs; otherwise run it on a machine that has the box, or drop the isolation knowing what that means |
+| [`E779`](#e779-the-watch-fell-back-to-ptrace) | the watch fell back to ptrace | can't see any ciggies bro | nothing to do; a kernel from 5.0 on, and a container that allows seccomp(2) with a listener, gives the fast route |
 | [`E780`](#e780-a-layer-was-kept,-not-applied) | a layer was kept, not applied | can't see any ciggies bro | cig box list, then cig box apply <run> <hop> or cig box discard <run> <hop> |
 | [`E781`](#e781-a-hop-changed-what-it-was-not-expected-to) | a hop changed what it was not expected to | these are MY ciggies | read the paths: add one to box.expect if the tool meant it, or treat it as the finding it is |
 | [`E782`](#e782-not-a-layer-this-run-can-apply) | not a layer this run can apply | can't see any ciggies bro | pass the layer a boxed hop of this run returned; a layer that changed is not applied: run the hop again |
@@ -2212,6 +2254,24 @@ A boxed hop with network: registry tried to connect somewhere its allow_hosts do
 Related: `E777`, `E763`.
 
 
+### E776 io_uring refused
+
+*burn · since 1.21.0 · arises in run*
+
+**Kind of no:** these are MY ciggies (the door: it knows you and said no; 403 Forbidden; permission denied; a lock; a refusal by policy).
+
+A boxed hop called io_uring_setup, io_uring_enter or io_uring_register. The box refuses all three (EPERM): operations submitted through io_uring pass no system call the watch and the tripwires can see, so a hop that could use it could do the very things the box watches for out of sight. The refusal is recorded as an event; the hop carries on without it (a library that tries io_uring first falls back to ordinary calls).
+
+**What to type next:** nothing to fix for a tool that falls back by itself; if the hop needs io_uring to work at all, it cannot be rehearsed in the box, and that is itself worth knowing about code you did not write
+
+**Known causes**, ranked; doctor checks them in this order:
+
+1. the program or a library it uses reaches for io_uring (a runtime with an io_uring backend, a database, a benchmark), as an optimization (no probe; a suggestion, not a finding). **Remedy:** read the event in r.events or cig runs <id>; most runtimes fall back to epoll on EPERM
+2. code that wants a path to the kernel the watch cannot see (no probe; a suggestion, not a finding). **Remedy:** treat it as a finding: nothing ordinary needs io_uring inside a rehearsal
+
+Related: `E779`, `E777`.
+
+
 ### E777 no isolation for untrusted code
 
 *burn · since 1.11.0 · arises in run*
@@ -2229,6 +2289,24 @@ The hop asked the box to isolate it (a network of its own: off or registry) and 
 3. the script declares no pack { }, and the box is a layer over the pack, so there is nothing to put it over (no probe; a suggestion, not a finding). **Remedy:** declare pack { "." } (or the roots the hop writes under) as the script's first statement
 
 Related: `E763`, `E771`.
+
+
+### E779 the watch fell back to ptrace
+
+*burn · since 1.21.0 · arises in run*
+
+**Kind of no:** can't see any ciggies bro (yours: you're pointed at the wrong place; wrong address: a path, a name, a directory not on PATH; ENOENT).
+
+The box's watch (box.watch) reads what a hop opens, connects to and runs through seccomp user notification. This kernel or container does not offer it, so the same calls are traced with ptrace instead: the same events, slower. The watch is never dropped for want of the fast route. Said once per hop.
+
+**What to type next:** nothing to do; a kernel from 5.0 on, and a container that allows seccomp(2) with a listener, gives the fast route
+
+**Known causes**, ranked; doctor checks them in this order:
+
+1. the kernel is older than 5.0, or the container's seccomp profile forbids a notification listener, or another listener is already installed in the hop's filter chain (a cig inside a watched hop) (no probe; a suggestion, not a finding). **Remedy:** the watch still works; to get the fast route run on a newer kernel or a container that allows it
+2. the hop is already traced, or the ptrace route is refused too (yama, a container), in which case a watched hop is refused rather than run unwatched (E777) (no probe; a suggestion, not a finding). **Remedy:** allow ptrace of descendants (kernel.yama.ptrace_scope 1 is enough) or run where seccomp notification is available
+
+Related: `E776`, `E777`.
 
 
 ### E780 a layer was kept, not applied
