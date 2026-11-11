@@ -1172,6 +1172,7 @@ impl Kernel {
         if reused.is_some() {
             hopwatch::skipped(b'b');
         }
+        let kept_scans = reused.is_some();
         let mut reused = reused.map(Vec::into_iter);
         for r in roots {
             let s = match reused.as_mut().and_then(Iterator::next) {
@@ -1271,7 +1272,10 @@ impl Kernel {
                         tin::globs(touches_sealed).ok()
                     };
                     let mut from_git: Vec<(usize, PathBuf, String, String, Seen)> = Vec::new();
-                    let mut to_tin: Vec<PathBuf> = Vec::new();
+                    // Each path with the stat tuple this hop's own scan read
+                    // for it (#148): the stat cache compares against that, so
+                    // a file is `lstat`ed once per hop, not again here.
+                    let mut to_tin: Vec<(PathBuf, Option<statcache::StatTuple>)> = Vec::new();
                     let mut to_seal: Vec<PathBuf> = Vec::new();
                     for (ri, s) in inside.iter().enumerate() {
                         let sets: Vec<&globset::GlobSet> =
@@ -1279,7 +1283,7 @@ impl Kernel {
                                 .into_iter()
                                 .flatten()
                                 .collect();
-                        for (rel, meta) in s.iter() {
+                        for (rel, meta, scanned) in s.iter_stat() {
                             if meta.is_dir() || !set.is_match(scan::rel_path(rel).as_ref()) {
                                 continue;
                             }
@@ -1295,7 +1299,7 @@ impl Kernel {
                                     continue;
                                 }
                             }
-                            to_tin.push(path);
+                            to_tin.push((path, scanned));
                         }
                     }
                     if !from_git.is_empty() {
@@ -1338,7 +1342,7 @@ impl Kernel {
                         }
                         for (ri, path, blob, sha256, meta) in from_git {
                             if !pinned_ok[ri] {
-                                to_tin.push(path);
+                                to_tin.push((path, None));
                                 continue;
                             }
                             let repo = repos[ri].as_ref().expect("a pinned repo");
@@ -1362,7 +1366,7 @@ impl Kernel {
                                 },
                             );
                         }
-                        to_tin.sort();
+                        to_tin.sort_by(|a, b| a.0.cmp(&b.0));
                     }
                     // #148: the stat cache. A file in `to_tin` whose stat
                     // tuple matches the cache's, is not racy against the
@@ -1380,26 +1384,33 @@ impl Kernel {
                         (statcache::Cache::default(), String::new())
                     };
                     let mut uncached: Vec<PathBuf> = Vec::new();
-                    let mut cache_hits: Vec<(PathBuf, tin::Stashed)> = Vec::new();
-                    for path in to_tin.drain(..) {
+                    // A file whose stat tuple matches is a candidate; the tin
+                    // is asked about all the candidates' objects at once.
+                    let mut candidates: Vec<(PathBuf, &statcache::Entry, statcache::StatTuple)> =
+                        Vec::new();
+                    for (path, scanned) in to_tin.drain(..) {
                         if !cache_on {
                             uncached.push(path);
                             continue;
                         }
-                        let key = statcache::encode_abs(&path);
                         // A file the change watch has not seen touched since
                         // this process wrote its entry is what the entry
                         // says: no `lstat` (`hop_watch`, #148).
-                        let entry = cache.entries.get(&key);
+                        let key = statcache::key_of(&path);
+                        let entry = cache.entries.get(key.as_ref());
                         let clean = trusted
                             .as_ref()
                             .is_some_and(|t| t.untouched(&path, cache.written_at_ns));
+                        // The scan's own stat stands in for a second one,
+                        // except when the scan was the last hop's kept one
+                        // (it is only as fresh as the watch says).
                         let stat = match (clean, entry) {
                             (true, Some(e)) => {
                                 hopwatch::skipped(b't');
                                 Some(e.stat)
                             }
-                            _ => statcache::stat_of(&path),
+                            _ if kept_scans => statcache::stat_of(&path),
+                            _ => scanned.or_else(|| statcache::stat_of(&path)),
                         };
                         let (Some(entry), Some(now_stat)) = (entry, stat) else {
                             uncached.push(path);
@@ -1411,7 +1422,19 @@ impl Kernel {
                             uncached.push(path);
                             continue;
                         }
-                        let Some(object) = tin::object_for(&entry.sha256) else {
+                        candidates.push((path, entry, now_stat));
+                    }
+                    let hashes: Vec<&str> = candidates
+                        .iter()
+                        .map(|(_, e, _)| e.sha256.as_str())
+                        .collect();
+                    let objects = tin::ObjectIndex::new(&hashes);
+                    drop(hashes);
+                    let mut cache_hits: Vec<(PathBuf, tin::Stashed)> =
+                        Vec::with_capacity(candidates.len());
+                    let mut hit_recipes: Vec<bool> = Vec::with_capacity(candidates.len());
+                    for (path, entry, now_stat) in candidates {
+                        let Some((object, is_recipe)) = objects.find(&entry.sha256) else {
                             // The cache remembers a hash the tin no longer
                             // holds: a gc took it after the last run. The
                             // file is stashed again; the fresh entry
@@ -1435,6 +1458,7 @@ impl Kernel {
                         if let Some(map) = pre_stat.as_mut() {
                             map.insert(path.clone(), now_stat);
                         }
+                        hit_recipes.push(is_recipe);
                         cache_hits.push((path, stashed));
                     }
                     let to_tin = uncached;
@@ -1471,13 +1495,23 @@ impl Kernel {
                                 list.push_str(&format!("{}\n", o.display()));
                             }
                         }
-                        for (_, st) in &cache_hits {
-                            for o in tin::pending_for_object(&st.object) {
-                                list.push_str(&format!("{}\n", o.display()));
+                        for ((_, st), is_recipe) in cache_hits.iter().zip(&hit_recipes) {
+                            if *is_recipe {
+                                for o in tin::pending_for_object(&st.object) {
+                                    list.push_str(&o.to_string_lossy());
+                                    list.push('\n');
+                                }
+                            } else {
+                                list.push_str(&st.object.to_string_lossy());
+                                list.push('\n');
                             }
                         }
-                        if !list.is_empty() {
-                            let pending = dir.join(tin::PENDING);
+                        let pending = dir.join(tin::PENDING);
+                        // The same list a hop of this run already wrote (and
+                        // synced) is not written and synced again.
+                        let already = !list.is_empty()
+                            && std::fs::read(&pending).is_ok_and(|old| old == list.as_bytes());
+                        if !list.is_empty() && !already {
                             if let Err(e) = std::fs::write(&pending, &list)
                                 .and_then(|()| journal::sync_file(&pending))
                             {
@@ -1487,8 +1521,11 @@ impl Kernel {
                             }
                         }
                     }
-                    for (path, st) in cache_hits {
-                        tinned.insert(path, st);
+                    // Sorted hits are built in one pass, not inserted one by one.
+                    if tinned.is_empty() {
+                        tinned = cache_hits.into_iter().collect();
+                    } else {
+                        tinned.extend(cache_hits);
                     }
                     for (path, st) in staged {
                         match st.commit() {
@@ -1571,6 +1608,7 @@ impl Kernel {
                 Err(e) => warnings.push(e),
             }
         }
+        statcache::note_hop_stats("begin");
         let work = cwd
             .map(Path::to_path_buf)
             .or_else(|| std::env::current_dir().ok())
@@ -1776,7 +1814,17 @@ impl Kernel {
         // file whose ctime did not move while the hop ran was not written
         // to at all, so no hash is taken for it: `pre_stat` remembers the
         // before-tuple, and `stat_of(p)` reads the after-tuple cheaply.
-        if !quiet {
+        // Two scans that agree on every stat tuple, and none of them too new
+        // to trust, are the proof the per-file check below would build up one
+        // file at a time (#148): no tinned file was written to.
+        let nothing_moved = !quiet
+            && !partial
+            && afters.len() == watch.inside.len()
+            && afters
+                .iter()
+                .zip(&watch.inside)
+                .all(|(a, b)| scan::same_stat(b, a, watch.started_ns));
+        if !quiet && !nothing_moved {
             let flagged: std::collections::HashSet<&PathBuf> = writes
                 .modified
                 .iter()
@@ -1787,17 +1835,33 @@ impl Kernel {
                 if st.link.is_some() || flagged.contains(p) {
                     continue;
                 }
-                let is_file = std::fs::symlink_metadata(p)
-                    .map(|m| m.is_file())
-                    .unwrap_or(false);
-                if !is_file {
-                    continue;
-                }
+                // The scan after already read this file's stat (it keeps the
+                // inode and ctime beside the rest), so a file it saw costs
+                // no `lstat` here. A path it did not see as a file, or a
+                // scan that stopped at the cap, is asked of the disk, as it
+                // always was.
+                let scanned = if partial {
+                    None
+                } else {
+                    afters.iter().find_map(|a| a.stat_of_path(p))
+                };
+                let now = match scanned {
+                    Some(t) => Some(t),
+                    None => {
+                        let is_file = std::fs::symlink_metadata(p)
+                            .map(|m| m.is_file())
+                            .unwrap_or(false);
+                        if !is_file {
+                            continue;
+                        }
+                        statcache::stat_of(p)
+                    }
+                };
                 // The stat cache's shortcut: ctime moved on every write,
                 // and `pre_stat` knows what it was. An unchanged tuple
                 // proves the file was never written to.
                 if let Some(map) = &watch.pre_stat {
-                    if let (Some(before), Some(now)) = (map.get(p), statcache::stat_of(p)) {
+                    if let (Some(before), Some(now)) = (map.get(p), now) {
                         if statcache::unchanged_through(before, &now, watch.started_ns) {
                             continue;
                         }
@@ -1820,6 +1884,7 @@ impl Kernel {
                 writes.modified.push(p);
             }
         }
+        statcache::note_hop_stats("end");
         for before in &watch.outside {
             let now = scan::scan(&before.root, 3, 5_000, None);
             // A shallow scan that stopped at its cap (a door to `/`, as a

@@ -55,6 +55,44 @@ pub fn is_enabled() -> bool {
     })
 }
 
+/// A test-only counter of the per-file questions a hop asks the file system
+/// (#148): a stat by the cache (`stat_of`), a tin object looked up one at a
+/// time (`object_for`), and an entry a scan read (`lstat`). With
+/// `CIG_INTERNAL_HOP_STATS` set to a file, the count so far is appended there
+/// as a line at the end of a hop's begin and end, and restarts. A hop over an
+/// unchanged tree must ask each of its files once per scan and nothing more;
+/// the test that says so counts these, never time. Unset outside tests: one
+/// relaxed add per call.
+pub(crate) static STAT_OF: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+pub(crate) static OBJECT_FOR: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+pub(crate) static SCAN_LSTAT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+pub(crate) fn note_hop_stats(phase: &str) {
+    use std::io::Write;
+    use std::sync::atomic::Ordering::Relaxed;
+    let Some(path) = std::env::var_os("CIG_INTERNAL_HOP_STATS") else {
+        return;
+    };
+    if path.is_empty() {
+        return;
+    }
+    let line = format!(
+        "{phase} stat_of={} object_for={} scan_lstat={}\n",
+        STAT_OF.swap(0, Relaxed),
+        OBJECT_FOR.swap(0, Relaxed),
+        SCAN_LSTAT.swap(0, Relaxed)
+    );
+    if let Ok(mut f) = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(Path::new(&path))
+    {
+        let _ = f.write_all(line.as_bytes());
+    }
+}
+
 /// How close to the cache's write time a file's mtime can be before the
 /// cache refuses to trust itself: two seconds covers FAT-grade timestamps
 /// (the coarsest of the common filesystems), the same margin the scan uses
@@ -142,15 +180,18 @@ pub fn load(pack_hash: &str) -> Cache {
         return Cache::default();
     }
     let mut cursor = 0usize;
-    let mut entries = BTreeMap::new();
+    // Entries are written in key order, so the map is built in one pass
+    // from the list instead of inserted one by one.
+    let mut list: Vec<(Vec<u8>, Entry)> = Vec::with_capacity(entry_count.min(1 << 20));
     for _ in 0..entry_count {
         let Some(entry) = read_one(&body, &mut cursor) else {
             // A truncated index is not a bug: return what has read cleanly,
             // and the hop stashes the rest.
             break;
         };
-        entries.insert(entry.0, entry.1);
+        list.push(entry);
     }
+    let entries: BTreeMap<Vec<u8>, Entry> = list.into_iter().collect();
     Cache {
         entries,
         written_at_ns,
@@ -305,6 +346,7 @@ pub fn unchanged_through(before: &StatTuple, now: &StatTuple, started_ns: u64) -
 /// link, a directory or a socket never caches: the tin keeps a link as its
 /// target, not as bytes to hash.
 pub fn stat_of(path: &Path) -> Option<StatTuple> {
+    STAT_OF.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let meta = fs::symlink_metadata(path).ok()?;
     if !meta.file_type().is_file() {
         return None;
@@ -416,6 +458,20 @@ fn decode_rel(bytes: &[u8]) -> PathBuf {
     #[cfg(not(unix))]
     {
         PathBuf::from(String::from_utf8_lossy(bytes).as_ref())
+    }
+}
+
+/// The key `encode_abs` gives, borrowed where the platform allows (Unix),
+/// so a lookup in the cache allocates nothing.
+pub fn key_of(path: &Path) -> std::borrow::Cow<'_, [u8]> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        std::borrow::Cow::Borrowed(path.as_os_str().as_bytes())
+    }
+    #[cfg(not(unix))]
+    {
+        std::borrow::Cow::Owned(encode_abs(path))
     }
 }
 

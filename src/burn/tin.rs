@@ -104,6 +104,7 @@ pub(crate) fn recipe_path(hash: &str) -> PathBuf {
 /// The tin's whole object or recipe for these bytes, when it has one: what
 /// a parcel leaves for a file whose bytes git held on the other machine.
 pub fn object_for(sha256: &str) -> Option<PathBuf> {
+    super::statcache::OBJECT_FOR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     if sha256.len() < 2 {
         return None;
     }
@@ -113,6 +114,111 @@ pub fn object_for(sha256: &str) -> Option<PathBuf> {
     }
     let r = recipe_path(sha256);
     r.is_file().then_some(r)
+}
+
+/// What the tin holds, asked once for many hashes (#148). A stat-cache hop
+/// must know that each hit's object is still in the tin (a `cig tin gc`
+/// takes them); one `stat` per file was most of what an unchanged tree cost
+/// after the scan. With enough hashes to ask about, the directories they
+/// fall in are listed instead (a few hundred reads, not one per file), and
+/// the answer is the same: a name there is a whole file that is there. Any
+/// doubt (a directory that cannot be read, too many entries to be worth
+/// listing, a name not seen) asks the file system about that one hash, as
+/// `object_for` always did.
+pub struct ObjectIndex {
+    objects: PathBuf,
+    recipes: PathBuf,
+    objs: HashSet<String>,
+    recs: HashSet<String>,
+    listed: bool,
+}
+
+/// Fewer hashes than this are asked one by one: listing a directory costs
+/// about as much as a handful of `stat`s.
+const INDEX_MIN: usize = 512;
+
+impl ObjectIndex {
+    pub fn new(hashes: &[&str]) -> Self {
+        let mut ix = ObjectIndex {
+            objects: objects_dir(),
+            recipes: recipes_dir(),
+            objs: HashSet::new(),
+            recs: HashSet::new(),
+            listed: false,
+        };
+        if hashes.len() < INDEX_MIN {
+            return ix;
+        }
+        // Reading far more names than there are hashes is no saving: past
+        // this many, the listing is dropped and each hash is asked alone.
+        let budget = hashes.len().saturating_mul(8).saturating_add(4096);
+        let mut seen = 0usize;
+        let mut buckets: Vec<&str> = hashes.iter().filter_map(|h| h.get(..2)).collect();
+        buckets.sort_unstable();
+        buckets.dedup();
+        if !list_buckets(&ix.objects, &buckets, &mut ix.objs, &mut seen, budget) {
+            ix.objs.clear();
+            return ix;
+        }
+        let mut missing: Vec<&str> = hashes
+            .iter()
+            .filter(|h| !ix.objs.contains(**h))
+            .filter_map(|h| h.get(..2))
+            .collect();
+        missing.sort_unstable();
+        missing.dedup();
+        if !list_buckets(&ix.recipes, &missing, &mut ix.recs, &mut seen, budget) {
+            ix.recs.clear();
+        }
+        ix.listed = true;
+        ix
+    }
+
+    /// The object (or recipe) for this hash and whether it is a recipe: what
+    /// `object_for` says, with the listing consulted first.
+    pub fn find(&self, sha256: &str) -> Option<(PathBuf, bool)> {
+        if self.listed {
+            if let Some(b) = sha256.get(..2) {
+                if self.objs.contains(sha256) {
+                    return Some((self.objects.join(b).join(sha256), false));
+                }
+                if self.recs.contains(sha256) {
+                    return Some((self.recipes.join(b).join(sha256), true));
+                }
+            }
+        }
+        let o = object_for(sha256)?;
+        let r = is_recipe(&o);
+        Some((o, r))
+    }
+}
+
+/// The regular files in each bucket directory, by name. False when more
+/// than `budget` names were read in all.
+fn list_buckets(
+    root: &Path,
+    buckets: &[&str],
+    into: &mut HashSet<String>,
+    seen: &mut usize,
+    budget: usize,
+) -> bool {
+    for b in buckets {
+        let Ok(rd) = fs::read_dir(root.join(b)) else {
+            continue;
+        };
+        for e in rd.flatten() {
+            *seen += 1;
+            if *seen > budget {
+                return false;
+            }
+            if e.file_type().is_ok_and(|t| t.is_file()) {
+                if let Some(n) = e.file_name().to_str() {
+                    into.insert(n.to_owned());
+                }
+            }
+        }
+    }
+    true
 }
 
 /// Every path in the tin the journal will end up referring to for this
@@ -2086,6 +2192,51 @@ mod tests {
             None => std::env::remove_var("CIGSCRIPT_HOME"),
         }
         out
+    }
+
+    /// #148: the listing a many-hash hop asks the tin with says what
+    /// `object_for` says, for a whole object, a recipe, something that is
+    /// not a file under the name, and nothing at all; and a short list is
+    /// asked one by one.
+    #[test]
+    fn the_object_index_answers_as_object_for_does() {
+        with_home(|_| {
+            let mut hashes: Vec<String> = Vec::new();
+            for i in 0..700u32 {
+                let h = format!("{:02x}{:062x}", i % 256, i);
+                let (o, r) = (object_path(&h), recipe_path(&h));
+                match i % 7 {
+                    0 => {}
+                    1 => {
+                        fs::create_dir_all(r.parent().unwrap()).unwrap();
+                        fs::write(&r, "{}").unwrap();
+                    }
+                    2 => fs::create_dir_all(&o).unwrap(),
+                    _ => {
+                        fs::create_dir_all(o.parent().unwrap()).unwrap();
+                        fs::write(&o, "x").unwrap();
+                    }
+                }
+                hashes.push(h);
+            }
+            let refs: Vec<&str> = hashes.iter().map(String::as_str).collect();
+            let want = |h: &str| {
+                object_for(h).map(|p| {
+                    let r = is_recipe(&p);
+                    (p, r)
+                })
+            };
+            let ix = ObjectIndex::new(&refs);
+            assert!(ix.listed, "700 hashes are listed, not asked one by one");
+            for h in &refs {
+                assert_eq!(ix.find(h), want(h), "{h}");
+            }
+            let few = ObjectIndex::new(&refs[..10]);
+            assert!(!few.listed, "a short list is asked one by one");
+            for h in &refs {
+                assert_eq!(few.find(h), want(h), "{h}");
+            }
+        });
     }
 
     #[test]

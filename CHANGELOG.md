@@ -8,6 +8,45 @@ project follows semantic versioning.
 - **Burn kernel throughput: native snapshots in the tin, a group sync, compressed journals** (#147).
   An overwrite's before-state now goes into the tin, chunked and deduplicated as a hop's is, instead of a whole file in `runs/<id>/snapshots/`; runs written before still unburn (the restore reads either form). The flushes of those snapshots are grouped (64 snapshots or 10 ms, and before a process runs, the run record, and close) while the journal's own sync stays per line; `CIG_SNAPSHOT_SYNC=op` restores the per-op flush. A finished run's journal is stored as `journal.jsonl.zst` with the chain checked through the stream (`CIG_JOURNAL_ZST=off` keeps it plain). New crates: `zstd`, `zstd-safe`, `zstd-sys` (BSD-3-Clause, with the zstd library the last builds from C source) and `jobserver` (Apache-2.0 OR MIT); THIRD-PARTY-NOTICES.md is regenerated. Also fixed: loading a journal, marking entries restored and checking a run before an unburn each walked every entry per entry (quadratic in the run's length).
   Measured (release build without LTO, ext4 on a shared machine at load 6 to 8, so the disk's `fsync` was 4 to 9 ms; interleaved against 1.20.0, best of 3): overwrite 1,000 x 1 KB 11,362 ms to 4,041 ms; 200 x 64 KB 2,028 ms to 1,075 ms; 50 x 1 MB to 620 ms; journal bytes per op on a finished run 575 to 56; run folder for 1,000 x 1 KB 3,308 KB to 1,517 KB (the 1,000 files here hold the same bytes, which the tin stores once). Not met: unburn is still about as slow as the burn (1.1 to 1.6 times it), small objects are not yet packed per run, chunks are not yet compressed, and reflink before-states are not built. Tests: `native_snapshots_dedupe_in_the_tin`, `old_snapshot_folders_still_unburn`, `compressed_journals_verify`, `kill_at_every_op_rolls_back_exactly`, `parallel_unburn_keeps_per_path_order`, `the_stress_test_rolls_back_bit_for_bit`, `a_missing_or_short_snapshot_is_refused_with_e703_never_restored_wrong`, `snapshot_sync_op_still_works`.
+- **A hop over 10,000 unchanged files costs 91 ms, not 228** (#148, the 100 ms
+  target). With `hop_statcache on` the hop asked the file system about each file
+  six times; it now asks twice, once for each scan. The scan keeps the inode and
+  ctime of every file it reads, so the stat cache and the check after the hop
+  use the scan's own `lstat`; the tin's objects are checked by listing the
+  directories the hits fall in (512 hits or more) instead of one `stat` each;
+  and two scans that agree on every stat tuple, with nothing inside the racy
+  margin, prove no file was written to, so the per-file hash check after the hop
+  is not run. `statx` calls per hop: 60,775 to 20,777 (best of 7, 16 cores:
+  228 ms to 91 ms at load 5, 223 to 101 ms at load 10; with `hop_watch on`,
+  145 to 87 ms at load 6-7). The journal,
+  the objects and the restore are the same bytes: the same three hops over a
+  tree gave journals equal entry for entry. Tests:
+  `an_unchanged_hop_asks_each_file_once_per_scan` (counts questions, not time),
+  `the_object_index_answers_as_object_for_does`,
+  `same_stat_proves_a_quiet_tree_and_nothing_else`. `docs/HOPS.md` says what
+  makes an unchanged hop cheap.
+- **The tin's tests carry the names the issue gave them, and `box_hide_keyring` exists** (#105).
+  Every row of the issue's Tests table is now a test of that name, in
+  `tests/cli.rs` or `tests/attack/`. Renamed, behavior unchanged:
+  `cig_inside_a_boxed_hop_records_its_run_and_unburns_with_the_parent`,
+  `a_recomputed_chain_does_not_verify`, `a_cut_short_journal_is_caught`,
+  `an_older_journal_is_caught`, `no_report_or_log_contains_the_key`. New:
+  `a_boxed_hop_cannot_write_the_tin` and `a_guarded_unboxed_hop_cannot_write_the_tin`
+  (a hop overwrites, deletes and removes what it can reach; not a byte of the
+  tin changes and the rollbacks still restore), `a_boxed_hop_cannot_see_the_key`,
+  `a_poisoned_inbox_is_dropped` (an object in a child run's inbox that does not
+  hash to its name), `the_key_is_not_in_the_tin` (a copy of the tin holds no
+  key and opens nothing), `an_exported_key_opens_a_restored_backup`,
+  `rekey_keeps_every_run_restorable` (three runs, newest first),
+  `a_parcel_is_resigned_on_import` and `a_pinned_version_reads_its_own_runs`.
+  The setting `box_hide_keyring` (off by default) is new: on, a guarded or boxed
+  hop gets no session bus even when the key is in a file (with the key in the
+  keyring the bus was always cut). docs/BURN.md gains the settings table, with
+  a test that every setting in it is a `cig config` key; `key_reminder`,
+  `journal_sign` and `verify_sample` each have a test that they take effect.
+  SECURITY.md and docs/BURN.md no longer say the vault's installer is not
+  shipped, and say plainly that the macOS launchd install has not been run on
+  a Mac.
 - **A faster tree-walker, steps T3 and T4 of #146.** Calls and loop turns take
   their scope from a free list and the arguments go straight into the callee's
   frame: no allocation per call in steady state (a counting allocator over
