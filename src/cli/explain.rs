@@ -13,6 +13,36 @@
 use super::{exit, Ctx};
 use crate::errors::{all, diagnostic_schema, lookup, lookup_probe, registry, Code};
 
+/// `cig explain --layers FILE:LINE:COL`: the layers are CigarScript's, so
+/// the `cigar` on PATH answers, with the same output flags; its exit code is
+/// cig's.
+pub fn layers(ctx: &Ctx, place: &str) -> i32 {
+    let mut args: Vec<&str> = Vec::new();
+    if ctx.json {
+        args.push("--json");
+    }
+    if ctx.plain {
+        args.push("--plain");
+    }
+    if !ctx.color {
+        args.push("--no-color");
+    }
+    args.extend(["explain", "--layers", place]);
+    match std::process::Command::new("cigar").args(&args).status() {
+        Ok(status) => status.code().unwrap_or(exit::SCRIPT_ERROR),
+        Err(e) => {
+            let why = if e.kind() == std::io::ErrorKind::NotFound {
+                "`cig explain --layers` needs cigar, which is not installed".to_string()
+            } else {
+                format!("`cig explain --layers` could not run cigar: {e}")
+            };
+            eprintln!("{} {why}", ctx.red("error[E800 usage]:"));
+            eprintln!("  = hint: ciginstaller install stick cigar");
+            exit::USAGE
+        }
+    }
+}
+
 pub fn explain(ctx: &Ctx, code: Option<String>, schema: bool) -> i32 {
     if schema {
         outln!(

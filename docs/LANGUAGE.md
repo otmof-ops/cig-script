@@ -313,7 +313,9 @@ kernel (E75x folds and the pack), E8xx usage, E9xx internal. Every code is a
 node in `errors/registry.toml` with its kind of no, what to type next and its
 ranked causes; `docs/ERRORS.md` is generated from it, `cig explain E502`
 prints the page, `cig explain --schema` prints the JSON Schema `--json`
-output follows, and doctor uses the same table to diagnose. Codes are stable
+output follows, `cig explain --layers sales.cigar:12:1` hands the place to
+cigar, which peels CigarScript's layers there, and doctor uses the same table
+to diagnose. Codes are stable
 across versions; a retired code is never reused.
 
 ## Script arguments

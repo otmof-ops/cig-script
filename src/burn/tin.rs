@@ -18,7 +18,7 @@ use super::journal::sha256_file;
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -134,6 +134,22 @@ pub fn pending_for_hash(sha256: &str) -> Vec<PathBuf> {
         out
     } else {
         vec![p]
+    }
+}
+
+/// `pending_for_hash` for an object the caller has already found (a stat
+/// cache hit): no second look for it, only the chunks a recipe names.
+pub fn pending_for_object(object: &Path) -> Vec<PathBuf> {
+    if is_recipe(object) {
+        let mut out = vec![object.to_path_buf()];
+        if let Ok(r) = read_recipe(object) {
+            for c in r.chunks {
+                out.push(object_path(&c.sha256));
+            }
+        }
+        out
+    } else {
+        vec![object.to_path_buf()]
     }
 }
 
@@ -398,6 +414,21 @@ pub fn prepare(path: &Path) -> io::Result<Staged> {
 /// nothing; the rest wait under temporary names. The recipe is written
 /// when the tin has none for this exact content.
 fn prepare_chunked(path: &Path, meta: &fs::Metadata) -> io::Result<Staged> {
+    // A big file is cut and hashed on every core (#148); a failure there
+    // (a file that shrank while it was read, say) is retried on the serial
+    // path, which gives the error a plain read would have given.
+    let workers = chunk_workers(meta.len());
+    if workers > 1 {
+        if let Ok(staged) = prepare_chunked_parallel(path, meta, workers) {
+            return Ok(staged);
+        }
+    }
+    prepare_chunked_serial(path, meta)
+}
+
+/// The serial reference: one pass, one core. The parallel path must give
+/// exactly what this gives (`parallel_hash_equals_serial_hash`).
+fn prepare_chunked_serial(path: &Path, meta: &fs::Metadata) -> io::Result<Staged> {
     note_file_read();
     fs::create_dir_all(recipes_dir())?;
     let file = fs::File::open(path)?;
@@ -436,7 +467,17 @@ fn prepare_chunked(path: &Path, meta: &fs::Metadata) -> io::Result<Staged> {
         }
         return Err(e);
     }
-    let sha256 = hex::encode(whole.finalize());
+    stage_recipe(chunks, hex::encode(whole.finalize()), total, meta)
+}
+
+/// The end both chunking paths share: the recipe for the chunks, written
+/// beside them unless the tin already holds this exact one.
+fn stage_recipe(
+    chunks: Vec<StagedChunk>,
+    sha256: String,
+    total: u64,
+    meta: &fs::Metadata,
+) -> io::Result<Staged> {
     let recipe = Recipe {
         format: RECIPE_FORMAT,
         sha256: sha256.clone(),
@@ -478,6 +519,354 @@ fn prepare_chunked(path: &Path, meta: &fs::Metadata) -> io::Result<Staged> {
         mtime_ns: super::journal::mtime_ns(meta),
         link: None,
     })
+}
+
+/// A file this big is cut into chunks and hashed on every core. Below it the
+/// threads cost more than they save.
+const PARALLEL_CHUNK_MIN: u64 = 16 * 1024 * 1024;
+/// How much of a file one worker cuts before its stream is joined to the one
+/// before it.
+const CUT_SEGMENT: u64 = 8 * 1024 * 1024;
+/// A recipe this big (and this many chunks) is restored on every core.
+const PARALLEL_RESTORE_MIN: u64 = 8 * 1024 * 1024;
+
+fn cores() -> usize {
+    std::thread::available_parallelism()
+        .map_or(1, |n| n.get())
+        .min(8)
+}
+
+/// How many threads chunk a file of `len` bytes: one means the serial path.
+fn chunk_workers(len: u64) -> usize {
+    if len < PARALLEL_CHUNK_MIN {
+        1
+    } else {
+        cores()
+    }
+}
+
+/// Read exactly `buf.len()` bytes at `offset`, leaving no cursor to share.
+fn read_exact_at(f: &fs::File, buf: &mut [u8], offset: u64) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileExt;
+        f.read_exact_at(buf, offset)
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::FileExt;
+        let mut done = 0usize;
+        while done < buf.len() {
+            let n = f.seek_read(&mut buf[done..], offset + done as u64)?;
+            if n == 0 {
+                return Err(io::ErrorKind::UnexpectedEof.into());
+            }
+            done += n;
+        }
+        Ok(())
+    }
+}
+
+/// Ask the kernel to start writing a range back now, without waiting for it,
+/// so the `fsync` that ends a restore finds most of the file already on its
+/// way to the disk. A hint: where it is unknown or refused, nothing changes.
+fn start_writeback(f: &fs::File, offset: u64, len: u64) {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::AsRawFd;
+        // SAFETY: a plain syscall on a descriptor this function borrows.
+        unsafe {
+            libc::sync_file_range(
+                f.as_raw_fd(),
+                offset as libc::off64_t,
+                len as libc::off64_t,
+                libc::SYNC_FILE_RANGE_WRITE,
+            );
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = (f, offset, len);
+}
+
+/// Write all of `buf` at `offset` (`pwrite`), leaving no cursor to share.
+fn write_all_at(f: &fs::File, buf: &[u8], offset: u64) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileExt;
+        f.write_all_at(buf, offset)
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::FileExt;
+        let mut done = 0usize;
+        while done < buf.len() {
+            let n = f.seek_write(&buf[done..], offset + done as u64)?;
+            if n == 0 {
+                return Err(io::ErrorKind::WriteZero.into());
+            }
+            done += n;
+        }
+        Ok(())
+    }
+}
+
+struct Lane<T> {
+    claimed: usize,
+    consumed: usize,
+    ready: BTreeMap<usize, io::Result<T>>,
+    stop: bool,
+}
+
+/// Sets the lane to stop when dropped, so workers never wait on a consumer
+/// that has gone (an error, or a panic in the sink).
+struct StopOnDrop<'a, T>(&'a std::sync::Mutex<Lane<T>>, &'a std::sync::Condvar);
+
+impl<T> Drop for StopOnDrop<'_, T> {
+    fn drop(&mut self) {
+        if let Ok(mut g) = self.0.lock() {
+            g.stop = true;
+        }
+        self.1.notify_all();
+    }
+}
+
+/// Run `work(0..n)` on `workers` threads and hand each result to `sink` in
+/// index order, on the calling thread. At most `window` results are ahead
+/// of the sink, so memory is bounded. The first error stops the run; what
+/// finished but was never sunk goes to `discard`, so a caller can clean up.
+fn ordered_map<T: Send>(
+    n: usize,
+    workers: usize,
+    window: usize,
+    work: &(dyn Fn(usize) -> io::Result<T> + Sync),
+    mut sink: impl FnMut(usize, T),
+    mut discard: impl FnMut(T),
+) -> io::Result<()> {
+    use std::sync::{Condvar, Mutex};
+    let lane = Mutex::new(Lane {
+        claimed: 0,
+        consumed: 0,
+        ready: BTreeMap::new(),
+        stop: false,
+    });
+    let cv = Condvar::new();
+    let window = window.max(1);
+    let mut outcome = Ok(());
+    std::thread::scope(|s| {
+        let _stop = StopOnDrop(&lane, &cv);
+        for _ in 0..workers.max(1) {
+            s.spawn(|| loop {
+                let i = {
+                    let Ok(mut g) = lane.lock() else { return };
+                    loop {
+                        if g.stop || g.claimed >= n {
+                            return;
+                        }
+                        if g.claimed < g.consumed + window {
+                            break;
+                        }
+                        g = match cv.wait(g) {
+                            Ok(g) => g,
+                            Err(_) => return,
+                        };
+                    }
+                    let i = g.claimed;
+                    g.claimed += 1;
+                    i
+                };
+                let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(i)))
+                    .unwrap_or_else(|_| Err(io::Error::other("a tin worker panicked")));
+                if let Ok(mut g) = lane.lock() {
+                    g.ready.insert(i, r);
+                }
+                cv.notify_all();
+            });
+        }
+        for i in 0..n {
+            let r = {
+                let Ok(mut g) = lane.lock() else {
+                    outcome = Err(io::Error::other("a tin worker panicked"));
+                    return;
+                };
+                loop {
+                    if let Some(r) = g.ready.remove(&i) {
+                        g.consumed = i + 1;
+                        break r;
+                    }
+                    g = match cv.wait(g) {
+                        Ok(g) => g,
+                        Err(_) => {
+                            outcome = Err(io::Error::other("a tin worker panicked"));
+                            return;
+                        }
+                    };
+                }
+            };
+            cv.notify_all();
+            match r {
+                Ok(t) => sink(i, t),
+                Err(e) => {
+                    outcome = Err(e);
+                    return;
+                }
+            }
+        }
+    });
+    if let Ok(g) = lane.into_inner() {
+        for (_, r) in g.ready {
+            if let Ok(t) = r {
+                discard(t);
+            }
+        }
+    }
+    outcome
+}
+
+/// The first chunk of `file` from `pos`: where it ends.
+fn next_cut(file: &fs::File, len: u64, pos: u64) -> io::Result<u64> {
+    let want = u64::from(CHUNK_MAX).min(len - pos) as usize;
+    let mut buf = vec![0u8; want];
+    read_exact_at(file, &mut buf, pos)?;
+    let c = fastcdc::v2020::FastCDC::new(&buf, CHUNK_MIN, CHUNK_AVG, CHUNK_MAX)
+        .next()
+        .ok_or_else(|| io::Error::other("no chunk where the file has bytes"))?;
+    Ok(pos + (c.offset + c.length) as u64)
+}
+
+/// The cuts one segment's worker finds, from its own guess of where a chunk
+/// begins (the segment's start; the true start for the first segment): every
+/// chunk end up to the first one at or past the segment's end. A cut is only
+/// believed when `CHUNK_MAX` bytes follow its chunk's start in what was read
+/// (fastcdc cuts differently once fewer remain) or the read reached the end
+/// of the file.
+fn segment_cuts(file: &fs::File, len: u64, k: usize) -> io::Result<Vec<u64>> {
+    let s = k as u64 * CUT_SEGMENT;
+    let e = (s + CUT_SEGMENT).min(len);
+    let read_to = (e + u64::from(CHUNK_MAX)).min(len);
+    let mut buf = vec![0u8; (read_to - s) as usize];
+    read_exact_at(file, &mut buf, s)?;
+    let at_end = read_to == len;
+    let mut out = Vec::new();
+    for c in fastcdc::v2020::FastCDC::new(&buf, CHUNK_MIN, CHUNK_AVG, CHUNK_MAX) {
+        if !at_end && c.offset + CHUNK_MAX as usize > buf.len() {
+            break;
+        }
+        let end = s + (c.offset + c.length) as u64;
+        out.push(end);
+        if end >= e {
+            break;
+        }
+    }
+    Ok(out)
+}
+
+/// Every chunk end of a file, the same ones one pass from the start would
+/// find. Each segment is cut on its own thread from a guessed start; the
+/// segments are then joined: a stream that shares one cut with the true one
+/// shares every cut after it (a cut depends on where its chunk began and on
+/// nothing before), so the true list takes the next segment's cuts from the
+/// first one both have. Where none is shared, the true stream is walked on
+/// until one is, which only costs time.
+fn parallel_cuts(file: &fs::File, len: u64, workers: usize) -> io::Result<Vec<u64>> {
+    if len == 0 {
+        return Ok(Vec::new());
+    }
+    let segs = len.div_ceil(CUT_SEGMENT) as usize;
+    let mut per: Vec<Vec<u64>> = Vec::with_capacity(segs);
+    ordered_map(
+        segs,
+        workers,
+        workers * 2,
+        &|k| segment_cuts(file, len, k),
+        |_, c| per.push(c),
+        |_| {},
+    )?;
+    let mut truth = per[0].clone();
+    for (k, mine) in per.iter().enumerate().skip(1) {
+        if truth.last() == Some(&len) {
+            break;
+        }
+        let s = k as u64 * CUT_SEGMENT;
+        let set: HashSet<u64> = mine.iter().copied().collect();
+        let mut at = truth.iter().position(|c| *c > s && set.contains(c));
+        if at.is_none() {
+            let mut pos = truth.last().copied().unwrap_or(0);
+            while pos < len {
+                pos = next_cut(file, len, pos)?;
+                truth.push(pos);
+                if set.contains(&pos) {
+                    at = Some(truth.len() - 1);
+                    break;
+                }
+            }
+        }
+        if let Some(i) = at {
+            truth.truncate(i + 1);
+            let join = truth[i];
+            truth.extend(mine.iter().copied().filter(|c| *c > join));
+        }
+    }
+    Ok(truth)
+}
+
+/// `prepare_chunked`, on `workers` threads: the same chunks, the same
+/// recipe, byte for byte. The cuts are found in parallel, then each chunk is
+/// read, hashed and (if the tin lacks it) written on its own thread, while
+/// the whole file's hash, which no thread can split, is fed in order from the
+/// very bytes the chunks were hashed from.
+fn prepare_chunked_parallel(
+    path: &Path,
+    meta: &fs::Metadata,
+    workers: usize,
+) -> io::Result<Staged> {
+    note_file_read();
+    fs::create_dir_all(recipes_dir())?;
+    let file = fs::File::open(path)?;
+    let len = file.metadata()?.len();
+    let cuts = parallel_cuts(&file, len, workers)?;
+    let work = |i: usize| -> io::Result<(StagedChunk, Vec<u8>)> {
+        let start = if i == 0 { 0 } else { cuts[i - 1] };
+        let mut data = vec![0u8; (cuts[i] - start) as usize];
+        read_exact_at(&file, &mut data, start)?;
+        let sha256 = hex::encode(Sha256::digest(&data));
+        let len = data.len() as u64;
+        let tmp = if pressed_ok(&object_path(&sha256), len, &sha256) {
+            None
+        } else {
+            let t = temp_name("chunk");
+            if let Err(e) = fs::write(&t, &data) {
+                let _ = fs::remove_file(&t);
+                return Err(e);
+            }
+            Some(t)
+        };
+        Ok((StagedChunk { sha256, len, tmp }, data))
+    };
+    let mut whole = Sha256::new();
+    let mut total = 0u64;
+    let mut chunks: Vec<StagedChunk> = Vec::with_capacity(cuts.len());
+    let mut stray: Vec<StagedChunk> = Vec::new();
+    let ran = ordered_map(
+        cuts.len(),
+        workers,
+        workers * 8,
+        &work,
+        |_, (c, data)| {
+            whole.update(&data);
+            total += c.len;
+            chunks.push(c);
+        },
+        |(c, _)| stray.push(c),
+    );
+    if let Err(e) = ran {
+        for c in chunks.iter().chain(stray.iter()) {
+            if let Some(t) = &c.tmp {
+                let _ = fs::remove_file(t);
+            }
+        }
+        return Err(e);
+    }
+    stage_recipe(chunks, hex::encode(whole.finalize()), total, meta)
 }
 
 /// Seal `path` into the tin: encrypted under a fresh random id, never
@@ -844,47 +1233,14 @@ fn materialize_inner(snapshot: &Path, expect_sha256: &str, dest: &Path) -> io::R
                 ),
             ));
         }
-        let mut out = io::BufWriter::new(fs::File::create(dest)?);
-        let mut whole = Sha256::new();
-        for (i, c) in recipe.chunks.iter().enumerate() {
-            let object = object_path(&c.sha256);
-            let data = fs::read(&object).map_err(|e| {
-                io::Error::new(
-                    e.kind(),
-                    format!(
-                        "chunk {} of {} (tin object {}) is missing: {e}; refusing to restore from the recipe",
-                        i + 1,
-                        recipe.chunks.len(),
-                        &c.sha256[..12]
-                    ),
-                )
-            })?;
-            if data.len() as u64 != c.len || hex::encode(Sha256::digest(&data)) != c.sha256 {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!(
-                        "tin object {} is corrupt (chunk {} of {} of the recipe); refusing to restore from it",
-                        &c.sha256[..12],
-                        i + 1,
-                        recipe.chunks.len()
-                    ),
-                ));
-            }
-            whole.update(&data);
-            out.write_all(&data)?;
+        // A big recipe is restored on every core (#148): chunks are read,
+        // checked and written at their own offsets in a file of the right
+        // size, and the whole hash is fed in order from what was checked.
+        let workers = restore_workers(&recipe);
+        if workers > 1 {
+            return restore_parallel(&recipe, snapshot, dest, workers);
         }
-        out.flush()?;
-        out.get_ref().sync_all()?;
-        if hex::encode(whole.finalize()) != recipe.sha256 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "the chunks of recipe {} do not add up to its hash; refusing to restore from it",
-                    snapshot.display()
-                ),
-            ));
-        }
-        return Ok(());
+        return restore_serial(&recipe, snapshot, dest);
     }
     if holds(snapshot) && !expect_sha256.is_empty() {
         // A shared object is checked against its name every time it is
@@ -905,6 +1261,115 @@ fn materialize_inner(snapshot: &Path, expect_sha256: &str, dest: &Path) -> io::R
     fs::copy(snapshot, dest)?;
     #[cfg(unix)]
     fs::set_permissions(dest, fs::metadata(snapshot)?.permissions())?;
+    Ok(())
+}
+
+/// One chunk of a recipe, read from the tin and checked against the length
+/// and hash the recipe names: a missing or corrupt one refuses the restore.
+fn read_chunk_checked(recipe: &Recipe, i: usize) -> io::Result<Vec<u8>> {
+    let c = &recipe.chunks[i];
+    let object = object_path(&c.sha256);
+    let data = fs::read(&object).map_err(|e| {
+        io::Error::new(
+            e.kind(),
+            format!(
+                "chunk {} of {} (tin object {}) is missing: {e}; refusing to restore from the recipe",
+                i + 1,
+                recipe.chunks.len(),
+                &c.sha256[..12]
+            ),
+        )
+    })?;
+    if data.len() as u64 != c.len || hex::encode(Sha256::digest(&data)) != c.sha256 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "tin object {} is corrupt (chunk {} of {} of the recipe); refusing to restore from it",
+                &c.sha256[..12],
+                i + 1,
+                recipe.chunks.len()
+            ),
+        ));
+    }
+    Ok(data)
+}
+
+/// The serial restore: one chunk at a time, in order. What the parallel one
+/// must write, byte for byte.
+fn restore_serial(recipe: &Recipe, snapshot: &Path, dest: &Path) -> io::Result<()> {
+    let mut out = io::BufWriter::new(fs::File::create(dest)?);
+    let mut whole = Sha256::new();
+    for i in 0..recipe.chunks.len() {
+        let data = read_chunk_checked(recipe, i)?;
+        whole.update(&data);
+        out.write_all(&data)?;
+    }
+    out.flush()?;
+    out.get_ref().sync_all()?;
+    if hex::encode(whole.finalize()) != recipe.sha256 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "the chunks of recipe {} do not add up to its hash; refusing to restore from it",
+                snapshot.display()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// How many threads restore this recipe: one means the serial loop.
+fn restore_workers(recipe: &Recipe) -> usize {
+    if recipe.bytes < PARALLEL_RESTORE_MIN || recipe.chunks.len() < 8 {
+        1
+    } else {
+        cores()
+    }
+}
+
+/// Restore a recipe's chunks on `workers` threads with `pwrite`: the file is
+/// made its full size first, each chunk lands at the sum of the lengths
+/// before it once it hashes to its name, and the whole hash is fed in order
+/// from the checked bytes. The result is what the serial loop writes.
+fn restore_parallel(
+    recipe: &Recipe,
+    snapshot: &Path,
+    dest: &Path,
+    workers: usize,
+) -> io::Result<()> {
+    let out = fs::File::create(dest)?;
+    let total: u64 = recipe.chunks.iter().map(|c| c.len).sum();
+    out.set_len(total)?;
+    let mut offsets = Vec::with_capacity(recipe.chunks.len());
+    let mut at = 0u64;
+    for c in &recipe.chunks {
+        offsets.push(at);
+        at += c.len;
+    }
+    let mut whole = Sha256::new();
+    ordered_map(
+        recipe.chunks.len(),
+        workers,
+        workers * 8,
+        &|i| {
+            let data = read_chunk_checked(recipe, i)?;
+            write_all_at(&out, &data, offsets[i])?;
+            start_writeback(&out, offsets[i], data.len() as u64);
+            Ok(data)
+        },
+        |_, data| whole.update(&data),
+        |_| {},
+    )?;
+    out.sync_all()?;
+    if hex::encode(whole.finalize()) != recipe.sha256 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "the chunks of recipe {} do not add up to its hash; refusing to restore from it",
+                snapshot.display()
+            ),
+        ));
+    }
     Ok(())
 }
 
@@ -1534,6 +1999,183 @@ mod tests {
                 (x >> 24) as u8
             })
             .collect()
+    }
+
+    /// What one pass from the start cuts: the reference the parallel cuts
+    /// must equal.
+    fn serial_cuts(data: &[u8]) -> Vec<u64> {
+        let mut out = Vec::new();
+        let mut end = 0u64;
+        for c in fastcdc::v2020::StreamCDC::new(data, CHUNK_MIN, CHUNK_AVG, CHUNK_MAX) {
+            end += c.unwrap().data.len() as u64;
+            out.push(end);
+        }
+        out
+    }
+
+    fn written(dir: &Path, name: &str, data: &[u8]) -> PathBuf {
+        let f = dir.join(name);
+        fs::write(&f, data).unwrap();
+        f
+    }
+
+    #[test]
+    fn parallel_hash_equals_serial_hash() {
+        with_home(|root| {
+            // Noise; noise then a long run of one byte (chunks that all hit
+            // the maximum, so the streams of two segments may never meet and
+            // the true one is walked); and a length just past a segment.
+            fs::create_dir_all(objects_dir()).unwrap();
+            let seg = CUT_SEGMENT as usize;
+            let mut runs = noise(seg + 9_001, 11);
+            runs.extend(std::iter::repeat_n(7u8, seg + 1_000));
+            let cases = [noise(2 * seg + 123_457, 5), runs, noise(seg + 1, 9)];
+            for (n, data) in cases.iter().enumerate() {
+                let f = written(root, &format!("big{n}.bin"), data);
+                let meta = fs::metadata(&f).unwrap();
+                // The cut points alone.
+                let file = fs::File::open(&f).unwrap();
+                for workers in [2, 5] {
+                    assert_eq!(
+                        parallel_cuts(&file, data.len() as u64, workers).unwrap(),
+                        serial_cuts(data),
+                        "case {n}, {workers} workers"
+                    );
+                }
+                // And what is staged from them: same chunks, same recipe.
+                let serial = prepare_chunked_serial(&f, &meta).unwrap();
+                let parallel = prepare_chunked_parallel(&f, &meta, 4).unwrap();
+                let names = |s: &Staged| -> Vec<(String, u64)> {
+                    s.chunks.iter().map(|c| (c.sha256.clone(), c.len)).collect()
+                };
+                assert_eq!(names(&serial), names(&parallel), "case {n}");
+                assert_eq!(serial.sha256, parallel.sha256, "case {n}");
+                assert_eq!(serial.bytes, parallel.bytes, "case {n}");
+                assert_eq!(serial.object(), parallel.object(), "case {n}");
+                let want = hex::encode(Sha256::digest(data));
+                assert_eq!(parallel.sha256, want, "case {n}");
+                // Both leave the same recipe text behind once committed.
+                let a = serial.commit().unwrap();
+                let b = parallel.commit().unwrap();
+                assert_eq!(a.object, b.object);
+                assert_eq!(a.sha256, b.sha256);
+                assert_eq!(
+                    fs::read(recipe_path(&a.sha256)).unwrap(),
+                    fs::read(recipe_path(&b.sha256)).unwrap()
+                );
+            }
+        });
+    }
+
+    /// A worker that cannot write stops the run, with no thread left waiting
+    /// and no temporary copy left in the tin.
+    #[cfg(unix)]
+    #[test]
+    fn a_parallel_prepare_that_fails_stops_cleanly() {
+        use std::os::unix::fs::PermissionsExt;
+        with_home(|root| {
+            fs::create_dir_all(objects_dir()).unwrap();
+            let f = written(root, "big.bin", &noise(CUT_SEGMENT as usize + 5, 21));
+            let meta = fs::metadata(&f).unwrap();
+            fs::set_permissions(objects_dir(), fs::Permissions::from_mode(0o555)).unwrap();
+            let denied = fs::write(objects_dir().join(".probe"), b"x").is_err();
+            let ran = prepare_chunked_parallel(&f, &meta, 3);
+            fs::set_permissions(objects_dir(), fs::Permissions::from_mode(0o755)).unwrap();
+            if denied {
+                assert!(
+                    ran.is_err(),
+                    "a tin that cannot be written to was written to"
+                );
+            }
+            let left: Vec<_> = fs::read_dir(objects_dir())
+                .unwrap()
+                .flatten()
+                .map(|e| e.path())
+                .collect();
+            assert!(left.is_empty(), "stray temp files: {left:?}");
+        });
+    }
+
+    fn big_restore(len: usize, reps: usize) {
+        with_home(|root| {
+            let data = noise(len, 77);
+            let f = written(root, "big.bin", &data);
+            let st = stash(&f).unwrap();
+            let recipe = read_recipe(&st.object).unwrap();
+            assert_eq!(recipe.bytes, len as u64);
+            let dest = root.join("restored.bin");
+            // The serial reference, and the way restore chooses to go; the
+            // times (`--nocapture`) are the best of `reps` alternating runs.
+            let (mut serial, mut chosen) = (std::time::Duration::MAX, std::time::Duration::MAX);
+            for _ in 0..reps {
+                let t = std::time::Instant::now();
+                restore_serial(&recipe, &st.object, &dest).unwrap();
+                serial = serial.min(t.elapsed());
+                assert!(fs::read(&dest).unwrap() == data, "serial restore differs");
+                fs::remove_file(&dest).unwrap();
+                let t = std::time::Instant::now();
+                materialize(&st.object, &st.sha256, &dest).unwrap();
+                chosen = chosen.min(t.elapsed());
+                assert!(fs::read(&dest).unwrap() == data, "restore differs");
+                fs::remove_file(&dest).unwrap();
+            }
+            eprintln!(
+                "restore of {len} bytes, best of {reps}: serial {serial:?}, chosen {chosen:?}"
+            );
+            // Forced on four threads, whatever this machine has.
+            restore_parallel(&recipe, &st.object, &dest, 4).unwrap();
+            assert!(fs::read(&dest).unwrap() == data, "parallel restore differs");
+            fs::remove_file(&dest).unwrap();
+            // A corrupt chunk refuses the parallel restore, and nothing is
+            // left where the file was to go.
+            let victim = object_path(&recipe.chunks[recipe.chunks.len() / 2].sha256);
+            lift_read_only(&victim);
+            let good = fs::read(&victim).unwrap();
+            let mut bad = good.clone();
+            bad[0] ^= 1;
+            fs::write(&victim, &bad).unwrap();
+            let err = materialize_with_workers(&st.object, &st.sha256, &dest, 4).unwrap_err();
+            assert!(err.to_string().contains("corrupt"), "{err}");
+            assert!(!dest.exists());
+            fs::write(&victim, &good).unwrap();
+        });
+    }
+
+    /// `materialize`, with the parallel restore forced on.
+    fn materialize_with_workers(
+        snapshot: &Path,
+        expect: &str,
+        dest: &Path,
+        workers: usize,
+    ) -> io::Result<()> {
+        let recipe = read_recipe(snapshot)?;
+        let r = restore_parallel(&recipe, snapshot, dest, workers);
+        let _ = expect;
+        if r.is_err() {
+            let _ = fs::remove_file(dest);
+        }
+        r
+    }
+
+    #[test]
+    fn big_file_restore_is_exact() {
+        // Debug builds hash slowly: a file two segments long is big enough
+        // to be cut and restored in parallel.
+        big_restore(
+            if cfg!(debug_assertions) {
+                24 * 1024 * 1024
+            } else {
+                64 * 1024 * 1024
+            },
+            1,
+        );
+    }
+
+    /// The nightly's size: `cargo test --release -- --ignored big_file`.
+    #[test]
+    #[ignore]
+    fn big_file_restore_is_exact_256_mb() {
+        big_restore(256 * 1024 * 1024, 5);
     }
 
     #[test]

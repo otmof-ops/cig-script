@@ -62,7 +62,7 @@ mimalloc = { version = "0.1", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
 # Job Objects: a hop's whole process tree ends with the hop on Windows.
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp", "Win32_Storage_FileSystem", "Win32_System_IO"] }
 
 [dev-dependencies]
 tempfile = "3"

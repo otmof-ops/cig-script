@@ -286,6 +286,48 @@ random-id policy, so no secret ever reaches the index. The cache is
 Unix-only until Rust stabilises Windows's own file-identity accessors
 (rust-lang/rust#63010).
 
+### Big files, chunked and restored on every core
+
+A file of 16 MiB or more is cut into chunks on all cores at once. Each
+8 MiB stretch is cut from its own start; where its chunks meet the ones
+before it (a chunk boundary depends only on where its chunk began, so two
+streams that share one share all after it) the lists are joined, and where
+they never meet the true stream is walked on until they do. The chunks, the
+recipe and the hashes are exactly what one pass from the start gives
+(`parallel_hash_equals_serial_hash`). The whole-file hash, which no thread
+can split, is fed in order from the same bytes the chunks were hashed from,
+so a file that changes while it is read cannot give a recipe that disagrees
+with its chunks.
+
+A restore of a big recipe reads each chunk, checks it against its name, and
+writes it at its own offset (`pwrite`) into a file made its full size first,
+on up to eight threads, asking the kernel to start writing each range back
+at once so the closing `fsync` finds most of it on its way. A chunk that is
+missing or does not hash to its name refuses the restore and nothing is left
+where the file was to go; the result is byte for byte what the serial loop
+writes (`big_file_restore_is_exact`). Below 8 MiB, or on one core, the serial
+loop runs as before.
+
+### Change notifications (opt-in, `hop_watch`)
+
+`cig config hop_watch on` keeps a change watch on the pack between the hops
+of one process (a script with several hops, a chain, cigo's guard): inotify
+on Linux, FSEvents on macOS, `ReadDirectoryChangesW` on Windows. A hop that
+begins when the watch has seen nothing since the last hop ended uses the scan
+that hop ended with instead of walking the tree again; with `hop_statcache`
+on, the files the watch has not seen change since the cache was written are
+not `stat`ed again; and a hop during which the watch saw nothing at all
+skips the scan after it too. Nothing is reported to a script: this is not the
+box's watch.
+
+The watch only ever removes a walk. On any doubt (a queue overflow, a
+directory made, moved or removed, a watch the kernel would not add, a link that
+leads out of the tree, another pack or other `skip` globs) the hop does the
+walk it always did and the watch arms again. What a notification cannot
+see: a file written through a writable `mmap`, or through a hard link kept
+outside the pack. That is why the setting is off by default. A cig that
+starts and ends with one hop has nothing to reuse and pays only the arming.
+
 ## Compensations
 
 `burn (s) { ... } unburn { ... }` is the undo for what no pack can reverse

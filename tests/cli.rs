@@ -12200,6 +12200,80 @@ fn an_unchanged_tree_is_not_read() {
     );
 }
 
+/// #148 `hop_watch`: a chain of hops over a tree the change watch can vouch
+/// for (one hop that changes nothing, one that changes a file, one that
+/// removes another) puts every file back exactly when the block coughs: what
+/// the watch lets a hop skip never hides a change.
+#[cfg(target_os = "linux")]
+#[test]
+fn hop_watch_hops_are_exact() {
+    let sb = Sandbox::new();
+    for name in ["a.txt", "b.txt", "c.txt", "d.txt"] {
+        sb.write(&format!("p/{name}"), "x\n");
+    }
+    sb.write("p/sub/e.txt", "e\n");
+    let pin = Command::new("sh")
+        .arg("-c")
+        .arg("touch -t 202001010000 p/*.txt p/sub/*.txt")
+        .current_dir(sb.path())
+        .status()
+        .unwrap();
+    assert!(pin.success());
+    assert!(sb.cig(&["config", "hop_statcache", "on"]).status.success());
+    assert!(sb.cig(&["config", "hop_watch", "on"]).status.success());
+    let hop =
+        |cmd: &str| format!("  proc.run(\"sh\", [\"-c\", \"{cmd}\"], {{touches: [\"**\"]}})\n");
+    let script = format!(
+        "pack {{ \"./p\" }}\nburn {{\n{}{}{}{}{}{}  cough \"x\"\n}}\n",
+        hop("echo first > p/sentinel.txt"),
+        hop("true"),
+        hop("echo more >> p/a.txt"),
+        hop("true"),
+        hop("rm p/b.txt"),
+        hop("echo deep >> p/sub/e.txt"),
+    );
+    sb.write("s.cig", &script);
+    let trace = sb.path().join("hopwatch-trace");
+    let out = sb.cig_env(
+        &["run", "s.cig"],
+        &[("CIG_INTERNAL_HOPWATCH", trace.to_str().unwrap())],
+    );
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    let err = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(sb.read("p/a.txt"), "x\n", "{err}");
+    assert_eq!(sb.read("p/b.txt"), "x\n", "{err}");
+    assert_eq!(sb.read("p/sub/e.txt"), "e\n", "{err}");
+    assert!(!sb.path().join("p/sentinel.txt").exists(), "{err}");
+    // The watch did let hops skip walks: the second hop changed nothing, so
+    // the third began on the scan the second ended with, and the second's
+    // own scan after was not taken.
+    let skipped = fs::read(&trace).unwrap_or_default();
+    assert!(skipped.contains(&b'e'), "a quiet hop skips its scan after");
+    assert!(
+        skipped.contains(&b'b'),
+        "the next hop begins on the kept scan"
+    );
+    // And the same run again, with the cache the first one left.
+    let err = sb.run_err(&["run", "s.cig"], 1);
+    assert_eq!(sb.read("p/a.txt"), "x\n", "{err}");
+    assert_eq!(sb.read("p/b.txt"), "x\n", "{err}");
+    assert!(!sb.path().join("p/sentinel.txt").exists(), "{err}");
+}
+
+/// `hop_watch` is a setting like `hop_statcache`: on or off, off by default.
+#[test]
+fn hop_watch_is_on_or_off() {
+    let sb = Sandbox::new();
+    assert!(sb.cig(&["config", "hop_watch", "on"]).status.success());
+    assert!(sb.cig(&["config", "hop_watch", "off"]).status.success());
+    let bad = sb.cig(&["config", "hop_watch", "maybe"]);
+    assert!(!bad.status.success());
+    assert!(
+        String::from_utf8_lossy(&bad.stderr).contains("hop_watch must be on or off"),
+        "{bad:?}"
+    );
+}
+
 /// #148: a_same_second_edit_is_caught. A file edited within the
 /// filesystem's timestamp granularity of the cache's save is re-hashed
 /// anyway, so a same-second edit is never missed. The hop then changes
@@ -16271,4 +16345,62 @@ mod tin_parcel {
         }
         assert_eq!(sb.read("p/.env"), "SECRET=original-secret-value\n");
     }
+}
+
+/// `cig explain --layers` hands the place to the `cigar` on PATH with the
+/// output flags, gives back its exit code, and says plainly when there is no
+/// cigar (cigar-script#13).
+#[cfg(unix)]
+#[test]
+fn explain_layers_is_cigars_answer() {
+    use std::os::unix::fs::PermissionsExt;
+    let sb = Sandbox::new();
+    let bin = sb.path().join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    let stand_in = bin.join("cigar");
+    fs::write(
+        &stand_in,
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$CIGAR_ARGV\"\nexit 4\n",
+    )
+    .unwrap();
+    fs::set_permissions(&stand_in, fs::Permissions::from_mode(0o755)).unwrap();
+    let argv = sb.path().join("argv.txt");
+    let run = |path: &Path, args: &[&str]| {
+        Command::new(cig_bin())
+            .args(args)
+            .current_dir(sb.path())
+            .env("CIGSCRIPT_HOME", sb.home())
+            .env("NO_COLOR", "1")
+            .env("PATH", path)
+            .env("CIGAR_ARGV", &argv)
+            .env("CIG_INTERNAL_TRACKER_DIR", sb.path().join("tracker"))
+            .env("CIG_UPDATE_MANIFEST", sb.path().join("no-releases.json"))
+            .env_remove("CI")
+            .output()
+            .expect("run cig")
+    };
+    let out = run(&bin, &["--json", "explain", "--layers", "sales.cigar:12:1"]);
+    assert_eq!(
+        out.status.code(),
+        Some(4),
+        "cigar's exit code is cig's: {out:?}"
+    );
+    let got = fs::read_to_string(&argv).unwrap();
+    assert_eq!(
+        got.lines().collect::<Vec<_>>(),
+        [
+            "--json",
+            "--no-color",
+            "explain",
+            "--layers",
+            "sales.cigar:12:1"
+        ]
+    );
+    let empty = sb.path().join("empty");
+    fs::create_dir_all(&empty).unwrap();
+    let out = run(&empty, &["explain", "--layers", "sales.cigar:12:1"]);
+    assert_eq!(out.status.code(), Some(3), "{out:?}");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("needs cigar, which is not installed"), "{err}");
+    assert!(err.contains("ciginstaller install stick cigar"), "{err}");
 }

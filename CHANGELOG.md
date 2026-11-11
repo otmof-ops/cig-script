@@ -134,6 +134,27 @@ project follows semantic versioning.
   - **Scopes come from a pool.** A scope that ends hands its slot array,
     with its name buffers, to the next call, block or loop turn, so a call
     and a loop turn make 3 allocations instead of 9.
+- **`cig explain --layers FILE:LINE:COL`** (cigar-script#13) hands the place to
+  the `cigar` on PATH with the same `--json`, `--plain` and colour choices and
+  gives back its exit code; with no cigar installed it is E800, naming
+  `ciginstaller install stick cigar`. `cig explain <code>` is unchanged.
+- **Big files are chunked and restored on every core, and a hop can use change
+  notifications** (#148). A file of 16 MiB or more is cut into chunks on all cores
+  at once (each 8 MiB stretch from its own start, joined where the chunk
+  boundaries meet) and hashed in parallel; the chunks, the recipe and every hash
+  are exactly the serial path's. A restore of a big recipe checks each chunk and
+  writes it at its own offset with `pwrite` on up to eight threads, and asks the
+  kernel to start the writeback at once: a 256 MB restore went from 261 ms to
+  85 ms (best of 5, warm cache). New setting `hop_watch` (off by default): a
+  process that runs several hops keeps an inotify (Linux), FSEvents (macOS) or
+  `ReadDirectoryChangesW` (Windows) watch on the pack, and a hop over a tree the
+  watch saw nothing touch skips the scan before it, the scan after it and, with
+  `hop_statcache` on, the per-file `stat`; any overflow or doubt falls back to
+  the walk. A hop no longer walks its pack a second time just to count what each
+  `touches` glob matches, and a stat-cache hit is no longer looked up twice in
+  the tin; a hop whose every file was a cache hit leaves the index alone (no
+  rewrite, no `fsync`). A write through a writable `mmap` raises no
+  notification, which is why `hop_watch` is opt-in.
 
 - **License: FSL-1.1-ALv2 from the next release.** The code moves from Apache-2.0 to
   the Functional Source License 1.1 with an Apache-2.0 future license: free to

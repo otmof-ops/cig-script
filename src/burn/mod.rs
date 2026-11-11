@@ -11,6 +11,7 @@
 
 pub mod ghost;
 pub mod git;
+pub mod hopwatch;
 pub mod inbox;
 pub mod journal;
 pub mod ledger;
@@ -475,6 +476,10 @@ pub struct PackWatch {
     /// When the watch began, as the stat cache counts time: the racy
     /// margin around it decides whether an unchanged tuple may be trusted.
     started_ns: u64,
+    /// The change watch's view of this hop (`hop_watch`, #148): where its
+    /// log stood when the hop began. `None` when the setting is off or the
+    /// watch could not be armed.
+    hw: Option<hopwatch::Token>,
 }
 
 /// Is a place a door out of the pack leads to worth watching? Not one that
@@ -952,13 +957,24 @@ fn touches_counts(
     cap: usize,
     skip: Option<&globset::GlobSet>,
 ) -> Vec<(String, usize)> {
+    let scans: Vec<Scan> = roots
+        .iter()
+        .map(|r| scan::scan_skipping(r, 64, cap, None, skip))
+        .collect();
+    touches_counts_in(&scans, touches)
+}
+
+/// `touches_counts` over scans already taken (the same walk, with the same
+/// depth, cap and `skip`, is what a hop's watch begins with): a hop does not
+/// walk its pack a second time to count what each glob matches (#148).
+fn touches_counts_in(scans: &[Scan], touches: &[String]) -> Vec<(String, usize)> {
     let mut counts: Vec<(String, usize)> = touches.iter().map(|t| (t.clone(), 0)).collect();
     let singles: Vec<Option<globset::GlobSet>> = touches
         .iter()
         .map(|t| tin::globs(std::slice::from_ref(t)).ok())
         .collect();
-    for r in roots {
-        for (rel, meta) in scan::scan_skipping(r, 64, cap, None, skip).iter() {
+    for scan in scans {
+        for (rel, meta) in scan.iter() {
             if meta.is_dir() {
                 continue;
             }
@@ -1141,8 +1157,25 @@ impl Kernel {
         let mut partial = false;
         let mut outside: Vec<Scan> = Vec::new();
         let mut warnings = Vec::new();
+        // `hop_watch` (#148): when the change watch has seen nothing since
+        // the scans the last hop ended with, those scans stand in for the
+        // walk. Any doubt in the watch and there are none: the walk is the
+        // one that always was.
+        let begun = hopwatch::is_enabled()
+            .then(|| hopwatch::begin(roots, &skip.join("\u{1}"), skip_set.as_ref(), cap));
+        let (reused, hw, trusted) = match begun {
+            Some(b) => (b.scans, b.token, b.trusted),
+            None => (None, None, None),
+        };
+        if reused.is_some() {
+            hopwatch::skipped(b'b');
+        }
+        let mut reused = reused.map(Vec::into_iter);
         for r in roots {
-            let s = scan::scan_skipping(r, 64, cap, None, skip_set.as_ref());
+            let s = match reused.as_mut().and_then(Iterator::next) {
+                Some(s) => s,
+                None => scan::scan_skipping(r, 64, cap, None, skip_set.as_ref()),
+            };
             partial |= !s.complete;
             // A directory link that leads out of the pack: the hop may
             // write through it, so where it leads is watched for the report.
@@ -1183,11 +1216,10 @@ impl Kernel {
                     // counts each glob, and the report after the hop names
                     // the glob that would have kept a file changed outside
                     // them all.
-                    let counts: Vec<(String, usize)> =
-                        touches_counts(roots, touches, cap, skip_set.as_ref())
-                            .into_iter()
-                            .filter(|(g, _)| !g.starts_with('?'))
-                            .collect();
+                    let counts: Vec<(String, usize)> = touches_counts_in(&inside, touches)
+                        .into_iter()
+                        .filter(|(g, _)| !g.starts_with('?'))
+                        .collect();
                     if !partial && !counts.is_empty() && counts.iter().all(|(_, n)| *n == 0) {
                         let existing: Vec<String> = inside
                             .iter()
@@ -1353,9 +1385,21 @@ impl Kernel {
                             continue;
                         }
                         let key = statcache::encode_abs(&path);
-                        let (Some(entry), Some(now_stat)) =
-                            (cache.entries.get(&key), statcache::stat_of(&path))
-                        else {
+                        // A file the change watch has not seen touched since
+                        // this process wrote its entry is what the entry
+                        // says: no `lstat` (`hop_watch`, #148).
+                        let entry = cache.entries.get(&key);
+                        let clean = trusted
+                            .as_ref()
+                            .is_some_and(|t| t.untouched(&path, cache.written_at_ns));
+                        let stat = match (clean, entry) {
+                            (true, Some(e)) => {
+                                hopwatch::skipped(b't');
+                                Some(e.stat)
+                            }
+                            _ => statcache::stat_of(&path),
+                        };
+                        let (Some(entry), Some(now_stat)) = (entry, stat) else {
                             uncached.push(path);
                             continue;
                         };
@@ -1426,7 +1470,7 @@ impl Kernel {
                             }
                         }
                         for (_, st) in &cache_hits {
-                            for o in tin::pending_for_hash(&st.sha256) {
+                            for o in tin::pending_for_object(&st.object) {
                                 list.push_str(&format!("{}\n", o.display()));
                             }
                         }
@@ -1465,32 +1509,60 @@ impl Kernel {
                     // so `pack_watch_end` can skip the hash check for any
                     // path whose ctime did not move while the hop ran.
                     if cache_on {
-                        for (path, st) in &tinned {
-                            if st.link.is_some() || st.git.is_some() || st.sha256.is_empty() {
-                                continue;
+                        // A hop whose every file was a cache hit has nothing
+                        // to write: the entries are the ones on disk, and
+                        // the index is left as it is (no encode, no fsync).
+                        let steady = to_tin.is_empty() && to_seal.is_empty();
+                        let mut saved = steady;
+                        if !steady {
+                            for (path, st) in &tinned {
+                                if st.link.is_some() || st.git.is_some() || st.sha256.is_empty() {
+                                    continue;
+                                }
+                                let key = statcache::encode_abs(path);
+                                let known = pre_stat.as_ref().and_then(|m| m.get(path)).copied();
+                                let Some(now_stat) = known.or_else(|| statcache::stat_of(path))
+                                else {
+                                    continue;
+                                };
+                                if let Some(map) = pre_stat.as_mut() {
+                                    map.entry(path.clone()).or_insert(now_stat);
+                                }
+                                let chunked = match cache.entries.get(&key) {
+                                    Some(e) if e.sha256 == st.sha256 => e.chunked,
+                                    _ => tin::object_for(&st.sha256)
+                                        .is_some_and(|p| tin::is_recipe(&p)),
+                                };
+                                cache.entries.insert(
+                                    key,
+                                    statcache::Entry {
+                                        stat: now_stat,
+                                        sha256: st.sha256.clone(),
+                                        chunked,
+                                    },
+                                );
                             }
-                            let Some(now_stat) = statcache::stat_of(path) else {
-                                continue;
-                            };
-                            if let Some(map) = pre_stat.as_mut() {
-                                map.entry(path.clone()).or_insert(now_stat);
+                            cache.written_at_ns = statcache::now_ns();
+                            match statcache::save(&pack_cache_key, &cache) {
+                                Ok(()) => saved = true,
+                                Err(e) => warnings.push(format!(
+                                    "the stat cache for this pack could not be saved ({e}); the next hop will stash the pack again"
+                                )),
                             }
-                            let chunked =
-                                tin::object_for(&st.sha256).is_some_and(|p| tin::is_recipe(&p));
-                            cache.entries.insert(
-                                statcache::encode_abs(path),
-                                statcache::Entry {
-                                    stat: now_stat,
-                                    sha256: st.sha256.clone(),
-                                    chunked,
-                                },
-                            );
                         }
-                        cache.written_at_ns = statcache::now_ns();
-                        if let Err(e) = statcache::save(&pack_cache_key, &cache) {
-                            warnings.push(format!(
-                                "the stat cache for this pack could not be saved ({e}); the next hop will stash the pack again"
-                            ));
+                        if let (Some(t), true) = (&hw, saved) {
+                            hopwatch::keep_marks(
+                                t,
+                                cache.written_at_ns,
+                                tinned
+                                    .iter()
+                                    .filter(|(_, st)| {
+                                        st.link.is_none()
+                                            && st.git.is_none()
+                                            && !st.sha256.is_empty()
+                                    })
+                                    .map(|(p, _)| p.as_path()),
+                            );
                         }
                     }
                 }
@@ -1516,6 +1588,7 @@ impl Kernel {
             warnings,
             pre_stat,
             started_ns: statcache::now_ns(),
+            hw,
         })
     }
 
@@ -1573,14 +1646,32 @@ impl Kernel {
         }
         let cap = watch_cap();
         let mut partial = watch.partial;
+        // `hop_watch` (#148): a change watch that saw nothing at all while
+        // the hop ran says the pack is as it was, and neither the scan after
+        // nor the hash check below has anything to find. Otherwise the log's
+        // number is read first, so the scan taken now is covered by it.
+        let hw = watch.hw.take();
+        let quiet = hw.as_ref().is_some_and(hopwatch::Token::quiet);
+        if quiet {
+            hopwatch::skipped(b'e');
+        }
+        let kept_at = if quiet {
+            None
+        } else {
+            hw.as_ref().and_then(hopwatch::Token::now)
+        };
         // The scan after, one per root, each reusing the scan before for
         // the directories that cannot have changed.
         let mut afters: Vec<Scan> = Vec::new();
-        for (ri, r) in roots.iter().enumerate() {
-            let s = scan::scan_skipping(r, 64, cap, watch.inside.get(ri), watch.skip.as_ref());
-            partial |= !s.complete;
-            afters.push(s);
+        if !quiet {
+            for (ri, r) in roots.iter().enumerate() {
+                let s = scan::scan_skipping(r, 64, cap, watch.inside.get(ri), watch.skip.as_ref());
+                partial |= !s.complete;
+                afters.push(s);
+            }
         }
+        // What the scan after would have been: the scan before, when quiet.
+        let after_scans: &[Scan] = if quiet { &watch.inside } else { &afters };
         let mut writes = HopWrites::default();
         // A symbolic link the hop retargeted, replaced or deleted comes
         // back from the journal alone: its target is all there is to keep.
@@ -1683,7 +1774,7 @@ impl Kernel {
         // file whose ctime did not move while the hop ran was not written
         // to at all, so no hash is taken for it: `pre_stat` remembers the
         // before-tuple, and `stat_of(p)` reads the after-tuple cheaply.
-        {
+        if !quiet {
             let flagged: std::collections::HashSet<&PathBuf> = writes
                 .modified
                 .iter()
@@ -1781,7 +1872,7 @@ impl Kernel {
                     p.display()
                 ));
             } else if std::fs::symlink_metadata(p).is_ok()
-                && !afters.iter().any(|s| s.has(p))
+                && !after_scans.iter().any(|s| s.has(p))
                 && entry_inside(p, &Seen::Dir { mode: 0, mtime: 0 }, &roots)
             {
                 writes.created.push(p.clone());
@@ -2068,6 +2159,15 @@ impl Kernel {
         }
         self.late_warnings = std::mem::take(&mut watch.warnings);
         self.late_claims = claim_warnings;
+        // The scans this hop ends with wait for the next one, which uses
+        // them if the watch has seen nothing by then.
+        if let Some(h) = &hw {
+            if quiet {
+                hopwatch::keep_scans(h, h.seq(), std::mem::take(&mut watch.inside));
+            } else if let Some(at) = kept_at {
+                hopwatch::keep_scans(h, at, afters);
+            }
+        }
         writes
     }
 

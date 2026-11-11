@@ -496,7 +496,18 @@ can optionally keep an index of each touched file's
 reads none of them: their tin objects are known by hash. A restore never
 trusts the index (`E704`'s before and after hashes still run), and
 `cig tin verify --statcache` re-hashes everything the index remembers and
-drops a lying entry as a tripwire report.
+drops a lying entry as a tripwire report. A hop whose every file was a
+cache hit leaves the index as it is (no rewrite, no `fsync`).
+
+**Change notifications** (`hop_watch`, off by default; `HOPS.md`). A process
+that runs several hops over one pack keeps a change watch on it, and a hop
+over a tree nobody touched uses the scan the last hop ended with instead of
+walking again. Any overflow or doubt falls back to the walk; a write through
+a writable `mmap` or a hard link kept outside the pack raises no
+notification, which is why it is off by default.
+
+**Big files** are cut into chunks and restored on every core, byte for byte
+as the serial path does it (`HOPS.md`).
 
 Every record says what shape it is in: `run.json` carries `"format": 1`,
 `after.json` `"format": 2`, and the first line of `journal.jsonl` is
