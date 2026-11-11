@@ -313,6 +313,56 @@ mod tests {
         assert!(!is_private(&dir).unwrap());
     }
 
+    /// Does this process's token get past any process DACL: SYSTEM, or
+    /// SeDebugPrivilege enabled?
+    fn token_passes_any_dacl() -> bool {
+        use windows_sys::Win32::Foundation::LUID;
+        use windows_sys::Win32::Security::{
+            LookupPrivilegeValueW, TokenPrivileges, LUID_AND_ATTRIBUTES, SE_PRIVILEGE_ENABLED,
+            TOKEN_PRIVILEGES,
+        };
+        if user_sid().map(|u| u == SYSTEM_SID).unwrap_or(false) {
+            return true;
+        }
+        let name = wide_str("SeDebugPrivilege");
+        let mut luid = LUID {
+            LowPart: 0,
+            HighPart: 0,
+        };
+        let mut token: HANDLE = null_mut();
+        // SAFETY: reads this process's own token into a buffer sized by the
+        // first call; the token is closed before the buffer is read.
+        unsafe {
+            if LookupPrivilegeValueW(null(), name.as_ptr(), &mut luid) == 0
+                || OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0
+            {
+                return false;
+            }
+            let mut need = 0u32;
+            GetTokenInformation(token, TokenPrivileges, null_mut(), 0, &mut need);
+            let mut buf = vec![0u64; (need as usize).div_ceil(8).max(1)];
+            let ok = GetTokenInformation(
+                token,
+                TokenPrivileges,
+                buf.as_mut_ptr().cast(),
+                need,
+                &mut need,
+            );
+            CloseHandle(token);
+            if ok == 0 {
+                return false;
+            }
+            let tp = &*(buf.as_ptr().cast::<TOKEN_PRIVILEGES>());
+            let all: &[LUID_AND_ATTRIBUTES] =
+                std::slice::from_raw_parts(tp.Privileges.as_ptr(), tp.PrivilegeCount as usize);
+            all.iter().any(|p| {
+                p.Luid.LowPart == luid.LowPart
+                    && p.Luid.HighPart == luid.HighPart
+                    && p.Attributes & SE_PRIVILEGE_ENABLED != 0
+            })
+        }
+    }
+
     #[test]
     fn the_process_list_keeps_memory_rights_from_the_same_user() {
         use windows_sys::Win32::System::Threading::{GetCurrentProcessId, OpenProcess};
@@ -323,6 +373,12 @@ mod tests {
             process_sddl(&user)
         );
         protect_process().unwrap();
+        if token_passes_any_dacl() {
+            // SYSTEM, or SeDebugPrivilege switched on (some CI runners): such
+            // a token opens any process whatever its list says.
+            eprintln!("this token passes every process DACL; the open proves nothing here");
+            return;
+        }
         // SAFETY: asks for a handle to this very process; closed if given.
         let h = unsafe { OpenProcess(0x0010, 0, GetCurrentProcessId()) };
         if !h.is_null() {
