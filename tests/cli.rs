@@ -16675,9 +16675,10 @@ fn syscalls_without_strace_say_not_measured() {
 
 /// The same flag on a real loop, where the machine has `strace` and `python3`
 /// and may use `ptrace`: 3,000 mmap/munmap pairs are flagged, and a program
-/// that maps once is not.
+/// that maps once is not. Not on musl: cig's musl build allocates through
+/// mimalloc, which keeps the loop from mapping at all (#146).
 #[test]
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", not(target_env = "musl")))]
 fn syscalls_flags_a_real_mmap_loop() {
     let have = |tool: &str| {
         Command::new(tool)
