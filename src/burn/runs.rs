@@ -219,14 +219,7 @@ impl RunRecord {
     /// run never got to write its totals, and recognise a run whose process
     /// died mid-burn.
     pub fn refresh_from_journal(&mut self) {
-        if let Ok(j) = super::journal::Journal::load(&self.dir()) {
-            let burns = j.len();
-            let irreversible = j.entries().iter().filter(|e| !e.reversible).count();
-            if burns > self.burns {
-                self.burns = burns;
-                self.irreversible = irreversible;
-            }
-        }
+        self.count_burns_from_journal();
         if self.status == "running"
             && !self
                 .pid
@@ -234,6 +227,26 @@ impl RunRecord {
                 .unwrap_or(false)
         {
             self.status = "interrupted".to_string();
+        }
+    }
+
+    /// `refresh_from_journal` for a record whose process the caller has
+    /// already found dead: the process is not asked about a second time.
+    pub(crate) fn refresh_from_journal_known_dead(&mut self) {
+        self.count_burns_from_journal();
+        if self.status == "running" {
+            self.status = "interrupted".to_string();
+        }
+    }
+
+    fn count_burns_from_journal(&mut self) {
+        if let Ok(j) = super::journal::Journal::load(&self.dir()) {
+            let burns = j.len();
+            let irreversible = j.entries().iter().filter(|e| !e.reversible).count();
+            if burns > self.burns {
+                self.burns = burns;
+                self.irreversible = irreversible;
+            }
         }
     }
 
@@ -398,7 +411,7 @@ fn process_identity(pid: u32) -> Option<(String, String)> {
         // run. The creation time is the FILETIME .NET's `ToFileTimeUtc`
         // gives, so records 1.3.x wrote with PowerShell compare equal.
         {
-            use windows_sys::Win32::Foundation::{CloseHandle, FILETIME};
+            use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, FILETIME};
             use windows_sys::Win32::System::Threading::{
                 GetProcessTimes, OpenProcess, QueryFullProcessImageNameW,
                 PROCESS_QUERY_LIMITED_INFORMATION,
@@ -406,6 +419,13 @@ fn process_identity(pid: u32) -> Option<(String, String)> {
             // SAFETY: plain Win32 calls; the handle is closed before returning.
             unsafe {
                 let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+                // No such process is the kernel's answer for a pid that has
+                // exited: that is a dead run, and neither PowerShell nor
+                // tasklist can say otherwise. Only a refusal (access denied
+                // for another user's process) goes on to ask them.
+                if h.is_null() && no_such_process(GetLastError()) {
+                    return None;
+                }
                 if !h.is_null() {
                     let mut created: FILETIME = std::mem::zeroed();
                     let mut exited: FILETIME = std::mem::zeroed();
@@ -477,6 +497,21 @@ fn process_identity(pid: u32) -> Option<(String, String)> {
     }
 }
 
+/// `ERROR_INVALID_PARAMETER`, what `OpenProcess` sets for a process id that
+/// names no process (it exited, or never was one).
+const ERROR_INVALID_PARAMETER: u32 = 87;
+
+/// Is this `OpenProcess` error the kernel saying the process is gone?
+#[cfg_attr(not(windows), allow(dead_code))]
+fn no_such_process(last_error: u32) -> bool {
+    last_error == ERROR_INVALID_PARAMETER
+}
+
+/// How many times `pid_alive` was asked, for the tests that pin how often a
+/// listing asks it.
+#[cfg(test)]
+pub static PID_CHECKS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 /// The start time of a process, for the run record (see `pid_alive`).
 pub fn process_started(pid: u32) -> Option<String> {
     process_identity(pid)
@@ -489,6 +524,8 @@ pub fn process_started(pid: u32) -> Option<String> {
 /// process has to be a cig, and when the record kept the start time, the
 /// same start time; otherwise the run died and the record is interrupted.
 pub fn pid_alive(pid: u32, started: Option<&str>) -> bool {
+    #[cfg(test)]
+    PID_CHECKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let Some((name, live_started)) = process_identity(pid) else {
         // The asking process is alive whatever the platform says about it.
         return pid == std::process::id();
@@ -643,6 +680,16 @@ mod tests {
         r.started = format!("2026-01-01T00:{:02}:{:02}.000Z", n / 60 % 60, n % 60);
         r.error = None;
         r
+    }
+
+    /// Only `ERROR_INVALID_PARAMETER` is "no such process": a refusal
+    /// (access denied, 5) means the process is there and the fallbacks are
+    /// asked, as before.
+    #[test]
+    fn only_invalid_parameter_means_the_process_is_gone() {
+        assert!(no_such_process(87));
+        assert!(!no_such_process(5));
+        assert!(!no_such_process(0));
     }
 
     /// Starting a run reads the same number of run records whatever the

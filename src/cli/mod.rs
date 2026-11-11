@@ -106,9 +106,9 @@ pub enum Command {
     Repl,
     /// The lab notebook: every run, its status, its burns; or one run with its journal (run history).
     Runs {
-        /// A run id (or unique prefix) to show in detail; or `pin` / `unpin`, then the run (`cig runs pin <id>`).
+        /// A run id (or unique prefix) to show in detail; or `pin` / `unpin`, then the run (`cig runs pin <id>`); or `adopt`, then an installer transaction folder (`cig runs adopt <home>/installer/txn/<id>`).
         id: Option<String>,
-        /// The run, after `pin` or `unpin`.
+        /// The run, after `pin` or `unpin`; the installer's transaction folder, after `adopt`.
         #[arg(value_name = "RUN", hide = true)]
         target: Option<String>,
         /// Delete run records older than the newest N.
@@ -715,6 +715,7 @@ fn dispatch(ctx: Ctx, command: Command) -> i32 {
         } => match (pin, unpin) {
             _ if pruned => runs::pruned(&ctx),
             _ if reindex => runs::reindex(&ctx),
+            _ if id.as_deref() == Some("adopt") => runs::adopt(&ctx, target.as_deref()),
             _ if matches!(id.as_deref(), Some("pin" | "unpin")) && target.is_some() => runs::pin(
                 &ctx,
                 &target.unwrap_or_default(),
