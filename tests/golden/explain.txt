@@ -115,6 +115,10 @@ E700-E749  the burn kernel and its journal (write-ahead log)
   E713  the inbox held something that is not a run burn
   E714  a child run is unburned through its parent (retired) burn
   E715  debugging is allowed               burn
+  E716  the installer's transaction did not commit burn
+  E717  a saved file is not what the journal recorded burn
+  E718  a path outside the installer's home burn
+  E719  not an installer transaction cig can read burn
   E720  a rekey cannot be done             burn
   E721  the tin's key folder is not private burn
   E722  a tin parcel does not verify       burn
@@ -1969,6 +1973,82 @@ E715 debugging is allowed  (burn, kernel family, since 1.8.0)
      remedy: unset CIG_ALLOW_DEBUG when you are done debugging cig
 
   arises in: run, any  ·  related: E707  ·  tags: kernel
+
+======== E716 ========
+E716 the installer's transaction did not commit  (burn, kernel family, since 1.21.0)
+
+  kind of no: one of the four; the message says which  (read the operating-system reason in the message; ENOENT, EACCES, ENOSPC and friends, each mapped in the causes below)
+
+  cig runs adopt only takes a transaction that committed: its journal ends in a commit line. This one is still open, was cut off mid-write, or was rolled back (there is then nothing of it left to undo). An open transaction is settled by the installer itself on its next run.
+
+  what to type next: ciginstaller doctor, then adopt the transaction that update reports as its txn once it has committed
+
+  known causes, ranked; doctor checks them in this order
+  1. the installer was interrupted before it committed, and has not settled the transaction yet
+     probe: none; a suggestion, not a finding
+     remedy: run any ciginstaller command: it rolls the open transaction back or forward; then adopt the one that committed
+  2. the transaction was rolled back, so its journal ends in rollback-done
+     probe: none; a suggestion, not a finding
+     remedy: nothing to undo; adopt the transaction of the update you want undone
+
+  arises in: runs  ·  related: E717, E718, E719  ·  tags: kernel
+
+======== E717 ========
+E717 a saved file is not what the journal recorded  (burn, kernel family, since 1.21.0)
+
+  kind of no: these are MY ciggies  (the door: it knows you and said no; 403 Forbidden; permission denied; a lock; a refusal by policy)
+
+  Every file the installer saved before it changed something is checked against the sha256 its journal recorded, before anything is imported. This one is missing, is not a plain file, or its hash differs (it was edited, truncated or replaced after the installer wrote it). Restoring from it would put back the wrong bytes, so nothing is imported and the state directory is untouched.
+
+  what to type next: ciginstaller rollback <txn>, which checks the same copies, or restore the saved folder from a backup and adopt again
+
+  known causes, ranked; doctor checks them in this order
+  1. a file under the transaction's saved/ folder was changed or removed after the installer wrote it
+     probe: none; a suggestion, not a finding
+     remedy: put the original saved folder back, or roll back with the installer's own command
+  2. the journal itself was edited: a hash was changed, or a saved copy it names is not inside the transaction
+     probe: none; a suggestion, not a finding
+     remedy: use a copy of the transaction that was not edited
+
+  arises in: runs  ·  related: E716, E718, E703  ·  tags: kernel
+
+======== E718 ========
+E718 a path outside the installer's home  (burn, kernel family, since 1.21.0)
+
+  kind of no: can't see any ciggies bro  (yours: you're pointed at the wrong place; wrong address: a path, a name, a directory not on PATH; ENOENT)
+
+  A transaction can only name paths inside the installer home it lives in (<home>/installer/txn/<id>). One of its ops names a path outside it, a path with a `..` in it, or one that goes through a link, so a restore could write somewhere the installer never owned. The whole transaction is refused and nothing is imported.
+
+  what to type next: ciginstaller rollback <txn> for a transaction that touched the user's own files, or adopt a copy whose paths are all inside its home
+
+  known causes, ranked; doctor checks them in this order
+  1. the transaction wrote a profile file in the user's home, which is outside the installer home
+     probe: none; a suggestion, not a finding
+     remedy: roll it back with the installer, which is the tool that owns those files
+  2. the journal was edited to point a restore at another place
+     probe: none; a suggestion, not a finding
+     remedy: do not restore from it; use a copy that was not edited
+
+  arises in: runs  ·  related: E716, E717, E719  ·  tags: kernel
+
+======== E719 ========
+E719 not an installer transaction cig can read  (burn, kernel family, since 1.21.0)
+
+  kind of no: never heard of you  (the door: it doesn't know you; 401 Unauthorized; authentication failure)
+
+  The folder given to cig runs adopt is not `<home>/installer/txn/<id>`, holds no journal.jsonl, has a journal that does not parse, is in a format newer than this cig reads, or could not be imported for want of room or rights in cig's own state directory. Nothing was imported.
+
+  what to type next: cig runs adopt <home>/installer/txn/<id>, with the id the installer's update reported as txn
+
+  known causes, ranked; doctor checks them in this order
+  1. the folder is not a transaction folder of the installer (wrong place, or a different folder under it)
+     probe: none; a suggestion, not a finding
+     remedy: give the txn folder under <home>/installer/txn
+  2. the journal is damaged, or was written by a newer installer
+     probe: none; a suggestion, not a finding
+     remedy: update cig, or roll back with the installer's own command
+
+  arises in: runs  ·  related: E716, E717, E718  ·  tags: kernel
 
 ======== E720 ========
 E720 a rekey cannot be done  (burn, kernel family, since 1.19.0)

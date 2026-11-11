@@ -289,6 +289,8 @@ pub(super) fn current_side(job: &Job) -> Side {
 pub(super) struct Baseline {
     pub(super) cases: Vec<(String, Vec<f64>)>,
     binary: Option<(PathBuf, String)>,
+    /// What `--save` kept of `--timings`, `--stats` and `--syscalls`, by case.
+    insights: Vec<(String, serde_json::Value)>,
 }
 
 pub(super) fn save_baseline(
@@ -301,7 +303,12 @@ pub(super) fn save_baseline(
     let mut cases = Vec::new();
     for r in rows {
         match &r.outcome {
-            Outcome::Timed(s) => cases.push((r.name.clone(), r.group.clone(), s)),
+            Outcome::Timed(s) => cases.push((
+                r.name.clone(),
+                r.group.clone(),
+                s,
+                super::diff::saved_json(&r.insight, Some(s.median_ms)),
+            )),
             _ => {
                 return Err(format!(
                     "baseline `{name}` not saved: {} was not timed",
@@ -313,11 +320,48 @@ pub(super) fn save_baseline(
     write_baseline(job, side, name, &cases, conditions)
 }
 
+/// `--diff NAME`: set each row's phases, counters and syscalls against the
+/// baseline's. A baseline that kept none of them cannot be diffed at all.
+pub(super) fn diff_rows(job: &Job, name: &str, rows: &mut [Row]) -> Result<(), String> {
+    let base = load_baseline(job, name)?;
+    if !base.insights.iter().any(|(_, v)| !v.is_null()) {
+        return Err(format!(
+            "baseline `{name}` kept no phases, counters or syscalls to compare: save it with `cig bench --save {name} --timings --stats --syscalls`"
+        ));
+    }
+    for r in rows.iter_mut() {
+        let median = match &r.outcome {
+            Outcome::Timed(s) => Some(s.median_ms),
+            _ => None,
+        };
+        let now = super::diff::saved_of(&r.insight, median);
+        r.diff = Some(
+            match (
+                base.insights.iter().find(|(n, _)| n == &r.name),
+                base.cases.iter().find(|(n, _)| n == &r.name),
+            ) {
+                (_, None) => Err("the baseline has no such case".to_string()),
+                (None, Some(_)) => Err(format!(
+                    "the baseline kept no phases, counters or syscalls for this case: save it with `--save {name} --timings --stats --syscalls`"
+                )),
+                (Some((_, v)), Some((_, ms))) => {
+                    let mut before = super::diff::saved_from_json(v);
+                    if before.wall_ms.is_none() && !ms.is_empty() {
+                        before.wall_ms = Some(Stats::of(ms, None).median_ms);
+                    }
+                    Ok(super::diff::diff(name, &before, &now))
+                }
+            },
+        );
+    }
+    Ok(())
+}
+
 fn write_baseline(
     job: &Job,
     side: &Side,
     name: &str,
-    cases: &[(String, Option<String>, &Stats)],
+    cases: &[(String, Option<String>, &Stats, Option<serde_json::Value>)],
     conditions: &Conditions,
 ) -> Result<(), String> {
     let binary = side.binary.as_ref().and_then(|p| {
@@ -338,12 +382,18 @@ fn write_baseline(
             "governor": conditions.governor,
         },
         "binary": binary,
-        "cases": cases.iter().map(|(n, g, s)| serde_json::json!({
-            "name": n,
-            "group": g,
-            "samples_ms": s.raw_ms,
-            "rss_bytes": s.rss_bytes,
-        })).collect::<Vec<_>>(),
+        "cases": cases.iter().map(|(n, g, s, insight)| {
+            let mut c = serde_json::json!({
+                "name": n,
+                "group": g,
+                "samples_ms": s.raw_ms,
+                "rss_bytes": s.rss_bytes,
+            });
+            if let Some(i) = insight {
+                c["insight"] = i.clone();
+            }
+            c
+        }).collect::<Vec<_>>(),
     });
     let path = baseline_path(name);
     let dir = path.parent().expect("baseline folder");
@@ -356,7 +406,7 @@ fn write_baseline(
     Ok(())
 }
 
-fn load_baseline(job: &Job, name: &str) -> Result<Baseline, String> {
+pub(super) fn load_baseline(job: &Job, name: &str) -> Result<Baseline, String> {
     let path = baseline_path(name);
     let text = std::fs::read_to_string(&path)
         .map_err(|e| format!("cannot read baseline {}: {e}", path.display()))?;
@@ -386,8 +436,12 @@ fn load_baseline(job: &Job, name: &str) -> Result<Baseline, String> {
         ));
     }
     let mut cases = Vec::new();
+    let mut insights = Vec::new();
     for c in v["cases"].as_array().cloned().unwrap_or_default() {
         let name = c["name"].as_str().unwrap_or_default().to_string();
+        if c["insight"].is_object() {
+            insights.push((name.clone(), c["insight"].clone()));
+        }
         let ms: Vec<f64> = c["samples_ms"]
             .as_array()
             .map(|a| a.iter().filter_map(|x| x.as_f64()).collect())
@@ -398,7 +452,11 @@ fn load_baseline(job: &Job, name: &str) -> Result<Baseline, String> {
         (Some(p), Some(h)) => Some((PathBuf::from(p), h.to_string())),
         _ => None,
     };
-    Ok(Baseline { cases, binary })
+    Ok(Baseline {
+        cases,
+        binary,
+        insights,
+    })
 }
 
 // ----- what `--against` names ------------------------------------------------
@@ -439,7 +497,7 @@ fn classify(spec: &str) -> Kind {
     Kind::Ref(spec.to_string())
 }
 
-fn looks_like_version(s: &str) -> bool {
+pub(super) fn looks_like_version(s: &str) -> bool {
     let core = s.strip_prefix('v').unwrap_or(s);
     let mut n = 0;
     for part in core.split('.') {
@@ -564,7 +622,7 @@ fn resolve(job: &Job, spec: &str, scratch: &Path) -> Result<Resolved, String> {
 /// A release's binary for this platform: downloaded, its sha256 checked
 /// against the release's sidecar, and only then made runnable. A binary that
 /// does not verify is deleted and nothing runs.
-fn fetch_release(spec: &str, scratch: &Path) -> Result<(PathBuf, String), String> {
+pub(super) fn fetch_release(spec: &str, scratch: &Path) -> Result<(PathBuf, String), String> {
     let version = Version::parse(spec).ok_or_else(|| format!("`{spec}` is not a version"))?;
     let release = update::find(update::DEFAULT_REPO, &format!("v{version}"))?;
     let name = update::asset_name(&version);
@@ -849,14 +907,28 @@ pub(super) fn against(job: &Job, spec: &str, scratch: &Path) -> i32 {
         })
         .collect();
     let conditions = Conditions::here();
+    let report =
+        (!job.gates.is_empty()).then(|| super::gate::evaluate_ab(&job.cases, &rows, &job.gates));
     if ctx.json {
-        print_json(job, spec, &resolved, &rows, &conditions);
+        print_json(job, spec, &resolved, &rows, &conditions, report.as_ref());
     } else if job.opts.markdown {
         print_markdown(job, &resolved, &rows, &conditions);
+        if let Some(r) = &report {
+            super::gate::print_markdown(r);
+        }
     } else {
         print_table(job, &resolved, &rows, &conditions);
+        if let Some(r) = &report {
+            super::gate::print_text(r);
+        }
     }
     let mut code = exit::OK;
+    if let Some(r) = &report {
+        super::gate::report_failures(r);
+        if r.failed() {
+            code = exit::SCRIPT_ERROR;
+        }
+    }
     for r in &rows {
         match &r.result {
             AbResult::Wrong(w) => {
@@ -871,10 +943,10 @@ pub(super) fn against(job: &Job, spec: &str, scratch: &Path) -> i32 {
         }
     }
     if let Some(name) = &job.opts.save {
-        let cases: Vec<(String, Option<String>, &Stats)> = rows
+        let cases: Vec<(String, Option<String>, &Stats, Option<serde_json::Value>)> = rows
             .iter()
             .filter_map(|r| match &r.result {
-                AbResult::Compared { b, .. } => Some((r.name.clone(), r.group.clone(), b)),
+                AbResult::Compared { b, .. } => Some((r.name.clone(), r.group.clone(), b, None)),
                 _ => None,
             })
             .collect();
@@ -1078,8 +1150,15 @@ pub(super) fn ab_json(r: &AbRow) -> serde_json::Value {
     })
 }
 
-fn print_json(job: &Job, spec: &str, res: &Resolved, rows: &[AbRow], c: &Conditions) {
-    let doc = serde_json::json!({
+fn print_json(
+    job: &Job,
+    spec: &str,
+    res: &Resolved,
+    rows: &[AbRow],
+    c: &Conditions,
+    gates: Option<&super::gate::Report>,
+) {
+    let mut doc = serde_json::json!({
         "format": FORMAT,
         "product": job.manifest.bench.product,
         "cig_version": env!("CARGO_PKG_VERSION"),
@@ -1093,6 +1172,9 @@ fn print_json(job: &Job, spec: &str, res: &Resolved, rows: &[AbRow], c: &Conditi
         },
         "cases": rows.iter().map(ab_json).collect::<Vec<_>>(),
     });
+    if let Some(g) = gates {
+        doc["gates"] = super::gate::to_json(g);
+    }
     outln!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
 }
 

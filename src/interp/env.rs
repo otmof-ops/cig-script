@@ -98,6 +98,16 @@ struct Vars {
 }
 
 thread_local! {
+    /// Whole scopes their owner is done with and nothing else holds, ready
+    /// to be a call's frame or a loop turn's: `Scope::child` takes one and
+    /// no allocation is made (cig-script#146).
+    static FREE: RefCell<Vec<Env>> = const { RefCell::new(Vec::new()) };
+}
+
+/// The most scopes the free list keeps.
+const FREE_SCOPES: usize = 256;
+
+thread_local! {
     /// Slot arrays of scopes that ended, ready for the next call, block or
     /// loop turn: a scope in steady state allocates no array and no names.
     static POOL: RefCell<Vec<Vars>> = const { RefCell::new(Vec::new()) };
@@ -272,11 +282,50 @@ impl Scope {
     }
 
     pub fn child(parent: &Env) -> Env {
+        let free = FREE
+            .try_with(|f| f.try_borrow_mut().ok().and_then(|mut f| f.pop()))
+            .ok()
+            .flatten();
+        if let Some(mut env) = free {
+            if let Some(scope) = Rc::get_mut(&mut env) {
+                scope.parent = Some(parent.clone());
+                scope.serial = take_serial();
+                return env;
+            }
+        }
         Rc::new(Scope {
             vars: RefCell::new(Vars::pooled()),
             parent: Some(parent.clone()),
             serial: take_serial(),
         })
+    }
+
+    /// Give back a scope its owner has finished with. One that nothing else
+    /// holds (no closure took its `Env`) goes to the free list with its
+    /// slots emptied; one that something holds is only let go of, and lives
+    /// as long as that does.
+    pub fn release(mut env: Env) {
+        let Some(scope) = Rc::get_mut(&mut env) else {
+            return;
+        };
+        let vars = scope.vars.get_mut();
+        if vars.index.is_some() || vars.slots.len() > POOL_SLOTS {
+            return;
+        }
+        // Values go first: one may be the last hold on another scope.
+        for slot in &mut vars.slots[..vars.len] {
+            slot.value = Value::Null;
+        }
+        vars.len = 0;
+        let parent = scope.parent.take();
+        let _ = FREE.try_with(|f| {
+            if let Ok(mut f) = f.try_borrow_mut() {
+                if f.len() < FREE_SCOPES {
+                    f.push(env);
+                }
+            }
+        });
+        drop(parent);
     }
 
     /// When this scope was made (see `next_serial`).

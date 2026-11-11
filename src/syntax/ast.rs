@@ -32,6 +32,19 @@ pub struct Block {
     pub span: Span,
 }
 
+impl Block {
+    /// Whether running this block puts a name in the scope it runs in: a
+    /// `roll`/`stick`, a `pull` or a chain. A block that does not needs no
+    /// scope of its own, and neither the checker nor the evaluator makes one
+    /// (cig-script#146), so a name resolved through it is the same number
+    /// of scopes up either way.
+    pub fn declares(&self) -> bool {
+        self.stmts
+            .iter()
+            .any(|s| matches!(s, Stmt::Declare { .. } | Stmt::Pull(_) | Stmt::Chain(_)))
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BurnClass {
     /// Executes in `run`, is simulated in `dry-run`.
@@ -60,6 +73,9 @@ pub enum AssignTarget {
     Member {
         object: Expr,
         name: String,
+        /// Where the key was last found in the map: a hint, checked against
+        /// the key before it is trusted (cig-script#146).
+        hint: Cell<u32>,
     },
 }
 
@@ -295,6 +311,8 @@ pub enum ExprKind {
         object: Box<Expr>,
         name: String,
         safe: bool,
+        /// Where the key was last found in the map (see `AssignTarget::Member`).
+        hint: Cell<u32>,
     },
     Index {
         object: Box<Expr>,

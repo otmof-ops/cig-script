@@ -2024,6 +2024,82 @@ probe = "none"
 remedy = "unset CIG_ALLOW_DEBUG when you are done debugging cig"
 
 [[code]]
+code = "E716"
+title = "the installer's transaction did not commit"
+meaning = "cig runs adopt only takes a transaction that committed: its journal ends in a commit line. This one is still open, was cut off mid-write, or was rolled back (there is then nothing of it left to undo). An open transaction is settled by the installer itself on its next run."
+fix = "ciginstaller doctor, then adopt the transaction that update reports as its txn once it has committed"
+no = "depends"
+arises = ["runs"]
+tags = ["kernel"]
+since = "1.21.0"
+related = ["E717", "E718", "E719"]
+[[code.cause]]
+why = "the installer was interrupted before it committed, and has not settled the transaction yet"
+probe = "none"
+remedy = "run any ciginstaller command: it rolls the open transaction back or forward; then adopt the one that committed"
+[[code.cause]]
+why = "the transaction was rolled back, so its journal ends in rollback-done"
+probe = "none"
+remedy = "nothing to undo; adopt the transaction of the update you want undone"
+
+[[code]]
+code = "E717"
+title = "a saved file is not what the journal recorded"
+meaning = "Every file the installer saved before it changed something is checked against the sha256 its journal recorded, before anything is imported. This one is missing, is not a plain file, or its hash differs (it was edited, truncated or replaced after the installer wrote it). Restoring from it would put back the wrong bytes, so nothing is imported and the state directory is untouched."
+fix = "ciginstaller rollback <txn>, which checks the same copies, or restore the saved folder from a backup and adopt again"
+no = "these-are-mine"
+arises = ["runs"]
+tags = ["kernel"]
+since = "1.21.0"
+related = ["E716", "E718", "E703"]
+[[code.cause]]
+why = "a file under the transaction's saved/ folder was changed or removed after the installer wrote it"
+probe = "none"
+remedy = "put the original saved folder back, or roll back with the installer's own command"
+[[code.cause]]
+why = "the journal itself was edited: a hash was changed, or a saved copy it names is not inside the transaction"
+probe = "none"
+remedy = "use a copy of the transaction that was not edited"
+
+[[code]]
+code = "E718"
+title = "a path outside the installer's home"
+meaning = "A transaction can only name paths inside the installer home it lives in (<home>/installer/txn/<id>). One of its ops names a path outside it, a path with a `..` in it, or one that goes through a link, so a restore could write somewhere the installer never owned. The whole transaction is refused and nothing is imported."
+fix = "ciginstaller rollback <txn> for a transaction that touched the user's own files, or adopt a copy whose paths are all inside its home"
+no = "cant-see-any"
+arises = ["runs"]
+tags = ["kernel"]
+since = "1.21.0"
+related = ["E716", "E717", "E719"]
+[[code.cause]]
+why = "the transaction wrote a profile file in the user's home, which is outside the installer home"
+probe = "none"
+remedy = "roll it back with the installer, which is the tool that owns those files"
+[[code.cause]]
+why = "the journal was edited to point a restore at another place"
+probe = "none"
+remedy = "do not restore from it; use a copy that was not edited"
+
+[[code]]
+code = "E719"
+title = "not an installer transaction cig can read"
+meaning = "The folder given to cig runs adopt is not `<home>/installer/txn/<id>`, holds no journal.jsonl, has a journal that does not parse, is in a format newer than this cig reads, or could not be imported for want of room or rights in cig's own state directory. Nothing was imported."
+fix = "cig runs adopt <home>/installer/txn/<id>, with the id the installer's update reported as txn"
+no = "never-heard-of-you"
+arises = ["runs"]
+tags = ["kernel"]
+since = "1.21.0"
+related = ["E716", "E717", "E718"]
+[[code.cause]]
+why = "the folder is not a transaction folder of the installer (wrong place, or a different folder under it)"
+probe = "none"
+remedy = "give the txn folder under <home>/installer/txn"
+[[code.cause]]
+why = "the journal is damaged, or was written by a newer installer"
+probe = "none"
+remedy = "update cig, or roll back with the installer's own command"
+
+[[code]]
 code = "E720"
 title = "a rekey cannot be done"
 meaning = "cig tin rekey refuses because what it needs is not here, is already in use, or would launder tampering. The current key must be available (otherwise there is nothing to re-seal from), and the keeper must be one a rekey can write to (keyring or key file). An interrupted earlier rekey that left behind a seal.key.old file that is not a key is also this code. The rekey takes an exclusive lock on the tin: a second cig tin rekey while one is held is refused outright, named. Every format-3 journal and the ledger are verified under the current key before anything is re-signed; a chain that does not fit refuses the rekey, naming the run, and leaves the tampered bytes on disk so they can be looked at. The keeper swap at the end is read back: a keeper that would not carry the new key refuses, leaves both stashes on disk (every sealed object stays readable under the fallback), and a later cig tin rekey finishes the job. Nothing on disk is changed before the walk begins."

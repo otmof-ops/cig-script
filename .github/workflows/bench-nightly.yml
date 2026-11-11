@@ -1,0 +1,56 @@
+# SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
+# SPDX-License-Identifier: FSL-1.1-ALv2
+#
+# The nightly benchmark matrix (#145 step 3, #179 step 6): cig's whole suite,
+# kernel group included, on every filesystem the kernel promises to behave on.
+#
+#   Linux    ext4, btrfs, XFS: a loop device made and formatted on the runner,
+#            mounted, and every sample's home put on it
+#   macOS    APFS, the runner's own disk
+#   Windows  NTFS, the runner's own disk
+#
+# Each job calls the reusable bench.yml, which runs `cig bench` on the whole
+# suite and appends one JSON line to `history/cig.<series>.jsonl` on the
+# `bench-history` branch (`cig bench history --series btrfs hello`). cig-script
+# is public, so these minutes cost nothing; heavy suites run nightly and pull
+# requests run the fast ones (DECISIONS 11).
+#
+# What fails a night: a case whose output is WRONG, a kernel case that does not
+# restore the exact bytes (both are `correctness`). The timings, the disk
+# ratios (block sizes differ between filesystems) and the start-up budgets are
+# printed and recorded, never failed: a shared runner's clock is not a gate
+# (#153).
+name: bench-nightly
+
+on:
+  schedule:
+    - cron: "23 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    name: bench (${{ matrix.series }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { series: ext4, runs-on: ubuntu-latest, filesystem: ext4 }
+          - { series: btrfs, runs-on: ubuntu-latest, filesystem: btrfs }
+          - { series: xfs, runs-on: ubuntu-latest, filesystem: xfs }
+          # The runner's own disk: no filesystem to make.
+          - { series: apfs, runs-on: macos-latest, filesystem: "" }
+          - { series: ntfs, runs-on: windows-latest, filesystem: "" }
+    uses: ./.github/workflows/bench.yml
+    with:
+      mode: nightly
+      cig-version: ""
+      runs-on: ${{ matrix.runs-on }}
+      filesystem: ${{ matrix.filesystem }}
+      series: ${{ matrix.series }}
+      gate: correctness
+    permissions:
+      contents: write # the nightly appends to the bench-history branch
+      pull-requests: write # the reusable workflow's PR comment step (not used here)
