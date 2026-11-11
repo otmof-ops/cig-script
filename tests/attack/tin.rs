@@ -10,7 +10,8 @@ use super::common::{guarded, text, Sandbox};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 
-const SEAL: [(&str, &str); 1] = [("CIG_SEAL_KEY", "file")];
+// Plain journals: these tests read and edit `journal.jsonl` by hand.
+const SEAL: [(&str, &str); 2] = [("CIG_SEAL_KEY", "file"), ("CIG_JOURNAL_ZST", "off")];
 
 fn burn(sb: &Sandbox) -> String {
     sb.write("a.txt", "one\n");

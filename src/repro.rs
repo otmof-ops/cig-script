@@ -99,6 +99,7 @@ const FILE_EXTENSIONS: &[&str] = &[
 /// File names of cig's own, and the family's, that a report may say.
 const OWN_NAMES: &[&str] = &[
     "journal.jsonl",
+    "journal.jsonl.zst",
     "run.json",
     "after.json",
     "intents.jsonl",

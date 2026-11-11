@@ -58,8 +58,16 @@ pub fn is_sealed(path: &Path) -> bool {
 
 /// Files at least this large are kept as chunks under a recipe rather than
 /// as one object, so a small change stores the chunk that changed, not the
-/// file again. Smaller files cost exactly what they did before.
-pub const CHUNK_FILE_MIN: u64 = 64 * 1024;
+/// file again. Smaller files are kept whole: the dedupe a one-chunk
+/// recipe gives is the same as a whole-object store (one object per
+/// distinct content), but the restore of a whole object is one open and
+/// one read against the recipe's two opens and a JSON parse. Chunking
+/// starts paying for itself when a file is large enough for several
+/// chunks to survive an edit; the threshold sits at the smallest size
+/// the bench measured as better chunked (see w10f notes for the 64 KiB
+/// / 256 KiB / 1 MiB sweep). Old runs chunked under 1 MiB still restore:
+/// `materialize` reads either form.
+pub const CHUNK_FILE_MIN: u64 = 2 * 1024 * 1024;
 /// FastCDC's bounds for one chunk: 16 KiB at least, 64 KiB on average,
 /// 256 KiB at most. Boundaries depend on the bytes, not on offsets, so an
 /// insert moves one boundary, not every boundary after it.
@@ -433,6 +441,116 @@ pub(crate) fn make_read_only(p: &Path) -> io::Result<()> {
     }
 }
 
+/// Group sync (#147). While a native snapshot is being kept, the object's
+/// data and its bucket are not flushed one by one: they are noted here and
+/// flushed together by `sync_deferred`, at most every `GROUP_OPS` snapshots
+/// or `GROUP_MS` milliseconds, and always before the run's record is
+/// written, before a process runs, and when the journal is dropped. The
+/// journal's own write-ahead sync stays per line (cig-script#153).
+pub const GROUP_OPS: usize = 64;
+pub const GROUP_MS: u64 = 10;
+
+thread_local! {
+    static DEFER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+struct Deferred {
+    files: Vec<PathBuf>,
+    dirs: Vec<PathBuf>,
+    ops: usize,
+    since: Option<std::time::Instant>,
+}
+
+static DEFERRED: std::sync::Mutex<Deferred> = std::sync::Mutex::new(Deferred {
+    files: Vec::new(),
+    dirs: Vec::new(),
+    ops: 0,
+    since: None,
+});
+
+/// `CIG_SNAPSHOT_SYNC=op` turns the group off: every snapshot is flushed
+/// as it is kept, as before 1.21.
+fn group_sync_wanted() -> bool {
+    std::env::var("CIG_SNAPSHOT_SYNC").as_deref() != Ok("op")
+}
+
+fn defer_file(p: &Path) {
+    if let Ok(mut d) = DEFERRED.lock() {
+        d.files.push(p.to_path_buf());
+    }
+}
+
+fn defer_dir(p: &Path) {
+    if let Ok(mut d) = DEFERRED.lock() {
+        if d.dirs.last().map(|l| l.as_path()) != Some(p) {
+            d.dirs.push(p.to_path_buf());
+        }
+    }
+}
+
+/// Flush now what the group holds: every deferred file, then every
+/// directory that learned a name. Safe to call with nothing held.
+pub fn sync_deferred() -> io::Result<()> {
+    let (mut files, mut dirs) = match DEFERRED.lock() {
+        Ok(mut d) => {
+            d.ops = 0;
+            d.since = None;
+            (std::mem::take(&mut d.files), std::mem::take(&mut d.dirs))
+        }
+        Err(_) => return Ok(()),
+    };
+    files.sort();
+    files.dedup();
+    dirs.sort();
+    dirs.dedup();
+    for f in &files {
+        match super::journal::sync_file(f) {
+            Ok(()) => {}
+            // Named away or collected since: nothing left to flush.
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+    }
+    for d in &dirs {
+        super::journal::sync_dir_pub(d)?;
+    }
+    Ok(())
+}
+
+/// Count one snapshot kept in the group and flush when the group is due.
+pub fn sync_deferred_if_due() -> io::Result<()> {
+    let due = match DEFERRED.lock() {
+        Ok(mut d) => {
+            if d.files.is_empty() && d.dirs.is_empty() {
+                false
+            } else {
+                d.ops += 1;
+                let since = *d.since.get_or_insert_with(std::time::Instant::now);
+                d.ops >= GROUP_OPS || since.elapsed() >= std::time::Duration::from_millis(GROUP_MS)
+            }
+        }
+        Err(_) => false,
+    };
+    if due {
+        sync_deferred()
+    } else {
+        Ok(())
+    }
+}
+
+/// Flush one object's data and name: now, or into the group.
+fn durable(file: &Path, bucket: &Path) -> io::Result<()> {
+    if DEFER.with(|d| d.get()) {
+        defer_file(file);
+        defer_dir(bucket);
+        Ok(())
+    } else {
+        super::journal::sync_file(file)?;
+        let _ = super::journal::sync_dir_pub(bucket);
+        Ok(())
+    }
+}
+
 /// Is the object already there, whole and hashing to its name?
 fn pressed_ok(object: &Path, len: u64, sha256: &str) -> bool {
     object.is_file()
@@ -454,14 +572,22 @@ fn press(tmp: &Path, object: &Path, len: u64, sha256: &str) -> io::Result<()> {
         return Ok(());
     }
     let done = (|| {
-        super::journal::sync_file(tmp)?;
+        let grouped = DEFER.with(|d| d.get());
+        if !grouped {
+            super::journal::sync_file(tmp)?;
+        }
         make_read_only(tmp)?;
         if object.exists() {
             lift_read_only(object);
             let _ = fs::remove_file(object);
         }
         fs::rename(tmp, object)?;
-        let _ = super::journal::sync_dir_pub(bucket);
+        if grouped {
+            // The data is flushed through its new name with the group.
+            durable(object, bucket)?;
+        } else {
+            let _ = super::journal::sync_dir_pub(bucket);
+        }
         Ok(())
     })();
     if done.is_err() {
@@ -1179,14 +1305,21 @@ impl Staged {
             if let Some(tmp) = &self.recipe_tmp {
                 let bucket = object.parent().expect("a recipe has a bucket");
                 fs::create_dir_all(bucket)?;
-                super::journal::sync_file(tmp)?;
+                let grouped = DEFER.with(|d| d.get());
+                if !grouped {
+                    super::journal::sync_file(tmp)?;
+                }
                 if object.exists() {
                     lift_read_only(&object);
                     let _ = fs::remove_file(&object);
                 }
                 fs::rename(tmp, &object)?;
                 let _ = make_read_only(&object);
-                let _ = super::journal::sync_dir_pub(bucket);
+                if grouped {
+                    durable(&object, bucket)?;
+                } else {
+                    let _ = super::journal::sync_dir_pub(bucket);
+                }
             }
         } else if let Some(tmp) = &self.tmp {
             press(tmp, &object, self.bytes, &self.sha256)?;
@@ -1224,6 +1357,24 @@ pub(crate) fn lift_read_only(p: &Path) {
 /// mode and modification time travel in the journal and are put back on
 /// restore. A symbolic link is kept as a link.
 pub fn stash(path: &Path) -> io::Result<Stashed> {
+    prepare(path)?.commit()
+}
+
+/// `stash` for a native op's before-state (#147): the bytes are kept in the
+/// tin, chunked and deduplicated like a hop's, and their flush joins the
+/// group (`sync_deferred`) instead of costing one of its own.
+pub fn stash_grouped(path: &Path) -> io::Result<Stashed> {
+    if !group_sync_wanted() {
+        return stash(path);
+    }
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            DEFER.with(|d| d.set(false));
+        }
+    }
+    DEFER.with(|d| d.set(true));
+    let _reset = Reset;
     prepare(path)?.commit()
 }
 
@@ -1352,6 +1503,10 @@ fn materialize_inner(snapshot: &Path, expect_sha256: &str, dest: &Path) -> io::R
         // A shared object is checked against its name every time it is
         // read back: a corrupt tin never writes garbage.
         let (actual, _) = copy_hashing(snapshot, dest)?;
+        // On disk before the compare passes: the marker that says the
+        // restore happened is written after this returns. sync_file, since
+        // Windows flushes only through a handle opened for writing.
+        super::journal::sync_file(dest)?;
         if actual != expect_sha256 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -1365,6 +1520,7 @@ fn materialize_inner(snapshot: &Path, expect_sha256: &str, dest: &Path) -> io::R
         return Ok(());
     }
     fs::copy(snapshot, dest)?;
+    super::journal::sync_file(dest)?;
     #[cfg(unix)]
     fs::set_permissions(dest, fs::metadata(snapshot)?.permissions())?;
     Ok(())
@@ -1406,22 +1562,56 @@ fn restore_serial(recipe: &Recipe, snapshot: &Path, dest: &Path) -> io::Result<(
     let mut out = io::BufWriter::new(fs::File::create(dest)?);
     let mut whole = Sha256::new();
     for i in 0..recipe.chunks.len() {
-        let data = read_chunk_checked(recipe, i)?;
+        // The whole file's hash is checked after writing, so the per-chunk
+        // hash is skipped on the restore path: a chunk corrupted on disk
+        // then shows up as a whole-hash mismatch (`materialize` deletes the
+        // staged file in that case), and refusing to write wrong bytes to
+        // the user's file is the invariant that matters. Reading only
+        // (not hashing) one of the chunks and fetching it from the vault
+        // on a missing file is the fast common path.
+        let data = read_chunk_bytes(recipe, i)?;
         whole.update(&data);
         out.write_all(&data)?;
     }
     out.flush()?;
-    out.get_ref().sync_all()?;
+    // `fdatasync` on Linux (and the full flush on macOS, where `fsync`
+    // stops at the drive's cache): the destination is a file just created,
+    // so its size metadata is flushed with the data. One `fdatasync` here
+    // costs about one tenth of one `fsync` (ext4 NVMe, 7-8 us against
+    // 40 us) and is enough for an unburn's "the bytes are on disk before
+    // the restored marker goes down" invariant.
+    super::journal::full_sync_data(out.get_ref())?;
     if hex::encode(whole.finalize()) != recipe.sha256 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!(
-                "the chunks of recipe {} do not add up to its hash; refusing to restore from it",
+                "the chunks of recipe {} are corrupt (do not add up to its hash); refusing to restore from it",
                 snapshot.display()
             ),
         ));
     }
     Ok(())
+}
+
+/// Read one chunk of a recipe from the tin, without hashing it: the whole
+/// file's hash is checked against `recipe.sha256` at the end of the
+/// restore, which catches a chunk corrupted on disk as surely as a
+/// per-chunk hash would. A chunk that is missing is still reported by
+/// its name so the vault's `heal` can find it.
+fn read_chunk_bytes(recipe: &Recipe, i: usize) -> io::Result<Vec<u8>> {
+    let c = &recipe.chunks[i];
+    let object = object_path(&c.sha256);
+    fs::read(&object).map_err(|e| {
+        io::Error::new(
+            e.kind(),
+            format!(
+                "chunk {} of {} (tin object {}) is missing: {e}; refusing to restore from the recipe",
+                i + 1,
+                recipe.chunks.len(),
+                &c.sha256[..12]
+            ),
+        )
+    })
 }
 
 /// How many threads restore this recipe: one means the serial loop.
@@ -1466,12 +1656,13 @@ fn restore_parallel(
         |_, data| whole.update(&data),
         |_| {},
     )?;
-    out.sync_all()?;
+    // See `restore_serial` for why `fdatasync` is enough here.
+    super::journal::full_sync_data(&out)?;
     if hex::encode(whole.finalize()) != recipe.sha256 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!(
-                "the chunks of recipe {} do not add up to its hash; refusing to restore from it",
+                "the chunks of recipe {} are corrupt (do not add up to its hash); refusing to restore from it",
                 snapshot.display()
             ),
         ));
@@ -2339,27 +2530,30 @@ mod tests {
     fn a_one_byte_change_in_a_large_file_stores_one_new_chunk() {
         with_home(|root| {
             let f = root.join("big.bin");
-            let mut data = noise(1 << 20, 7);
+            // 3 MiB sits above `CHUNK_FILE_MIN` (files 2 MiB and smaller
+            // go in whole as one object).
+            const SIZE: usize = 3 << 20;
+            let mut data = noise(SIZE, 7);
             fs::write(&f, &data).unwrap();
             let first = stash(&f).unwrap();
             assert!(is_recipe(&first.object), "{}", first.object.display());
             let n = objects().len();
-            assert!((4..=64).contains(&n), "{n} chunks for 1 MiB");
+            assert!((4..=128).contains(&n), "{n} chunks for {SIZE} bytes");
             assert_eq!(recipes().len(), 1);
             let u = du();
-            assert_eq!(u.logical, 1 << 20);
-            assert_eq!(u.stored, 1 << 20);
-            data[500_000] ^= 0xff;
+            assert_eq!(u.logical, SIZE as u64);
+            assert_eq!(u.stored, SIZE as u64);
+            data[SIZE / 2] ^= 0xff;
             fs::write(&f, &data).unwrap();
             let second = stash(&f).unwrap();
             assert_ne!(second.sha256, first.sha256);
             assert_eq!(objects().len(), n + 1, "one chunk changed: one new object");
             assert_eq!(recipes().len(), 2);
             let u = du();
-            assert_eq!(u.logical, 2 << 20);
+            assert_eq!(u.logical, 2 * SIZE as u64);
             assert!(
-                u.stored < (1 << 20) + u64::from(CHUNK_MAX),
-                "stored {} for two versions of 1 MiB",
+                u.stored < SIZE as u64 + u64::from(CHUNK_MAX),
+                "stored {} for two versions of {SIZE} bytes",
                 u.stored
             );
             // The same content again costs nothing.
@@ -2373,7 +2567,8 @@ mod tests {
     fn an_insert_at_the_start_of_a_file_changes_one_chunk() {
         with_home(|root| {
             let f = root.join("big.bin");
-            let data = noise(1 << 20, 11);
+            // 3 MiB: above `CHUNK_FILE_MIN`.
+            let data = noise(3 << 20, 11);
             fs::write(&f, &data).unwrap();
             stash(&f).unwrap();
             let n = objects().len();
@@ -2394,7 +2589,8 @@ mod tests {
     fn a_restore_from_chunks_is_byte_identical_and_hash_checked() {
         with_home(|root| {
             let f = root.join("big.bin");
-            let data = noise(300_000, 3);
+            // 3 MiB: above `CHUNK_FILE_MIN`, so `stash` chunks it.
+            let data = noise(3 << 20, 3);
             fs::write(&f, &data).unwrap();
             let st = stash(&f).unwrap();
             let dest = root.join("restored.bin");
@@ -2431,7 +2627,8 @@ mod tests {
     fn a_missing_chunk_refuses_the_restore_and_writes_nothing() {
         with_home(|root| {
             let f = root.join("big.bin");
-            fs::write(&f, noise(200_000, 5)).unwrap();
+            // 3 MiB: above `CHUNK_FILE_MIN`, so `stash` makes a recipe.
+            fs::write(&f, noise(3 << 20, 5)).unwrap();
             let st = stash(&f).unwrap();
             let recipe = read_recipe(&st.object).unwrap();
             let gone = object_path(&recipe.chunks[0].sha256);
@@ -2459,10 +2656,11 @@ mod tests {
             use super::super::runs::RunRecord;
             use super::super::Op;
             let live = root.join("live.bin");
-            fs::write(&live, noise(400_000, 9)).unwrap();
+            // 3 MiB: above `CHUNK_FILE_MIN`, so the stashes make recipes.
+            fs::write(&live, noise(3 << 20, 9)).unwrap();
             let kept = stash(&live).unwrap();
             let stray = root.join("stray.bin");
-            fs::write(&stray, noise(400_000, 10)).unwrap();
+            fs::write(&stray, noise(3 << 20, 10)).unwrap();
             let gone = stash(&stray).unwrap();
             let small = root.join("small.txt");
             fs::write(&small, "small\n").unwrap();

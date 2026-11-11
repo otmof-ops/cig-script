@@ -621,6 +621,8 @@ fn run_source_inner(
         ));
         save_intents(&record, &interp);
         settle_own_bugs(ctx, &result, rolled_back.as_ref(), &interp, &record);
+        // The run is over: its journal is kept compressed (#147).
+        crate::burn::pack::settle(&record.dir());
         // A run that a hop of another cig started reports to its parent
         // (the burn protocol): the parent's rollback puts this run back
         // through this run's own journal, which is exact.

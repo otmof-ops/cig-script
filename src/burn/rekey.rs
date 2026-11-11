@@ -737,7 +737,7 @@ fn verify_everything_under_current_key() -> Result<(), String> {
             if !dir.is_dir() {
                 continue;
             }
-            if !dir.join("journal.jsonl").exists() {
+            if !super::pack::journal_exists(&dir) {
                 continue;
             }
             let j = super::journal::Journal::load(&dir).map_err(|e| {

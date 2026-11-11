@@ -177,9 +177,10 @@ if [ "$(code)" = 0 ] && grep -q "chain *intact" out.txt; then
 else result "hash chain: intact run verifies, edited journal breaks" FAIL "$(last)"; fi
 
 # 25 the tin in chunks: a one-byte edit to a large file comes back from its recipe
-fresh; mkdir -p p; "$PY" -c "open('p/big.bin','wb').write(bytes((i*7+3)%251 for i in range(1<<20)))"
+# 3 MiB sits above the chunk threshold (files 2 MiB and smaller are kept whole).
+fresh; mkdir -p p; "$PY" -c "open('p/big.bin','wb').write(bytes((i*7+3)%251 for i in range(3<<20)))"
 sum_before=$("$PY" -c "import hashlib;print(hashlib.sha256(open('p/big.bin','rb').read()).hexdigest())")
-printf 'pack { "./p" }\nburn {\n  proc.run("%s", ["-c", "f=open(\x27big.bin\x27,\x27r+b\x27); f.seek(500000); f.write(b\x27Z\x27)"], {cwd: "p", touches: ["**"]})\n  cough "boom"\n}\n' "$PY" > s.cig
+printf 'pack { "./p" }\nburn {\n  proc.run("%s", ["-c", "f=open(\x27big.bin\x27,\x27r+b\x27); f.seek(1500000); f.write(b\x27Z\x27)"], {cwd: "p", touches: ["**"]})\n  cough "boom"\n}\n' "$PY" > s.cig
 run run s.cig
 sum_after=$("$PY" -c "import hashlib;print(hashlib.sha256(open('p/big.bin','rb').read()).hexdigest())")
 "$CIG" --json tin du > du.json 2>/dev/null
