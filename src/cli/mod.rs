@@ -205,6 +205,9 @@ pub enum Command {
         /// Print the JSON Schema for a diagnostic (generated from the registry).
         #[arg(long)]
         schema: bool,
+        /// The layers at a place in a `.cigar` file, peeled by cigar.
+        #[arg(long, value_name = "FILE:LINE:COL", conflicts_with_all = ["code", "schema"])]
+        layers: Option<String>,
     },
     /// Show or change the few settings there are, in ~/.cigscript/config.
     Config {
@@ -681,7 +684,14 @@ fn dispatch(ctx: Ctx, command: Command) -> i32 {
         Command::InternalDoctor { fix } => doctor::product_doctor(&ctx, fix),
         Command::Uninstall { args } => update::uninstall_stub(&ctx, &args),
         Command::Language => language::language(&ctx),
-        Command::Explain { code, schema } => explain::explain(&ctx, code, schema),
+        Command::Explain {
+            code,
+            schema,
+            layers,
+        } => match layers {
+            Some(place) => explain::layers(&ctx, &place),
+            None => explain::explain(&ctx, code, schema),
+        },
         Command::Config { key, value, unset } => config::config(&ctx, key, value, unset),
         Command::Crash { command } => crash::crash_stub(&ctx, command),
         Command::InternalCrash { command } => crash::crash(&ctx, command),

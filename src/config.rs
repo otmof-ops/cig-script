@@ -72,6 +72,11 @@ pub const KEYS: &[(&str, &str, &str)] = &[
         "the stat cache (#148): off keeps every hop reading and hashing the tree anyway; on remembers each touched file's (dev, inode, size, mtime, ctime, mode) with the tin object it was stashed under, so a later hop whose files all match the cache reads none of them (restores still re-hash: E704 is unchanged). `cig tin verify --statcache` re-checks it",
     ),
     (
+        "hop_watch",
+        "off",
+        "change notifications for hops (#148): on keeps an inotify (Linux), FSEvents (macOS) or ReadDirectoryChangesW (Windows) watch on the pack between the hops of one process, so a hop over a tree nobody touched skips the stat walk (and, with hop_statcache on, the per-file stat). Any overflow or doubt falls back to the walk. It cannot see a write through a writable mmap or through a hard link kept outside the pack, which is why it is off by default",
+    ),
+    (
         "seal",
         "secrets",
         "which files the tin keeps sealed (encrypted at rest): secrets (secret-shaped names, a pack root's .cigseal, a hop's touches_sealed), all, or never",
@@ -281,6 +286,10 @@ impl Config {
                 return Err(format!(
                     "pass_budget is a size such as 64MB or 1GB, not `{other}`"
                 ))
+            }
+            ("hop_watch", "on" | "off") => {}
+            ("hop_watch", other) => {
+                return Err(format!("hop_watch must be on or off, not `{other}`"))
             }
             ("hop_statcache", "on" | "off") => {}
             ("hop_statcache", other) => {
