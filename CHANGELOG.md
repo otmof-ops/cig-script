@@ -5,6 +5,78 @@ project follows semantic versioning.
 
 ## Unreleased
 
+- **Decoys and `pass_reads` for the box** (#106 step 4). `box: { decoys:
+  ["~/.ssh/id_ed25519", "~/.aws/credentials", "~/.npmrc"] }` names
+  credential paths the box should fake. For every resolved path the
+  run's scratch holds a realistic fake (shaped by basename — OpenSSH
+  key skeleton, AWS credentials, `_authToken` line, KEY=value env —
+  carrying a marker read from `getrandom(2)`, 0700 directory and
+  0400 files). The box bind-mounts the fake read-only over the real
+  path in its own mount namespace, carrying the source mount's
+  locked flags (`MS_NODEV`, `MS_NOSUID`, `MS_NOEXEC`, `MS_NOATIME`
+  and friends) plus `MS_NOSUID|MS_NODEV|MS_NOEXEC`; a failed remount
+  refuses the hop (a writable decoy is not a boundary). Same
+  retry-on-ENOENT logic as the covers; a path missing at mount time
+  is skipped. **The mount is the boundary:** the real file is
+  unreachable by any route in the box — a symlink, an `openat` with
+  a dirfd of the parent, a `/proc/self/root/<path>` walk, the legacy
+  `open` syscall — because the inode at the path is the decoy's. The
+  real file is never bound anywhere in the box. Plan-time resolver:
+  `..` is refused, a symlinked directory component is refused, paths
+  outside the caller's `HOME` and the pack roots are refused, a
+  directory target is refused ("decoys are files"), and a path named
+  by both `decoys` and `pass_reads` is refused — every case lands in
+  the run's `why` with a specific reason rather than a silent drop.
+  The watch supervisor still sees every open and writes `E773` for a
+  decoy read; a decoy hit on a write open (`O_WRONLY`/`O_RDWR`/
+  `O_CREAT`/`O_TRUNC`) or an `O_DIRECTORY`/`O_PATH` open CONTINUEs
+  and the mount answers `EROFS` or the decoy's inode as the kernel
+  would, so `npm login` keeps writing into the hop's layer rather
+  than EBADF-ing. `box: { pass_reads: { "~/.npmrc": "/usr/bin/npm" }
+  }` keeps one program (resolved to `/proc/<pid>/exe` at
+  notification time, with ` (deleted)` stripped) able to read the
+  real file: the supervisor opens it from cig's side of the mount
+  namespace boundary and hands it through `SECCOMP_IOCTL_NOTIF_ADDFD`
+  with `SEND` (Linux 5.14+, atomic). Every other reader sees the
+  decoy through the mount and the supervisor records `E775`.
+  `pass_reads` is refused at plan time on a kernel older than 5.14,
+  on the ptrace fallback (`CIG_WATCH_ROUTE=ptrace`), on a program
+  that is not on PATH or that canonicalises to a multicall binary
+  (busybox, toybox, which are shared across applets and so cannot
+  identify "the npm program"). The program is canonicalised at plan
+  time so merged-usr symlinks resolve to the one file the
+  supervisor sees. `IOCTL_NOTIF_ID_VALID` is re-run after the memory
+  reads and immediately before `ADDFD`. On any ADDFD refusal the
+  supervisor CONTINUEs: the mount still serves the decoy, no `EPERM`
+  path remains. Off Linux `decoys` and `pass_reads` are refused where
+  `box:` is parsed, the same way `watch` is. The watch widens to
+  `Reads` whenever `decoys` or `pass_reads` is non-empty, even
+  without `watch: true`, so every open round-trips to the supervisor
+  under a decoy hop (tune hops accordingly; it is for seeing, not
+  performance). New codes: `E773` (a decoy was read), `E774`
+  (planned: a decoy marker was written out), `E775` (a passed
+  credential read by the wrong program).
+- **`cig doctor` names the box's watch primitive** (#106 step 3). A new
+  row `box-watch` tries, in a forked child, a seccomp(2) filter with the
+  `NEW_LISTENER` flag for the fast route and a `ptrace` seize on a
+  throwaway child for the slower one, so the row names which route this
+  machine has. Where neither is available `box: { watch: true }` is
+  refused (`E777`); the row says so. The cache key widens to
+  `box-primitives-watch` so a run on an older cache does not hide the
+  new row.
+- **`box: { watch: true }` is refused up front off Linux.** The watch
+  is `seccomp(2)`'s user notification, which Linux owns; on macOS and
+  Windows asking for it (`watch: true` or `watch: "reads"`) now refuses
+  at `box:` parse, with `the watch is Linux's seccomp`, before the box
+  is built. `watch: false` is unchanged everywhere.
+- **The watch is free for unwatched calls, measured.** A new unit test
+  in `src/burn/watch.rs`, `the_watch_costs_nothing_for_unwatched_calls`,
+  runs a tiny classic-BPF interpreter over the `Mode::Calls` filter and
+  asserts every syscall outside the watched set (getpid, close, read,
+  write, gettid, clock_gettime, nanosleep, futex, mmap, mprotect, dup,
+  pipe2, poll, lseek, exit, exit_group, sendto with no address) is
+  `SECCOMP_RET_ALLOW`. The filter's cost for an ordinary call is one
+  instruction run, not a round trip to the supervisor.
 - **Listing runs no longer starts a process for every run that died** (cigo#119).
   A run left `running` by a process that is gone is now told to be
   `interrupted` once and the verdict is kept in the run index, where it was

@@ -506,14 +506,18 @@ fn ask(question: &str) -> bool {
 /// cig stay the same, for a day at most. Only on a machine that already has
 /// a key: doctor never makes one.
 fn box_primitives_remembered() -> Vec<(&'static str, bool, String)> {
+    #[cfg(target_os = "linux")]
     const NAMES: &[&str] = &[
         "user ns",
         "mount ns",
         "network ns",
         "pid ns",
         "overlayfs",
+        "watch",
         "box",
     ];
+    #[cfg(not(target_os = "linux"))]
+    const NAMES: &[&str] = &["box"];
     // A test hook: no namespace is made, for a run of this check that is
     // about the shape of the answer and not about the machine.
     if std::env::var_os("CIG_INTERNAL_NO_NS_PROBE").is_some() {
@@ -545,11 +549,14 @@ fn box_primitives_remembered() -> Vec<(&'static str, bool, String)> {
     .iter()
     .map(std::path::Path::new)
     .collect();
-    // What the answer depends on in this process rather than in a file: who
-    // it runs as, its seccomp and no_new_privs state and its AppArmor
-    // profile. A doctor run in a sandbox and one in a plain shell ask
-    // different questions.
-    let mut subject = b"box-primitives".to_vec();
+    // What the answer depends on in this process rather than in a file:
+    // who it runs as, its seccomp and no_new_privs state and its
+    // AppArmor profile. A doctor run in a sandbox and one in a plain
+    // shell ask different questions. The subject carries a version
+    // ("/2" since the watch row and the forked probe landed), so a
+    // cache from an older cig for the same files is not reused for
+    // the new shape.
+    let mut subject = b"box-primitives/2".to_vec();
     #[cfg(unix)]
     {
         // SAFETY: getuid has no preconditions.
@@ -651,6 +658,14 @@ fn box_primitives() -> Vec<(&'static str, bool, String)> {
             )),
             Err(e) => out.push(("overlayfs", false, e)),
         }
+        // The box's watch (`watch: true`): what a hop opens, connects to
+        // and runs. Tried in a forked child so cig never filters itself:
+        // seccomp(2) with a listener flag gives user notification, else a
+        // ptrace seize on a throwaway child gives the slower route, else
+        // the row says the watch is not available and `watch: true` is
+        // refused (E777).
+        let (watch_ok, watch_says) = watch_probe();
+        out.push(("watch", watch_ok, watch_says));
         // The tin key's memory, as a forked child (a hop before its exec)
         // sees it.
         match crate::burn::seal::fork_protection() {
@@ -679,6 +694,104 @@ fn box_primitives() -> Vec<(&'static str, bool, String)> {
             false,
             "the box is Linux's (user namespaces and overlayfs): here a boxed hop is refused (E777) or falls back to the tin (E763)".to_string(),
         )]
+    }
+}
+
+/// The watch's row in the box primitives: try to install a seccomp
+/// filter with a listener in a forked child (cig never filters
+/// itself), and if that fails try a ptrace seize on a throwaway child.
+/// The row says which route this machine has; where neither works,
+/// `box: { watch: true }` is refused (E777) and the row says so. Off
+/// Linux the parse of `box:` refuses the watch before the box runs,
+/// so the row and this probe live in a Linux-only block.
+#[cfg(target_os = "linux")]
+fn watch_probe() -> (bool, String) {
+    {
+        if std::env::var_os("CIG_INTERNAL_NO_NS_PROBE").is_some() {
+            return (
+                false,
+                "not probed: CIG_INTERNAL_NO_NS_PROBE is set".to_string(),
+            );
+        }
+        // The fast route: a seccomp(2) listener. Tried in a forked
+        // child that installs the smallest allow-everything filter
+        // with the NEW_LISTENER flag; the child's exit status tells
+        // the parent whether the kernel made one. A bare fork + _exit
+        // (not `Command::new("true")`, which depends on PATH and would
+        // read `true` from whatever a foreign PATH named), so the
+        // probe is self-contained.
+        let fast = unsafe {
+            let pid = libc::fork();
+            if pid == 0 {
+                let prog = [libc::sock_filter {
+                    code: 0x06,
+                    jt: 0,
+                    jf: 0,
+                    k: 0x7fff_0000,
+                }];
+                if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
+                    libc::_exit(1);
+                }
+                let fp = libc::sock_fprog {
+                    len: prog.len() as libc::c_ushort,
+                    filter: prog.as_ptr() as *mut libc::sock_filter,
+                };
+                let fd = libc::syscall(libc::SYS_seccomp, 1, 1u64 << 3, &fp) as libc::c_int;
+                if fd < 0 {
+                    libc::_exit(2);
+                }
+                libc::close(fd);
+                libc::_exit(0);
+            }
+            if pid < 0 {
+                false
+            } else {
+                let mut status: libc::c_int = 0;
+                libc::waitpid(pid, &mut status, 0);
+                libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0
+            }
+        };
+        if fast {
+            return (
+                true,
+                "user notification (seccomp(2) with a listener): the fast route".to_string(),
+            );
+        }
+        // The slower route: a `ptrace` seize on a throwaway child, where
+        // the hop's thread of cig attaches and reads the same calls
+        // through the stop points.
+        let slow = {
+            // SAFETY: fork, then ptrace in this thread, waitpid for the
+            // child; nothing cleverer.
+            unsafe {
+                let pid = libc::fork();
+                if pid == 0 {
+                    // The child waits to be seized and exits.
+                    libc::pause();
+                    libc::_exit(0);
+                }
+                if pid < 0 {
+                    false
+                } else {
+                    let seized = libc::ptrace(libc::PTRACE_SEIZE, pid, 0usize, 0usize) == 0;
+                    libc::kill(pid, libc::SIGKILL);
+                    let mut status: libc::c_int = 0;
+                    libc::waitpid(pid, &mut status, 0);
+                    seized
+                }
+            }
+        };
+        if slow {
+            return (
+                true,
+                "ptrace (E779): the watch runs on the slower route here".to_string(),
+            );
+        }
+        (
+            false,
+            "unavailable: neither seccomp user notification nor ptrace of a child works here; `watch: true` is refused (E777)"
+                .to_string(),
+        )
     }
 }
 
