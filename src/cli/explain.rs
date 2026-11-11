@@ -60,7 +60,7 @@ fn list(ctx: &Ctx) -> i32 {
     for range in &registry().ranges {
         let codes: Vec<&Code> = all()
             .iter()
-            .filter(|c| range.from <= c.code && c.code <= range.to)
+            .filter(|c| range.holds(crate::errors::number(&c.code).unwrap_or(0)))
             .collect();
         outln!();
         outln!(

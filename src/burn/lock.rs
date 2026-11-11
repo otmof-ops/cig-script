@@ -57,6 +57,12 @@ fn who_path(lock: &Path) -> PathBuf {
     lock.with_extension("who")
 }
 
+/// Try an exclusive lock on any file without waiting; `None` means another
+/// process holds it. The lock goes with the returned handle.
+pub fn try_lock_file(path: &Path) -> io::Result<Option<fs::File>> {
+    try_lock(path)
+}
+
 /// Try the lock on `path` without waiting. `Ok(None)` means someone holds it.
 fn try_lock(path: &Path) -> io::Result<Option<fs::File>> {
     #[cfg(unix)]

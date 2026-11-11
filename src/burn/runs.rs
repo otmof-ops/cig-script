@@ -275,22 +275,33 @@ impl RunRecord {
 
     pub fn load(run_dir: &Path) -> io::Result<Self> {
         let text = fs::read_to_string(run_dir.join("run.json"))?;
-        // The format is read first: a newer cig may have added fields this
-        // one does not know, and that is a newer record, not a damaged one.
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
-            let format = v["format"].as_u64().unwrap_or(0) as u32;
-            if format > RECORD_FORMAT {
-                return Err(newer_format(
-                    "run.json",
-                    format,
-                    v["version"].as_str().unwrap_or(""),
-                ));
+        #[cfg(test)]
+        LOADS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // One parse, into the record. The format is judged on what came
+        // out of it: a newer cig may have added fields this one does not
+        // know, and that is a newer record, not a damaged one. Only a
+        // record that does not read as ours is parsed again, loosely, to
+        // tell a newer one from a damaged one.
+        match serde_json::from_str::<Self>(&text) {
+            Ok(mut rec) if rec.format <= RECORD_FORMAT => {
+                rec.loaded_from = Some(run_dir.to_path_buf());
+                Ok(rec)
+            }
+            Ok(rec) => Err(newer_format("run.json", rec.format, &rec.version)),
+            Err(e) => {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+                    let format = v["format"].as_u64().unwrap_or(0) as u32;
+                    if format > RECORD_FORMAT {
+                        return Err(newer_format(
+                            "run.json",
+                            format,
+                            v["version"].as_str().unwrap_or(""),
+                        ));
+                    }
+                }
+                Err(io::Error::new(io::ErrorKind::InvalidData, e))
             }
         }
-        let mut rec: Self = serde_json::from_str(&text)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        rec.loaded_from = Some(run_dir.to_path_buf());
-        Ok(rec)
     }
 
     /// The version that wrote this record, for handing the run back to it.
@@ -301,6 +312,11 @@ impl RunRecord {
 
 /// The error for a record a newer cig wrote: `io::ErrorKind::Unsupported`,
 /// so a caller can tell it from damage and hand the run to that version.
+/// `run.json` files read, counted for the tests that pin how many a start
+/// may read.
+#[cfg(test)]
+pub static LOADS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 pub fn newer_format(what: &str, format: u32, version: &str) -> io::Error {
     io::Error::new(
         io::ErrorKind::Unsupported,
@@ -502,13 +518,27 @@ pub fn pid_alive(pid: u32, started: Option<&str>) -> bool {
 /// backup). They were never the pack's. Swept when a run starts, for every
 /// run that is not alive; a live run's layers are its own.
 pub fn sweep_dead_layers() {
-    let Ok(entries) = fs::read_dir(runs_dir()) else {
-        return;
+    // Only the runs the index flags (written before a run's layers are
+    // made), so a start costs the same at ten runs as at ten thousand. An
+    // index that cannot be trusted (missing, cut short, or a record added
+    // to the folder behind its back) sends the sweep through every folder,
+    // as it always did.
+    let dirs: Vec<std::path::PathBuf> = match super::runs_index::boxed_runs() {
+        Some(ids) => ids.into_iter().map(|id| runs_dir().join(id)).collect(),
+        None => match fs::read_dir(runs_dir()) {
+            Ok(entries) => entries.flatten().map(|e| e.path()).collect(),
+            Err(_) => return,
+        },
     };
-    for entry in entries.flatten() {
-        let dir = entry.path();
+    for dir in dirs {
         let layers = dir.join("box");
         if !layers.is_dir() {
+            // Flagged, and nothing is left: the flag comes off.
+            if let Some(id) = dir.file_name().and_then(|n| n.to_str()) {
+                if dir.is_dir() {
+                    super::runs_index::mark_boxed(id, false);
+                }
+            }
             continue;
         }
         let alive = RunRecord::load(&dir)
@@ -543,23 +573,40 @@ pub fn list() -> io::Result<Vec<RunRecord>> {
 /// the version) is in the record, and a history of a thousand runs must not
 /// make every start slower.
 pub fn last_good(script_sha256: &str) -> Option<(crate::update::Version, String)> {
-    // Asked before every run, so it reads each run's record alone and
-    // never a journal: everything it needs (the script's hash, the
-    // status, the mode, the version) is in the record, and a history
-    // of a thousand runs must not make every start slower. The run
-    // index (#149) does not stand in for this scan because a folder
-    // scan here keeps the FIFO invariant (`cig run` opens no other
-    // run's journal, even one hand-written beside the index).
-    let mut records: Vec<RunRecord> = fs::read_dir(runs_dir())
+    // From the run index (#184): the hash, status and mode of every run
+    // are on its lines, so the candidates come off a text scan and only
+    // the one that wins has its own `run.json` read, to confirm it. No
+    // other run's record or journal is opened. When the index cannot
+    // stand in for the folder (see `runs_index::trusted_text`), the
+    // folder scan below answers, one parse per record, and the index is
+    // brought up to date from what it read.
+    let confirm = |id: &str| -> Option<(crate::update::Version, String)> {
+        let rec = RunRecord::load(&runs_dir().join(id)).ok()?;
+        if rec.script_sha256 != script_sha256 || rec.status != "ok" || rec.mode != "run" {
+            return None;
+        }
+        rec.written_by().map(|v| (v, rec.id.clone()))
+    };
+    if let Some(answer) = super::runs_index::last_good_candidates(script_sha256, confirm) {
+        return answer;
+    }
+    let all: Vec<RunRecord> = fs::read_dir(runs_dir())
         .ok()?
         .filter_map(|e| e.ok())
         .filter_map(|e| RunRecord::load(&e.path()).ok())
+        .collect();
+    let mut records: Vec<&RunRecord> = all
+        .iter()
         .filter(|r| r.script_sha256 == script_sha256 && r.status == "ok" && r.mode == "run")
         .collect();
     records.sort_by(|a, b| b.started.cmp(&a.started).then_with(|| b.id.cmp(&a.id)));
-    records
+    let hit = records
         .into_iter()
-        .find_map(|r| r.written_by().map(|v| (v, r.id.clone())))
+        .find_map(|r| r.written_by().map(|v| (v, r.id.clone())));
+    // Bring the index level with the folder, so the next start takes the
+    // short way. Best effort.
+    let _ = super::runs_index::write_fresh(&all);
+    hit
 }
 
 /// Resolve a full id or a unique prefix to a run directory.
@@ -578,5 +625,108 @@ pub fn find(id_or_prefix: &str) -> io::Result<Option<RunRecord>> {
         n => Err(io::Error::other(format!(
             "`{id_or_prefix}` matches {n} runs; give more of the id"
         ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+
+    fn rec(n: usize, sha: &str, status: &str) -> RunRecord {
+        let id = format!("20260101T{:06}-{:06x}", n, n);
+        let mut r = RunRecord::damaged(&id, &io::Error::other("stub"));
+        r.format = RECORD_FORMAT;
+        r.version = "1.20.0".to_string();
+        r.script_sha256 = sha.to_string();
+        r.status = status.to_string();
+        r.started = format!("2026-01-01T00:{:02}:{:02}.000Z", n / 60 % 60, n % 60);
+        r.error = None;
+        r
+    }
+
+    /// Starting a run reads the same number of run records whatever the
+    /// history holds: the index names the candidate and one `run.json` is
+    /// read to confirm it. The old scan read every record (#184).
+    #[test]
+    fn run_start_is_constant_in_history() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _g = crate::burn::test_env_lock();
+        let old = std::env::var_os("CIGSCRIPT_HOME");
+        std::env::set_var("CIGSCRIPT_HOME", tmp.path().join("home"));
+        let mut reads = Vec::new();
+        let mut next = 0;
+        for size in [5usize, 60, 240] {
+            while next < size {
+                // Every record is one of this script's good runs: the worst
+                // case for a scan that parses what it matches.
+                rec(next, "abc", "ok").save().unwrap();
+                next += 1;
+            }
+            let before = LOADS.load(Ordering::Relaxed);
+            let (_, id) = last_good("abc").expect("a good run");
+            reads.push(LOADS.load(Ordering::Relaxed) - before);
+            assert_eq!(id, format!("20260101T{:06}-{:06x}", size - 1, size - 1));
+        }
+        assert_eq!(reads, vec![1, 1, 1], "run.json reads by history size");
+        // A record an older cig wrote into the folder, never told to the
+        // index, still wins: the folder's stamp no longer fits, so the
+        // folder is scanned.
+        let mut later = rec(999, "abc", "ok");
+        later.version = "1.19.0".to_string();
+        let dir = runs_dir().join(&later.id);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("run.json"), serde_json::to_string(&later).unwrap()).unwrap();
+        let (v, id) = last_good("abc").unwrap();
+        assert_eq!(
+            (v.to_string(), id),
+            ("1.19.0".to_string(), later.id.clone())
+        );
+        // That scan brought the index level: the next start takes the short way.
+        let before = LOADS.load(Ordering::Relaxed);
+        assert_eq!(last_good("abc").unwrap().1, later.id);
+        assert_eq!(LOADS.load(Ordering::Relaxed) - before, 1);
+        match old {
+            Some(v) => std::env::set_var("CIGSCRIPT_HOME", v),
+            None => std::env::remove_var("CIGSCRIPT_HOME"),
+        }
+    }
+
+    /// The flag that says a run may hold box layers is in the index before
+    /// the layers are made, so a run that dies in the hop is still found.
+    /// Here the layers cannot be made at all (`box` is a file): the flag is
+    /// there anyway, and the sweep visits only that run.
+    #[test]
+    fn box_flag_before_layers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _g = crate::burn::test_env_lock();
+        let old = std::env::var_os("CIGSCRIPT_HOME");
+        std::env::set_var("CIGSCRIPT_HOME", tmp.path().join("home"));
+        for n in 0..4 {
+            rec(n, "abc", "ok").save().unwrap();
+        }
+        assert_eq!(super::super::runs_index::boxed_runs(), Some(vec![]));
+        let flagged = rec(2, "abc", "ok");
+        let dir = flagged.dir();
+        fs::write(dir.join("box"), "not a folder").unwrap();
+        let made = super::super::overlay::prepare(&dir, 1, &[tmp.path().to_path_buf()]);
+        assert!(made.is_err(), "the layers could not be made");
+        assert_eq!(
+            super::super::runs_index::boxed_runs(),
+            Some(vec![flagged.id.clone()])
+        );
+        // A real layer under a run that is not running is swept, and the
+        // flag comes off with it.
+        fs::remove_file(dir.join("box")).unwrap();
+        let layers = dir.join("box/1/0/work");
+        fs::create_dir_all(&layers).unwrap();
+        sweep_dead_layers();
+        assert!(!dir.join("box").exists());
+        sweep_dead_layers();
+        assert_eq!(super::super::runs_index::boxed_runs(), Some(vec![]));
+        match old {
+            Some(v) => std::env::set_var("CIGSCRIPT_HOME", v),
+            None => std::env::remove_var("CIGSCRIPT_HOME"),
+        }
     }
 }

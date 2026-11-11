@@ -7,22 +7,6 @@ E100-E199  lexing: the source cannot be turned into tokens
   E102  unknown escape                     lex
   E103  unexpected character               lex
   E104  malformed number                   lex
-  E1000  nothing to compile                 usage
-  E1001  no runtime for the target          usage
-  E1002  the runtime is another cig         usage
-  E1003  the script's pin is not met        usage
-  E1004  the program cannot be written      usage
-  E1005  the runtime already carries a program usage
-  E1006  an unknown target                  usage
-  E1007  two programs would share one name  usage
-  E1008  the runtime would tie programs to this machine's libc usage
-  E1009  a script whose name is not printable usage
-  E1050  a damaged program                  usage
-  E1051  a program for another cig          usage
-  E1054  a program with raised rights       usage
-  E1055  a program that cannot read itself  usage
-  E1052  not one of the program's run flags usage
-  E1053  not this program's run             usage
 
 E200-E299  parsing: the tokens do not follow the grammar
   E200  syntax error                       syntax
@@ -77,6 +61,9 @@ E500-E519  runtime: a failure while the script was running, including the resour
 E520-E529  the ghost filesystem: dry-run reads of paths that simulated ops changed
   E520  read of a ghost-deleted path       runtime
 
+E530-E549  reserved for `cig net` (cig-script#115): tunnels, the resolver, routes, canaries and the network kill switch; owned by cig-script
+  reserved; nothing emitted yet
+
 E550-E569  hops (process boundaries): child processes and foreign scripts
   E550  hop failed                         runtime
   E551  command not found                  runtime
@@ -87,7 +74,10 @@ E550-E569  hops (process boundaries): child processes and foreign scripts
   E556  bad shape on stdout                runtime
   E557  bad encoding on stdout             runtime
 
-E580-E589  the blacklist: what cig-orchestrator stops wherever it shows up, from the lists it keeps and your own entries
+E570-E579  reserved for CIG.OS (cig-os): the OS layer's own refusals, owned by cig-os; no other family takes it
+  reserved; nothing emitted yet
+
+E580-E588  the blacklist: what cig-orchestrator stops wherever it shows up, from the lists it keeps and your own entries
   E580  on the blacklist                   runtime  (cigo)
   E581  the last warning                   runtime  (planned)
   E582  run anyway, in the box             runtime  (planned)
@@ -97,6 +87,9 @@ E580-E589  the blacklist: what cig-orchestrator stops wherever it shows up, from
   E586  the list is old                    runtime  (planned)
   E587  a list that does not verify        runtime  (cigo)
   E588  the blacklist file is gone         runtime  (cigo)
+
+E589-E599  reserved for cig-orchestrator's offsite backup of the tin (cig-orchestrator#65): the sealed backup, the push and verify to a place, the recovery key and its drills; owned by cig-orchestrator
+  reserved; nothing emitted yet
 
 E600-E699  raised by the script: cough, assert, chains, process checks
   E600  raised by the script               cough
@@ -150,6 +143,7 @@ E750-E769  folds and packs: refusals when automation is composed
   E761  a hop's report could not be used   burn
   E762  a parcel could not be written or imported burn
   E763  the box could not be made, or its layer not applied burn
+  E764  the ledger's chain is broken, so nothing is appended burn
 
 E770-E799  the box for untrusted code: its network, the watch, kept layers, the kill switch
   E771  a host outside the allow list      burn
@@ -211,10 +205,6 @@ E900-E999  internal: a bug in CigScript itself
   E902  tripwire                           internal
 
 E1000-E1099  building and running compiled programs: the path, the runtime, the target, and a program's own command line (cigcompile, and the programs it makes)
-  E101  unterminated string                lex
-  E102  unknown escape                     lex
-  E103  unexpected character               lex
-  E104  malformed number                   lex
   E1000  nothing to compile                 usage
   E1001  no runtime for the target          usage
   E1002  the runtime is another cig         usage
@@ -248,6 +238,21 @@ E1600-E1699  CigarScript: calling Rust and C, and the burn rule at that boundary
   reserved; nothing emitted yet
 
 E1700-E1799  carton: packages, manifests and the lock file
+  reserved; nothing emitted yet
+
+E1800-E1899  reserved for ciginstaller: installing, updating, removing and checking the family (cig-installer's first range); owned by cig-installer
+  reserved; nothing emitted yet
+
+E1900-E1999  reserved for ciginstaller, its second range, for the codes its first range cannot hold; owned by cig-installer
+  reserved; nothing emitted yet
+
+E2000-E2099  reserved for cigo's agent family (cig-orchestrator#63): launching an agent, the scrubbed fetch, quote folders, the taint and download rules; owned by cig-orchestrator
+  reserved; nothing emitted yet
+
+E2100-E2199  reserved for the guard's level 5, spyware and anti-forensics checks (cig-orchestrator#57, #58, #89): eBPF enforcement and what it finds; owned by cig-orchestrator
+  reserved; nothing emitted yet
+
+E2200-E2299  reserved for cigo's firmware checks (cig-orchestrator#61): the firmware status, the measured boot and what a refused flash names; owned by cig-orchestrator
   reserved; nothing emitted yet
 
 cig explain <code> for the page; cig explain --schema for the JSON schema
@@ -2379,6 +2384,28 @@ E763 the box could not be made, or its layer not applied  (burn, fold family, si
      remedy: the run rolled back what was applied; fix the path and run again
 
   arises in: run, light  ·  related: E757, E752  ·  tags: kernel
+
+======== E764 ========
+E764 the ledger's chain is broken, so nothing is appended  (burn, fold family, since 1.20.0)
+
+  kind of no: can't see any ciggies bro  (yours: you're pointed at the wrong place; wrong address: a path, a name, a directory not on PATH; ENOENT)
+
+  Every ledger line is signed over the line before it, under the tin's key. An append chains its new line onto the last one, so a last line that no key verifies (edited, replaced, cut mid-line, or signed under a key this machine does not have) would be given a good line after it and the break would look as if it had always been there. The run's own work is not affected; the ledger is left as it is and the run says so. E760 is the same check on a run's journal.
+
+  what to type next: `cig runs --verify` names the first line that does not fit; look at what changed the ledger before anything else is trusted
+
+  known causes, ranked; doctor checks them in this order
+  1. a ledger line was edited by hand, or a tool rewrote the file
+     probe: none; a suggestion, not a finding
+     remedy: `cig runs --verify` says which line; the record cannot be re-signed without the key, so restore the ledger from a copy you trust
+  2. the ledger was written under another machine's key (a tin copied without its key)
+     probe: none; a suggestion, not a finding
+     remedy: copy the key that signed it
+  3. the last line was cut short by a crash or a full disk
+     probe: none; a suggestion, not a finding
+     remedy: `cig runs --verify` names the line; keep a copy of the ledger, then cut the torn last line away
+
+  arises in: run, unburn, runs  ·  related: E760, E709  ·  tags: kernel
 
 ======== E800 ========
 E800 usage error  (usage, usage family, since 1.0.0)

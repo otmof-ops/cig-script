@@ -33,6 +33,11 @@ pub struct Layers {
 /// overlay over a parent is mounted before one over a child inside it.
 pub fn prepare(run_dir: &Path, seq: u64, roots: &[PathBuf]) -> io::Result<Layers> {
     let dir = layers_dir(run_dir, seq);
+    // The run may leave layers from here on: say so in the run index first,
+    // so the next start's sweep finds it without looking at every run.
+    if let Some(id) = run_dir.file_name().and_then(|n| n.to_str()) {
+        super::runs_index::mark_boxed(id, true);
+    }
     let mut ordered: Vec<PathBuf> = roots.to_vec();
     ordered.sort_by_key(|r| r.components().count());
     let mut out = Vec::new();

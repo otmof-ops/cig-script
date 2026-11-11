@@ -19,6 +19,32 @@ project follows semantic versioning.
   recorded by the `cla` workflow) instead of the DCO. Decision record:
   `docs/decisions/0001-licence.md` (cig-installer#27).
 
+- **A run no longer reads the whole history to start** (#184). The ledger's
+  append refuses a last line no key verifies (`E764`; `E760` is the journal's
+  chain) and leaves the ledger as it was; `cig runs --verify` and `--deep`
+  report the ledger's own chain, name the line and exit non-zero. `last_good`
+  comes off the run index and reads one `run.json` to confirm it; the sweep of
+  dead box layers visits only runs the index flags (written before a run's
+  layers are made). An index that no longer fits the runs folder (a record an
+  older cig added) sends both through the folder, as before, and brings the
+  index level. `run.json` is parsed once.
+- **`cig runs`** prints the newest 50 runs through one buffered write; `--all`
+  lists every run (`--json` always does). **`cig runs pin <id>`** and
+  **`cig runs unpin <id>`** are the short ways of `--pin` and `--unpin`, and
+  **`cig run --pin`** pins the run it makes.
+
+- **The family's new error ranges are reserved in the registry**, so nothing
+  else takes them: `E530`-`E549` `cig net`, `E570`-`E579` CIG.OS, `E589`-`E599`
+  cigo's offsite backup (the blacklist family is now `E580`-`E588`; `E589` was
+  never used), `E1800`-`E1899` and `E1900`-`E1999` ciginstaller, `E2000`-`E2099`
+  cigo's agent family, `E2100`-`E2199` the guard's level 5, spyware and
+  anti-forensics checks, `E2200`-`E2299` firmware. `cig explain` lists a
+  range's codes by number, not by text.
+- **`cig unburn --force` on a run left `unburn_failed` retries only the entries
+  that failed** (#132), with the changed-since checks overridden. It no longer
+  restores again what an earlier pass put back, which an older run's own
+  unburn may have rewound since. `--force` on a run rolled back cleanly still
+  redoes everything.
 - **Reports run through `ciginstaller`.** `cig crash list|show|send|delete`
   are stubs for `ciginstaller crash ...` with the same arguments; `cig crash
   flush`, `submit` and `announce-fixed` stay, because capture and the local

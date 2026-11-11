@@ -100,6 +100,7 @@ impl Sandbox {
             .env("CIGSCRIPT_HOME", self.home())
             .env("NO_COLOR", "1")
             .env("CIG_SEAL_KEY", "file")
+            .env("CIG_BUDGET_SYNC", "1")
             // Every cig a test starts, and every background flush it spawns,
             // files into the sandbox's own tracker, never a real one.
             .env("CIG_INTERNAL_TRACKER_DIR", self.path().join("tracker"))
@@ -147,6 +148,7 @@ impl Sandbox {
             .env("HOME", self.path())
             .env("NO_COLOR", "1")
             .env("CIG_SEAL_KEY", "file")
+            .env("CIG_BUDGET_SYNC", "1")
             // Every cig a test starts, and every background flush it spawns,
             // files into the sandbox's own tracker, never a real one.
             .env("CIG_INTERNAL_TRACKER_DIR", self.path().join("tracker"))
@@ -164,6 +166,7 @@ impl Sandbox {
             .env("CIGSCRIPT_HOME", self.home())
             .env("NO_COLOR", "1")
             .env("CIG_SEAL_KEY", "file")
+            .env("CIG_BUDGET_SYNC", "1")
             // Every cig a test starts, and every background flush it spawns,
             // files into the sandbox's own tracker, never a real one.
             .env("CIG_INTERNAL_TRACKER_DIR", self.path().join("tracker"))
@@ -188,6 +191,7 @@ impl Sandbox {
             .env("CIGSCRIPT_HOME", self.home())
             .env("NO_COLOR", "1")
             .env("CIG_SEAL_KEY", "file")
+            .env("CIG_BUDGET_SYNC", "1")
             // Every cig a test starts, and every background flush it spawns,
             // files into the sandbox's own tracker, never a real one.
             .env("CIG_INTERNAL_TRACKER_DIR", self.path().join("tracker"))
@@ -669,6 +673,7 @@ fn a_panic_writes_a_redacted_crash_report_and_never_sends_without_consent() {
         .env("CIGSCRIPT_HOME", sb.home())
         .env("NO_COLOR", "1")
         .env("CIG_SEAL_KEY", "file")
+        .env("CIG_BUDGET_SYNC", "1")
         .env("CIG_INTERNAL_TRACKER_DIR", sb.path().join("tracker"))
         .env("CIG_INTERNAL_PANIC", "1")
         .env_remove("CI")
@@ -2417,6 +2422,7 @@ fn a_named_pipe_is_refused_not_hung() {
         .env("CIGSCRIPT_HOME", sb.home())
         .env("NO_COLOR", "1")
         .env("CIG_SEAL_KEY", "file")
+        .env("CIG_BUDGET_SYNC", "1")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
         .spawn()
@@ -4319,6 +4325,51 @@ fn a_partial_rollback_is_finished_by_a_plain_unburn() {
     assert!(third.contains("error[E705 burn]:"), "{third}");
 }
 
+#[test]
+#[cfg(unix)]
+fn force_on_a_partial_rollback_retries_only_what_failed() {
+    use std::os::unix::fs::PermissionsExt;
+    if running_as_root() {
+        eprintln!("skipped: root ignores directory modes, so no restore can be made to fail here");
+        return;
+    }
+    let sb = Sandbox::new();
+    sb.write("a.txt", "o\n");
+    sb.write("sub/b.txt", "o\n");
+    sb.write("one.cig", "burn {\n  fs.write_text(\"a.txt\", \"n1\")\n}\n");
+    sb.write(
+        "two.cig",
+        "burn {\n  fs.write_text(\"a.txt\", \"n2\")\n  fs.write_text(\"sub/b.txt\", \"n\")\n}\n",
+    );
+    sb.run_ok(&["run", "one.cig"]);
+    sb.run_ok(&["run", "two.cig"]);
+    let runs = sb.runs();
+    let (newer, older) = (
+        runs[0]["id"].as_str().unwrap().to_string(),
+        runs[1]["id"].as_str().unwrap().to_string(),
+    );
+    // The newer run's first pass puts a.txt back to n1 and fails on sub/b.txt.
+    let sub = sb.path().join("sub");
+    fs::set_permissions(&sub, fs::Permissions::from_mode(0o500)).unwrap();
+    let first = sb.cig(&["unburn", &newer]);
+    fs::set_permissions(&sub, fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(!first.status.success());
+    assert_eq!(sb.read("a.txt"), "n1");
+    // The older run is unburned between the two passes: a.txt goes back to o.
+    sb.run_ok(&["unburn", &older]);
+    assert_eq!(sb.read("a.txt"), "o\n");
+    // --force finishes the newer run's failed entry and leaves the older
+    // run's restore of a.txt alone.
+    let second = sb.run_ok(&["unburn", &newer, "--force"]);
+    assert!(second.contains("sub/b.txt"), "{second}");
+    assert_eq!(sb.read("sub/b.txt"), "o\n");
+    assert_eq!(sb.read("a.txt"), "o\n");
+    assert_eq!(sb.runs()[0]["status"], "unburned");
+    // A run rolled back cleanly still needs --force to be redone.
+    let third = sb.run_err(&["unburn", &newer], 1);
+    assert!(third.contains("error[E705 burn]:"), "{third}");
+}
+
 #[cfg(unix)]
 #[test]
 fn the_tin_key_is_kept_out_of_the_tin_and_a_sealed_run_unburns() {
@@ -4713,6 +4764,114 @@ fn tin_head_matches_the_ledger_and_an_edited_ledger_is_caught() {
     .unwrap();
     let err = sb.run_err(&["tin", "verify"], 1);
     assert!(err.contains("ledger") && err.contains("E709"), "{err}");
+}
+
+// ----- the ledger's tail (#184) ---------------------------------------------
+
+#[cfg(unix)]
+fn ledger_file(sb: &Sandbox) -> std::path::PathBuf {
+    sb.path().join(".cigscript-keys").join("ledger.jsonl")
+}
+
+/// Edit one ledger line's status without touching its MAC.
+#[cfg(unix)]
+fn edit_ledger_line(sb: &Sandbox, line_no: usize) {
+    let text = fs::read_to_string(ledger_file(sb)).unwrap();
+    let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+    assert!(
+        lines[line_no - 1].contains("\"status\":\"ok\""),
+        "{lines:?}"
+    );
+    lines[line_no - 1] = lines[line_no - 1].replace("\"status\":\"ok\"", "\"status\":\"xx\"");
+    fs::write(ledger_file(sb), format!("{}\n", lines.join("\n"))).unwrap();
+}
+
+/// A last line no key verifies is never chained onto: the run still does
+/// its work, says why the ledger was left alone, and the ledger is as it
+/// was (E764; E760 is the journal's chain).
+#[cfg(unix)]
+#[test]
+fn append_refuses_a_broken_tail() {
+    let sb = Sandbox::new();
+    two_op_run(&sb);
+    let n = fs::read_to_string(ledger_file(&sb))
+        .unwrap()
+        .lines()
+        .count();
+    assert!(n >= 1);
+    edit_ledger_line(&sb, n);
+    let before = fs::read_to_string(ledger_file(&sb)).unwrap();
+    sb.write("s2.cig", "burn {\n  fs.write_text(\"c.txt\", \"3\")\n}\n");
+    let out = sb.cig(&["run", "s2.cig"]);
+    let err = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(err.contains("E764"), "{err}");
+    assert_eq!(
+        fs::read_to_string(ledger_file(&sb)).unwrap(),
+        before,
+        "nothing may be appended to a broken tail"
+    );
+    // A forget (a plain append) is refused the same way.
+    let out = sb.cig(&["runs", "--forget", "nope"]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("E764"));
+}
+
+/// An append reads the tail and nothing else: a line edited far back in
+/// the ledger is not what an append is for (the verdict commands find it),
+/// so the next run still appends, and `--verify` then names the line.
+#[cfg(unix)]
+#[test]
+fn append_reads_only_the_tail() {
+    let sb = Sandbox::new();
+    for i in 0..6 {
+        sb.write(
+            "s.cig",
+            &format!("burn {{\n  fs.write_text(\"f{i}.txt\", \"{i}\")\n}}\n"),
+        );
+        sb.run_ok(&["run", "s.cig"]);
+    }
+    let n = fs::read_to_string(ledger_file(&sb))
+        .unwrap()
+        .lines()
+        .count();
+    assert!(n >= 6, "{n}");
+    edit_ledger_line(&sb, 2);
+    sb.write("s.cig", "burn {\n  fs.write_text(\"last.txt\", \"z\")\n}\n");
+    sb.run_ok(&["run", "s.cig"]);
+    let after = fs::read_to_string(ledger_file(&sb))
+        .unwrap()
+        .lines()
+        .count();
+    assert_eq!(after, n + 1, "the run appended to the ledger");
+    // And the whole-chain walk, where it is asked for, still sees line 2.
+    let out = sb.cig(&["runs", "--verify"]);
+    let said = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(!out.status.success(), "{said}");
+    assert!(said.contains("broken at line 2"), "{said}");
+}
+
+/// `cig runs --verify` and `--deep` report the ledger's own chain, name the
+/// line, and exit non-zero (they said ok before).
+#[cfg(unix)]
+#[test]
+fn verify_all_reports_a_broken_ledger_chain() {
+    let sb = Sandbox::new();
+    two_op_run(&sb);
+    sb.run_ok(&["runs", "--verify"]);
+    edit_ledger_line(&sb, 1);
+    for args in [
+        &["runs", "--verify"][..],
+        &["runs", "--verify", "--deep"][..],
+    ] {
+        let out = sb.cig(args);
+        let said = String::from_utf8_lossy(&out.stdout).to_string();
+        assert!(!out.status.success(), "{args:?}: {said}");
+        assert!(said.contains("broken at line 1"), "{args:?}: {said}");
+    }
+    let out = sb.cig(&["--json", "runs", "--verify"]);
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["ledger"]["broken_at"], 1, "{v}");
+    assert_eq!(v["ok"], false, "{v}");
 }
 
 // ----- the tin guard (#105 L1) ---------------------------------------------
@@ -6156,6 +6315,7 @@ fn a_contained_hops_network_works_with_cig_under_tmp() {
         .env("CIGSCRIPT_HOME", root.join("home"))
         .env("NO_COLOR", "1")
         .env("CIG_SEAL_KEY", "file")
+        .env("CIG_BUDGET_SYNC", "1")
         .env("CIG_UPDATE_MANIFEST", root.join("no-releases.json"))
         .env_remove("CI")
         .output()
@@ -6772,6 +6932,7 @@ fn a_second_run_on_the_same_pack_is_refused_while_the_first_runs() {
         .env("CIGSCRIPT_HOME", sb.home())
         .env("NO_COLOR", "1")
         .env("CIG_SEAL_KEY", "file")
+        .env("CIG_BUDGET_SYNC", "1")
         .env("CIG_UPDATE_MANIFEST", sb.path().join("no-releases.json"))
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -8564,6 +8725,7 @@ fn scan_memory_stays_under_the_budget_for_a_million_entries() {
         .env("CIGSCRIPT_HOME", sb.home())
         .env("NO_COLOR", "1")
         .env("CIG_SEAL_KEY", "file")
+        .env("CIG_BUDGET_SYNC", "1")
         .output()
         .expect("time");
     let err = String::from_utf8_lossy(&out.stderr).to_string();
@@ -8847,6 +9009,7 @@ fn a_chatty_undo_neither_hangs_the_rollback_nor_floods_the_report() {
         .env("CIGSCRIPT_HOME", sb.home())
         .env("NO_COLOR", "1")
         .env("CIG_SEAL_KEY", "file")
+        .env("CIG_BUDGET_SYNC", "1")
         .env_remove("CI")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -9123,6 +9286,7 @@ fn a_key_handed_over_on_a_descriptor_seals_and_is_never_written() {
             .env("CIGSCRIPT_HOME", sb.home())
             .env("NO_COLOR", "1")
             .env("CIG_SEAL_KEY", "file")
+            .env("CIG_BUDGET_SYNC", "1")
             .env("CIG_INTERNAL_TRACKER_DIR", sb.path().join("tracker"))
             .env("CIG_UPDATE_MANIFEST", sb.path().join("no-releases.json"))
             .env_remove("CI")
@@ -9396,6 +9560,16 @@ fn the_layers_a_dead_run_left_are_swept_when_the_next_run_starts() {
     {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&work, fs::Permissions::from_mode(0o000)).unwrap();
+    }
+    // The index flag a run that died in a boxed hop would have written
+    // before its layers were made (#184): the sweep visits flagged runs.
+    {
+        use std::io::Write;
+        let mut idx = fs::OpenOptions::new()
+            .append(true)
+            .open(sb.home().join("runs-index.jsonl"))
+            .unwrap();
+        writeln!(idx, "{{\"op\":\"box\",\"id\":\"{id}\",\"on\":true}}").unwrap();
     }
     // Another run, of anything: the dead run's layers are gone with it.
     sb.write("t.cig", "exhale \"hello\"\n");
@@ -10153,6 +10327,7 @@ fn a_send_waits_for_the_sender_that_holds_the_ashtray() {
         .env("CIGSCRIPT_HOME", sb.home())
         .env("NO_COLOR", "1")
         .env("CIG_SEAL_KEY", "file")
+        .env("CIG_BUDGET_SYNC", "1")
         .env("CIG_UPDATE_MANIFEST", sb.path().join("no-releases.json"))
         .env("CIG_INTERNAL_TRACKER_DIR", &tracker)
         .env_remove("CI")
@@ -10605,6 +10780,7 @@ fn a_run_starts_without_reading_other_runs_journals() {
         .env("CIGSCRIPT_HOME", sb.home())
         .env("NO_COLOR", "1")
         .env("CIG_SEAL_KEY", "file")
+        .env("CIG_BUDGET_SYNC", "1")
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
@@ -10862,6 +11038,102 @@ fn a_refused_run_stops_the_stretch_cleanly() {
     let again = sb.cig(&["unburn", "--continue"]);
     assert_eq!(again.status.code(), Some(3));
     assert!(String::from_utf8_lossy(&again.stderr).contains("no stretch to continue"));
+}
+
+/// Five runs writing overlapping files; the oldest first.
+fn overlapping_runs(sb: &Sandbox) -> Vec<String> {
+    sb.write("a.txt", "v0");
+    let writes: [&[(&str, &str)]; 5] = [
+        &[("f.txt", "1"), ("a.txt", "a1")],
+        &[("f.txt", "2"), ("g.txt", "g2")],
+        &[("f.txt", "3"), ("g.txt", "g3"), ("a.txt", "a3")],
+        &[("f.txt", "4"), ("h.txt", "h4")],
+        &[("g.txt", "g5"), ("h.txt", "h5")],
+    ];
+    for (k, w) in writes.iter().enumerate() {
+        let body: String = w
+            .iter()
+            .map(|(f, c)| format!("  fs.write_text(\"{f}\", \"{c}\")\n"))
+            .collect();
+        sb.write(&format!("o{k}.cig"), &format!("burn {{\n{body}}}\n"));
+        sb.run_ok(&["run", &format!("o{k}.cig")]);
+    }
+    let mut ids: Vec<String> = sb
+        .runs()
+        .iter()
+        .map(|r| r["id"].as_str().unwrap().to_string())
+        .collect();
+    ids.reverse();
+    ids
+}
+
+fn tree_and_marks(sb: &Sandbox) -> (Vec<(String, Option<String>)>, Vec<String>) {
+    let files = ["a.txt", "f.txt", "g.txt", "h.txt"]
+        .iter()
+        .map(|f| (f.to_string(), sb.exists(f).then(|| sb.read(f))))
+        .collect();
+    let mut runs = sb.runs();
+    runs.reverse();
+    let marks = runs
+        .iter()
+        .map(|r| format!("{} {}", r["status"], r["rolled_back"]))
+        .collect();
+    (files, marks)
+}
+
+/// #149, the combined restore: `--to` writes each file once, to its
+/// earliest before-state, and leaves exactly what unburning the same runs
+/// one by one, newest first, leaves: the bytes and the marks.
+#[test]
+fn unburn_to_equals_unburn_one_by_one() {
+    let a = Sandbox::new();
+    let ids_a = overlapping_runs(&a);
+    let out = a.cig(&["unburn", "--to", &ids_a[1], "--yes"]);
+    let said = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(out.status.success(), "{said}");
+    assert!(!said.contains("tripwire"), "{said}");
+    let said = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        said.contains("left for the older run's restore of it"),
+        "the files were not combined: {said}"
+    );
+    let b = Sandbox::new();
+    let ids_b = overlapping_runs(&b);
+    for id in ids_b[2..].iter().rev() {
+        b.run_ok(&["unburn", id]);
+    }
+    assert_eq!(tree_and_marks(&a), tree_and_marks(&b));
+    // `--to` the second run: the three after it are back, so the files
+    // are as that run left them.
+    assert_eq!(a.read("a.txt"), "a1");
+    assert_eq!(a.read("f.txt"), "2");
+    assert_eq!(a.read("g.txt"), "g2");
+    assert!(!a.exists("h.txt"));
+}
+
+/// #149: `cig runs pin <id>`, `cig runs unpin <id>` and `cig run --pin`
+/// say what `--pin` and `--unpin` on `cig runs` say.
+#[test]
+fn the_pin_spellings_pin_and_unpin() {
+    let sb = Sandbox::new();
+    let ids = four_runs(&sb);
+    sb.run_ok(&["runs", "pin", &ids[0]]);
+    let listed = sb.run_ok(&["runs", "--all"]);
+    assert!(
+        listed
+            .lines()
+            .any(|l| l.contains(&ids[0]) && l.contains("(pinned)")),
+        "{listed}"
+    );
+    sb.run_ok(&["runs", "unpin", &ids[0]]);
+    let listed = sb.run_ok(&["runs", "--all"]);
+    assert!(!listed.contains("(pinned)"), "{listed}");
+    sb.write("p.cig", "burn {\n  fs.write_text(\"p.txt\", \"p\")\n}\n");
+    sb.run_ok(&["run", "--pin", "p.cig"]);
+    let runs = sb.runs();
+    let newest = &runs[0];
+    assert_eq!(newest["pinned"], true, "{newest}");
+    assert_eq!(runs.iter().filter(|r| r["pinned"] == true).count(), 1);
 }
 
 /// #149: a pinned run is kept by --prune and by keep_runs, listed as
@@ -11200,6 +11472,63 @@ fn history_budget_is_off_by_default_and_prunes_oldest_first_when_set() {
             .iter()
             .any(|r| r["how"] == "budget"),
         "no budget entry: {json}"
+    );
+}
+
+/// #149: a stretch that was killed after some of its runs leaves its list;
+/// `--continue` takes up the rest, and a run already back is not done twice.
+#[test]
+fn a_killed_unburn_to_resumes() {
+    let sb = Sandbox::new();
+    let ids = four_runs(&sb);
+    // What a stretch `--to` the oldest run writes before it starts, and what
+    // it had done when it was killed: the newest run is back, the list stays.
+    let stretch = serde_json::json!({
+        "runs": [ids[3], ids[2], ids[1]],
+        "made": "2026-11-11T00:00:00Z",
+    });
+    fs::write(sb.home().join("unburn-stretch.json"), stretch.to_string()).unwrap();
+    sb.run_ok(&["unburn", &ids[3]]);
+    assert_eq!(sb.read("f.txt"), "3");
+    let out = sb.cig(&["unburn", "--continue", "-y"]);
+    let said = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(out.status.success(), "{said}");
+    assert!(said.contains("undid 2 runs"), "{said}");
+    assert!(!said.contains(&format!("-- {}", ids[3])), "{said}");
+    assert_eq!(sb.read("f.txt"), "1");
+    assert!(sb.exists("g1.txt") && !sb.exists("g2.txt") && !sb.exists("g3.txt"));
+    assert!(!sb.home().join("unburn-stretch.json").exists());
+    // Each is back exactly once: another pass has nothing to do, and a
+    // single unburn of any of them is refused as done.
+    let again = sb.cig(&["unburn", "--continue"]);
+    assert!(!again.status.success());
+    sb.run_err(&["unburn", &ids[2]], 1);
+}
+
+/// #149: the budget pass never takes a run that holds a box layer waiting
+/// for approval, however old, and a pass run on its own (what a run starts
+/// in the background) prunes the rest oldest first.
+#[test]
+fn held_layers_are_never_pruned_by_the_budget_pass() {
+    let sb = Sandbox::new();
+    let ids = four_runs(&sb);
+    let held = sb.home().join("runs").join(&ids[0]);
+    fs::create_dir_all(held.join("kept")).unwrap();
+    fs::create_dir_all(held.join("box").join("1")).unwrap();
+    fs::write(held.join("kept").join("1.json"), "{}").unwrap();
+    sb.run_ok(&["config", "history_keep", "0"]);
+    sb.run_ok(&["config", "history_budget", "1024"]);
+    sb.run_ok(&["__budget"]);
+    let left: Vec<String> = sb
+        .runs()
+        .iter()
+        .map(|r| r["id"].as_str().unwrap().to_string())
+        .collect();
+    assert!(left.contains(&ids[0]), "the held run was pruned: {left:?}");
+    assert!(left.contains(&ids[3]), "the newest was pruned: {left:?}");
+    assert!(
+        !left.contains(&ids[1]) && !left.contains(&ids[2]),
+        "{left:?}"
     );
 }
 
@@ -12025,6 +12354,7 @@ fn rekey_refuses_when_the_key_was_handed_over_on_a_descriptor() {
         .env("CIGSCRIPT_HOME", sb.home())
         .env("NO_COLOR", "1")
         .env("CIG_SEAL_KEY", "file")
+        .env("CIG_BUDGET_SYNC", "1")
         .env("CIG_INTERNAL_TRACKER_DIR", sb.path().join("tracker"))
         .env("CIG_UPDATE_MANIFEST", sb.path().join("no-releases.json"))
         .env_remove("CI")
@@ -13357,6 +13687,7 @@ fn runs_index_is_consistent_under_two_concurrent_runs() {
         .env("CIGSCRIPT_HOME", sb.home())
         .env("NO_COLOR", "1")
         .env("CIG_SEAL_KEY", "file")
+        .env("CIG_BUDGET_SYNC", "1")
         .env("CIG_INTERNAL_TRACKER_DIR", sb.path().join("tracker"))
         .env_remove("CI")
         .env("CIG_UPDATE_MANIFEST", sb.path().join("no-releases.json"))
@@ -13370,6 +13701,7 @@ fn runs_index_is_consistent_under_two_concurrent_runs() {
         .env("CIGSCRIPT_HOME", sb.home())
         .env("NO_COLOR", "1")
         .env("CIG_SEAL_KEY", "file")
+        .env("CIG_BUDGET_SYNC", "1")
         .env("CIG_INTERNAL_TRACKER_DIR", sb.path().join("tracker"))
         .env_remove("CI")
         .env("CIG_UPDATE_MANIFEST", sb.path().join("no-releases.json"))
@@ -13886,6 +14218,7 @@ expect = { exit = 0 }
         .env("HOME", &outer_home)
         .env("NO_COLOR", "1")
         .env("CIG_SEAL_KEY", "file")
+        .env("CIG_BUDGET_SYNC", "1")
         .env("CIG_INTERNAL_TRACKER_DIR", sb.path().join("tracker"))
         .env_remove("CI")
         .output()
@@ -13933,6 +14266,7 @@ expect = { exit = 0 }
         .env("HOME", &outer_home)
         .env("NO_COLOR", "1")
         .env("CIG_SEAL_KEY", "file")
+        .env("CIG_BUDGET_SYNC", "1")
         .env("CIG_INTERNAL_TRACKER_DIR", sb.path().join("tracker"))
         .env_remove("CI")
         .output()
@@ -14042,6 +14376,7 @@ impl SharedParentSandbox {
             .env("CIGSCRIPT_HOME", self.home())
             .env("NO_COLOR", "1")
             .env("CIG_SEAL_KEY", "file")
+            .env("CIG_BUDGET_SYNC", "1")
             .env("CIG_INTERNAL_TRACKER_DIR", self.path().join("tracker"))
             .env("CIG_UPDATE_MANIFEST", self.path().join("no-releases.json"))
             .env_remove("CI")

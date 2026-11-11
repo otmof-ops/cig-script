@@ -66,6 +66,13 @@ kind = "runtime"
 meaning = "the ghost filesystem: dry-run reads of paths that simulated ops changed"
 
 [[range]]
+from = "E530"
+to = "E549"
+family = "net"
+kind = "runtime"
+meaning = "reserved for `cig net` (cig-script#115): tunnels, the resolver, routes, canaries and the network kill switch; owned by cig-script"
+
+[[range]]
 from = "E550"
 to = "E569"
 family = "hop"
@@ -73,11 +80,25 @@ kind = "runtime"
 meaning = "hops (process boundaries): child processes and foreign scripts"
 
 [[range]]
+from = "E570"
+to = "E579"
+family = "cigos"
+kind = "runtime"
+meaning = "reserved for CIG.OS (cig-os): the OS layer's own refusals, owned by cig-os; no other family takes it"
+
+[[range]]
 from = "E580"
-to = "E589"
+to = "E588"
 family = "blacklist"
 kind = "runtime"
 meaning = "the blacklist: what cig-orchestrator stops wherever it shows up, from the lists it keeps and your own entries"
+
+[[range]]
+from = "E589"
+to = "E599"
+family = "backup"
+kind = "runtime"
+meaning = "reserved for cig-orchestrator's offsite backup of the tin (cig-orchestrator#65): the sealed backup, the push and verify to a place, the recovery key and its drills; owned by cig-orchestrator"
 
 [[range]]
 from = "E600"
@@ -135,9 +156,10 @@ family = "internal"
 kind = "internal"
 meaning = "internal: a bug in CigScript itself"
 
-# ----- the four-digit families: cigcompile and CigarScript (cig-compile#11) --
 # A four-digit code's kind is its range's; the first-digit rule above is
 # the three-digit codes'. Codes compare by number, never as text.
+
+# ----- the four-digit families: cigcompile and CigarScript (cig-compile#11) --
 
 [[range]]
 from = "E1000"
@@ -187,6 +209,44 @@ to = "E1799"
 family = "carton"
 kind = "usage"
 meaning = "carton: packages, manifests and the lock file"
+
+[[range]]
+from = "E1800"
+to = "E1899"
+family = "installer"
+kind = "usage"
+meaning = "reserved for ciginstaller: installing, updating, removing and checking the family (cig-installer's first range); owned by cig-installer"
+
+[[range]]
+from = "E1900"
+to = "E1999"
+family = "installer"
+kind = "usage"
+meaning = "reserved for ciginstaller, its second range, for the codes its first range cannot hold; owned by cig-installer"
+
+[[range]]
+from = "E2000"
+to = "E2099"
+family = "agent"
+kind = "usage"
+meaning = "reserved for cigo's agent family (cig-orchestrator#63): launching an agent, the scrubbed fetch, quote folders, the taint and download rules; owned by cig-orchestrator"
+
+[[range]]
+from = "E2100"
+to = "E2199"
+family = "deep-guard"
+kind = "burn"
+meaning = "reserved for the guard's level 5, spyware and anti-forensics checks (cig-orchestrator#57, #58, #89): eBPF enforcement and what it finds; owned by cig-orchestrator"
+
+[[range]]
+from = "E2200"
+to = "E2299"
+family = "firmware"
+kind = "burn"
+meaning = "reserved for cigo's firmware checks (cig-orchestrator#61): the firmware status, the measured boot and what a refused flash names; owned by cig-orchestrator"
+
+# A four-digit code's kind is its range's; the first-digit rule above is
+# the three-digit codes'. Codes compare by number, never as text.
 
 # ----- the four kinds of no (docs/LEXICON.md, "Scrounging a ciggy") ---------
 
@@ -2389,6 +2449,29 @@ remedy = "declare pack { \".\" } as the script's first statement"
 why = "a path in the layer could not be written to the pack (permissions, a device full)"
 probe = "path-permissions"
 remedy = "the run rolled back what was applied; fix the path and run again"
+
+[[code]]
+code = "E764"
+title = "the ledger's chain is broken, so nothing is appended"
+meaning = "Every ledger line is signed over the line before it, under the tin's key. An append chains its new line onto the last one, so a last line that no key verifies (edited, replaced, cut mid-line, or signed under a key this machine does not have) would be given a good line after it and the break would look as if it had always been there. The run's own work is not affected; the ledger is left as it is and the run says so. E760 is the same check on a run's journal."
+fix = "`cig runs --verify` names the first line that does not fit; look at what changed the ledger before anything else is trusted"
+no = "cant-see-any"
+arises = ["run", "unburn", "runs"]
+tags = ["kernel"]
+since = "1.20.0"
+related = ["E760", "E709"]
+[[code.cause]]
+why = "a ledger line was edited by hand, or a tool rewrote the file"
+probe = "none"
+remedy = "`cig runs --verify` says which line; the record cannot be re-signed without the key, so restore the ledger from a copy you trust"
+[[code.cause]]
+why = "the ledger was written under another machine's key (a tin copied without its key)"
+probe = "none"
+remedy = "copy the key that signed it"
+[[code.cause]]
+why = "the last line was cut short by a crash or a full disk"
+probe = "none"
+remedy = "`cig runs --verify` names the line; keep a copy of the ledger, then cut the torn last line away"
 
 [[code]]
 code = "E800"

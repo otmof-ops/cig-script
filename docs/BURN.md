@@ -151,7 +151,12 @@ restores what can be restored and reports the rest.
 `E705`, because restoring the old snapshots a second time would overwrite
 whatever happened since. `--force` overrides that too, deliberately. A
 rollback that left some restores failed is the exception: a plain
-`cig unburn <id>` retries those alone and leaves what was put back as it is.
+`cig unburn <id>` retries those alone and leaves what was put back as it is,
+and `cig unburn <id> --force` does the same with the changed-since checks
+overridden. `--force` never redoes an entry an earlier pass already put back:
+an older run unburned in between may have rewound those files, and putting this
+run's before-images over its restores would make every run below it refuse with
+`E704`.
 
 **What a rollback displaces is kept.** A hop's write set was observed, not
 performed, so the kernel cannot tell the hop's bytes from a save made while
@@ -1005,5 +1010,6 @@ rollback report ("cannot undo"). What the label covers:
   only copy is kept, never removed. What a rollback could not restore is
   recorded on the run (`rollback_incomplete`; `cig runs <id>` lists the
   failures), a plain `cig unburn <id>` then retries those alone with the
-  rest left as it is (`--force` restores everything again), and `cig unburn`
-  refuses to start when it could not record itself.
+  rest left as it is (`--force` retries the same entries with the
+  changed-since checks overridden, and never redoes what a pass put back), and
+  `cig unburn` refuses to start when it could not record itself.
