@@ -5,6 +5,27 @@ project follows semantic versioning.
 
 ## Unreleased
 
+- **A faster tree-walker, steps T3 and T4 of #146.** Calls and loop turns take
+  their scope from a free list and the arguments go straight into the callee's
+  frame: no allocation per call in steady state (a counting allocator over
+  `fib` and a loop with a call: 0, from 3). A block that declares nothing makes
+  no scope (the checker counts it the same way, so resolved names stay
+  right). Two ints or two floats take a fused path ahead of the general
+  operator, still raising E502/E503 from the general one. A read or write of
+  `m.k` remembers where the key was last found and trusts it only when the
+  key there is the same, so a map that loses or gains keys answers as before.
+  The statement and expression evaluators keep their rare cases out of line,
+  which shrinks the frame every node pays for. Measured on a shared machine,
+  minimum of five interleaved rounds, release builds: glibc `loop` 119 -> 90 ms,
+  `fib` 112 -> 84, `nbody` 857 -> 560, `fannkuch` 512 -> 386; musl `loop` 128 -> 91,
+  `fib` 107 -> 115, `nbody` 944 -> 616, `fannkuch` 545 -> 414. Over the twelve
+  programs with a CPython twin, the median against CPython went from 1.92x to
+  1.55x (glibc) and 2.46x to 1.86x (musl). Output, errors, step counts and
+  the budget's stopping line are unchanged: `tests/steps.rs`, `tests/walker.rs`
+  and the new `tests/differential.rs` (the real 1.15.1 release, by SHA-256)
+  hold them. #146's targets for `loop`, `fib`, `nbody` and `fannkuch` are not
+  yet met; `benches/profiles/` says where the time is.
+
 - **Listing runs no longer starts a process for every run that died** (cigo#119).
   A run left `running` by a process that is gone is now told to be
   `interrupted` once and the verdict is kept in the run index, where it was

@@ -659,9 +659,11 @@ impl Parser {
                     object,
                     name,
                     safe: false,
+                    hint,
                 } => AssignTarget::Member {
                     object: *object,
                     name,
+                    hint,
                 },
                 _ => {
                     return Err(
@@ -940,6 +942,7 @@ impl Parser {
                                 object: Box::new(expr),
                                 name,
                                 safe,
+                                hint: Default::default(),
                             },
                             span,
                         );
