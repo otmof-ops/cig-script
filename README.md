@@ -624,7 +624,7 @@ pipeline; building from source works on all three today.
     or service that substitutes for it or does the same job. Selling it, or
     selling access to it, is the clear case.
   - *It becomes Apache-2.0.* Each version converts to
-    [Apache-2.0](LICENSES/Apache-2.0.txt) two years after it is made
+    [Apache-2.0](https://www.apache.org/licenses/LICENSE-2.0) two years after it is made
     available.
   - *Earlier releases.* Every release through v1.20.0 was made under Apache-2.0 and stays under it. [LICENSING.md](LICENSING.md)
     lists which versions carry which license.
