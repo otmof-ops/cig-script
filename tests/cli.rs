@@ -6554,7 +6554,7 @@ fn a_contained_hop_works_with_home_under_tmp() {
     fs::write(root.join("p/keep.txt"), "v1\n").unwrap();
     fs::write(
         root.join("s.cig"),
-        "pack { \"./p\" }\nburn {\n  proc.run(\"sh\", [\"-c\", \"echo ok > out.txt\"], {cwd: \"p\", box: {contain: true, expect: [\"out.txt\"]}})\n}\n",
+        "pack { \"./p\" }\nburn {\n  proc.run(\"sh\", [\"-c\", \"echo ok > out.txt\"], {cwd: \"p\", box: {network: \"off\", contain: true, expect: [\"out.txt\"]}})\n}\n",
     )
     .unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_cig"))
