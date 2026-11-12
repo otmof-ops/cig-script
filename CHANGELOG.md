@@ -3,6 +3,40 @@
 All notable changes to CigScript. The format follows Keep a Changelog; the
 project follows semantic versioning.
 
+## Unreleased
+
+- **`cig tin vault update` waits for the restarted vault to answer**. The
+  service is `Type=simple`, so systemd calls it active as soon as
+  `ExecStart` has forked; the socket appears a moment later. `update`
+  now polls `/run/cig-vault/vault.sock` (`/var/run/cig-vault/vault.sock`
+  on macOS) up to 10 seconds through the same client the next caller
+  would use, and reports `E724 the vault refused or did not answer` on
+  timeout. Covered by the attack suite's
+  `vault_admin::the_vault_installs_collects_updates_and_uninstalls`;
+  the test also tidies the vault behind itself (`cig-vault.service` and
+  the two sudoers drop-ins) when it fails part-way.
+- **The detached crash flusher holds nothing the parent needs**. On
+  Unix, `spawn_flush` marks every inherited descriptor above stderr
+  close-on-exec in the child's `pre_exec` (`close_range` with
+  `CLOSE_RANGE_CLOEXEC`, or a per-fd `fcntl` fallback), so a lock
+  file, a jobserver pipe, or a CI runner's pipe does not travel with
+  it; on Windows the stdio streams go to null and no other handle is
+  inheritable by default. The flusher also carries a 60 second hard
+  deadline on itself (`CIG_FLUSH_DEADLINE_SECS`, written by
+  `spawn_flush`), so a stall in `gh`, `curl` or the tracker cannot
+  keep it alive past its run. New test:
+  `a_detached_flush_closes_the_pipes_it_inherited`.
+- **The runs index knows when the folder changed outside it, on
+  Windows too**. The index's "nothing added or removed" signal was the
+  runs folder's mtime and its hard-link count; on Windows (NTFS on the
+  `windows-11-arm` runner) the directory's `LastWriteTime` is not
+  updated reliably when a child is added, so a run an older cig wrote
+  into the folder without the index could be missed. The signal now
+  carries the folder's entry count on non-Unix in place of nlink, and
+  the folder-added check works on every platform. Catches
+  `burn::runs::tests::run_start_is_constant_in_history` on
+  `windows-latest` and `windows-11-arm`; carton 0.2.0 row 1.
+
 ## 1.21.0 — 2026-11-12
 
 The burn kernel's throughput, the box's watch with decoys and

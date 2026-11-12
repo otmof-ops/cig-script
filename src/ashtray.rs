@@ -253,11 +253,38 @@ fn holder_dead(path: &std::path::Path) -> bool {
     }
 }
 
+/// How long a detached `cig crash flush --quiet` may run before it is
+/// terminated. Long enough for the issue tracker to respond on a fair
+/// network (`gh` and `curl` take tens of seconds on a bad one), short
+/// enough that a stalled process does not outlive its caller by minutes.
+/// `cig crash flush` typed by the user has no watchdog: the person is
+/// waiting on it.
+pub const DETACHED_FLUSH_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// `spawn_flush` writes this on the detached child so `flush` can arm
+/// the watchdog. The parent cig and any `cig crash flush` typed by the
+/// user leave it unset and the watchdog does not fire.
+pub const FLUSH_DEADLINE_ENV: &str = "CIG_FLUSH_DEADLINE_SECS";
+
 /// One pass: every due report is tried once; with `every`, the ones still
 /// in their backoff too (the person typed `cig crash flush`, which is a
 /// request for now). Skipped, with `locked` set, while another sender
 /// holds the ashtray.
 pub fn flush(cfg: &Config, every: bool) -> Flushed {
+    // A detached flusher carries a deadline so a hung network call, a
+    // wedged subprocess, or a lock whose holder never answers cannot
+    // keep the process alive after the run that spawned it. Fatal, not
+    // graceful: anything past the budget is given up on.
+    if let Some(secs) = std::env::var(FLUSH_DEADLINE_ENV)
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|n| *n > 0)
+    {
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(secs));
+            std::process::exit(0);
+        });
+    }
     let mut out = Flushed::default();
     let Some(_lock) = lock(std::time::Duration::from_millis(200)) else {
         out.locked = true;
@@ -286,26 +313,106 @@ pub fn spawn_flush(cfg: &Config) {
     if due(cfg).is_empty() {
         return;
     }
-    // Marked as cig's call to itself: a program's binary is `cig` for it.
     let Ok(mut c) = crate::program::self_command() else {
         return;
     };
+    harden_detached_flush(&mut c);
+    let _ = c.spawn();
+}
+
+/// Carry the configuration every detached flusher gets: stdio closed, a
+/// deadline the flusher's own watchdog reads, a separate process group,
+/// and no inherited descriptor above stdio. Shared so the test that
+/// proves the last of those can build a command the same way the
+/// product does.
+///
+/// The child starts with only stdio open: a lock file the parent held,
+/// a jobserver pipe, or a CI runner's pipe does not travel, so the
+/// flusher cannot go on holding it after its run is over. A hard
+/// deadline closes out any call that still hangs (a slow issue tracker,
+/// a wedged subprocess).
+pub fn harden_detached_flush(c: &mut std::process::Command) {
     c.args(["crash", "flush", "--quiet"])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
+        .stderr(std::process::Stdio::null())
+        .env(
+            FLUSH_DEADLINE_ENV,
+            DETACHED_FLUSH_DEADLINE.as_secs().to_string(),
+        );
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
         c.process_group(0);
+        // Marked in the child only (`pre_exec`): `CLOSE_RANGE_CLOEXEC`
+        // keeps the standard library's exec-status pipe working (it is
+        // close-on-exec already) and only hides the inherited ones from
+        // the exec that follows. The parent's descriptors stay as they
+        // are.
+        //
+        // SAFETY: `pre_exec` runs after fork and before exec; the body
+        // makes only async-signal-safe calls (`syscall`, `fcntl`) and
+        // allocates nothing.
+        unsafe {
+            c.pre_exec(|| {
+                cloexec_above_stdio();
+                Ok(())
+            });
+        }
     }
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        // DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+        // DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP. `Stdio::null()` on
+        // all three streams means the standard library passes no
+        // inheritable handle for them, and every other handle cig opens
+        // has its `bInheritHandle` bit cleared by Rust's own default.
+        // The child therefore receives none of the parent's open handles
+        // above stdio.
         c.creation_flags(0x0000_0008 | 0x0000_0200);
     }
-    let _ = c.spawn();
+}
+
+/// Mark every descriptor above stderr close-on-exec, in the child only
+/// (`pre_exec`). `close_range` with `CLOSE_RANGE_CLOEXEC` (Linux 5.11)
+/// carries the set, with a per-fd `fcntl` fallback for older kernels and
+/// for BSDs. Async-signal-safe. The standard library's exec-status pipe
+/// is `FD_CLOEXEC` already, so a failed exec still reports to the parent.
+///
+/// # Safety
+///
+/// Call only in `pre_exec` (after fork, before exec) or at process start:
+/// setting CLOEXEC on every live descriptor is safe but closing those
+/// descriptors on the next exec is final, so a parent that goes on using
+/// a fd must not call this.
+#[cfg(unix)]
+pub unsafe fn cloexec_above_stdio() {
+    #[cfg(target_os = "linux")]
+    {
+        const CLOSE_RANGE_CLOEXEC: libc::c_long = 1 << 2;
+        if libc::syscall(
+            libc::SYS_close_range,
+            3 as libc::c_long,
+            libc::c_uint::MAX as libc::c_long,
+            CLOSE_RANGE_CLOEXEC,
+        ) >= 0
+        {
+            return;
+        }
+    }
+    // Fallback: walk a bounded range. The parent waits for the exec, so
+    // the walk is capped: 65,536 descriptors is far above what cig or a
+    // caller hands it, and keeps the walk to a few milliseconds where the
+    // limit is in the hundreds of thousands (FreeBSD) or unlimited.
+    let max = libc::sysconf(libc::_SC_OPEN_MAX);
+    let last = if (3..=1 << 16).contains(&max) {
+        max as libc::c_int
+    } else {
+        1 << 16
+    };
+    for fd in 3..last {
+        libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
+    }
 }
 
 /// Does this text name issue `number` as `#number`, as a whole token?

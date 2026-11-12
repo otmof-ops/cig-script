@@ -89,10 +89,18 @@ enum Line {
     Box { id: String, on: bool },
 }
 
-/// `(mtime_ns, nlink)` of the runs folder: what tells a reader the index
-/// still names everything in it. nlink is 0 where the platform has none.
+/// What tells a reader the index still names everything in the runs
+/// folder: a pair whose second value changes when a child is added or
+/// removed outside the index. On Unix that is `nlink` (the kernel
+/// updates it as subdirectories come and go); on Windows a directory's
+/// `LastWriteTime` is not updated reliably when a child is added or
+/// removed (the `windows-11-arm` runner leaves it unchanged), so the
+/// entry count stands in. Both signals are cheap: on Unix one `stat`;
+/// on Windows one directory list, which the index saves many of later
+/// by avoiding the folder scan.
 fn dir_stamp() -> (u64, u64) {
-    let Ok(meta) = fs::metadata(runs_dir()) else {
+    let runs = runs_dir();
+    let Ok(meta) = fs::metadata(&runs) else {
         return (0, 0);
     };
     let mtime_ns = meta
@@ -102,13 +110,16 @@ fn dir_stamp() -> (u64, u64) {
         .map(|d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX))
         .unwrap_or(0);
     #[cfg(unix)]
-    let nlink = {
+    let second = {
         use std::os::unix::fs::MetadataExt;
         meta.nlink()
     };
     #[cfg(not(unix))]
-    let nlink = 0;
-    (mtime_ns, nlink)
+    let second = match fs::read_dir(&runs) {
+        Ok(it) => it.filter_map(Result::ok).count() as u64,
+        Err(_) => 0,
+    };
+    (mtime_ns, second)
 }
 
 /// `list()` said the index was missing or torn and rebuilt it. Said once

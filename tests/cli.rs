@@ -19305,6 +19305,96 @@ fn ci_gates_and_the_nightly_matrix_are_wired() {
     }
 }
 
+/// The detached crash flusher starts with only stdio open: an inheritable
+/// pipe the parent held does not travel, so once the parent lets go of
+/// its own end the pipe is closed. Before the fix the child kept every
+/// descriptor cig had inherited, so anything that waited on one of them
+/// (a lock, a pipe a runner reads to its end) waited on the flusher too.
+/// Exercises the same
+/// `pre_exec` hook `spawn_flush` uses on a long-running `/bin/sleep`,
+/// so a short-lived cig that exited before the parent checked could not
+/// pass by accident.
+#[cfg(unix)]
+#[test]
+fn a_detached_flush_closes_the_pipes_it_inherited() {
+    use std::io::Read;
+    use std::os::unix::io::FromRawFd;
+    use std::os::unix::process::CommandExt;
+    let mut fds: [libc::c_int; 2] = [-1, -1];
+    // SAFETY: plain pipe(2); the fds are owned below.
+    assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+    let (r, w) = (fds[0], fds[1]);
+    // `pipe(2)` does not set FD_CLOEXEC: this is the leak the child
+    // must close. Make it explicit so a future std-library change that
+    // starts setting it does not quietly pass the test.
+    for fd in [r, w] {
+        // SAFETY: fcntl on a fd this process owns.
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        unsafe {
+            libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC);
+        }
+    }
+    // The child lives long enough to be measured: a short-lived cig
+    // that exited fast would close the pipe on exit no matter what
+    // our pre_exec did, so the test would pass without proving the
+    // fix. `/bin/sleep 5` keeps the child alive through the read.
+    let mut c = Command::new("/bin/sleep");
+    c.arg("5")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    // SAFETY: `pre_exec` runs after fork, before exec; the body makes
+    // only async-signal-safe calls.
+    unsafe {
+        c.pre_exec(|| {
+            cigscript::ashtray::cloexec_above_stdio();
+            Ok(())
+        });
+    }
+    let mut child = c.spawn().expect("spawn /bin/sleep");
+    // Parent lets go of its write end. The pipe stays open iff some
+    // other process (the child) still holds a copy of that end.
+    // SAFETY: closing a fd this process opened.
+    unsafe {
+        libc::close(w);
+    }
+    // Reader: once no writer is left, `read` returns 0 (EOF). Wrap
+    // the raw fd in `File` so the handle drops on return.
+    // SAFETY: `r` was opened by `pipe(2)` above and is owned here.
+    let mut rf = unsafe { std::fs::File::from_raw_fd(r) };
+    // Bounded: the pipe must EOF well before the sleep ends.
+    let mut tv = libc::timeval {
+        tv_sec: 3,
+        tv_usec: 0,
+    };
+    let mut set: libc::fd_set = unsafe { std::mem::zeroed() };
+    unsafe {
+        libc::FD_ZERO(&mut set);
+        libc::FD_SET(r, &mut set);
+    }
+    let ready = unsafe {
+        libc::select(
+            r + 1,
+            &mut set,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut tv,
+        )
+    };
+    assert!(
+        ready > 0,
+        "the pipe was still held three seconds after the parent let go"
+    );
+    let mut buf = [0u8; 1];
+    let n = rf.read(&mut buf).expect("read pipe");
+    assert_eq!(
+        n, 0,
+        "the detached child kept the inherited pipe open (read {n} byte(s))"
+    );
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 /// The same flag against the real `perf`, where the machine has it and lets
 /// a process be sampled: a busy loop is drawn, with samples. Skipped (and
 /// said) where perf is absent or forbidden.
