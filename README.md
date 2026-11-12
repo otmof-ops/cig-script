@@ -286,7 +286,7 @@ ciginstaller doctor --tools  # `cig doctor` runs this
 ```
 
 Every release asset carries a build attestation from this repository's release
-workflow: `gh attestation verify cig-v1.7.1-linux-x86_64 -R otmof-ops/cig-script`
+workflow: `gh attestation verify cig-v1.21.0-linux-x86_64 -R otmof-ops/cig-script`
 checks it, and the installer checks it itself when `gh` is installed; the
 checksum is the floor without it. The Linux assets
 are static musl builds (any glibc, Alpine, Android under Termux); there are
@@ -551,23 +551,37 @@ Add a row. The rules for reporting one are in
 
 | command | does |
 |---|---|
-| `cig run script.cig [-- args]` | check, then run; roll back on failure |
+| `cig run script.cig [-- args] [--pin]` | check, then run; roll back on failure; `--pin` keeps the run whatever `--prune` says |
 | `cig run --dry-run script.cig` | run with every burn simulated; print the plan |
 | `cig check script.cig [--deny-warnings]` | parse and statically check without running |
 | `cig chains script.cig` / `cig light script.cig <chain>` | list chains; light one |
 | `cig eval "expr"` / `cig repl` | evaluate a snippet; interactive session |
-| `cig runs [id] [--prune N]` / `cig unburn <id> [--dry-run] [--force]` | run records; put one back |
-| `cig explain [code] [--schema]` | the page for an error code: which kind of no, what to type next, the ranked causes; the JSON Schema for a diagnostic |
-| `cig doctor [run]` | a stored run's error diagnosed again, read-only; with no run it is `ciginstaller doctor --tools`, the health of the installation |
-| `cig report [run] [--out file\|--send]` | the short way into `ciginstaller bug`: no run is `bug cig`, a run is `bug --run <run> --part cig [--send]`, `--out FILE` is `ciginstaller report <run> --cig --out FILE` (the bundle alone: every path a placeholder, plan, journal, diagnostic, diagnosis, install facts) |
-| `cig crash list\|show\|send\|delete` | stubs for `ciginstaller crash ...` with the same arguments; `cig crash flush` and `submit` stay cig's |
-| `cig update [--check]` | a stub for `ciginstaller update [--check]`; the installer says which bugs you reported are fixed once it has updated cig |
+| `cig runs [id] [--all\|--prune N\|--verify [--deep]\|--pruned\|--reindex\|--forget ID]` | the lab notebook: the newest 50 by default, every run with `--all`, one run's journal with an id, the chain checked with `--verify` |
+| `cig runs pin <id>` / `cig runs unpin <id>` | keep (or release) a run past `keep_runs`, `keep_days` and `--prune` |
+| `cig runs adopt <dir>` | adopt a committed `ciginstaller` transaction as a run, so `cig unburn <id>` undoes the installer update |
+| `cig unburn <id> [--dry-run] [--force]` | put the world back the way it was, newest op first; `--force` retries only the entries a failed unburn left |
+| `cig explain [code] [--schema] [--layers FILE:LINE:COL]` | the page for an error code; the JSON Schema for a diagnostic; the layers at a `.cigar` file place, handed to `cigar` |
+| `cig doctor [run]` | a stored run's error diagnosed again, read-only; with no run it is `ciginstaller doctor --tools` |
+| `cig report [run] [--out FILE\|--send]` | a stub for `ciginstaller bug`: no run is `bug cig`, a run is `bug --run <run> --part cig [--send]`; `--out FILE` is `ciginstaller report <run> --cig --out FILE` |
+| `cig crash list\|show\|send\|delete` | stubs for `ciginstaller crash ...`; `cig crash flush` and `submit` stay cig's |
+| `cig update [--check]` | a stub for `ciginstaller update [--check]`; the installer says which reports are fixed once it has updated cig |
 | `cig uninstall` | a stub for `ciginstaller uninstall cig`; your `~/.cigscript` data stays |
-| `cig crash [list\|show\|send\|flush\|submit\|delete]` | the ashtray: every report cig made about its own bugs (crashes, internal errors, tripwires), under your control; `flush` sends what is waiting, `submit` takes a report from another tool of the family |
 | `cig versions [add\|remove\|prune]` | the humidor: every other version of cig, for pinned scripts and old journals |
 | `cig pin <file> [--to 1.2]` | write `# cig 1.2` into a script, so a newer cig hands it to that version |
-| `cig tin [du\|verify\|gc]` | the tin: the before-bytes of files hops may change, outside the project |
-| `cig bench [manifest]` | measure: a manifest's cases, checked first, medians and p10 to p90; `--against` compares interleaved |
+| `cig parcel <id> [--out FILE] [--with-key]` / `cig unparcel FILE [--root NAME=PATH] [--show]` | pack a single run, its tin objects and its compensations into one file; import it on another machine |
+| `cig box list\|apply\|discard` | the layers hops kept rather than applied: list, apply (as a new run), discard |
+| `cig pass list\|show\|verify\|narrow\|revoke\|export\|import\|log\|stats\|key\|gc` | passes: what was already checked, for exactly which inputs; `export` and `import` move a pass between machines; `key` prints this machine's allowed-signers line |
+| `cig tin [du]` | how many objects the tin holds and how many bytes (the default) |
+| `cig tin verify [--head]` | re-hash every object against its name, check every recipe, open every sealed object |
+| `cig tin gc` | remove every object no run in the history still refers to |
+| `cig tin head` | the ledger's head, one line, to keep elsewhere for `cig tin verify --head` |
+| `cig tin mac --label L FILE` / `cig tin keep --label L FILE` / `cig tin give --label L --name N` | a keyed MAC over a file, kept under a label; a sealed copy kept under a label and name; the kept copy on stdout |
+| `cig tin key export\|import` | back the tin's seal key up (passphrase-wrapped), or put a backed-up one in place |
+| `cig tin rekey` | make a new seal key and re-seal every sealed object under it; crash-safe |
+| `cig tin parcel [--to DIR\|--git [REF]] [--since PARCEL]` / `cig tin unparcel DIR\|--git REF` | back the whole tin up (every live run and journal, the objects they need, the ledger), checked before anything is written |
+| `cig tin vault install\|uninstall\|gc\|update` | the vault: a no-delete store that runs as its own account (`_cigtin`), opt-in |
+| `cig bench [manifest] [--only N] [--group G] [--samples N] [--save NAME] [--against WHAT] [--watch] [--profile] [--diff BASE] [--keep] [--repeat-until-slow] [--timings] [--stats] [--syscalls] [--gate GATES] [--family [--with P@V] [--matrix P=V1,V2]]` | measure: manifest cases, checked first, medians and p10 to p90; `--against` is interleaved A/B, `--family` runs every product's suite |
+| `cig bench history [CASE] [--file F\|--branch B] [--series S]` | a case's nightly history: sparkline, table, cross-machine changes marked |
 | `cig config [key [value]]` | the few settings there are |
 | `cig language` | the legend and the standard library |
 
@@ -605,27 +619,35 @@ gated. [docs/BENCH.md](docs/BENCH.md) lists the cases and what each number is.
 - [docs/CHAINS.md](docs/CHAINS.md): chains, the automation layer.
 - [docs/HOPS.md](docs/HOPS.md): running other programs, and the rules that hold at the boundary.
 - [docs/BURN.md](docs/BURN.md): effects, modes, the journal, rollback, and what it can't undo and says so.
+- [docs/PROTOCOL.md](docs/PROTOCOL.md): the burn protocol a tool speaks when it wants to say what it changed and how to undo it, rather than be watched from the outside.
+- [docs/PASS.md](docs/PASS.md): passes — one authenticated record for every "already checked", what they carry, and how they are verified later or on another machine.
 - [docs/PROGRAMS.md](docs/PROGRAMS.md): compiled programs: a script appended to the `cig` that runs it, its command line, and what differs from `cig run`.
 - [docs/SCIENCE.md](docs/SCIENCE.md): CigScript in the lab.
 - [docs/BENCH.md](docs/BENCH.md): `cig bench` and the `bench/bench.toml` manifest: samples in batches, medians, p10 to p90, CV and peak RSS; cig's own suite and the kernel measures.
+- [docs/FINDINGS.md](docs/FINDINGS.md): the measurements behind the numbers the other documents quote, so each figure can be checked by running the same thing again.
 - [docs/STDLIB.md](docs/STDLIB.md): every function with its arity and effect (generated).
 - [docs/ERRORS.md](docs/ERRORS.md): every error code, its kind of no, what to type next, its causes (generated from the registry).
 - [docs/DESIGN.md](docs/DESIGN.md): why it looks like this, the tone, what came before, and the roadmap.
-- [HAMMER.md](HAMMER.md): the current update package, seam by seam, with the state of each deliverable.
+- [HAMMER.md](HAMMER.md): history — the 1.1.0 "Hammer" update package, kept so its deliverable list and the commits that paid it off can still be read.
 - [examples/](examples/): runnable scripts, all checked and run in CI.
 
 ## Status
 
-1.1.0 is the "Hammer" update, built from an external adversarial read of
-1.0.0 and delivered seam by seam from its own package ([HAMMER.md](HAMMER.md)):
-the rollback property test, symlinks and interrupted runs, a durable journal,
-the error registry, doctor, the wall, the step budget and `finally`, the
-cross-run check on `unburn`, the ghost filesystem, hops that hold the line,
-the pack and compensations. The language surface in `docs/LANGUAGE.md` and
-the effect rules in `docs/BURN.md` are the contract. Next: foreign scripts
-run inside a pack, a browser playground, parameterised packs and cartons,
-signed releases. macOS and Windows binaries arrive with the CI release
-pipeline; building from source works on all three today.
+1.21.0 is the current release (2026-11-12). Release assets are built by the
+pipeline in [.github/workflows/ci.yml](.github/workflows/ci.yml) for Linux
+on x86_64, aarch64 and armv7 (static musl, so they run on any glibc, on
+Alpine, and under Termux), macOS on Apple Silicon and Intel, Windows on
+x86_64 and ARM64, and FreeBSD on x86_64; every asset carries a build
+attestation. `install.sh` and `install.ps1` in this repository redirect to
+`ciginstaller`, which installs, updates and uninstalls cig as a verified
+transaction (see **Install**).
+
+The language surface in [docs/LANGUAGE.md](docs/LANGUAGE.md) and the effect
+rules in [docs/BURN.md](docs/BURN.md) are the contract. Next, from the open
+issues: wait times across the board (#188), history that pays you back
+(#185), the roadmap for the measured-performance work (#150), more of the
+burn kernel's throughput (#147), more of the tree-walker (#146), `cig net`
+(#115), and the next steps of the box (#106).
 
 ## Licensing
 
