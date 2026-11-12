@@ -1,13 +1,13 @@
 // SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
 // SPDX-License-Identifier: FSL-1.1-ALv2
 
-//! #146: the faster evaluator prints what 1.15.1 printed. The corpus (the
+//! #146: the faster evaluator prints what 1.20.0, the last release before it, printed. The corpus (the
 //! error and resolution scripts under `tests/walker`, the step scripts under
 //! `tests/steps` and the programs of the compute set that finish quickly)
-//! runs under the 1.15.1 release and under this build, and the exit status,
+//! runs under the 1.20.0 release and under this build, and the exit status,
 //! standard output and standard error of each are compared.
 //!
-//! The 1.15.1 binary is `CIG_DIFF_BIN` when set, otherwise the Linux x86_64
+//! The 1.20.0 binary is `CIG_DIFF_BIN` when set, otherwise the Linux x86_64
 //! release asset, fetched once into `target/` and accepted only when its
 //! SHA-256 is the one pinned below. Offline, on another platform, or without
 //! `curl`, the test says so and skips; `CIG_REQUIRE_DIFFERENTIAL=1` turns a
@@ -21,8 +21,8 @@ use std::time::Duration;
 use wait_timeout::ChildExt;
 
 const RELEASE_URL: &str =
-    "https://github.com/otmof-ops/cig-script/releases/download/v1.15.1/cig-v1.15.1-linux-x86_64";
-const RELEASE_SHA256: &str = "991a282f362fa40424cb216f0c1c4285ad193279ba36f4844c8d8ebd62445eef";
+    "https://github.com/otmof-ops/cig-script/releases/download/v1.20.0/cig-v1.20.0-linux-x86_64";
+const RELEASE_SHA256: &str = "4649fda09236ada8a2ade2460c33db9cfa4b2f4dba40186099118a6a3b2dc8e3";
 
 /// The compute programs that finish in about a second in a debug build.
 const COMPUTE: [&str; 9] = [
@@ -46,16 +46,16 @@ fn sha256_of(path: &Path) -> Option<String> {
     Some(hex::encode(Sha256::digest(bytes)))
 }
 
-/// The 1.15.1 binary, or why there is none.
+/// The 1.20.0 binary, or why there is none.
 fn old_binary() -> Result<PathBuf, String> {
     if let Some(p) = std::env::var_os("CIG_DIFF_BIN") {
         return Ok(PathBuf::from(p));
     }
     if !(cfg!(target_os = "linux") && cfg!(target_arch = "x86_64")) {
-        return Err("the pinned 1.15.1 asset is the Linux x86_64 one".into());
+        return Err("the pinned 1.20.0 asset is the Linux x86_64 one".into());
     }
     let dir = root().join("target").join("differential");
-    let bin = dir.join("cig-v1.15.1-linux-x86_64");
+    let bin = dir.join("cig-v1.20.0-linux-x86_64");
     if sha256_of(&bin).as_deref() == Some(RELEASE_SHA256) {
         return Ok(bin);
     }
@@ -144,14 +144,14 @@ fn scripts_in(dir: &str, only: Option<&[&str]>) -> Vec<PathBuf> {
 }
 
 #[test]
-fn differential_suite_against_1_15_1() {
+fn differential_suite_against_1_20_0() {
     let old = match old_binary() {
         Ok(p) => p,
         Err(why) => {
             if std::env::var_os("CIG_REQUIRE_DIFFERENTIAL").is_some() {
-                panic!("differential suite needs the 1.15.1 binary: {why}");
+                panic!("differential suite needs the 1.20.0 binary: {why}");
             }
-            eprintln!("SKIPPED: differential suite against 1.15.1: {why}");
+            eprintln!("SKIPPED: differential suite against 1.20.0: {why}");
             return;
         }
     };
@@ -177,6 +177,6 @@ fn differential_suite_against_1_15_1() {
     }
     assert!(
         differ.is_empty(),
-        "output differs from 1.15.1 for: {differ:#?}"
+        "output differs from 1.20.0 for: {differ:#?}"
     );
 }
