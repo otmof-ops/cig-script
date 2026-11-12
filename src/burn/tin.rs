@@ -56,6 +56,38 @@ pub fn is_sealed(path: &Path) -> bool {
     path.starts_with(sealed_dir())
 }
 
+/// Where the packs of small before-states live (#147).
+pub fn packs_root() -> PathBuf {
+    super::tinpack::root()
+}
+
+/// Is this snapshot path a pack of small before-states? The journal entry
+/// names the pack and the object's hash; the object is the record in the
+/// pack with that name.
+pub fn is_packed(path: &Path) -> bool {
+    super::tinpack::is_packed(path)
+}
+
+/// Every pack in the tin, with its size.
+pub fn packs() -> Vec<(PathBuf, u64)> {
+    super::tinpack::packs()
+}
+
+/// The objects a pack holds, by name: what the vault's live set needs.
+pub fn packed_ids(pack: &Path) -> Vec<String> {
+    super::tinpack::ids(pack)
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect()
+}
+
+/// The bytes of the object `sha256` from a pack, checked against the name.
+/// Reads nothing but the pack: a test or a tool can call it on a pack
+/// anywhere.
+pub fn read_packed(pack: &Path, sha256: &str) -> io::Result<Vec<u8>> {
+    super::tinpack::read(pack, sha256)
+}
+
 /// Files at least this large are kept as chunks under a recipe rather than
 /// as one object, so a small change stores the chunk that changed, not the
 /// file again. Smaller files are kept whole: the dedupe a one-chunk
@@ -105,6 +137,119 @@ pub fn object_path_pub(hash: &str) -> PathBuf {
     object_path(hash)
 }
 
+/// The suffix of an object kept compressed (#147): `objects/ab/<sha256>.zst`
+/// holds one zstd frame whose bytes, decompressed, hash to `<sha256>`. An
+/// object is kept compressed only when that saves at least a tenth.
+pub const ZST: &str = ".zst";
+
+/// Where the compressed form of the object for this hash would be.
+pub fn object_zst_path(hash: &str) -> PathBuf {
+    objects_dir().join(&hash[..2]).join(format!("{hash}{ZST}"))
+}
+
+/// Both places an object for this hash can be, plain first: what a list of
+/// paths a run depends on names for a chunk, whichever form it took.
+pub(crate) fn object_paths(hash: &str) -> [PathBuf; 2] {
+    [object_path(hash), object_zst_path(hash)]
+}
+
+/// Is this path an object kept compressed?
+pub fn is_compressed(path: &Path) -> bool {
+    holds(path)
+        && path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|n| n.strip_suffix(ZST))
+            .is_some_and(|stem| stem.len() == 64 && stem.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
+/// The hash a plain or compressed object's file name says it holds.
+pub fn object_name(path: &Path) -> Option<String> {
+    let n = path.file_name()?.to_str()?;
+    let stem = n.strip_suffix(ZST).unwrap_or(n);
+    (stem.len() == 64 && stem.bytes().all(|b| b.is_ascii_hexdigit())).then(|| stem.to_string())
+}
+
+/// `bytes` compressed, when that saves at least a tenth (zstd level 3).
+pub(crate) fn squeeze(bytes: &[u8]) -> Option<Vec<u8>> {
+    if bytes.len() < 64 {
+        return None;
+    }
+    zstd::bulk::compress(bytes, super::pack::LEVEL)
+        .ok()
+        .filter(|c| c.len() * 10 <= bytes.len() * 9)
+}
+
+/// The bytes a compressed object file holds, decompressed. `len` is what
+/// they should come to, when known; it bounds the output either way.
+pub fn unsqueeze_file(path: &Path, len: Option<u64>) -> io::Result<Vec<u8>> {
+    let packed = fs::read(path)?;
+    let cap = match len {
+        Some(n) => n as usize,
+        None => zstd::zstd_safe::get_frame_content_size(&packed)
+            .ok()
+            .flatten()
+            .map(|n| n as usize)
+            .filter(|n| *n <= 1 << 30)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("{} does not say how large it is", path.display()),
+                )
+            })?,
+    };
+    zstd::bulk::decompress(&packed, cap).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{} does not decompress: {e}", path.display()),
+        )
+    })
+}
+
+/// The bytes of the object named `sha256`, from whichever form the tin
+/// holds, not checked: a missing one is NotFound under the plain path's
+/// name, so the vault's `heal` can find it.
+pub(crate) fn object_bytes(sha256: &str, len: Option<u64>) -> io::Result<Vec<u8>> {
+    match fs::read(object_path(sha256)) {
+        Ok(b) => Ok(b),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            let z = object_zst_path(sha256);
+            if z.is_file() {
+                unsqueeze_file(&z, len)
+            } else {
+                Err(e)
+            }
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Does the tin hold the object named `sha256`, in either form?
+pub(crate) fn has_object(sha256: &str) -> bool {
+    object_path(sha256).is_file() || object_zst_path(sha256).is_file()
+}
+
+/// The object for these bytes, when the tin holds it whole and hashing to
+/// its name, in either form: what a stash reuses instead of writing again.
+pub fn held(sha256: &str, len: u64) -> Option<PathBuf> {
+    let [plain, zst] = object_paths(sha256);
+    if plain.is_file() && pressed_ok(&plain, len, sha256) {
+        return Some(plain);
+    }
+    (zst.is_file() && pressed_ok(&zst, len, sha256)).then_some(zst)
+}
+
+/// The file the object named `sha256` is kept in: the plain one, unless
+/// only the compressed one is there. What a parcel carries for a chunk.
+pub fn object_file(sha256: &str) -> PathBuf {
+    let [plain, zst] = object_paths(sha256);
+    if !plain.is_file() && zst.is_file() {
+        zst
+    } else {
+        plain
+    }
+}
+
 pub(crate) fn recipe_path(hash: &str) -> PathBuf {
     recipes_dir().join(&hash[..2]).join(hash)
 }
@@ -119,6 +264,10 @@ pub fn object_for(sha256: &str) -> Option<PathBuf> {
     let o = object_path(sha256);
     if o.is_file() {
         return Some(o);
+    }
+    let z = object_zst_path(sha256);
+    if z.is_file() {
+        return Some(z);
     }
     let r = recipe_path(sha256);
     r.is_file().then_some(r)
@@ -137,6 +286,8 @@ pub struct ObjectIndex {
     objects: PathBuf,
     recipes: PathBuf,
     objs: HashSet<String>,
+    /// Objects kept compressed, by the hash they hold.
+    zsts: HashSet<String>,
     recs: HashSet<String>,
     listed: bool,
 }
@@ -151,6 +302,7 @@ impl ObjectIndex {
             objects: objects_dir(),
             recipes: recipes_dir(),
             objs: HashSet::new(),
+            zsts: HashSet::new(),
             recs: HashSet::new(),
             listed: false,
         };
@@ -168,9 +320,19 @@ impl ObjectIndex {
             ix.objs.clear();
             return ix;
         }
+        let zsts: Vec<String> = ix
+            .objs
+            .iter()
+            .filter(|n| n.ends_with(ZST))
+            .cloned()
+            .collect();
+        for n in zsts {
+            ix.objs.remove(&n);
+            ix.zsts.insert(n[..n.len() - ZST.len()].to_string());
+        }
         let mut missing: Vec<&str> = hashes
             .iter()
-            .filter(|h| !ix.objs.contains(**h))
+            .filter(|h| !ix.objs.contains(**h) && !ix.zsts.contains(**h))
             .filter_map(|h| h.get(..2))
             .collect();
         missing.sort_unstable();
@@ -189,6 +351,9 @@ impl ObjectIndex {
             if let Some(b) = sha256.get(..2) {
                 if self.objs.contains(sha256) {
                     return Some((self.objects.join(b).join(sha256), false));
+                }
+                if self.zsts.contains(sha256) {
+                    return Some((self.objects.join(b).join(format!("{sha256}{ZST}")), false));
                 }
                 if self.recs.contains(sha256) {
                     return Some((self.recipes.join(b).join(sha256), true));
@@ -242,7 +407,7 @@ pub fn pending_for_hash(sha256: &str) -> Vec<PathBuf> {
         let mut out = vec![p.clone()];
         if let Ok(r) = read_recipe(&p) {
             for c in r.chunks {
-                out.push(object_path(&c.sha256));
+                out.extend(object_paths(&c.sha256));
             }
         }
         out
@@ -258,7 +423,7 @@ pub fn pending_for_object(object: &Path) -> Vec<PathBuf> {
         let mut out = vec![object.to_path_buf()];
         if let Ok(r) = read_recipe(object) {
             for c in r.chunks {
-                out.push(object_path(&c.sha256));
+                out.extend(object_paths(&c.sha256));
             }
         }
         out
@@ -345,6 +510,9 @@ pub struct Staged {
     mode: Option<u32>,
     mtime_ns: Option<u64>,
     link: Option<PathBuf>,
+    /// A whole file kept compressed (its copy, or the object the tin
+    /// already held for it).
+    zst: bool,
 }
 
 #[derive(Debug)]
@@ -352,6 +520,8 @@ struct StagedChunk {
     sha256: String,
     len: u64,
     tmp: Option<PathBuf>,
+    /// Kept (or to be kept) as `<sha256>.zst`.
+    zst: bool,
 }
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);
@@ -474,13 +644,13 @@ fn group_sync_wanted() -> bool {
     std::env::var("CIG_SNAPSHOT_SYNC").as_deref() != Ok("op")
 }
 
-fn defer_file(p: &Path) {
+pub(crate) fn defer_file(p: &Path) {
     if let Ok(mut d) = DEFERRED.lock() {
         d.files.push(p.to_path_buf());
     }
 }
 
-fn defer_dir(p: &Path) {
+pub(crate) fn defer_dir(p: &Path) {
     if let Ok(mut d) = DEFERRED.lock() {
         if d.dirs.last().map(|l| l.as_path()) != Some(p) {
             d.dirs.push(p.to_path_buf());
@@ -553,9 +723,42 @@ fn durable(file: &Path, bucket: &Path) -> io::Result<()> {
 
 /// Is the object already there, whole and hashing to its name?
 fn pressed_ok(object: &Path, len: u64, sha256: &str) -> bool {
+    if is_compressed(object) {
+        return unsqueeze_file(object, Some(len))
+            .is_ok_and(|b| b.len() as u64 == len && hex::encode(Sha256::digest(&b)) == sha256);
+    }
     object.is_file()
         && fs::metadata(object).map(|m| m.len()).ok() == Some(len)
         && sha256_file(object).ok().as_deref() == Some(sha256)
+}
+
+/// A chunk's or a whole file's bytes, staged beside the objects under a
+/// temporary name (compressed when that saves a tenth), unless the tin
+/// already holds that object in either form.
+fn stage_bytes(sha256: String, data: &[u8], tag: &str) -> io::Result<StagedChunk> {
+    let len = data.len() as u64;
+    if let Some(at) = held(&sha256, len) {
+        let zst = is_compressed(&at);
+        return Ok(StagedChunk {
+            sha256,
+            len,
+            tmp: None,
+            zst,
+        });
+    }
+    let t = temp_name(tag);
+    let packed = squeeze(data);
+    let w = fs::write(&t, packed.as_deref().unwrap_or(data));
+    if let Err(e) = w {
+        let _ = fs::remove_file(&t);
+        return Err(e);
+    }
+    Ok(StagedChunk {
+        sha256,
+        len,
+        tmp: Some(t),
+        zst: packed.is_some(),
+    })
 }
 
 /// Give a temporary copy its name as an object: pressed, written once. An
@@ -613,22 +816,24 @@ pub fn prepare(path: &Path) -> io::Result<Staged> {
             mode: None,
             mtime_ns: None,
             link: Some(fs::read_link(path)?),
+            zst: false,
         });
     }
     fs::create_dir_all(objects_dir())?;
     if meta.len() >= CHUNK_FILE_MIN {
         return prepare_chunked(path, &meta);
     }
-    let tmp = temp_name("stash");
-    let (sha256, bytes) = match copy_hashing(path, &tmp) {
-        Ok(v) => v,
-        Err(e) => {
-            let _ = fs::remove_file(&tmp);
-            return Err(e);
-        }
-    };
+    // Read whole (under `CHUNK_FILE_MIN`), hashed as read: the name is
+    // what was read, not what the file held a moment earlier.
+    note_file_read();
+    let mut data = Vec::with_capacity(meta.len() as usize);
+    fs::File::open(path)?.read_to_end(&mut data)?;
+    let sha256 = hex::encode(Sha256::digest(&data));
+    let bytes = data.len() as u64;
+    let staged = stage_bytes(sha256.clone(), &data, "stash")?;
     Ok(Staged {
-        tmp: Some(tmp),
+        tmp: staged.tmp,
+        zst: staged.zst,
         chunks: Vec::new(),
         recipe_tmp: None,
         sealed: None,
@@ -680,14 +885,7 @@ fn prepare_chunked_serial(path: &Path, meta: &fs::Metadata) -> io::Result<Staged
             whole.update(&chunk.data);
             let len = chunk.data.len() as u64;
             total += len;
-            let tmp = if pressed_ok(&object_path(&sha256), len, &sha256) {
-                None
-            } else {
-                let t = temp_name("chunk");
-                fs::write(&t, &chunk.data)?;
-                Some(t)
-            };
-            chunks.push(StagedChunk { sha256, len, tmp });
+            chunks.push(stage_bytes(sha256, &chunk.data, "chunk")?);
         }
         Ok(())
     })();
@@ -750,6 +948,7 @@ fn stage_recipe(
         mode: mode_of(meta),
         mtime_ns: super::journal::mtime_ns(meta),
         link: None,
+        zst: false,
     })
 }
 
@@ -1061,18 +1260,7 @@ fn prepare_chunked_parallel(
         let mut data = vec![0u8; (cuts[i] - start) as usize];
         read_exact_at(&file, &mut data, start)?;
         let sha256 = hex::encode(Sha256::digest(&data));
-        let len = data.len() as u64;
-        let tmp = if pressed_ok(&object_path(&sha256), len, &sha256) {
-            None
-        } else {
-            let t = temp_name("chunk");
-            if let Err(e) = fs::write(&t, &data) {
-                let _ = fs::remove_file(&t);
-                return Err(e);
-            }
-            Some(t)
-        };
-        Ok((StagedChunk { sha256, len, tmp }, data))
+        Ok((stage_bytes(sha256, &data, "chunk")?, data))
     };
     let mut whole = Sha256::new();
     let mut total = 0u64;
@@ -1170,6 +1358,7 @@ pub fn prepare_sealed(path: &Path) -> io::Result<Staged> {
         mode: mode_of(&meta),
         mtime_ns: super::journal::mtime_ns(&meta),
         link: None,
+        zst: false,
     })
 }
 
@@ -1183,6 +1372,8 @@ impl Staged {
             sealed_dir().join(&id[..2]).join(id)
         } else if self.chunked {
             recipe_path(&self.sha256)
+        } else if self.zst {
+            object_zst_path(&self.sha256)
         } else {
             object_path(&self.sha256)
         }
@@ -1197,7 +1388,7 @@ impl Staged {
         }
         let mut out = vec![self.object()];
         for c in &self.chunks {
-            out.push(object_path(&c.sha256));
+            out.extend(object_paths(&c.sha256));
         }
         out
     }
@@ -1251,13 +1442,16 @@ impl Staged {
         // What the vault is handed once the copies have their names: the
         // chunks, then the recipe that names them.
         let mut for_vault: Vec<super::vault::Item> = Vec::new();
+        let chunk_at = |c: &StagedChunk| {
+            if c.zst {
+                object_zst_path(&c.sha256)
+            } else {
+                object_path(&c.sha256)
+            }
+        };
         if self.chunked {
             for c in &self.chunks {
-                for_vault.push((
-                    super::vault::VKind::Object,
-                    c.sha256.clone(),
-                    object_path(&c.sha256),
-                ));
+                for_vault.push((super::vault::VKind::Object, c.sha256.clone(), chunk_at(c)));
             }
             for_vault.push((
                 super::vault::VKind::Recipe,
@@ -1275,7 +1469,7 @@ impl Staged {
             let mut chunks = self.chunks.into_iter();
             let mut failed: Option<io::Error> = None;
             for c in chunks.by_ref() {
-                let target = object_path(&c.sha256);
+                let target = chunk_at(&c);
                 let r = match &c.tmp {
                     Some(tmp) => press(tmp, &target, c.len, &c.sha256),
                     // Held by the tin when the file was read; a `cig tin gc`
@@ -1323,6 +1517,11 @@ impl Staged {
             }
         } else if let Some(tmp) = &self.tmp {
             press(tmp, &object, self.bytes, &self.sha256)?;
+        } else if !object.is_file() {
+            return Err(io::Error::other(format!(
+                "object {} left the tin while the file was being kept (a gc ran meanwhile)",
+                &self.sha256[..12]
+            )));
         }
         super::vault::keep_all(&for_vault);
         Ok(Stashed {
@@ -1376,6 +1575,46 @@ pub fn stash_grouped(path: &Path) -> io::Result<Stashed> {
     DEFER.with(|d| d.set(true));
     let _reset = Reset;
     prepare(path)?.commit()
+}
+
+/// A native op's before-state (#147): a file under
+/// [`tinpack::OBJECT_MAX`](super::tinpack::OBJECT_MAX) bytes is a record in
+/// this process's pack, listed in `run_dir`, unless the tin already holds
+/// it as an object of its own; a larger one, a link or a file that grew
+/// while it was read is kept as `stash_grouped` keeps it. The record is
+/// named by the hash of the bytes as they were read, and flushed with the
+/// group.
+pub fn stash_native(path: &Path, run_dir: &Path) -> io::Result<Stashed> {
+    let meta = fs::symlink_metadata(path)?;
+    if !meta.is_file() || meta.len() >= super::tinpack::OBJECT_MAX {
+        return stash_grouped(path);
+    }
+    note_file_read();
+    let mut bytes = Vec::with_capacity(meta.len() as usize);
+    fs::File::open(path)?
+        .take(super::tinpack::OBJECT_MAX)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 >= super::tinpack::OBJECT_MAX {
+        return stash_grouped(path);
+    }
+    let sha256 = hex::encode(Sha256::digest(&bytes));
+    let len = bytes.len() as u64;
+    let object = if let Some(loose) = held(&sha256, len) {
+        loose
+    } else {
+        let pack = super::tinpack::keep(&bytes, &sha256, Some(run_dir), group_sync_wanted())?;
+        super::vault::keep_bytes(&sha256, &bytes);
+        pack
+    };
+    Ok(Stashed {
+        object,
+        sha256,
+        bytes: len,
+        mode: mode_of(&meta),
+        mtime_ns: super::journal::mtime_ns(&meta),
+        link: None,
+        git: None,
+    })
 }
 
 /// Move a file into the tin: what a rollback is about to remove or rewrite
@@ -1443,6 +1682,7 @@ pub fn take_with(path: &Path, seal: bool) -> io::Result<Stashed> {
         mode: mode_of(&meta),
         mtime_ns: super::journal::mtime_ns(&meta),
         link: None,
+        zst: false,
     };
     staged.commit()
 }
@@ -1469,6 +1709,9 @@ pub fn materialize(snapshot: &Path, expect_sha256: &str, dest: &Path) -> io::Res
 }
 
 fn materialize_inner(snapshot: &Path, expect_sha256: &str, dest: &Path) -> io::Result<()> {
+    if is_packed(snapshot) {
+        return restore_packed(snapshot, expect_sha256, dest);
+    }
     if super::seal::is_sealed_path(snapshot) {
         return super::seal::unseal_file(
             snapshot,
@@ -1499,6 +1742,9 @@ fn materialize_inner(snapshot: &Path, expect_sha256: &str, dest: &Path) -> io::R
         }
         return restore_serial(&recipe, snapshot, dest);
     }
+    if is_compressed(snapshot) {
+        return restore_compressed(snapshot, expect_sha256, dest);
+    }
     if holds(snapshot) && !expect_sha256.is_empty() {
         // A shared object is checked against its name every time it is
         // read back: a corrupt tin never writes garbage.
@@ -1526,12 +1772,130 @@ fn materialize_inner(snapshot: &Path, expect_sha256: &str, dest: &Path) -> io::R
     Ok(())
 }
 
+/// The object `sha256` as a pack holds it, or, when the pack is gone or
+/// the record does not hash to its name, as an object of its own: the
+/// vault keeps every object by its name, packed or not, and puts it back
+/// in `tin/objects`. Checked against the name either way.
+fn packed_bytes(pack: &Path, sha256: &str) -> io::Result<Vec<u8>> {
+    if sha256.len() != 64 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "{} is a pack and the journal names no object in it",
+                pack.display()
+            ),
+        ));
+    }
+    let err = match super::tinpack::read(pack, sha256) {
+        Ok(b) => return Ok(b),
+        Err(e) => e,
+    };
+    let loose = object_path(sha256);
+    let ok = |p: &Path| {
+        fs::read(p)
+            .ok()
+            .filter(|b| hex::encode(Sha256::digest(b)) == sha256)
+    };
+    if let Some(b) = ok(&loose) {
+        return Ok(b);
+    }
+    if super::vault::heal(&loose) {
+        if let Some(b) = ok(&loose) {
+            return Ok(b);
+        }
+    }
+    Err(err)
+}
+
+/// The bytes of a compressed whole object, checked against the name the
+/// journal recorded; when they do not decompress or hash, the plain form
+/// (the vault puts one back) stands in.
+fn compressed_bytes(object: &Path, sha256: &str) -> io::Result<Vec<u8>> {
+    let name = object_name(object).unwrap_or_default();
+    let want = if sha256.is_empty() {
+        name.as_str()
+    } else {
+        sha256
+    };
+    let err = match unsqueeze_file(object, None) {
+        Ok(b) if hex::encode(Sha256::digest(&b)) == want => return Ok(b),
+        Ok(b) => io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "tin object {} is corrupt (sha256 {} once decompressed); refusing to restore from it",
+                object.display(),
+                &hex::encode(Sha256::digest(&b))[..12]
+            ),
+        ),
+        Err(e) => e,
+    };
+    if want.len() == 64 {
+        let plain = object_path(want);
+        let ok = |p: &Path| {
+            fs::read(p)
+                .ok()
+                .filter(|b| hex::encode(Sha256::digest(b)) == want)
+        };
+        if let Some(b) = ok(&plain) {
+            return Ok(b);
+        }
+        if super::vault::heal(&plain) {
+            if let Some(b) = ok(&plain) {
+                return Ok(b);
+            }
+        }
+    }
+    Err(err)
+}
+
+fn restore_compressed(object: &Path, sha256: &str, dest: &Path) -> io::Result<()> {
+    let bytes = compressed_bytes(object, sha256)?;
+    let mut f = fs::File::create(dest)?;
+    f.write_all(&bytes)?;
+    super::journal::full_sync_data(&f)?;
+    Ok(())
+}
+
+/// The checks `journal.verify` makes on a snapshot the tin finds by its
+/// name rather than as a file it copies (a pack's record, a compressed
+/// object), or `None` for any other snapshot. One line per problem, each
+/// reading "snapshot missing" or "snapshot is corrupt (...)".
+pub fn check_by_name(snapshot: &Path, sha256: &str) -> Option<Vec<String>> {
+    let got = if is_packed(snapshot) {
+        packed_bytes(snapshot, sha256)
+    } else if is_compressed(snapshot) {
+        compressed_bytes(snapshot, sha256)
+    } else {
+        return None;
+    };
+    Some(match got {
+        Ok(_) => Vec::new(),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => vec!["snapshot missing".to_string()],
+        Err(e) => vec![format!("snapshot is corrupt ({e})")],
+    })
+}
+
+/// Is this a snapshot the tin finds by its name (a pack's record, a
+/// compressed object), so a restore may go on when the file itself is
+/// gone and the vault has the object?
+pub fn found_by_name(snapshot: &Path) -> bool {
+    is_packed(snapshot) || is_compressed(snapshot)
+}
+
+/// Write a packed object to `dest`, flushed before this returns.
+fn restore_packed(pack: &Path, sha256: &str, dest: &Path) -> io::Result<()> {
+    let bytes = packed_bytes(pack, sha256)?;
+    let mut f = fs::File::create(dest)?;
+    f.write_all(&bytes)?;
+    super::journal::full_sync_data(&f)?;
+    Ok(())
+}
+
 /// One chunk of a recipe, read from the tin and checked against the length
 /// and hash the recipe names: a missing or corrupt one refuses the restore.
 fn read_chunk_checked(recipe: &Recipe, i: usize) -> io::Result<Vec<u8>> {
     let c = &recipe.chunks[i];
-    let object = object_path(&c.sha256);
-    let data = fs::read(&object).map_err(|e| {
+    let data = object_bytes(&c.sha256, Some(c.len)).map_err(|e| {
         io::Error::new(
             e.kind(),
             format!(
@@ -1600,8 +1964,7 @@ fn restore_serial(recipe: &Recipe, snapshot: &Path, dest: &Path) -> io::Result<(
 /// its name so the vault's `heal` can find it.
 fn read_chunk_bytes(recipe: &Recipe, i: usize) -> io::Result<Vec<u8>> {
     let c = &recipe.chunks[i];
-    let object = object_path(&c.sha256);
-    fs::read(&object).map_err(|e| {
+    object_bytes(&c.sha256, Some(c.len)).map_err(|e| {
         io::Error::new(
             e.kind(),
             format!(
@@ -1700,8 +2063,7 @@ pub fn check_recipe(snapshot: &Path, expect_sha256: &str) -> Vec<String> {
         ));
     }
     for (i, c) in recipe.chunks.iter().enumerate() {
-        let object = object_path(&c.sha256);
-        if !object.is_file() {
+        if !has_object(&c.sha256) {
             problems.push(format!(
                 "chunk {} of {} (tin object {}) is missing",
                 i + 1,
@@ -1710,7 +2072,7 @@ pub fn check_recipe(snapshot: &Path, expect_sha256: &str) -> Vec<String> {
             ));
             continue;
         }
-        match sha256_file(&object) {
+        match object_bytes(&c.sha256, Some(c.len)).map(|b| hex::encode(Sha256::digest(&b))) {
             Ok(actual) if actual == c.sha256 => {}
             Ok(actual) => problems.push(format!(
                 "tin object {} is corrupt (chunk {} of {}; sha256 {} on disk)",
@@ -1784,7 +2146,7 @@ pub fn referenced_by(rec: &super::runs::RunRecord) -> HashSet<PathBuf> {
                                 if is_recipe(&o) {
                                     if let Ok(r) = read_recipe(&o) {
                                         for c in &r.chunks {
-                                            out.insert(object_path(&c.sha256));
+                                            out.extend(object_paths(&c.sha256));
                                         }
                                     }
                                 }
@@ -1795,18 +2157,26 @@ pub fn referenced_by(rec: &super::runs::RunRecord) -> HashSet<PathBuf> {
                             out.insert(snapshot.clone());
                             if let Ok(r) = read_recipe(snapshot) {
                                 for c in &r.chunks {
-                                    out.insert(object_path(&c.sha256));
+                                    out.extend(object_paths(&c.sha256));
                                 }
                             }
                         }
                         super::journal::Before::File { snapshot, .. }
                         | super::journal::Before::Dir { snapshot }
-                            if holds(snapshot) || is_sealed(snapshot) =>
+                            if holds(snapshot) || is_sealed(snapshot) || is_packed(snapshot) =>
                         {
                             out.insert(snapshot.clone());
                         }
                         _ => {}
                     }
+                }
+            }
+        }
+        // The packs the run wrote to, listed before their first record.
+        if let Ok(text) = fs::read_to_string(rec.dir().join(super::tinpack::LISTED)) {
+            for id in text.lines().map(str::trim) {
+                if id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit()) {
+                    out.insert(super::tinpack::pack_path(id));
                 }
             }
         }
@@ -1904,9 +2274,28 @@ fn hashed_entries(store: &Path) -> Vec<(PathBuf, u64)> {
     hashed_entries_named(store, 64)
 }
 
-/// Every object in the tin (whole files and chunks alike), with its size.
+/// Every object in the tin (whole files and chunks alike, plain or
+/// compressed), with its size on disk.
 pub fn objects() -> Vec<(PathBuf, u64)> {
-    hashed_entries(&objects_dir())
+    let mut out = hashed_entries(&objects_dir());
+    let Ok(buckets) = fs::read_dir(objects_dir()) else {
+        return out;
+    };
+    for bucket in buckets.flatten() {
+        let Ok(entries) = fs::read_dir(bucket.path()) else {
+            continue;
+        };
+        for e in entries.flatten() {
+            let p = e.path();
+            if is_compressed(&p) {
+                if let Ok(m) = e.metadata() {
+                    out.push((p, m.len()));
+                }
+            }
+        }
+    }
+    out.sort();
+    out
 }
 
 /// Every recipe in the tin, with the size of the recipe file itself.
@@ -1934,6 +2323,19 @@ pub struct Usage {
     /// Sealed objects (encrypted at rest), counted apart.
     pub sealed: usize,
     pub sealed_bytes: u64,
+    /// Pack files of small before-states, and the objects they hold
+    /// (counted in `objects` too; their bytes in `stored`).
+    pub packs: usize,
+    pub packed: usize,
+}
+
+/// The size a compressed object comes to, from its frame's header.
+fn frame_size(p: &Path) -> Option<u64> {
+    let mut head = [0u8; 18];
+    let n = fs::File::open(p).and_then(|mut f| f.read(&mut head)).ok()?;
+    zstd::zstd_safe::get_frame_content_size(&head[..n])
+        .ok()
+        .flatten()
 }
 
 /// What the tin holds: objects and bytes stored, next to what the files
@@ -1952,23 +2354,34 @@ pub fn du() -> Usage {
         }
     }
     for (p, size) in &all {
-        let name = p
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_default();
+        let name = object_name(p).unwrap_or_default();
         if !chunk_names.contains(&name) {
-            logical += size;
+            logical += if is_compressed(p) {
+                frame_size(p).unwrap_or(*size)
+            } else {
+                *size
+            };
         }
     }
     let sealed = sealed();
     let sealed_bytes: u64 = sealed.iter().map(|(_, b)| b).sum();
+    let packs = packs();
+    let mut packed = 0usize;
+    for (p, _) in &packs {
+        for (_, raw) in super::tinpack::ids(p) {
+            packed += 1;
+            logical += raw;
+        }
+    }
     Usage {
-        objects: all.len(),
-        stored: all.iter().map(|(_, b)| b).sum(),
+        objects: all.len() + packed,
+        stored: all.iter().map(|(_, b)| b).sum::<u64>() + packs.iter().map(|(_, b)| b).sum::<u64>(),
         recipes: recipes.len(),
         logical: logical + sealed_bytes,
         sealed: sealed.len(),
         sealed_bytes,
+        packs: packs.len(),
+        packed,
     }
 }
 
@@ -1999,11 +2412,13 @@ pub fn verify(quick: bool) -> Vec<String> {
         }
     }
     for (p, _) in objects() {
-        let name = p
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_default();
-        match sha256_file(&p) {
+        let name = object_name(&p).unwrap_or_default();
+        let actual = if is_compressed(&p) {
+            unsqueeze_file(&p, None).map(|b| hex::encode(Sha256::digest(&b)))
+        } else {
+            sha256_file(&p)
+        };
+        match actual {
             Ok(actual) if actual == name => {}
             Ok(actual) => problems.push(format!(
                 "{} does not hash to its name (sha256 {} on disk); a restore from it would be refused",
@@ -2017,7 +2432,7 @@ pub fn verify(quick: bool) -> Vec<String> {
         match read_recipe(&p) {
             Ok(r) => {
                 for (i, c) in r.chunks.iter().enumerate() {
-                    if !object_path(&c.sha256).is_file() {
+                    if !has_object(&c.sha256) {
                         problems.push(format!(
                             "{} names chunk {} of {} (object {}), which is missing; a restore from it would be refused",
                             p.display(),
@@ -2031,6 +2446,9 @@ pub fn verify(quick: bool) -> Vec<String> {
             Err(e) => problems.push(format!("{}: {e}", p.display())),
         }
     }
+    for (p, _) in packs() {
+        problems.extend(super::tinpack::verify(&p));
+    }
     problems
 }
 
@@ -2038,9 +2456,30 @@ pub fn verify(quick: bool) -> Vec<String> {
 /// and, with `sealed_orphans`, every sealed object the tin's key cannot
 /// open (sealed under a key that is gone). Returns (removed, bytes).
 pub fn gc(sealed_orphans: bool) -> (usize, u64) {
+    let began = std::time::SystemTime::now();
     let keep = referenced();
     let mut removed = 0;
     let mut bytes = 0;
+    // A pack goes when no run names it, counted by the objects it held. One
+    // written to since this gc began belongs to a run that has not listed
+    // it where `referenced` looked yet: it stays.
+    for (p, size) in packs() {
+        if keep.contains(&p) {
+            continue;
+        }
+        let fresh = fs::metadata(&p)
+            .and_then(|m| m.modified())
+            .is_ok_and(|t| t >= began);
+        if fresh {
+            continue;
+        }
+        let held = super::tinpack::ids(&p).len().max(1);
+        lift_read_only(&p);
+        if fs::remove_file(&p).is_ok() {
+            removed += held;
+            bytes += size;
+        }
+    }
     for (p, size) in objects().into_iter().chain(recipes()).chain(sealed()) {
         let orphan = sealed_orphans
             && is_sealed(&p)

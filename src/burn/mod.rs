@@ -30,6 +30,7 @@ pub mod scan;
 pub mod seal;
 pub mod statcache;
 pub mod tin;
+pub mod tinpack;
 pub mod tinparcel;
 pub mod vault;
 pub mod watch;

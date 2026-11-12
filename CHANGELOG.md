@@ -5,6 +5,25 @@ project follows semantic versioning.
 
 ## Unreleased
 
+- **Small before-states are packed, and the tin compresses what it
+  keeps** (#147). A native op's before-state under 16 KiB is a record in
+  a pack (`tin/packs/<id[..2]>/<id>`, one file per cig process, records
+  front to back, each with a checked header) instead of an object file
+  and a disk block of its own; an unburn reads a pack once and restores
+  every object in it from memory, hash-checked. A record cut short by a
+  killed cig is at the end of its pack and named by no journal line: the
+  walk stops there. Objects, chunks and pack records are kept as one zstd
+  frame (level 3) where that saves at least a tenth (`<sha256>.zst` in
+  `tin/objects`), and as they are where it does not; every name is still
+  the hash of the uncompressed bytes, so dedup, `cig tin verify`, `gc`,
+  parcels and the vault agree. A run lists its packs in
+  `runs/<id>/tin.packs`; `gc` removes a pack whole once no run lists or
+  names it. `cig tin du` reports `packs` and `packed`. Old runs, plain
+  objects and `snapshots/` folders restore as before. New tests:
+  `small_snapshots_pack_into_one_file`,
+  `a_damaged_pack_record_is_refused_and_the_rest_restore`,
+  `a_text_snapshot_costs_at_most_0_3_bytes_per_byte`,
+  `a_damaged_compressed_object_is_refused`.
 - **`cig tin vault update` waits for the restarted vault to answer**. The
   service is `Type=simple`, so systemd calls it active as soon as
   `ExecStart` has forked; the socket appears a moment later. `update`

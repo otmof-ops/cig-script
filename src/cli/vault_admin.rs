@@ -470,6 +470,13 @@ dscl . -create /Users/{ACCOUNT} UserShell /usr/bin/false && dscl . -create /User
         let (o, r, s) = (tin::objects_root(), tin::recipes_root(), tin::sealed_dir());
         let mut out = String::new();
         for p in tin::referenced() {
+            // A pack holds objects the vault keeps by their own names.
+            if tin::is_packed(&p) {
+                for id in tin::packed_ids(&p) {
+                    out.push_str(&format!("o {id}\n"));
+                }
+                continue;
+            }
             let kind = if p.starts_with(&o) {
                 cig_vault::Kind::Object
             } else if p.starts_with(&r) {
@@ -479,7 +486,12 @@ dscl . -create /Users/{ACCOUNT} UserShell /usr/bin/false && dscl . -create /User
             } else {
                 continue;
             };
-            if let Some(id) = p.file_name().map(|n| n.to_string_lossy().to_string()) {
+            let id = if tin::is_compressed(&p) {
+                tin::object_name(&p)
+            } else {
+                p.file_name().map(|n| n.to_string_lossy().to_string())
+            };
+            if let Some(id) = id {
                 if kind.id_ok(&id) {
                     out.push_str(&format!("{} {id}\n", kind.letter()));
                 }

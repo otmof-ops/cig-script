@@ -452,11 +452,11 @@ pub fn tin_cmd(ctx: &Ctx, cmd: Option<TinCommand>) -> i32 {
             if ctx.json {
                 outln!(
                     "{}",
-                    serde_json::json!({"objects": u.objects, "bytes": u.stored, "stored": u.stored, "recipes": u.recipes, "logical": u.logical, "sealed": u.sealed, "sealed_bytes": u.sealed_bytes, "referenced": referenced, "dir": tin::dir()})
+                    serde_json::json!({"objects": u.objects, "bytes": u.stored, "stored": u.stored, "recipes": u.recipes, "logical": u.logical, "sealed": u.sealed, "sealed_bytes": u.sealed_bytes, "packs": u.packs, "packed": u.packed, "referenced": referenced, "dir": tin::dir()})
                 );
             } else {
                 outln!(
-                    "{} object{} ({} bytes stored) keeping {} bytes of files{}{}; {referenced} still referred to by a run, in {}",
+                    "{} object{} ({} bytes stored) keeping {} bytes of files{}{}{}; {referenced} still referred to by a run, in {}",
                     u.objects,
                     if u.objects == 1 { "" } else { "s" },
                     u.stored,
@@ -470,6 +470,17 @@ pub fn tin_cmd(ctx: &Ctx, cmd: Option<TinCommand>) -> i32 {
                         String::new()
                     } else {
                         format!(", {} sealed ({} bytes)", u.sealed, u.sealed_bytes)
+                    },
+                    if u.packs == 0 {
+                        String::new()
+                    } else {
+                        format!(
+                            ", {} small one{} in {} pack{}",
+                            u.packed,
+                            if u.packed == 1 { "" } else { "s" },
+                            u.packs,
+                            if u.packs == 1 { "" } else { "s" }
+                        )
                     },
                     crate::crash::tilde(&tin::dir())
                 );
