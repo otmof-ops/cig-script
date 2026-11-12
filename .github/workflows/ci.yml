@@ -39,6 +39,12 @@ jobs:
       # the disk is fast enough for them to be a measurement.
       - if: matrix.os == 'ubuntu-latest'
         run: cargo test --release --test cli -- --ignored
+      # The differential suite skips when its reference binary cannot be had; here it must run, so a
+      # reference release that disappears fails the build instead of passing silently.
+      - if: matrix.os == 'ubuntu-latest'
+        run: cargo test --release --test differential
+        env:
+          CIG_REQUIRE_DIFFERENTIAL: "1"
       - run: cargo run --release -- run examples/hello.cig -- ci
       - run: cargo run --release -- chains examples/tasks.cig
       # The benchmark gates (#145): every case's output is its expect file and
