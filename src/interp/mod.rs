@@ -8,7 +8,7 @@ mod eval;
 pub(crate) mod ops;
 pub(crate) mod record;
 
-pub(crate) use eval::arity_mismatch;
+pub(crate) use eval::{arity_mismatch, exhale_part, map_key, set_field, set_index};
 pub use eval::{closest, error_value, normalize_index};
 
 use crate::burn::{Decision, Kernel, Op};

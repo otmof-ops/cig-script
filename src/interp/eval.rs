@@ -286,20 +286,9 @@ impl Interp {
             Stmt::Exhale { values, .. } => {
                 let mut line = String::new();
                 for (i, e) in values.iter().enumerate() {
-                    if i > 0 {
-                        line.push(' ');
-                    }
-                    line.push_str(&self.eval(e, env)?.display());
+                    exhale_part(&mut line, i, &self.eval(e, env)?);
                 }
-                line.push('\n');
-                if let Err(e) = self.out.write_all(line.as_bytes()) {
-                    if e.kind() == std::io::ErrorKind::BrokenPipe {
-                        // The reader went away (e.g. `| head`): stop quietly.
-                        self.exit_requested = Some(0);
-                        return Err(runtime("output pipe closed").code("E513").into());
-                    }
-                    return Err(runtime(format!("could not write output: {e}")).into());
-                }
+                self.write_exhaled(line)?;
                 Ok(())
             }
             Stmt::Cough { value, span } => {
@@ -569,93 +558,34 @@ impl Interp {
             AssignTarget::Index { object, index } => {
                 let obj = self.operand(object, env)?;
                 let idx = self.operand(index, env)?;
-                match (&obj, &idx) {
-                    (Value::List(list), Value::Int(i)) => {
-                        let len = list.borrow().len();
-                        let pos = normalize_index(*i, len).ok_or_else(|| {
-                            runtime(format!("index {i} is out of range for a list of {len}"))
-                                .code("E504")
-                                .at(span)
-                        })?;
-                        let new = match op {
-                            AssignOp::Set => rhs,
-                            _ => {
-                                let current = list.borrow()[pos].clone();
-                                binary(compound_op(op), current, rhs, span)?
-                            }
-                        };
-                        list.borrow_mut()[pos] = new;
-                        Ok(())
+                let new = match op {
+                    AssignOp::Set => rhs,
+                    _ => {
+                        let current = stored_at(&obj, &idx, span, index.span, object.span)?;
+                        binary(compound_op(op), current, rhs, span)?
                     }
-                    (Value::Map(map), Value::Str(key)) => {
-                        let new = match op {
-                            AssignOp::Set => rhs,
-                            _ => {
-                                let current =
-                                    map.borrow().get(&**key).cloned().ok_or_else(|| {
-                                        runtime(format!("map has no key `{key}`"))
-                                            .code("E505")
-                                            .at(span)
-                                    })?;
-                                binary(compound_op(op), current, rhs, span)?
-                            }
-                        };
-                        map.borrow_mut().insert(key.to_string(), new);
-                        Ok(())
-                    }
-                    (Value::List(_), other) => Err(type_error(format!(
-                        "list index must be an int, got {}",
-                        other.type_name()
-                    ))
-                    .at(index.span)
-                    .into()),
-                    (Value::Map(_), other) => Err(type_error(format!(
-                        "map key must be a string, got {}",
-                        other.type_name()
-                    ))
-                    .at(index.span)
-                    .into()),
-                    (other, _) => Err(type_error(format!(
-                        "cannot index into {}",
-                        other.type_name()
-                    ))
-                    .code("E405")
-                    .at(object.span)
-                    .into()),
-                }
+                };
+                set_index(&obj, &idx, new, span, index.span, object.span)?;
+                Ok(())
             }
             AssignTarget::Member { object, name, hint } => {
                 let obj = self.operand(object, env)?;
-                match &obj {
-                    Value::Map(map) => {
-                        let new = match op {
-                            AssignOp::Set => rhs,
-                            _ => {
-                                let current =
-                                    field(&map.borrow(), name, hint).cloned().ok_or_else(|| {
-                                        runtime(format!("map has no key `{name}`"))
-                                            .code("E505")
-                                            .at(span)
-                                    })?;
-                                binary(compound_op(op), current, rhs, span)?
-                            }
-                        };
-                        let mut map = map.borrow_mut();
-                        match field_index(&map, name, hint) {
-                            Some(i) => map[i] = new,
-                            None => {
-                                map.insert(name.clone(), new);
-                            }
-                        }
-                        Ok(())
+                let new = match (&obj, op) {
+                    (_, AssignOp::Set) => rhs,
+                    (Value::Map(map), _) => {
+                        let current =
+                            field(&map.borrow(), name, hint).cloned().ok_or_else(|| {
+                                runtime(format!("map has no key `{name}`"))
+                                    .code("E505")
+                                    .at(span)
+                            })?;
+                        binary(compound_op(op), current, rhs, span)?
                     }
-                    other => Err(type_error(format!(
-                        "cannot set `.{name}` on {}",
-                        other.type_name()
-                    ))
-                    .at(object.span)
-                    .into()),
-                }
+                    // Not a map: `set_field` says so before anything is read.
+                    _ => rhs,
+                };
+                set_field(&obj, name, new, hint, object.span)?;
+                Ok(())
             }
         }
     }
@@ -749,7 +679,10 @@ impl Interp {
             ExprKind::Call { callee, args } => {
                 let f = self.eval(callee, env)?;
                 if let Value::Func(func) = &f {
-                    if func.params.len() == args.len() {
+                    // A compiled function takes its arguments as values, not
+                    // a scope: it goes the general way, to `call_function`.
+                    if func.params.len() == args.len() && !matches!(func.body, FnBody::Compiled(_))
+                    {
                         // The arguments go straight into the callee's frame:
                         // no list, no allocation (cig-script#146).
                         let scope = Scope::child(&func.closure);
@@ -807,17 +740,7 @@ impl Interp {
                 for (key, value) in entries {
                     let k = match key {
                         MapKey::Static(s) => s.clone(),
-                        MapKey::Dynamic(e) => match self.eval(e, env)? {
-                            Value::Str(s) => s.to_string(),
-                            Value::Int(i) => i.to_string(),
-                            other => {
-                                return Err(type_error(format!(
-                                    "map keys must be strings, got {}",
-                                    other.type_name()
-                                ))
-                                .at(e.span))
-                            }
-                        },
+                        MapKey::Dynamic(e) => map_key(self.eval(e, env)?, e.span)?,
                     };
                     let v = self.eval(value, env)?;
                     map.insert(k, v);
@@ -895,7 +818,7 @@ impl Interp {
     }
 
     #[inline(never)]
-    fn member(&mut self, obj: Value, name: &str, safe: bool, span: Span) -> Eval {
+    pub(crate) fn member(&mut self, obj: Value, name: &str, safe: bool, span: Span) -> Eval {
         match &obj {
             Value::Null if safe => Ok(Value::Null),
             Value::Map(map) => match map.borrow().get(name) {
@@ -941,7 +864,7 @@ impl Interp {
     }
 
     #[inline(never)]
-    fn index(&mut self, obj: Value, idx: Value, span: Span, idx_span: Span) -> Eval {
+    pub(crate) fn index(&mut self, obj: Value, idx: Value, span: Span, idx_span: Span) -> Eval {
         match (&obj, &idx) {
             (Value::List(list), Value::Int(i)) => {
                 let list = list.borrow();
@@ -1053,6 +976,9 @@ impl Interp {
         if args.len() != func.params.len() {
             return Err(arity_mismatch(func, args.len(), span));
         }
+        if let FnBody::Compiled(cf) = &func.body {
+            return crate::vm::call_compiled(self, func, cf, args, span);
+        }
         let scope = Scope::child(&func.closure);
         for (param, arg) in func.params.iter().zip(args) {
             scope.declare(param, arg, true);
@@ -1066,7 +992,9 @@ impl Interp {
         let result = match &func.body {
             FnBody::Expr(e) => self.eval(e, &scope).map_err(Signal::Error),
             FnBody::Block(b) => self.exec_block_in(&b.stmts, &scope).map(|()| Value::Null),
-            FnBody::Compiled(_) => Err(Signal::Error(crate::vm::not_built_reentry(span))),
+            // `call_function` sends a compiled function to the VM before a
+            // scope is made, and the fast call path leaves it to that.
+            FnBody::Compiled(_) => Err(Signal::Error(crate::vm::misrouted(span))),
         };
         self.leave_call();
         Scope::release(scope);
@@ -1100,7 +1028,13 @@ impl Interp {
     }
 
     #[inline(never)]
-    fn call_method(&mut self, recv: Value, name: &str, args: Vec<Value>, span: Span) -> Eval {
+    pub(crate) fn call_method(
+        &mut self,
+        recv: Value,
+        name: &str,
+        args: Vec<Value>,
+        span: Span,
+    ) -> Eval {
         // A map holding a function under that key is called as a plain function.
         if let Value::Map(map) = &recv {
             let f = map.borrow().get(name).cloned();
@@ -1167,6 +1101,146 @@ fn field_index(map: &IndexMap<String, Value>, name: &str, hint: &Cell<u32>) -> O
 #[inline]
 fn field<'m>(map: &'m IndexMap<String, Value>, name: &str, hint: &Cell<u32>) -> Option<&'m Value> {
     field_index(map, name, hint).map(|i| &map[i])
+}
+
+/// One value of an `exhale` line: a space before every value but the first,
+/// then the value as `display` shows it. The tree-walker and the VM build
+/// the line with this, and write it with [`Interp::write_exhaled`].
+pub(crate) fn exhale_part(line: &mut String, i: usize, v: &Value) {
+    if i > 0 {
+        line.push(' ');
+    }
+    line.push_str(&v.display());
+}
+
+impl Interp {
+    /// Write a finished `exhale` line, with its newline, to the output. A
+    /// reader that went away (`| head`) stops the script quietly (E513).
+    pub(crate) fn write_exhaled(&mut self, mut line: String) -> Result<(), Diagnostic> {
+        line.push('\n');
+        if let Err(e) = self.out.write_all(line.as_bytes()) {
+            if e.kind() == std::io::ErrorKind::BrokenPipe {
+                // The reader went away (e.g. `| head`): stop quietly.
+                self.exit_requested = Some(0);
+                return Err(runtime("output pipe closed").code("E513"));
+            }
+            return Err(runtime(format!("could not write output: {e}")));
+        }
+        Ok(())
+    }
+}
+
+/// A map literal's computed key: a string as itself, an int as its digits,
+/// anything else a type error at the key.
+pub(crate) fn map_key(v: Value, span: Span) -> Result<String, Diagnostic> {
+    match v {
+        Value::Str(s) => Ok(s.to_string()),
+        Value::Int(i) => Ok(i.to_string()),
+        other => Err(type_error(format!(
+            "map keys must be strings, got {}",
+            other.type_name()
+        ))
+        .at(span)),
+    }
+}
+
+/// `obj.name = new`: a map's key set in place, or added at the end; on
+/// anything else, the type error at `obj_span`.
+pub(crate) fn set_field(
+    obj: &Value,
+    name: &str,
+    new: Value,
+    hint: &Cell<u32>,
+    obj_span: Span,
+) -> Result<(), Diagnostic> {
+    match obj {
+        Value::Map(map) => {
+            let mut map = map.borrow_mut();
+            match field_index(&map, name, hint) {
+                Some(i) => map[i] = new,
+                None => {
+                    map.insert(name.to_string(), new);
+                }
+            }
+            Ok(())
+        }
+        other => {
+            Err(type_error(format!("cannot set `.{name}` on {}", other.type_name())).at(obj_span))
+        }
+    }
+}
+
+/// The value an indexed assignment target holds now, for `+=` and the like:
+/// E504 past a list's end, E505 for a missing key, and the store's own type
+/// errors otherwise.
+fn stored_at(
+    obj: &Value,
+    idx: &Value,
+    span: Span,
+    idx_span: Span,
+    obj_span: Span,
+) -> Result<Value, Diagnostic> {
+    match (obj, idx) {
+        (Value::List(list), Value::Int(i)) => {
+            let list = list.borrow();
+            let pos = list_slot(*i, list.len(), span)?;
+            Ok(list[pos].clone())
+        }
+        (Value::Map(map), Value::Str(key)) => map.borrow().get(&**key).cloned().ok_or_else(|| {
+            runtime(format!("map has no key `{key}`"))
+                .code("E505")
+                .at(span)
+        }),
+        _ => Err(store_type_error(obj, idx, idx_span, obj_span)),
+    }
+}
+
+/// `obj[idx] = new`: a list's element (E504 past its end) or a map's key.
+pub(crate) fn set_index(
+    obj: &Value,
+    idx: &Value,
+    new: Value,
+    span: Span,
+    idx_span: Span,
+    obj_span: Span,
+) -> Result<(), Diagnostic> {
+    match (obj, idx) {
+        (Value::List(list), Value::Int(i)) => {
+            let mut list = list.borrow_mut();
+            let pos = list_slot(*i, list.len(), span)?;
+            list[pos] = new;
+            Ok(())
+        }
+        (Value::Map(map), Value::Str(key)) => {
+            map.borrow_mut().insert(key.to_string(), new);
+            Ok(())
+        }
+        _ => Err(store_type_error(obj, idx, idx_span, obj_span)),
+    }
+}
+
+fn list_slot(i: i64, len: usize, span: Span) -> Result<usize, Diagnostic> {
+    normalize_index(i, len).ok_or_else(|| {
+        runtime(format!("index {i} is out of range for a list of {len}"))
+            .code("E504")
+            .at(span)
+    })
+}
+
+fn store_type_error(obj: &Value, idx: &Value, idx_span: Span, obj_span: Span) -> Diagnostic {
+    match obj {
+        Value::List(_) => type_error(format!(
+            "list index must be an int, got {}",
+            idx.type_name()
+        ))
+        .at(idx_span),
+        Value::Map(_) => {
+            type_error(format!("map key must be a string, got {}", idx.type_name())).at(idx_span)
+        }
+        other => type_error(format!("cannot index into {}", other.type_name()))
+            .code("E405")
+            .at(obj_span),
+    }
 }
 
 /// E401 for a script function called with the wrong number of arguments.

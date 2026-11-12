@@ -511,16 +511,18 @@ fn jumps_test_testn_testset() {
 
 #[test]
 fn a_backward_loop_counts_down() {
-    // R0 = 5; R1 = 0; top: testn R0 -> out; R1 += 2; R0 -= 1; loop top; out: ret R1
+    // R0 = 5; R1 = 0; top: testn R0 -> out; steps; R1 += 2; R0 -= 1;
+    // loop top; out: ret R1
     let mut f = main_fn(
         2,
         vec![
             Instr::asbx(Op::LOADINT, 0, 5),
             Instr::asbx(Op::LOADINT, 1, 0),
-            Instr::asbx(Op::TESTN, 0, 3), // pc 2 -> 6
+            Instr::asbx(Op::TESTN, 0, 4), // pc 2 -> 7
+            steps(1, 1),
             abc(Op::ADDK, 1, 1, 0),
             abc(Op::SUBK, 0, 0, 1),
-            Instr::asbx(Op::LOOP, 0, -4), // pc 5 -> 2
+            Instr::asbx(Op::LOOP, 0, -5), // pc 6 -> 2
             ret(1),
         ],
     );
@@ -1218,8 +1220,8 @@ fn an_unverified_module_cannot_be_run() {
 
 // ----- what is left ---------------------------------------------------------------------
 
-/// The instructions this package runs.
-const BUILT: [Op; 39] = [
+/// The instructions the VM runs.
+const BUILT: [Op; 59] = [
     Op::NOP,
     Op::MOV,
     Op::LOADK,
@@ -1259,24 +1261,35 @@ const BUILT: [Op; 39] = [
     Op::CALLB,
     Op::RET,
     Op::TAILCALL,
+    Op::FORPREP,
+    Op::FORLOOP,
+    Op::ITERPREP,
+    Op::ITERNEXT,
+    Op::NEWLIST,
+    Op::NEWMAP,
+    Op::GETFIELD,
+    Op::SETFIELD,
+    Op::GETINDEX,
+    Op::SETINDEX,
+    Op::APPENDLIST,
+    Op::INSERTMAP,
+    Op::INTERP,
+    Op::CALLM,
+    Op::GETUP,
+    Op::SETUP,
+    Op::CELLNEW,
+    Op::CELLGET,
+    Op::CELLSET,
+    Op::EXHALE,
 ];
 
-/// A module whose first instruction is `op`, with operands that verify.
-/// Returns the module and the function to enter (instructions that need
-/// an upvalue sit in a child, which only a capturing closure could reach).
+/// A module whose first instruction is `op`, with operands that verify,
+/// and the function to enter.
 fn first_is(op: Op) -> (Module, usize) {
     let mut f = main_fn(8, vec![]);
     f.constants = vec![Constant::Str("x".into())];
     let code = match op {
-        Op::FORPREP | Op::FORLOOP | Op::ITERNEXT => vec![Instr::asbx(op, 0, 0), ret(0)],
-        Op::ITERPREP | Op::NEWLIST | Op::NEWMAP | Op::CELLNEW | Op::THROW => {
-            vec![abc(op, 0, 0, 0), ret(0)]
-        }
-        Op::GETFIELD | Op::CALLM => vec![abc(op, 0, 0, 0), ret(0)],
-        Op::SETFIELD => vec![abc(op, 0, 0, 1), ret(0)],
-        Op::GETINDEX | Op::SETINDEX | Op::INSERTMAP => vec![abc(op, 0, 1, 2), ret(0)],
-        Op::APPENDLIST => vec![abc(op, 0, 1, 0), ret(0)],
-        Op::INTERP => vec![abc(op, 0, 1, 2), ret(0)],
+        Op::THROW => vec![abc(op, 0, 0, 0), ret(0)],
         Op::TRY_ENTER => {
             f.handlers = vec![HandlerEntry {
                 pc_start: 0,
@@ -1312,27 +1325,7 @@ fn first_is(op: Op) -> (Module, usize) {
             f.requires_burn = true;
             vec![abc(op, 0, 0, 0x10), ret(0)]
         }
-        Op::PACK | Op::EXHALE | Op::CHAIN_MAKE => vec![abc(op, 0, 2, 0), ret(0)],
-        Op::GETUP | Op::CELLGET => {
-            let mut c = child_fn("c", 0, 2, vec![abc(op, 0, 0, 0), ret(0)]);
-            c.upvalues = vec![UpvalDesc {
-                kind: UpvalKind::ParentLocal,
-                index: 0,
-            }];
-            f.instrs = vec![ret(0)];
-            f.children = vec![c];
-            return (module(f), 1);
-        }
-        Op::SETUP | Op::CELLSET => {
-            let mut c = child_fn("c", 0, 2, vec![abc(op, 0, 0, 0), ret(0)]);
-            c.upvalues = vec![UpvalDesc {
-                kind: UpvalKind::ParentLocal,
-                index: 0,
-            }];
-            f.instrs = vec![ret(0)];
-            f.children = vec![c];
-            return (module(f), 1);
-        }
+        Op::PACK | Op::CHAIN_MAKE => vec![abc(op, 0, 2, 0), ret(0)],
         other => panic!("no module for {other}"),
     };
     let n = code.len() as u32;
@@ -1379,20 +1372,21 @@ fn instructions_not_built_yet_say_so() {
             )
         );
     }
-    // A closure over captured values is the next package's too.
-    let mut f = main_fn(2, vec![Instr::abx(Op::CLOSURE, 0, 0), ret(0)]);
-    let mut c = add_fn();
-    c.upvalues = vec![UpvalDesc {
-        kind: UpvalKind::ParentLocal,
-        index: 1,
-    }];
-    f.children = vec![c];
-    let e = err(&module(f));
-    assert_eq!(e.kind, Kind::Internal);
-    assert!(e
-        .message
-        .contains("`closure` of a function that captures values"));
-    assert_eq!(at_pc(&e), Some(0));
+    assert_eq!(
+        NOT_BUILT,
+        [
+            Op::TRY_ENTER,
+            Op::TRY_LEAVE,
+            Op::THROW,
+            Op::BURN_ENTER,
+            Op::BURN_OP,
+            Op::BURN_LEAVE,
+            Op::COMP_ENTER,
+            Op::COMP_LEAVE,
+            Op::PACK,
+            Op::CHAIN_MAKE,
+        ]
+    );
 }
 
 // ----- safety ----------------------------------------------------------------------------
@@ -1435,10 +1429,11 @@ const SAFE_BUILTINS: [&str; 16] = [
     "math.clamp",
 ];
 
-/// A random function: registers, constants, children (`depth` levels),
-/// and code whose jumps go forward, except a `loop` back to a `steps`
-/// that charges, so every cycle spends budget.
-fn random_fn(rng: &mut Rng, depth: u32, arity: u16) -> BcFunction {
+/// A random function: registers, constants, children (`depth` levels)
+/// that capture from it, and code whose jumps go forward, except a `loop`
+/// back to a `steps` that charges, so every cycle spends budget. `parent`
+/// is the enclosing function's register and upvalue counts.
+fn random_fn(rng: &mut Rng, depth: u32, arity: u16, parent: Option<(u32, usize)>) -> BcFunction {
     let ops: Vec<Op> = (0..=255u8).filter_map(Op::from_byte).collect();
     let regs = 1 + rng.below(8) as u32;
     let mut f = BcFunction::empty_main();
@@ -1450,6 +1445,25 @@ fn random_fn(rng: &mut Rng, depth: u32, arity: u16) -> BcFunction {
     f.name = format!("f{depth}");
     f.reg_count = regs.max(u32::from(arity));
     f.arity = arity;
+    if let Some((regs, ups)) = parent {
+        for _ in 0..rng.below(3) {
+            let local = ups == 0 || rng.below(2) == 0;
+            f.upvalues.push(if local {
+                UpvalDesc {
+                    kind: UpvalKind::ParentLocal,
+                    index: rng.below(u64::from(regs)) as u16,
+                }
+            } else {
+                UpvalDesc {
+                    kind: UpvalKind::ParentUpvalue,
+                    index: rng.below(ups as u64) as u16,
+                }
+            });
+        }
+    }
+    // Names for getfield, setfield and callm.
+    f.constants.push(Constant::Str("len".into()));
+    f.constants.push(Constant::Str("a".into()));
     for _ in 0..rng.below(5) {
         f.constants.push(match rng.below(4) {
             0 => Constant::Bool(rng.below(2) == 0),
@@ -1461,7 +1475,8 @@ fn random_fn(rng: &mut Rng, depth: u32, arity: u16) -> BcFunction {
     if depth < 2 {
         for _ in 0..rng.below(3) {
             let a = rng.below(3) as u16;
-            f.children.push(random_fn(rng, depth + 1, a));
+            let here = (f.reg_count, f.upvalues.len());
+            f.children.push(random_fn(rng, depth + 1, a, Some(here)));
         }
     }
     let n = 1 + rng.below(24) as usize;
@@ -1473,6 +1488,17 @@ fn random_fn(rng: &mut Rng, depth: u32, arity: u16) -> BcFunction {
         .collect();
     let mut code: Vec<Instr> = Vec::new();
     let mut loop_heads: Vec<usize> = Vec::new();
+    if !f.upvalues.is_empty() && rng.below(3) == 0 {
+        // Every upvalue instruction once, on operands that verify.
+        let u = rng.below(f.upvalues.len() as u64) as u8;
+        code = vec![
+            abc(Op::GETUP, 0, u, 0),
+            abc(Op::CELLNEW, 0, 0, 0),
+            abc(Op::CELLSET, u, 0, 0),
+            abc(Op::CELLGET, 0, u, 0),
+            abc(Op::SETUP, u, 0, 0),
+        ];
+    }
     while code.len() < n {
         let pc = code.len();
         let left = (n - pc) as u64;
@@ -1506,6 +1532,24 @@ fn random_fn(rng: &mut Rng, depth: u32, arity: u16) -> BcFunction {
                 let b = safe[rng.below(safe.len() as u64) as usize] as u8;
                 code.push(abc(op, reg(rng), b, rng.below(3) as u8));
             }
+            Op::GETFIELD | Op::CALLM => {
+                let k = rng.below(2) as u8;
+                let (b, c) = if op == Op::GETFIELD {
+                    (reg(rng), k)
+                } else {
+                    (k, rng.below(3) as u8)
+                };
+                code.push(abc(op, reg(rng), b, c));
+            }
+            Op::SETFIELD => code.push(abc(op, reg(rng), rng.below(2) as u8, reg(rng))),
+            Op::GETUP | Op::CELLGET => {
+                let u = rng.below(f.upvalues.len() as u64 + 1) as u8;
+                code.push(abc(op, reg(rng), u, 0));
+            }
+            Op::SETUP | Op::CELLSET => {
+                let u = rng.below(f.upvalues.len() as u64 + 1) as u8;
+                code.push(abc(op, u, reg(rng), 0));
+            }
             _ => code.push(abc(
                 op,
                 reg(rng),
@@ -1528,17 +1572,33 @@ fn random_fn(rng: &mut Rng, depth: u32, arity: u16) -> BcFunction {
     f
 }
 
+/// Every opcode in `f` and its children.
+fn ops_in(f: &BcFunction, out: &mut std::collections::HashSet<Op>) {
+    out.extend(
+        cig_bytecode::instr::walk(&f.instrs)
+            .filter_map(|d| d.ok())
+            .map(|d| d.op),
+    );
+    for c in &f.children {
+        ops_in(c, out);
+    }
+}
+
 #[test]
 fn a_verified_module_never_panics() {
     let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
     let mut ran = 0;
     let mut tried = 0;
-    while ran < 2_000 && tried < 200_000 {
+    let mut seen = std::collections::HashSet::new();
+    // At least 2,000 modules, and on until every built instruction has been
+    // in one that verified.
+    while (ran < 2_000 || !BUILT.iter().all(|op| seen.contains(op))) && tried < 400_000 {
         tried += 1;
-        let m = module(random_fn(&mut rng, 0, 0));
+        let m = module(random_fn(&mut rng, 0, 0, None));
         let Ok(v) = verify_module(&m) else {
             continue;
         };
+        ops_in(&m.main, &mut seen);
         let budget = 1 + rng.below(60);
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let Ok(p) = load(v) else {
@@ -1558,4 +1618,1129 @@ fn a_verified_module_never_panics() {
         ran += 1;
     }
     assert!(ran >= 2_000, "only {ran} of {tried} verified");
+    for op in BUILT {
+        assert!(seen.contains(&op), "no verified module ran `{op}`");
+    }
+}
+
+// ----- output and text -------------------------------------------------------------------
+
+#[derive(Clone, Default)]
+struct Buf(Rc<std::cell::RefCell<Vec<u8>>>);
+
+impl std::io::Write for Buf {
+    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+        self.0.borrow_mut().extend_from_slice(b);
+        Ok(b.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Buf {
+    fn text(&self) -> String {
+        String::from_utf8(self.0.borrow().clone()).expect("utf-8")
+    }
+}
+
+/// Run `src` on the tree-walker with `vars` declared as globals: what it
+/// printed, and how it ended.
+fn walker_run(src: &str, vars: &[(&str, Value)]) -> (String, Option<Diagnostic>) {
+    let program = crate::syntax::parse(src).expect("parses");
+    let buf = Buf::default();
+    let mut i = interp();
+    i.out = Box::new(buf.clone());
+    for (name, v) in vars {
+        i.globals.declare(name, v.clone(), true);
+    }
+    let r = i.run_program(&program);
+    (buf.text(), r.err())
+}
+
+/// Run `m`'s top level with `args`: what it printed, and how it ended.
+fn vm_run(m: &Module, args: Vec<Value>) -> (String, Result<Value, Diagnostic>) {
+    let buf = Buf::default();
+    let mut i = interp();
+    i.out = Box::new(buf.clone());
+    let r = run_function(&mut i, &program(m), 0, args);
+    assert_eq!(i.loop_depth, 0, "the loop depth is given back");
+    assert_eq!(i.call_depth_for_tests(), 0, "the call depth is given back");
+    (buf.text(), r)
+}
+
+/// An error as the two engines are compared on it: code, kind, message
+/// and hint (positions are the lowering's: each test checks its pc).
+fn said(d: &Diagnostic) -> String {
+    format!("{} {:?} {} {:?}", d.code, d.kind, d.message, d.hint)
+}
+
+/// Every kind of value `exhale` can be handed.
+fn printable_values() -> Vec<Value> {
+    let mut v = operand_table();
+    let mut nested = IndexMap::new();
+    nested.insert("b c".to_string(), Value::str("q\"$\n\t\u{7}"));
+    nested.insert(
+        "n".to_string(),
+        Value::list(vec![Value::Null, Value::Float(1e20)]),
+    );
+    v.push(Value::map(nested));
+    let looped = Value::list(vec![Value::Int(1)]);
+    if let Value::List(l) = &looped {
+        l.borrow_mut().push(looped.clone());
+    }
+    v.push(looped);
+    let len = crate::stdlib::builtin_catalogue()[catalogue_index("len")];
+    v.push(Value::Builtin(Rc::new(*len)));
+    let math = crate::stdlib::prelude()
+        .into_iter()
+        .find(|(n, _)| *n == "math")
+        .map(|(_, m)| m)
+        .expect("math");
+    v.push(math);
+    let mut f = main_fn(1, vec![Instr::abx(Op::CLOSURE, 0, 0), ret(0)]);
+    f.children = vec![add_fn()];
+    v.push(exec(&module(f)).expect("a closure"));
+    v
+}
+
+#[test]
+fn exhale_writes_the_interpreters_bytes() {
+    // `exhale v` and `exhale v, v`, then interpolation: `"<${v}|${v}>"`.
+    // `--json` and `--plain` shape diagnostics and cig's own reports, not
+    // the script's output, so one writer serves all three.
+    let mut f = main_fn(
+        8,
+        vec![
+            abc(Op::EXHALE, 0, 1, 0),
+            abc(Op::MOV, 1, 0, 0),
+            abc(Op::EXHALE, 0, 2, 0),
+            Instr::abx(Op::LOADK, 2, 0),
+            abc(Op::MOV, 3, 0, 0),
+            Instr::abx(Op::LOADK, 4, 1),
+            abc(Op::MOV, 5, 0, 0),
+            Instr::abx(Op::LOADK, 6, 2),
+            abc(Op::INTERP, 7, 2, 4),
+            abc(Op::EXHALE, 7, 1, 0),
+            ret(7),
+        ],
+    );
+    f.arity = 1;
+    f.constants = vec![
+        Constant::Str("<".into()),
+        Constant::Str("|".into()),
+        Constant::Str(">".into()),
+    ];
+    let m = module(f);
+    let src = "exhale v\nexhale v, v\nexhale \"<${v}|${v}>\"\n";
+    for v in printable_values() {
+        let (want, e) = walker_run(src, &[("v", v.clone())]);
+        assert!(e.is_none(), "{}", v.repr());
+        let (got, r) = vm_run(&m, vec![v.clone()]);
+        assert_eq!(got, want, "{}", v.repr());
+        r.expect("ran");
+    }
+}
+
+/// A writer whose reader went away.
+struct Closed;
+
+impl std::io::Write for Closed {
+    fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+        Err(std::io::ErrorKind::BrokenPipe.into())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn exhale_to_a_closed_pipe_stops_as_the_interpreter_does() {
+    let ast = crate::syntax::parse("exhale 1\n").expect("parses");
+    let mut w = interp();
+    w.out = Box::new(Closed);
+    let walker = w.run_program(&ast);
+    assert!(walker.is_ok(), "the tree-walker stops quietly");
+    assert_eq!(w.exit_requested, Some(0));
+
+    let m = module(main_fn(
+        1,
+        vec![
+            Instr::asbx(Op::LOADINT, 0, 1),
+            abc(Op::EXHALE, 0, 1, 0),
+            ret(0),
+        ],
+    ));
+    let mut i = interp();
+    i.out = Box::new(Closed);
+    let e = run(&mut i, &program(&m)).err().expect("stops");
+    assert_eq!(e.code, "E513");
+    assert_eq!(e.message, "output pipe closed");
+    assert_eq!(i.exit_requested, Some(0));
+}
+
+#[test]
+fn interp_shows_each_part_as_interpolation_does() {
+    // "n=${n} f=${f} s=${s} l=${l}" over every operand.
+    let mut f = main_fn(
+        12,
+        vec![
+            Instr::abx(Op::LOADK, 2, 0),
+            abc(Op::MOV, 3, 0, 0),
+            Instr::abx(Op::LOADK, 4, 1),
+            abc(Op::MOV, 5, 1, 0),
+            abc(Op::INTERP, 0, 2, 3),
+            ret(0),
+        ],
+    );
+    f.arity = 2;
+    f.constants = vec![Constant::Str("a=".into()), Constant::Str(" b=".into())];
+    let m = module(f);
+    for a in operand_table() {
+        for b in [Value::str("é"), Value::Float(1.0), Value::Null] {
+            let vars = [("a", a.clone()), ("b", b.clone())];
+            let (want, e) = walker_run("exhale \"a=${a} b=${b}\"\n", &vars);
+            assert!(e.is_none());
+            let got = exec_with(&m, vec![a.clone(), b.clone()]).expect("ran");
+            assert_eq!(format!("{}\n", got.display()), want);
+        }
+    }
+    // An interp of no parts but one gives that part as text.
+    let f = main_fn(
+        2,
+        vec![
+            Instr::asbx(Op::LOADINT, 1, 42),
+            abc(Op::INTERP, 0, 1, 0),
+            ret(0),
+        ],
+    );
+    assert_eq!(ok(&module(f)), "\"42\"");
+}
+
+// ----- loops ---------------------------------------------------------------------------
+
+/// `for i in R0..R1 step K[0] { exhale i }`, the window at R2..R6:
+/// forprep jumps past the loop when it makes no turn.
+fn for_module(step: i64) -> Module {
+    let mut f = main_fn(
+        7,
+        vec![
+            abc(Op::MOV, 2, 0, 0),
+            abc(Op::MOV, 3, 1, 0),
+            Instr::abx(Op::LOADK, 4, 0),
+            steps(1, 0),
+            Instr::asbx(Op::FORPREP, 2, 3),  // pc 4 -> 8
+            steps(1, 1),                     // pc 5: one item
+            abc(Op::EXHALE, 5, 1, 0),        // pc 6
+            Instr::asbx(Op::FORLOOP, 2, -3), // pc 7 -> 5
+            steps(0, 0),                     // pc 8
+            ret(5),
+        ],
+    );
+    f.arity = 2;
+    f.constants = vec![Constant::Int(step)];
+    module(f)
+}
+
+#[test]
+fn forprep_and_forloop_run_a_range() {
+    let m = for_module(1);
+    for (a, b) in [(0, 0), (0, 1), (3, 1), (-2, 3), (i64::MAX - 2, i64::MAX)] {
+        let (want, e) = walker_run(
+            "for i in a..b {\n  exhale i\n}\n",
+            &[("a", Value::Int(a)), ("b", Value::Int(b))],
+        );
+        assert!(e.is_none());
+        let (got, r) = vm_run(&m, vec![Value::Int(a), Value::Int(b)]);
+        assert!(r.is_ok(), "{a}..{b}");
+        assert_eq!(got, want, "{a}..{b}");
+    }
+    // Other steps, as `range(a, b, step)` lists them.
+    for (step, a, b) in [
+        (-1, 5, 0),
+        (-2, 5, 0),
+        (3, 0, 10),
+        (-1, 0, 5),
+        (i64::MAX, 0, i64::MAX),
+        (-1, i64::MIN + 2, i64::MIN),
+    ] {
+        let (want, e) = walker_run(
+            "for i in range(a, b, s) {\n  exhale i\n}\n",
+            &[
+                ("a", Value::Int(a)),
+                ("b", Value::Int(b)),
+                ("s", Value::Int(step)),
+            ],
+        );
+        assert!(e.is_none());
+        let (got, r) = vm_run(&for_module(step), vec![Value::Int(a), Value::Int(b)]);
+        assert!(r.is_ok(), "{a}..{b} by {step}");
+        assert_eq!(got, want, "{a}..{b} by {step}");
+    }
+    // The induction variable is a copy: writing it does not move the loop.
+    let f = main_fn(
+        6,
+        vec![
+            Instr::asbx(Op::LOADINT, 5, 0),
+            Instr::asbx(Op::LOADINT, 0, 0),
+            Instr::asbx(Op::LOADINT, 1, 3),
+            Instr::asbx(Op::LOADINT, 2, 1),
+            Instr::asbx(Op::FORPREP, 0, 4),   // pc 4 -> 9
+            steps(1, 1),                      // pc 5
+            abc(Op::ADD, 5, 5, 3),            // pc 6: R5 += i
+            Instr::asbx(Op::LOADINT, 3, 100), // pc 7
+            Instr::asbx(Op::FORLOOP, 0, -4),  // pc 8 -> 5
+            ret(5),
+        ],
+    );
+    assert_eq!(ok(&module(f)), "3");
+    // The errors of `a..b`: bounds that are not ints (E403), more than
+    // 10,000,000 numbers (E512), each at the forprep.
+    let m = for_module(1);
+    for (a, b) in [
+        (Value::Float(1.0), Value::Int(3)),
+        (Value::Int(0), Value::str("x")),
+        (Value::Int(0), Value::Int(10_000_001)),
+        (Value::Int(i64::MIN), Value::Int(i64::MAX)),
+    ] {
+        let (_, w) = walker_run(
+            "for i in a..b {\n  exhale i\n}\n",
+            &[("a", a.clone()), ("b", b.clone())],
+        );
+        let w = w.expect("the tree-walker stops");
+        let (_, r) = vm_run(&m, vec![a.clone(), b.clone()]);
+        let v = r.err().expect("the VM stops");
+        assert_eq!(said(&v), said(&w), "{}..{}", a.repr(), b.repr());
+        assert_eq!(at_pc(&v), Some(4));
+    }
+    // A wide forprep/forloop names its window past 255 and jumps from its
+    // first word.
+    let code = vec![
+        wide_prefix(1, 0),
+        Instr::asbx(Op::LOADINT, 0, 0), // pc 0: R256 = 0
+        wide_prefix(1, 0),
+        Instr::asbx(Op::LOADINT, 1, 4), // pc 2: R257 = 4
+        wide_prefix(1, 0),
+        Instr::asbx(Op::LOADINT, 2, 1), // pc 4: R258 = 1
+        Instr::asbx(Op::LOADINT, 0, 0), // pc 6: R0 = 0
+        wide_prefix(1, 0),
+        Instr::asbx(Op::FORPREP, 0, 6), // pc 7 -> 14
+        steps(1, 1),                    // pc 9
+        wide_prefix(0, 0x0100),
+        abc(Op::ADD, 0, 0, 3), // pc 10: R0 += R259
+        wide_prefix(1, 0xFFFF),
+        Instr::asbx(Op::FORLOOP, 0, -4), // pc 12 -> 9
+        ret(0),
+    ];
+    let f = main_fn(260, code);
+    assert_eq!(ok(&module(f)), "6");
+}
+
+/// `for x in R0 { exhale x; <body> }` then `exhale R0`, the window at
+/// R1..R5; `body` may use R5.. and the constants `"push"` (K0) and `"!"`
+/// (K1).
+fn iter_module(body: Vec<Instr>) -> Module {
+    let n = body.len() as i16;
+    let mut code = vec![
+        abc(Op::MOV, 1, 0, 0),
+        steps(1, 0),
+        abc(Op::ITERPREP, 1, 0, 0),          // pc 2
+        Instr::asbx(Op::ITERNEXT, 1, n + 3), // pc 3 -> exit
+        steps(1, 1),                         // pc 4
+        abc(Op::EXHALE, 4, 1, 0),            // pc 5
+    ];
+    code.extend(body);
+    code.push(Instr::asbx(Op::LOOP, 0, -(n + 4))); // -> pc 3
+    code.extend([steps(0, 0), abc(Op::EXHALE, 0, 1, 0), ret(0)]);
+    let mut f = main_fn(10, code);
+    f.arity = 1;
+    f.constants = vec![Constant::Str("push".into()), Constant::Str("!".into())];
+    module(f)
+}
+
+#[test]
+fn iterprep_and_iternext_walk_the_interpreters_snapshot() {
+    let m = iter_module(Vec::new());
+    let (out, r) = vm_run(&m, vec![Value::str("aé😀")]);
+    assert!(r.is_ok());
+    assert_eq!(out, "a\né\n😀\naé😀\n");
+    let (out, _) = vm_run(&m, vec![Value::list(Vec::new())]);
+    assert_eq!(out, "[]\n");
+    for v in [Value::Int(3), Value::Null, Value::Float(1.5)] {
+        let (_, w) = walker_run("for x in v {\n  exhale x\n}\n", &[("v", v.clone())]);
+        let w = w.expect("the tree-walker stops");
+        let (out, r) = vm_run(&m, vec![v.clone()]);
+        let e = r.err().expect("the VM stops");
+        assert_eq!(out, "");
+        assert_eq!(said(&e), said(&w));
+        assert_eq!(e.code, "E405");
+        assert_eq!(at_pc(&e), Some(2));
+    }
+}
+
+#[test]
+fn a_loop_over_data_visits_what_the_interpreter_visits() {
+    let list = || Value::list(vec![Value::Int(1), Value::str("é"), Value::Int(3)]);
+    let map = || {
+        let mut m = IndexMap::new();
+        m.insert("a".to_string(), Value::Int(1));
+        m.insert("b".to_string(), Value::Int(2));
+        Value::map(m)
+    };
+    let plain = iter_module(Vec::new());
+    // v.push(x) after each item: the loop still visits the three it began with.
+    let pushes = iter_module(vec![
+        abc(Op::MOV, 5, 0, 0),
+        abc(Op::MOV, 6, 4, 0),
+        abc(Op::CALLM, 5, 0, 1),
+    ]);
+    // v[x + "!"] = 1 after each key: new keys are not visited.
+    let stores = iter_module(vec![
+        Instr::abx(Op::LOADK, 7, 1),
+        abc(Op::ADD, 6, 4, 7),
+        Instr::asbx(Op::LOADINT, 8, 1),
+        abc(Op::SETINDEX, 0, 6, 8),
+    ]);
+    let text = || Value::str("aé😀\u{301}");
+    let empty = || Value::str("");
+    let no_map = || Value::map(IndexMap::new());
+    let cases: Vec<(&str, &Module, &dyn Fn() -> Value)> = vec![
+        ("", &plain, &list),
+        ("", &plain, &map),
+        ("", &plain, &text),
+        ("", &plain, &empty),
+        ("", &plain, &no_map),
+        ("  v.push(x)\n", &pushes, &list),
+        ("  v[x + \"!\"] = 1\n", &stores, &map),
+    ];
+    // Each engine gets its own copy: the loops change what they walk.
+    for (body, m, v) in cases {
+        let src = format!("for x in v {{\n  exhale x\n{body}}}\nexhale v\n");
+        let (want, e) = walker_run(&src, &[("v", v())]);
+        assert!(e.is_none(), "{src}");
+        let (got, r) = vm_run(m, vec![v()]);
+        assert!(r.is_ok(), "{src}: {:?}", r.err().map(|e| e.message));
+        assert_eq!(got, want, "{src}");
+    }
+    // Ranges, including the empty one and a negative step, are in
+    // `forprep_and_forloop_run_a_range`.
+}
+
+// ----- lists and maps --------------------------------------------------------------------
+
+#[test]
+fn lists_and_maps_build_and_store() {
+    // [7, "x"]
+    let mut f = main_fn(
+        2,
+        vec![
+            abc(Op::NEWLIST, 0, 2, 0),
+            Instr::asbx(Op::LOADINT, 1, 7),
+            abc(Op::APPENDLIST, 0, 1, 0),
+            Instr::abx(Op::LOADK, 1, 0),
+            abc(Op::APPENDLIST, 0, 1, 0),
+            ret(0),
+        ],
+    );
+    f.constants = vec![Constant::Str("x".into())];
+    assert_eq!(ok(&module(f)), "[7, \"x\"]");
+    // {a: 9, "5": 2}: an int key is its digits; a key set again keeps its place.
+    let mut f = main_fn(
+        3,
+        vec![
+            abc(Op::NEWMAP, 0, 0, 0),
+            Instr::abx(Op::LOADK, 1, 0),
+            Instr::asbx(Op::LOADINT, 2, 1),
+            abc(Op::INSERTMAP, 0, 1, 2),
+            Instr::asbx(Op::LOADINT, 1, 5),
+            Instr::asbx(Op::LOADINT, 2, 2),
+            abc(Op::INSERTMAP, 0, 1, 2),
+            Instr::abx(Op::LOADK, 1, 0),
+            Instr::asbx(Op::LOADINT, 2, 9),
+            abc(Op::INSERTMAP, 0, 1, 2),
+            ret(0),
+        ],
+    );
+    f.constants = vec![Constant::Str("a".into())];
+    assert_eq!(ok(&module(f)), "{a: 9, \"5\": 2}");
+    // A map literal's key that is neither a string nor an int.
+    let (_, w) = walker_run("roll m = {[k]: 1}\n", &[("k", Value::Float(1.5))]);
+    let f = main_fn(
+        3,
+        vec![
+            abc(Op::NEWMAP, 0, 0, 0),
+            Instr::asbx(Op::LOADNULL, 1, 0),
+            abc(Op::INSERTMAP, 0, 1, 2),
+            ret(0),
+        ],
+    );
+    let e = err(&module(f));
+    if let Some(w) = w {
+        assert_eq!(e.message, w.message.replace("float", "null"));
+    }
+    assert_eq!(e.message, "map keys must be strings, got null");
+    assert_eq!(at_pc(&e), Some(2));
+    // appendlist and insertmap on what is not a list or a map: a lowering
+    // that wrote them wrong, an internal error at the instruction.
+    for (op, what) in [(Op::APPENDLIST, "no list"), (Op::INSERTMAP, "no map")] {
+        let f = main_fn(3, vec![abc(op, 0, 1, 2), ret(0)]);
+        let e = err(&module(f));
+        assert_eq!(e.kind, Kind::Internal);
+        assert!(e.message.contains(what), "{}", e.message);
+        assert_eq!(at_pc(&e), Some(0));
+    }
+}
+
+#[test]
+fn wide_data_instructions_name_registers_past_255() {
+    let mut f = main_fn(
+        300,
+        vec![
+            Instr::asbx(Op::LOADINT, 0, 0), // pc 0: R0 = 0
+            wide_prefix(1, 0),
+            abc(Op::NEWMAP, 0, 0, 0), // pc 1: R256 = {}
+            wide_prefix(1, 0),
+            abc(Op::NEWLIST, 1, 0, 0), // pc 3: R257 = []
+            wide_prefix(1, 0),
+            Instr::asbx(Op::LOADINT, 2, 5), // pc 5: R258 = 5
+            wide_prefix(1, 0x0001),
+            abc(Op::APPENDLIST, 1, 2, 0), // pc 7: R257.push(R258)
+            wide_prefix(1, 0x0100),
+            abc(Op::SETFIELD, 0, 0, 2), // pc 9: R256.k = R258
+            wide_prefix(1, 0x0001),
+            abc(Op::GETFIELD, 3, 0, 0), // pc 11: R259 = R256.k
+            wide_prefix(1, 0x0001),
+            abc(Op::GETINDEX, 4, 1, 0), // pc 13: R260 = R257[R0]
+            wide_prefix(1, 0x0100),
+            abc(Op::SETINDEX, 1, 0, 3), // pc 15: R257[R0] = R259
+            wide_prefix(1, 0),
+            Instr::abx(Op::LOADK, 5, 1), // pc 17: R261 = "z"
+            wide_prefix(1, 0x0101),
+            abc(Op::INSERTMAP, 0, 5, 4), // pc 19: R256[R261] = R260
+            wide_prefix(1, 0x0001),
+            abc(Op::INTERP, 6, 0, 1), // pc 21: R262 = "${R256}${R257}"
+            wide_prefix(1, 0),
+            abc(Op::EXHALE, 6, 1, 0), // pc 23
+            wide_prefix(1, 0x0001),
+            abc(Op::MOV, 7, 1, 0), // pc 25: R263 = R257
+            wide_prefix(1, 0),
+            abc(Op::CALLM, 7, 2, 0), // pc 27: R263 = R263.len()
+            wide_prefix(1, 0),
+            ret(7),
+        ],
+    );
+    f.constants = vec![
+        Constant::Str("k".into()),
+        Constant::Str("z".into()),
+        Constant::Str("len".into()),
+    ];
+    let (out, r) = vm_run(&module(f), Vec::new());
+    assert_eq!(out, "{k: 5, z: 5}[5]\n");
+    assert_eq!(r.ok().map(|v| v.repr()), Some("1".to_string()));
+}
+
+/// Objects for the data table, made fresh for each engine in every case
+/// (stores change them).
+fn data_objects() -> Vec<Value> {
+    let mut m = IndexMap::new();
+    m.insert("a".to_string(), Value::Int(1));
+    m.insert("b c".to_string(), Value::list(vec![Value::Int(2)]));
+    let math = crate::stdlib::prelude()
+        .into_iter()
+        .find(|(n, _)| *n == "math")
+        .map(|(_, m)| m)
+        .expect("math");
+    vec![
+        Value::list(vec![Value::Int(1), Value::str("x"), Value::list(vec![])]),
+        Value::list(vec![]),
+        Value::map(m),
+        Value::map(IndexMap::new()),
+        Value::str("héllo😀"),
+        Value::str(""),
+        Value::Null,
+        Value::Bool(true),
+        Value::Int(7),
+        Value::Float(2.5),
+        math,
+        Value::Builtin(Rc::new(
+            *crate::stdlib::builtin_catalogue()[catalogue_index("len")],
+        )),
+    ]
+}
+
+#[test]
+fn the_vm_and_the_interpreter_agree_on_every_data_operation() {
+    let keys = [
+        Value::Int(0),
+        Value::Int(1),
+        Value::Int(-1),
+        Value::Int(5),
+        Value::Int(-9),
+        Value::Int(i64::MIN),
+        Value::str("a"),
+        Value::str("zz"),
+        Value::str("b c"),
+        Value::Float(1.0),
+        Value::Null,
+        Value::Bool(true),
+    ];
+    let getindex = {
+        let mut f = main_fn(3, vec![abc(Op::GETINDEX, 2, 0, 1), ret(2)]);
+        f.arity = 2;
+        module(f)
+    };
+    let setindex = {
+        let mut f = main_fn(
+            3,
+            vec![
+                Instr::asbx(Op::LOADINT, 2, 9),
+                abc(Op::SETINDEX, 0, 1, 2),
+                ret(0),
+            ],
+        );
+        f.arity = 2;
+        module(f)
+    };
+    let n_objects = data_objects().len();
+    let mut compared = 0;
+    let show = |r: Result<Value, Diagnostic>| match r {
+        Ok(v) => v.repr(),
+        Err(e) => said(&e),
+    };
+    let walked = |src: &str, vars: &[(&str, Value)]| match walker_run(src, vars) {
+        (out, None) => out.trim_end_matches('\n').to_string(),
+        (_, Some(e)) => said(&e),
+    };
+    for i in 0..n_objects {
+        for k in &keys {
+            let o = || data_objects().swap_remove(i);
+            let want = walked("exhale repr(o[k])\n", &[("o", o()), ("k", k.clone())]);
+            let got = show(vm_run(&getindex, vec![o(), k.clone()]).1);
+            assert_eq!(
+                got,
+                want,
+                "getindex {} {}",
+                data_objects()[i].repr(),
+                k.repr()
+            );
+
+            let want = walked(
+                "o[k] = 9\nexhale repr(o)\n",
+                &[("o", o()), ("k", k.clone())],
+            );
+            let got = show(vm_run(&setindex, vec![o(), k.clone()]).1);
+            assert_eq!(
+                got,
+                want,
+                "setindex {} {}",
+                data_objects()[i].repr(),
+                k.repr()
+            );
+            compared += 2;
+        }
+        for name in ["a", "zz", "len", "abs", "name"] {
+            let mut f = main_fn(2, vec![abc(Op::GETFIELD, 1, 0, 0), ret(1)]);
+            f.arity = 1;
+            f.constants = vec![Constant::Str(name.into())];
+            let o = || data_objects().swap_remove(i);
+            let want = walked(&format!("exhale repr(o.{name})\n"), &[("o", o())]);
+            let got = show(vm_run(&module(f), vec![o()]).1);
+            assert_eq!(got, want, "getfield {} .{name}", data_objects()[i].repr());
+
+            let mut f = main_fn(
+                2,
+                vec![
+                    Instr::asbx(Op::LOADINT, 1, 9),
+                    abc(Op::SETFIELD, 0, 0, 1),
+                    ret(0),
+                ],
+            );
+            f.arity = 1;
+            f.constants = vec![Constant::Str(name.into())];
+            let want = walked(&format!("o.{name} = 9\nexhale repr(o)\n"), &[("o", o())]);
+            let got = show(vm_run(&module(f), vec![o()]).1);
+            assert_eq!(got, want, "setfield {} .{name}", data_objects()[i].repr());
+            compared += 2;
+        }
+    }
+    assert_eq!(compared, n_objects * (keys.len() + 5) * 2);
+    // Each error is at the instruction.
+    let e = vm_run(&getindex, vec![Value::list(vec![]), Value::Int(0)])
+        .1
+        .err()
+        .expect("E504");
+    assert_eq!((e.code, at_pc(&e)), ("E504", Some(0)));
+    let e = vm_run(&setindex, vec![Value::Int(1), Value::Int(0)])
+        .1
+        .err()
+        .expect("E405");
+    assert_eq!((e.code, at_pc(&e)), ("E405", Some(1)));
+}
+
+// ----- method calls ------------------------------------------------------------------------
+
+#[test]
+fn callm_calls_the_interpreters_methods() {
+    let mut fm = IndexMap::new();
+    fm.insert(
+        "f".to_string(),
+        Value::Builtin(Rc::new(
+            *crate::stdlib::builtin_catalogue()[catalogue_index("len")],
+        )),
+    );
+    let math = crate::stdlib::prelude()
+        .into_iter()
+        .find(|(n, _)| *n == "math")
+        .map(|(_, m)| m)
+        .expect("math");
+    let list = |xs: &[i64]| Value::list(xs.iter().map(|x| Value::Int(*x)).collect());
+    // Each engine gets its own copy of the receiver: `push` changes it.
+    let copy = |v: &Value| match v {
+        Value::List(l) => Value::list(l.borrow().clone()),
+        other => other.clone(),
+    };
+    let cases: Vec<(Value, &str, Vec<Value>)> = vec![
+        (list(&[3, 1, 2]), "sort", vec![]),
+        (Value::str("abc"), "upper", vec![]),
+        (list(&[1, 2]), "push", vec![Value::Int(3)]),
+        (list(&[1, 2]), "push", vec![]),
+        (Value::map(fm), "f", vec![Value::str("abcd")]),
+        (math.clone(), "abs", vec![Value::Int(-3)]),
+        (math, "nope", vec![]),
+        (Value::str("abc"), "uper", vec![]),
+        (Value::Null, "upper", vec![]),
+        (list(&[1, 2]), "slice", vec![Value::Int(1), Value::Int(2)]),
+    ];
+    for (recv, name, args) in cases {
+        let n = args.len();
+        let mut f = main_fn(1 + n as u32, vec![abc(Op::CALLM, 0, 0, n as u8), ret(0)]);
+        f.arity = 1 + n as u16;
+        f.constants = vec![Constant::Str(name.into())];
+        let names: Vec<String> = (0..n).map(|i| format!("a{i}")).collect();
+        let mut vars = vec![("r", copy(&recv))];
+        for (i, a) in args.iter().enumerate() {
+            vars.push((names[i].as_str(), a.clone()));
+        }
+        let src = format!("exhale repr(r.{name}({}))\n", names.join(", "));
+        let want = match walker_run(&src, &vars) {
+            (out, None) => out.trim_end_matches('\n').to_string(),
+            (_, Some(e)) => said(&e),
+        };
+        let mut argv = vec![recv];
+        argv.extend(args);
+        let got = match vm_run(&module(f), argv).1 {
+            Ok(v) => v.repr(),
+            Err(e) => {
+                assert_eq!(at_pc(&e), Some(0), "{}", e.message);
+                said(&e)
+            }
+        };
+        assert_eq!(got, want, "{src}");
+    }
+}
+
+// ----- closures and cells -----------------------------------------------------------------
+
+fn captures(kind: UpvalKind, index: u16) -> UpvalDesc {
+    UpvalDesc { kind, index }
+}
+
+/// `pack() => <upvalue 0>`.
+fn reads_upvalue(kind: UpvalKind, index: u16) -> BcFunction {
+    let mut c = child_fn("", 0, 1, vec![abc(Op::CELLGET, 0, 0, 0), ret(0)]);
+    c.kind = FuncKind::Lambda;
+    c.upvalues = vec![captures(kind, index)];
+    c
+}
+
+/// `for i in 0..3 { <per-turn> fs.push(pack() => <i or k>) }` then
+/// `for f in fs { exhale f() }`. `fresh` gives each turn its own cell for
+/// `i` (the tree-walker's scope per turn); otherwise the body writes `i`
+/// into `k` (R12), one variable declared before the loop.
+fn closures_in_a_loop(fresh: bool) -> Module {
+    let body = if fresh {
+        vec![abc(Op::CELLNEW, 4, 0, 0), abc(Op::NOP, 0, 0, 0)]
+    } else {
+        vec![abc(Op::NOP, 0, 0, 0), abc(Op::MOV, 12, 4, 0)]
+    };
+    let mut code = vec![
+        abc(Op::NEWLIST, 0, 0, 0),      // pc 0: fs
+        abc(Op::CELLNEW, 12, 0, 0),     // pc 1: roll k (a captured variable)
+        Instr::asbx(Op::LOADINT, 1, 0), // pc 2
+        Instr::asbx(Op::LOADINT, 2, 3), // pc 3
+        Instr::asbx(Op::LOADINT, 3, 1), // pc 4
+        steps(1, 0),                    // pc 5
+        Instr::asbx(Op::FORPREP, 1, 7), // pc 6 -> 14
+        steps(1, 1),                    // pc 7
+    ];
+    code.extend(body); // pc 8, 9
+    code.extend([
+        Instr::abx(Op::CLOSURE, 6, 0),   // pc 10
+        abc(Op::MOV, 5, 0, 0),           // pc 11
+        abc(Op::CALLM, 5, 0, 1),         // pc 12: fs.push(R6)
+        Instr::asbx(Op::FORLOOP, 1, -7), // pc 13 -> 7
+        steps(0, 0),                     // pc 14
+        abc(Op::MOV, 7, 0, 0),           // pc 15
+        steps(1, 0),                     // pc 16
+        abc(Op::ITERPREP, 7, 0, 0),      // pc 17
+        Instr::asbx(Op::ITERNEXT, 7, 5), // pc 18 -> 24
+        steps(1, 1),                     // pc 19
+        abc(Op::MOV, 11, 10, 0),         // pc 20
+        abc(Op::CALL, 11, 0, 0),         // pc 21
+        abc(Op::EXHALE, 11, 1, 0),       // pc 22
+        Instr::asbx(Op::LOOP, 0, -6),    // pc 23 -> 18
+        steps(0, 0),                     // pc 24
+        ret(0),
+    ]);
+    let mut f = main_fn(13, code);
+    f.constants = vec![Constant::Str("push".into())];
+    f.children = vec![reads_upvalue(
+        UpvalKind::ParentLocal,
+        if fresh { 4 } else { 12 },
+    )];
+    module(f)
+}
+
+#[test]
+fn closures_capture_per_iteration() {
+    let (want, e) = walker_run(
+        "roll fs = []\nfor i in 0..3 {\n  fs.push(pack() => i)\n}\nfor f in fs {\n  exhale f()\n}\n",
+        &[],
+    );
+    assert!(e.is_none());
+    assert_eq!(want, "0\n1\n2\n");
+    let (got, r) = vm_run(&closures_in_a_loop(true), Vec::new());
+    assert!(r.is_ok(), "{:?}", r.err().map(|e| e.message));
+    assert_eq!(got, want);
+    // One variable from before the loop: every closure sees its last value.
+    let (want, e) = walker_run(
+        "roll fs = []\nroll k = 0\nfor i in 0..3 {\n  k = i\n  fs.push(pack() => k)\n}\nfor f in fs {\n  exhale f()\n}\n",
+        &[],
+    );
+    assert!(e.is_none());
+    assert_eq!(want, "2\n2\n2\n");
+    let (got, r) = vm_run(&closures_in_a_loop(false), Vec::new());
+    assert!(r.is_ok());
+    assert_eq!(got, want);
+}
+
+#[test]
+fn cells_share_a_variable_between_a_function_and_its_closures() {
+    // roll n = 0; pull inc() { n = n + 1 }; inc(); inc(); exhale n
+    let (want, _) = walker_run(
+        "roll n = 0\npull inc() {\n  n = n + 1\n}\ninc()\ninc()\nexhale n\n",
+        &[],
+    );
+    let mut inc = child_fn(
+        "inc",
+        0,
+        2,
+        vec![
+            abc(Op::CELLGET, 0, 0, 0),
+            abc(Op::ADDK, 0, 0, 0),
+            abc(Op::CELLSET, 0, 0, 0),
+            abc(Op::LOADNULL, 1, 0, 0),
+            ret(1),
+        ],
+    );
+    inc.constants = vec![Constant::Int(1)];
+    inc.upvalues = vec![captures(UpvalKind::ParentLocal, 0)];
+    let mut f = main_fn(
+        3,
+        vec![
+            Instr::asbx(Op::LOADINT, 0, 0),
+            abc(Op::CELLNEW, 0, 0, 0),
+            Instr::abx(Op::CLOSURE, 1, 0),
+            abc(Op::MOV, 2, 1, 0),
+            abc(Op::CALL, 2, 0, 0),
+            abc(Op::MOV, 2, 1, 0),
+            abc(Op::CALL, 2, 0, 0),
+            abc(Op::EXHALE, 0, 1, 0),
+            ret(0),
+        ],
+    );
+    f.children = vec![inc];
+    let (got, r) = vm_run(&module(f), Vec::new());
+    assert_eq!(got, want);
+    assert_eq!(r.ok().map(|v| v.repr()), Some("2".to_string()));
+
+    // The parent's writes reach the closure too, and a closure of a closure
+    // shares through its parent's upvalue (getup/setup, kind 1).
+    let mut grand = child_fn(
+        "",
+        0,
+        1,
+        vec![
+            Instr::asbx(Op::LOADINT, 0, 40),
+            abc(Op::SETUP, 0, 0, 0),
+            abc(Op::GETUP, 0, 0, 0),
+            ret(0),
+        ],
+    );
+    grand.kind = FuncKind::Lambda;
+    grand.upvalues = vec![captures(UpvalKind::ParentUpvalue, 0)];
+    let mut middle = child_fn("", 0, 1, vec![Instr::abx(Op::CLOSURE, 0, 0), ret(0)]);
+    middle.kind = FuncKind::Lambda;
+    middle.upvalues = vec![captures(UpvalKind::ParentLocal, 0)];
+    middle.children = vec![grand];
+    let mut f = main_fn(
+        3,
+        vec![
+            abc(Op::CELLNEW, 0, 0, 0),
+            Instr::abx(Op::CLOSURE, 1, 0),  // middle, over R0's cell
+            Instr::asbx(Op::LOADINT, 0, 2), // the parent writes the cell
+            abc(Op::CALL, 1, 0, 0),         // R1 = grand
+            abc(Op::CALL, 1, 0, 0),         // grand sets the cell to 40
+            abc(Op::ADD, 2, 0, 1),          // 40 + 40
+            ret(2),
+        ],
+    );
+    f.children = vec![middle];
+    assert_eq!(ok(&module(f)), "80");
+
+    // A register with no cell is captured as a copy: the closure's writes
+    // stay its own, and later writes of the parent do not reach it.
+    let mut own = child_fn(
+        "",
+        0,
+        1,
+        vec![
+            abc(Op::GETUP, 0, 0, 0),
+            abc(Op::ADDK, 0, 0, 0),
+            abc(Op::SETUP, 0, 0, 0),
+            ret(0),
+        ],
+    );
+    own.kind = FuncKind::Lambda;
+    own.constants = vec![Constant::Int(1)];
+    own.upvalues = vec![captures(UpvalKind::ParentLocal, 0)];
+    let mut f = main_fn(
+        4,
+        vec![
+            Instr::asbx(Op::LOADINT, 0, 10),
+            Instr::abx(Op::CLOSURE, 1, 0),
+            Instr::asbx(Op::LOADINT, 0, 100),
+            abc(Op::MOV, 2, 1, 0),
+            abc(Op::CALL, 2, 0, 0), // 11
+            abc(Op::MOV, 3, 1, 0),
+            abc(Op::CALL, 3, 0, 0), // 12
+            abc(Op::ADD, 2, 2, 3),
+            abc(Op::ADD, 2, 2, 0), // 11 + 12 + 100
+            ret(2),
+        ],
+    );
+    f.children = vec![own];
+    assert_eq!(ok(&module(f)), "123");
+
+    // A pull that calls itself: its closure captures its own cell.
+    let mut fact = child_fn(
+        "fact",
+        1,
+        4,
+        vec![
+            Instr::asbx(Op::LOADINT, 1, 1),
+            abc(Op::LEJ, 0, 1, 4), // n <= 1 -> ret 1
+            abc(Op::CELLGET, 2, 0, 0),
+            abc(Op::SUBK, 3, 0, 0),
+            abc(Op::CALL, 2, 1, 0),
+            abc(Op::MUL, 1, 0, 2),
+            ret(1),
+        ],
+    );
+    fact.constants = vec![Constant::Int(1)];
+    fact.upvalues = vec![captures(UpvalKind::ParentLocal, 0)];
+    let mut f = main_fn(
+        3,
+        vec![
+            abc(Op::CELLNEW, 0, 0, 0),
+            Instr::abx(Op::CLOSURE, 0, 0),
+            abc(Op::MOV, 1, 0, 0),
+            Instr::asbx(Op::LOADINT, 2, 10),
+            abc(Op::CALL, 1, 1, 0),
+            ret(1),
+        ],
+    );
+    f.children = vec![fact];
+    assert_eq!(ok(&module(f)), "3628800");
+}
+
+// ----- re-entry ------------------------------------------------------------------------------
+
+/// `pack(x) => x * 10 + k`, `k` captured from the parent's R(k_reg).
+fn times_ten_plus(k_reg: u16) -> BcFunction {
+    let mut c = child_fn(
+        "",
+        1,
+        3,
+        vec![
+            abc(Op::MULK, 1, 0, 0),
+            abc(Op::CELLGET, 2, 0, 0),
+            abc(Op::ADD, 1, 1, 2),
+            ret(1),
+        ],
+    );
+    c.kind = FuncKind::Lambda;
+    c.constants = vec![Constant::Int(10)];
+    c.upvalues = vec![captures(UpvalKind::ParentLocal, k_reg)];
+    c
+}
+
+#[test]
+fn a_builtin_calls_back_a_compiled_function() {
+    // R0 = xs (argument); R1 = k = 5; R3 = xs.map(f) with f over k.
+    let mut f = main_fn(
+        5,
+        vec![
+            Instr::asbx(Op::LOADINT, 1, 5),
+            Instr::abx(Op::CLOSURE, 4, 0),
+            abc(Op::MOV, 3, 0, 0),
+            abc(Op::CALLM, 3, 0, 1),
+            ret(3),
+        ],
+    );
+    f.arity = 1;
+    f.constants = vec![Constant::Str("map".into())];
+    f.children = vec![times_ten_plus(1)];
+    let xs = Value::list(vec![Value::Int(1), Value::Int(2), Value::Int(3)]);
+    let (_, r) = vm_run(&module(f.clone()), vec![xs]);
+    assert_eq!(r.ok().map(|v| v.repr()), Some("[15, 25, 35]".to_string()));
+    // sort_by with a compiled key.
+    f.constants = vec![Constant::Str("sort_by".into())];
+    let xs = Value::list(vec![Value::Int(-3), Value::Int(1), Value::Int(-2)]);
+    let (_, r) = vm_run(&module(f.clone()), vec![xs]);
+    assert_eq!(r.ok().map(|v| v.repr()), Some("[-3, -2, 1]".to_string()));
+    // An error inside the callback comes out with its own code.
+    f.constants = vec![Constant::Str("map".into())];
+    let xs = Value::list(vec![Value::Int(1), Value::str("x")]);
+    let (_, r) = vm_run(&module(f), vec![xs]);
+    let e = r.err().expect("an error");
+    assert_eq!(e.code, "E403");
+}
+
+#[test]
+fn compiled_and_interpreted_functions_are_interchangeable() {
+    // A compiled `add` and a compiled closure, as values.
+    let mut f = main_fn(1, vec![Instr::abx(Op::CLOSURE, 0, 0), ret(0)]);
+    f.children = vec![add_fn()];
+    let add = exec(&module(f)).expect("add");
+    let mut f = main_fn(
+        3,
+        vec![
+            Instr::asbx(Op::LOADINT, 1, 7),
+            Instr::abx(Op::CLOSURE, 0, 0),
+            ret(0),
+        ],
+    );
+    f.children = vec![times_ten_plus(1)];
+    let scaled = exec(&module(f)).expect("a closure");
+
+    // The tree-walker calls them as it calls its own.
+    let src = "exhale add(2, 40)\nexhale [1, 2].map(scaled)\nexhale [[1, 2], [3, 4]].map(pack(p) => add(p[0], p[1]))\nexhale repr(add), type_of(scaled)\n";
+    let (out, e) = walker_run(src, &[("add", add.clone()), ("scaled", scaled)]);
+    assert!(e.is_none(), "{:?}", e.map(|e| e.message));
+    assert_eq!(out, "42\n[17, 27]\n[3, 7]\n<pull add> function\n");
+    // ... with the same errors: arity (E401) at the call.
+    let (_, compiled) = walker_run("add(1)\n", &[("add", add.clone())]);
+    let (_, walked) = walker_run("pull add(a, b) {\n  snuff a + b\n}\nadd(1)\n", &[]);
+    let (c, w) = (compiled.expect("E401"), walked.expect("E401"));
+    assert_eq!(said(&c), said(&w));
+    assert_eq!(c.line, Some(1));
+    // A compiled function's error inside a callback comes out of the
+    // tree-walker with its code.
+    let (_, e) = walker_run(
+        "[\"x\"].map(pack(s) => add(s, 1))\n",
+        &[("add", add.clone())],
+    );
+    assert_eq!(e.expect("E403").code, "E403");
+
+    // The VM calls an interpreted function handed to it, and a compiled
+    // function of another program, through the interpreter.
+    let (_, e) = walker_run("roll g = pack(x) => x * 3\n", &[]);
+    assert!(e.is_none());
+    let program = crate::syntax::parse("roll g = pack(x) => x * 3\nexhale g\n").expect("parses");
+    let mut i = interp();
+    i.run_program(&program).expect("runs");
+    let g = i.globals.get("g").expect("g");
+    let mut f = main_fn(
+        3,
+        vec![
+            Instr::asbx(Op::LOADINT, 2, 14),
+            abc(Op::MOV, 1, 0, 0),
+            abc(Op::CALL, 1, 1, 0),
+            ret(1),
+        ],
+    );
+    f.arity = 1;
+    let m = module(f);
+    assert_eq!(
+        exec_with(&m, vec![g]).ok().map(|v| v.repr()),
+        Some("42".to_string())
+    );
+    let mut f = main_fn(
+        4,
+        vec![
+            Instr::asbx(Op::LOADINT, 2, 14),
+            Instr::asbx(Op::LOADINT, 3, 28),
+            abc(Op::MOV, 1, 0, 0),
+            abc(Op::CALL, 1, 2, 0),
+            ret(1),
+        ],
+    );
+    f.arity = 1;
+    assert_eq!(
+        exec_with(&module(f), vec![add]).ok().map(|v| v.repr()),
+        Some("42".to_string())
+    );
+}
+
+#[test]
+fn a_reentered_call_counts_depth_as_a_call() {
+    // pull f(n) { snuff [n].map(f) } recurses through a builtin until E506.
+    let mut rec = child_fn(
+        "f",
+        1,
+        4,
+        vec![
+            abc(Op::NEWLIST, 1, 1, 0),
+            abc(Op::APPENDLIST, 1, 0, 0),
+            abc(Op::CELLGET, 2, 0, 0),
+            abc(Op::CALLM, 1, 0, 1),
+            ret(1),
+        ],
+    );
+    rec.constants = vec![Constant::Str("map".into())];
+    rec.upvalues = vec![captures(UpvalKind::ParentLocal, 0)];
+    let mut f = main_fn(
+        3,
+        vec![
+            abc(Op::CELLNEW, 0, 0, 0),
+            Instr::abx(Op::CLOSURE, 0, 0),
+            abc(Op::MOV, 1, 0, 0),
+            Instr::asbx(Op::LOADINT, 2, 0),
+            abc(Op::CALL, 1, 1, 0),
+            ret(1),
+        ],
+    );
+    f.children = vec![rec];
+    let m = module(f);
+    // Each level is a VM, a builtin and a VM again on the Rust stack; an
+    // unoptimized build needs more than `cig`'s 256 MiB for 4000 of them
+    // (the tree-walker's own `[n].map(f)` recursion needs more than 512).
+    let e = std::thread::Builder::new()
+        .stack_size(1 << 30)
+        .spawn(move || {
+            let mut i = interp();
+            let r = run(&mut i, &program(&m));
+            assert_eq!(i.call_depth_for_tests(), 0, "the depth is given back");
+            r.err().map(|e| (e.code, e.message))
+        })
+        .expect("thread")
+        .join()
+        .expect("joined")
+        .expect("E506");
+    assert_eq!(e.0, "E506");
+    assert_eq!(
+        e.1,
+        "call depth exceeded 4000; is there unbounded recursion?"
+    );
 }

@@ -154,11 +154,12 @@ fn a_backward_fused_jump_verifies() {
     // (the LT at pc 1), which is a valid first-word pc inside the
     // body of the function. Replace with a cleaner setup: pre-load
     // two regs, compare, jump back.
+    // The target charges the step budget, so the cycle is charged.
     let mut m = base();
     m.main.reg_count = 2;
     m.main.instrs = vec![
         Instr::abc(Op::LOADNULL, 0, 0, 0), // pc 0
-        Instr::abc(Op::LOADNULL, 1, 0, 0), // pc 1
+        Instr::abx(Op::STEPS, 0, 1),       // pc 1
         Instr {
             // pc 2: NEJ R0, R1, sC = -2  (target = 2+1-2 = 1)
             raw: (Op::NEJ as u32) | (1u32 << 16) | ((((-2_i8) as u8) as u32) << 24),
@@ -537,4 +538,163 @@ fn testn_falsy_branch_verifies_and_disassembles() {
     verify_module(&m).expect("testn should verify");
     let dis = cig_bytecode::disasm::disassemble_module(&m);
     assert!(dis.contains("testn"), "disasm missing testn: {dis}");
+}
+
+fn uncharged_pc(m: &Module) -> Option<u32> {
+    match verify_module(m) {
+        Err(VerifyError::UnchargedCycle { func, pc }) => {
+            assert_eq!(func, 0);
+            let e = verify_module(m).unwrap_err();
+            assert_eq!(e.rule(), "uncharged-cycle");
+            assert_eq!(e.to_string(), format!("uncharged-cycle at fn0+{pc}"));
+            Some(pc)
+        }
+        Err(other) => panic!("refused for another rule: {other}"),
+        Ok(_) => None,
+    }
+}
+
+#[test]
+fn a_cycle_with_no_charged_step_is_refused() {
+    // The plain `jmp -1`.
+    let mut m = base();
+    m.main.instrs = vec![
+        Instr::abc(Op::LOADNULL, 0, 0, 0),
+        Instr::asbx(Op::JMP, 0, -1), // pc 1 -> 1
+        Instr::abc(Op::RET, 0, 0, 0),
+    ];
+    assert_eq!(uncharged_pc(&m), Some(1));
+
+    // A cycle through a fused compare-and-jump: pc 1 -> 3 -> (eqj) 1.
+    let mut m = base();
+    m.main.instrs = vec![
+        Instr::abc(Op::LOADNULL, 0, 0, 0),
+        Instr::abc(Op::LOADNULL, 1, 0, 0),       // pc 1
+        Instr::asbx(Op::JMP, 0, 0),              // pc 2 -> 3
+        Instr::abc(Op::EQJ, 0, 1, (-3i8) as u8), // pc 3 -> 1
+        Instr::abc(Op::RET, 0, 0, 0),
+    ];
+    assert_eq!(uncharged_pc(&m), Some(1));
+
+    // A cycle through a handler edge: the try body (pc 1..3) can fault to
+    // its handler at pc 1, which falls into the body again.
+    let mut m = base();
+    m.main.instrs = vec![
+        Instr::abx(Op::STEPS, 0, 1),
+        Instr::abc(Op::LOADNULL, 0, 0, 0), // pc 1
+        Instr::abc(Op::NOT, 1, 0, 0),      // pc 2
+        Instr::abc(Op::RET, 0, 0, 0),      // pc 3
+    ];
+    m.main.handlers.push(HandlerEntry {
+        pc_start: 1,
+        pc_end: 3,
+        handler_pc: 1,
+        catch_reg: RESERVED_U32,
+        finally_pc: RESERVED_U32,
+    });
+    assert_eq!(uncharged_pc(&m), Some(1));
+    // The same through an outer handler's finally, reached from an inner
+    // handler's range.
+    let mut m = base();
+    m.main.instrs = vec![
+        Instr::abx(Op::STEPS, 0, 1),
+        Instr::abc(Op::LOADNULL, 0, 0, 0), // pc 1
+        Instr::abc(Op::NOT, 1, 0, 0),      // pc 2
+        Instr::abc(Op::RET, 0, 0, 0),      // pc 3
+        Instr::abc(Op::RET, 0, 0, 0),      // pc 4
+    ];
+    m.main.handlers = vec![
+        HandlerEntry {
+            pc_start: 1,
+            pc_end: 4,
+            handler_pc: 4,
+            catch_reg: RESERVED_U32,
+            finally_pc: 2,
+        },
+        HandlerEntry {
+            pc_start: 2,
+            pc_end: 3,
+            handler_pc: 4,
+            catch_reg: RESERVED_U32,
+            finally_pc: RESERVED_U32,
+        },
+    ];
+    assert_eq!(uncharged_pc(&m), Some(2));
+
+    // A cycle whose only `steps` charges 0.
+    let mut m = base();
+    m.main.instrs = vec![
+        Instr::abx(Op::STEPS, 1, 0),  // pc 0
+        Instr::asbx(Op::LOOP, 0, -2), // pc 1 -> 0
+        Instr::abc(Op::RET, 0, 0, 0),
+    ];
+    assert_eq!(uncharged_pc(&m), Some(0));
+
+    // The iterating loops' back-edges count too.
+    for op in [Op::FORLOOP, Op::ITERNEXT] {
+        let mut m = base();
+        m.main.instrs = vec![
+            Instr::abc(Op::LOADNULL, 0, 0, 0),
+            Instr::abc(Op::LOADNULL, 1, 0, 0), // pc 1
+            Instr::asbx(op, 0, -2),            // pc 2 -> 1
+            Instr::abc(Op::RET, 0, 0, 0),
+        ];
+        assert_eq!(uncharged_pc(&m), Some(1), "{op}");
+    }
+
+    // A wide back-edge measures from its first word.
+    let mut m = base();
+    m.main.instrs = vec![
+        Instr::abc(Op::LOADNULL, 0, 0, 0),
+        wide_prefix(0, 0xFFFF),      // pc 1
+        Instr::asbx(Op::JMP, 0, -2), // pc 1 -> 0 (32-bit -2)
+        Instr::abc(Op::RET, 0, 0, 0),
+    ];
+    assert_eq!(uncharged_pc(&m), Some(0));
+}
+
+#[test]
+fn a_loop_that_charges_each_turn_verifies() {
+    // while: steps 1,0; top: cond; testn -> out; steps 1,1; body; loop top.
+    let mut m = base();
+    m.main.instrs = vec![
+        Instr::abx(Op::STEPS, 1, 0),       // pc 0
+        Instr::abc(Op::NOT, 0, 0, 0),      // pc 1: top
+        Instr::asbx(Op::TESTN, 0, 3),      // pc 2 -> 6
+        Instr::abx(Op::STEPS, 1, 1),       // pc 3: one turn
+        Instr::abc(Op::LOADNULL, 1, 0, 0), // pc 4
+        Instr::asbx(Op::LOOP, 0, -5),      // pc 5 -> 1
+        Instr::abx(Op::STEPS, 0, 0),       // pc 6
+        Instr::abc(Op::RET, 0, 0, 0),
+    ];
+    verify_module(&m).expect("a charged while verifies");
+
+    // for i in a..b: forprep -> out; body: steps 1,1; ...; forloop -> body.
+    let mut m = base();
+    m.main.instrs = vec![
+        Instr::asbx(Op::FORPREP, 0, 3),  // pc 0 -> 4
+        Instr::abx(Op::STEPS, 1, 1),     // pc 1: one item
+        Instr::abc(Op::MOV, 5, 3, 0),    // pc 2
+        Instr::asbx(Op::FORLOOP, 0, -3), // pc 3 -> 1
+        Instr::abc(Op::RET, 0, 0, 0),    // pc 4
+    ];
+    verify_module(&m).expect("a charged for verifies");
+
+    // A try inside a charged loop: the handler falls back to the head.
+    let mut m = base();
+    m.main.instrs = vec![
+        Instr::abx(Op::STEPS, 1, 1),       // pc 0: head
+        Instr::abc(Op::LOADNULL, 0, 0, 0), // pc 1: try body
+        Instr::abc(Op::NOT, 1, 0, 0),      // pc 2: handler
+        Instr::asbx(Op::TEST, 1, -4),      // pc 3 -> 0
+        Instr::abc(Op::RET, 0, 0, 0),
+    ];
+    m.main.handlers.push(HandlerEntry {
+        pc_start: 1,
+        pc_end: 2,
+        handler_pc: 2,
+        catch_reg: RESERVED_U32,
+        finally_pc: RESERVED_U32,
+    });
+    verify_module(&m).expect("a charged loop around a try verifies");
 }

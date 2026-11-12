@@ -111,6 +111,7 @@ fn verify_function(
     verify_line_table(func, f, &pcs)?;
     verify_instructions(func, f, &pcs)?;
     verify_termination(func, f, &pcs)?;
+    verify_charged_cycles(func, f, &pcs)?;
 
     for c in &f.children {
         verify_function(c, Some(f), counter, depth + 1)?;
@@ -667,6 +668,168 @@ fn verify_termination(func: u32, f: &Function, pcs: &FirstWordPcs) -> Result<(),
         Op::JMP => Ok(()),
         _ => Err(VerifyError::NotTerminated { func }),
     }
+}
+
+// ---- every cycle is charged ------------------------------------------
+
+/// Within a function, the instructions that are not a `steps` with
+/// `Bx >= 1` form no cycle: every way back to an instruction already run
+/// passes a `steps` that charges the step budget.
+///
+/// The graph's nodes are the function's pcs plus one node per handler.
+/// Its edges are every transfer the VM can make: the fall-through to the
+/// next instruction (except after `ret`, `tailcall`, `throw`, `jmp` and
+/// `loop`), each jump operand (the plain and fused jumps, `forprep`,
+/// `forloop`, `iternext`), and an edge from every pc inside a handler's
+/// range to that handler's node, which leads to its `handler_pc`, its
+/// `finally_pc` and the next handler out. A pc reaches only its innermost
+/// handler's node, and the nodes chain outward, so the edge count stays
+/// linear in the function's size.
+///
+/// The check removes the charging `steps`, then peels off every node with
+/// no remaining predecessor (Kahn's algorithm, with a queue: no recursion).
+/// Whatever is left lies on or after a cycle; walking predecessors from it
+/// lands on one, whose lowest pc is reported.
+fn verify_charged_cycles(func: u32, f: &Function, pcs: &FirstWordPcs) -> Result<(), VerifyError> {
+    let n = f.instrs.len();
+    let mut code: Vec<Option<DecodedInstr>> = vec![None; n];
+    for pc in pcs.iter() {
+        if let (Ok(d), Some(slot)) = (decode(&f.instrs, pc), code.get_mut(pc as usize)) {
+            *slot = Some(d);
+        }
+    }
+    let charges = |d: &DecodedInstr| d.op == Op::STEPS && d.b_u >= 1;
+
+    // Handlers by (start ascending, end descending): an outer one comes
+    // before the ones it contains (they nest: verified above). One sweep
+    // gives each pc its innermost handler and each handler its parent.
+    let n_handlers = f.handlers.len();
+    let mut order: Vec<usize> = (0..n_handlers).collect();
+    order.sort_by_key(|&i| {
+        let h = &f.handlers[i];
+        (h.pc_start, core::cmp::Reverse(h.pc_end), i)
+    });
+    let mut inner: Vec<Option<usize>> = vec![None; n];
+    let mut parent: Vec<Option<usize>> = vec![None; n_handlers];
+    let mut open: Vec<usize> = Vec::new();
+    let mut next = order.iter().peekable();
+    for (pc, slot) in inner.iter_mut().enumerate() {
+        let pc = pc as u32;
+        while open.last().is_some_and(|&h| f.handlers[h].pc_end <= pc) {
+            open.pop();
+        }
+        while let Some(&&h) = next.peek() {
+            if f.handlers[h].pc_start != pc {
+                break;
+            }
+            next.next();
+            while open.last().is_some_and(|&o| f.handlers[o].pc_end <= pc) {
+                open.pop();
+            }
+            parent[h] = open.last().copied();
+            open.push(h);
+        }
+        *slot = open.last().copied();
+    }
+
+    let total = n + n_handlers;
+    // A node's successors, at most three: pc nodes have a fall-through,
+    // one jump and one handler; handler nodes have handler_pc, finally_pc
+    // and the parent handler. A charging `steps` is out of the graph.
+    let live = |u: usize| match code.get(u) {
+        Some(Some(d)) => !charges(d),
+        Some(None) => false,
+        None => u < total,
+    };
+    let succ = |u: usize, out: &mut Vec<usize>| {
+        out.clear();
+        if let Some(slot) = code.get(u) {
+            let Some(d) = slot else { return };
+            if charges(d) {
+                return;
+            }
+            let pc = i64::from(d.pc);
+            let ends = matches!(
+                d.op,
+                Op::RET | Op::TAILCALL | Op::THROW | Op::JMP | Op::LOOP
+            );
+            let info = d.op.info();
+            let targets = [
+                (!ends).then(|| pc + i64::from(d.width)),
+                (info.b == OperandKind::Jump).then(|| pc + 1 + i64::from(d.b_s)),
+                (info.c == OperandKind::Jump).then(|| pc + 1 + i64::from(d.c_s)),
+            ];
+            for t in targets.into_iter().flatten() {
+                if (0..n as i64).contains(&t) {
+                    out.push(t as usize);
+                }
+            }
+            if let Some(Some(h)) = inner.get(u) {
+                out.push(n + h);
+            }
+        } else if let Some(h) = f.handlers.get(u - n) {
+            out.push(h.handler_pc as usize);
+            if h.finally_pc != RESERVED_U32 {
+                out.push(h.finally_pc as usize);
+            }
+            if let Some(Some(p)) = parent.get(u - n) {
+                out.push(n + p);
+            }
+        }
+        out.retain(|&v| v < total && live(v));
+    };
+
+    let mut indeg = vec![0u32; total];
+    let mut buf = Vec::with_capacity(3);
+    for u in (0..total).filter(|&u| live(u)) {
+        succ(u, &mut buf);
+        for &v in &buf {
+            indeg[v] += 1;
+        }
+    }
+    let mut queue: std::collections::VecDeque<usize> =
+        (0..total).filter(|&u| live(u) && indeg[u] == 0).collect();
+    while let Some(u) = queue.pop_front() {
+        succ(u, &mut buf);
+        for &v in &buf {
+            indeg[v] -= 1;
+            if indeg[v] == 0 {
+                queue.push_back(v);
+            }
+        }
+    }
+    let Some(start) = (0..total).find(|&u| live(u) && indeg[u] > 0) else {
+        return Ok(());
+    };
+
+    // What is left: each node has a predecessor that is left too. Walk
+    // predecessors past the node count to land on a cycle, then once
+    // round it for its lowest pc.
+    let left = |u: usize| live(u) && indeg[u] > 0;
+    let mut pred: Vec<Vec<usize>> = vec![Vec::new(); total];
+    for u in (0..total).filter(|&u| left(u)) {
+        succ(u, &mut buf);
+        for &v in buf.iter().filter(|&&v| left(v)) {
+            pred[v].push(u);
+        }
+    }
+    let back = |u: usize| pred[u].first().copied().unwrap_or(u);
+    let mut on_cycle = start;
+    for _ in 0..=total {
+        on_cycle = back(on_cycle);
+    }
+    let mut lowest = on_cycle;
+    let mut u = back(on_cycle);
+    while u != on_cycle {
+        if u < n && (lowest >= n || u < lowest) {
+            lowest = u;
+        }
+        u = back(u);
+    }
+    Err(VerifyError::UnchargedCycle {
+        func,
+        pc: lowest as u32,
+    })
 }
 
 #[cfg(test)]

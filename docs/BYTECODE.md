@@ -369,6 +369,16 @@ The rules (one bullet per `VerifyError` variant, matched by its
   there, or the module's top-level function declares an upvalue (it
   has no parent).
 - **`nested-too-deep`** — the function nesting exceeds 64 levels.
+- **`uncharged-cycle`** — within a function, the instructions that are
+  not a `steps` with `Bx >= 1` form a cycle: some way back to an
+  instruction already run passes no `steps` that charges the step
+  budget. Every edge the VM can take counts: the fall-through (except
+  after `ret`, `tailcall`, `throw`, `jmp` and `loop`), every jump operand
+  (the plain and fused jumps, `forprep`, `forloop`, `iternext`), and an
+  edge from every pc inside a handler's range to its `handler_pc` and
+  `finally_pc` and on to every handler around it. The error names the
+  lowest pc on the cycle. The check is linear in the function's size
+  and does not recurse.
 
 A module that satisfies every rule is safe to run with no further
 bounds checks — with the one carve-out named in "What the verifier
@@ -454,8 +464,8 @@ open. A lowering writes to them.
   A `steps` with `Bx > 1` stops at that one instruction, so folding is
   exact only where nothing between the folded steps can be observed.
 - **`loop`** is a back-edge jump. It counts nothing; the step a loop
-  turn costs is the `steps` on the loop's path. A cycle with no
-  `steps` on it never meets the budget.
+  turn costs is the `steps` on the loop's path, and the verifier
+  refuses a cycle without one (`uncharged-cycle`).
 - **Operators.** Every arithmetic and comparison instruction calls the
   interpreter's own operator (`interp::ops`). `pow`/`powk` are
   `math.pow`: CigScript has no power operator. There is no `gt` or
@@ -472,12 +482,60 @@ open. A lowering writes to them.
   null. `tailcall` reuses the frame, and still counts one call of
   depth and keeps the replaced frame's loop nesting until the chain
   returns, so `E506` and `E515` read as they would after a plain call.
-- **`closure`** of a child with no upvalues makes a function value
-  (`<pull name>`, or `<pack>` for a lambda). A child with upvalues,
-  and every instruction of the closures, data, `try`, burn, `pack`,
-  `exhale`, chain and iteration groups, stops with an internal error
-  that names the instruction until the package that builds it lands
-  (`vm::NOT_BUILT` lists them).
+- **`closure`** makes a function value (`<pull name>`, or `<pack>` for a
+  lambda), a value like any other: the tree-walker and a builtin's
+  callback (`xs.map(f)`, a sort key) call a compiled function, and the
+  VM calls an interpreted one, each with the other's arity (`E401`) and
+  depth (`E506`) rules. A callback into a compiled function runs in a
+  VM of its own until it returns.
+- **Cells.** A register can carry a cell. `cellnew A` gives `R(A)` a
+  fresh cell holding `R(A)`'s value; from then on every read of `R(A)`
+  reads the cell and every write writes it, until the frame ends.
+  `closure` gives the child one cell per upvalue: a parent register
+  that carries a cell is shared, a parent register that does not is
+  copied into a cell of the child's own, and a parent upvalue is
+  shared. `getup`/`cellget` read an upvalue's cell and `setup`/`cellset`
+  write it. A lowering gives a captured variable's register `cellnew`
+  before its first write in each instance of its scope: for a variable
+  made fresh each turn of a loop, at the top of the turn, before the
+  turn's item or declaration is written, so the closures of earlier
+  turns keep theirs. A register that held a captured variable takes
+  `cellnew` before it is used for another.
+- **`forprep A, sBx` / `forloop A, sBx`** run `for i in a..b`. The window
+  is `R(A)` start (then the running value), `R(A+1)` limit, `R(A+2)`
+  step, `R(A+3)` the item. `forprep` checks the bounds as `a..b` does
+  (`E403` when they are not ints, `E512` past 10,000,000 turns; a step
+  other than 1 counts its turns the same way, and a step that is 0 or
+  not an int is an internal error), jumps to `pc + 1 + sBx` when there
+  is no turn, and otherwise sets `R(A+3)` to the start. `forloop` steps
+  the running value and, while it is before the limit (above it for a
+  negative step), sets `R(A+3)` and jumps to `pc + 1 + sBx`. A write to
+  `R(A+3)` in the body does not move the loop.
+- **`iterprep A` / `iternext A, sBx`** run `for x in v`. `iterprep`
+  takes the interpreter's snapshot of `R(A)` (a list's items, a map's
+  keys in order, a string's characters; `E405` for anything else) into
+  `R(A+1)` and sets `R(A+2)` to 0. `iternext` puts the next item in
+  `R(A+3)`, or jumps to `pc + 1 + sBx` when there is none. A change to
+  the collection during the loop does not change what it visits.
+  The loop instructions write `R(A+3)` as a plain register: a cell
+  there stays with the closures that captured it.
+- **Data.** `getfield`, `getindex`, `setfield`, `setindex`, `insertmap`
+  and `callm` are the interpreter's own access, store and method call,
+  with its errors (`E504`, `E505`, `E404`, `E405`, the type errors and
+  their hints) at the instruction's position. `getfield` is `.name`,
+  not `?.name`. `insertmap` takes a key as a map literal does (a string,
+  or an int as its digits). There are no inline caches yet.
+- **`exhale A, B`** writes `R(A..A+B)` through the interpreter's writer
+  (a space between values, a newline after, `E513` when the reader has
+  gone), and `interp A, B, C` joins `R(B..B+C+1)` as string
+  interpolation shows each part. Each value is shown when the
+  instruction runs, after every part was evaluated; the tree-walker
+  shows each value as soon as it is evaluated, so a lowering whose
+  later parts can change an earlier part's list or map turns each part
+  to text first (a one-part `interp`).
+- The `try`, burn, `pack` and chain instructions stop with an internal
+  error that names the instruction until the package that builds them
+  lands (`vm::NOT_BUILT` lists them).
 
 ## Versioning
 

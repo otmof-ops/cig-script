@@ -13,7 +13,16 @@
 //! - a builtin is called through [`Interp::call_builtin`], the same entry
 //!   as a call in the tree-walker;
 //! - the step budget is [`Interp::tick`], its counter and its E515;
-//! - the call depth is [`Interp::enter_call`], its limit and its E506.
+//! - the call depth is [`Interp::enter_call`], its limit and its E506;
+//! - `exhale` builds its line with [`exhale_part`] and writes it with
+//!   [`Interp::write_exhaled`]; field, index and method access are the
+//!   interpreter's [`Interp::member`], [`Interp::index`],
+//!   [`Interp::call_method`], [`set_field`] and [`set_index`]; a loop over
+//!   data iterates what [`Interp::iterate`] gives.
+//!
+//! A compiled function is a [`Value::Func`] like any other: the VM calls an
+//! interpreted one through the interpreter, and the interpreter (a builtin's
+//! callback, the tree-walker) calls a compiled one through [`call_compiled`].
 //!
 //! A [`Program`] is the module decoded once, at load, into a per-pc table
 //! through [`cig_bytecode::instr::walk`] (which goes through the crate's
@@ -23,10 +32,16 @@
 //! catalogue and every `burn.op` kind against the burn-op catalogue, both
 //! refused with E1050.
 //!
-//! The instructions of later packages (closures that capture values,
-//! cells, lists and maps, `try`, burns, `pack`, `exhale`, chains,
-//! interpolation, the iterating loops) stop with one internal error that
-//! names the instruction; [`NOT_BUILT`] lists them.
+//! Captured variables live in cells. A register can carry a cell (after
+//! `cellnew`): every read of that register reads the cell and every write
+//! writes it, so the function and the closures that captured the register
+//! share one variable. Every upvalue is a cell: capturing a register that
+//! carries one shares it, capturing a plain register gives the closure a
+//! cell of its own holding a copy, and capturing an upvalue shares that.
+//!
+//! The instructions of later packages (`try`, burns, `pack`, chains) stop
+//! with one internal error that names the instruction; [`NOT_BUILT`] lists
+//! them.
 
 #![forbid(unsafe_code)]
 #![cfg_attr(
@@ -40,16 +55,18 @@
 )]
 
 use crate::diagnostics::{internal, usage, Diagnostic};
-use crate::interp::ops::{binary, fast_binary, negate};
-use crate::interp::{arity_mismatch, Interp};
+use crate::interp::ops::{binary, fast_binary, negate, range_fits};
+use crate::interp::{arity_mismatch, exhale_part, map_key, set_field, set_index, Interp};
 use crate::syntax::ast::BinOp;
 use crate::syntax::span::Span;
 use crate::value::{Builtin, FnBody, Function, Value};
 use cig_bytecode::instr::walk;
 use cig_bytecode::{
-    Constant, DecodedInstr, FuncKind, Function as BcFunction, LineEntry, Op, SpanBase, Verified,
-    VerifyError,
+    Constant, DecodedInstr, FuncKind, Function as BcFunction, LineEntry, Op, SpanBase, UpvalDesc,
+    UpvalKind, Verified, VerifyError,
 };
+use indexmap::IndexMap;
+use std::cell::RefCell;
 use std::rc::Rc;
 
 #[cfg(test)]
@@ -72,26 +89,7 @@ pub const BURN_OP_KINDS: [&str; 9] = [
 
 /// The instructions this VM does not run yet: each stops with an internal
 /// error that names it. A later package builds them, one at a time.
-pub const NOT_BUILT: [Op; 30] = [
-    Op::FORPREP,
-    Op::FORLOOP,
-    Op::ITERPREP,
-    Op::ITERNEXT,
-    Op::NEWLIST,
-    Op::NEWMAP,
-    Op::GETFIELD,
-    Op::SETFIELD,
-    Op::GETINDEX,
-    Op::SETINDEX,
-    Op::APPENDLIST,
-    Op::INSERTMAP,
-    Op::INTERP,
-    Op::CALLM,
-    Op::GETUP,
-    Op::SETUP,
-    Op::CELLNEW,
-    Op::CELLGET,
-    Op::CELLSET,
+pub const NOT_BUILT: [Op; 10] = [
     Op::TRY_ENTER,
     Op::TRY_LEAVE,
     Op::THROW,
@@ -101,7 +99,6 @@ pub const NOT_BUILT: [Op; 30] = [
     Op::COMP_ENTER,
     Op::COMP_LEAVE,
     Op::PACK,
-    Op::EXHALE,
     Op::CHAIN_MAKE,
 ];
 
@@ -124,7 +121,8 @@ struct Proto {
     lambda: bool,
     reg_count: usize,
     arity: usize,
-    upvalues: usize,
+    /// What each upvalue captures from the function that makes the closure.
+    upvalues: Vec<UpvalDesc>,
     /// The decoded instruction at each first-word pc; `None` at the second
     /// word of a `WIDE` pair, which nothing may jump to.
     code: Vec<Option<DecodedInstr>>,
@@ -135,12 +133,17 @@ struct Proto {
     children: Vec<usize>,
 }
 
+/// A variable a closure shares with the function that made it.
+type Cell = Rc<RefCell<Value>>;
+
 /// A function value of a loaded module: what `closure` makes and `call`
 /// calls. It lives in a [`Value::Func`] as [`FnBody::Compiled`].
 #[derive(Clone)]
 pub struct CompiledFn {
     program: Rc<Program>,
     index: usize,
+    /// The cells the closure captured, one per upvalue.
+    upvals: Rc<[Cell]>,
 }
 
 /// E1050 for a module the verifier refused, worded as `docs/BYTECODE.md`
@@ -168,13 +171,17 @@ pub(crate) fn not_built(op: Op, span: Span) -> Diagnostic {
     .at(span)
 }
 
-/// The internal error of a compiled function called from outside the VM
-/// (a builtin's callback, the tree-walker): re-entry is a later package.
-pub(crate) fn not_built_reentry(span: Span) -> Diagnostic {
-    internal(
-        "the VM cannot be re-entered to run a compiled function yet: the package that builds it has not landed (cig-compile#31)",
-    )
-    .at(span)
+/// The internal error of a compiled function that reached the
+/// tree-walker's own frame instead of [`call_compiled`].
+pub(crate) fn misrouted(span: Span) -> Diagnostic {
+    internal("a compiled function reached the tree-walker's frame instead of the VM").at(span)
+}
+
+/// The internal error of an instruction whose operands do not hold what
+/// it works on (a lowering wrote it wrong): `appendlist` on a value that
+/// is not a list, a loop window that does not hold its loop's state.
+fn misuse(op: Op, what: &str, span: Span) -> Diagnostic {
+    internal(format!("`{op}` {what}")).at(span)
 }
 
 /// An invariant the verifier guarantees did not hold. A verified module
@@ -228,7 +235,7 @@ fn flatten(f: &BcFunction, out: &mut Vec<Proto>, n_builtins: usize) -> Result<us
         lambda: f.kind == FuncKind::Lambda,
         reg_count: f.reg_count as usize,
         arity: f.arity as usize,
-        upvalues: f.upvalues.len(),
+        upvalues: f.upvalues.clone(),
         code,
         spans: spans(&f.span_base, &f.lines, f.instrs.len()),
         consts: f.constants.iter().map(constant).collect(),
@@ -302,6 +309,41 @@ pub(crate) fn run_function(
     index: usize,
     args: Vec<Value>,
 ) -> Result<Value, Diagnostic> {
+    run_frame(interp, program, index, Rc::from(Vec::new()), args)
+}
+
+/// Call a compiled function from outside the VM: a builtin's callback
+/// (`xs.map(f)`, a sort key), the tree-walker, or another program's VM.
+/// The arity (E401) and the depth (E506) are checked as for any call, and
+/// the function runs in a VM of its own until it returns.
+pub(crate) fn call_compiled(
+    interp: &mut Interp,
+    f: &Function,
+    cf: &CompiledFn,
+    args: Vec<Value>,
+    span: Span,
+) -> Result<Value, Diagnostic> {
+    let proto = cf
+        .program
+        .funcs
+        .get(cf.index)
+        .ok_or_else(|| broken("no such function", span))?;
+    if args.len() != proto.arity {
+        return Err(arity_mismatch(f, args.len(), span));
+    }
+    interp.enter_call(span)?;
+    let result = run_frame(interp, &cf.program, cf.index, Rc::clone(&cf.upvals), args);
+    interp.leave_call();
+    result
+}
+
+fn run_frame(
+    interp: &mut Interp,
+    program: &Rc<Program>,
+    index: usize,
+    upvals: Rc<[Cell]>,
+    args: Vec<Value>,
+) -> Result<Value, Diagnostic> {
     let proto = program
         .funcs
         .get(index)
@@ -316,6 +358,7 @@ pub(crate) fn run_function(
     let mut m = Machine {
         interp,
         stack: Vec::new(),
+        cells: Vec::new(),
         frames: Vec::new(),
     };
     let first = proto.spans.first().copied().unwrap_or_default();
@@ -331,6 +374,7 @@ pub(crate) fn run_function(
         held_calls: 0,
         nest: 0,
         held_nest: 0,
+        upvals,
     });
     let result = m.exec(program);
     // Whatever stopped the run, the interpreter's depth and loop counters
@@ -362,12 +406,17 @@ struct Frame {
     nest: u32,
     /// Loop nesting held for frames a tail call replaced.
     held_nest: u32,
+    /// The running closure's upvalues.
+    upvals: Rc<[Cell]>,
 }
 
 struct Machine<'i> {
     interp: &'i mut Interp,
     /// Every frame's registers, frame after frame.
     stack: Vec<Value>,
+    /// The cell each register carries, if any: beside `stack`, the same
+    /// length. A register with a cell reads and writes the cell.
+    cells: Vec<Option<Cell>>,
     frames: Vec<Frame>,
 }
 
@@ -388,7 +437,13 @@ impl Machine<'_> {
             span,
         )?;
         self.stack.resize(len, Value::Null);
+        self.cells.resize(len, None);
         Ok(())
+    }
+
+    fn shrink(&mut self, len: usize) {
+        self.stack.truncate(len);
+        self.cells.truncate(len);
     }
 
     fn release(&mut self, f: &Frame) {
@@ -399,22 +454,56 @@ impl Machine<'_> {
         }
     }
 
-    fn get(&self, base: usize, r: u32, span: Span) -> Result<&Value, Diagnostic> {
+    /// `R(r)`: the register's value, or its cell's when it carries one.
+    fn get(&self, base: usize, r: u32, span: Span) -> Result<Value, Diagnostic> {
+        self.get_abs(base.saturating_add(r as usize), span)
+    }
+
+    fn get_abs(&self, i: usize, span: Span) -> Result<Value, Diagnostic> {
+        if let Some(Some(cell)) = self.cells.get(i) {
+            return Ok(cell.borrow().clone());
+        }
         self.stack
-            .get(base.saturating_add(r as usize))
+            .get(i)
+            .cloned()
             .ok_or_else(|| broken("a register past its frame", span))
     }
 
+    /// `R(r) = v`: into the register's cell when it carries one.
     fn set(&mut self, base: usize, r: u32, v: Value, span: Span) -> Result<(), Diagnostic> {
+        self.set_abs(base.saturating_add(r as usize), v, span)
+    }
+
+    fn set_abs(&mut self, i: usize, v: Value, span: Span) -> Result<(), Diagnostic> {
+        if let Some(Some(cell)) = self.cells.get(i) {
+            *cell.borrow_mut() = v;
+            return Ok(());
+        }
         let slot = self
             .stack
-            .get_mut(base.saturating_add(r as usize))
+            .get_mut(i)
             .ok_or_else(|| broken("a register past its frame", span))?;
         *slot = v;
         Ok(())
     }
 
-    /// `R(first..first+n)`, cloned: a call's arguments.
+    /// `R(r) = v` as a plain register: a cell it carried stays with the
+    /// closures that captured it. The loop instructions write their item
+    /// this way, so each turn starts free of the last turn's cell.
+    fn put(&mut self, base: usize, r: u32, v: Value, span: Span) -> Result<(), Diagnostic> {
+        let i = base.saturating_add(r as usize);
+        if let Some(cell) = self.cells.get_mut(i) {
+            *cell = None;
+        }
+        let slot = self
+            .stack
+            .get_mut(i)
+            .ok_or_else(|| broken("a register past its frame", span))?;
+        *slot = v;
+        Ok(())
+    }
+
+    /// `R(first..first+n)`, read: a call's arguments, an `exhale`'s values.
     fn window(
         &self,
         base: usize,
@@ -423,10 +512,32 @@ impl Machine<'_> {
         span: Span,
     ) -> Result<Vec<Value>, Diagnostic> {
         let start = base.saturating_add(first as usize);
-        self.stack
-            .get(start..start.saturating_add(n as usize))
-            .map(<[Value]>::to_vec)
-            .ok_or_else(|| broken("a register range past its frame", span))
+        (start..start.saturating_add(n as usize))
+            .map(|i| self.get_abs(i, span))
+            .collect()
+    }
+
+    /// The current frame's upvalue `u`.
+    fn upval(&self, u: u32, span: Span) -> Result<Cell, Diagnostic> {
+        self.frames
+            .last()
+            .and_then(|f| f.upvals.get(u as usize))
+            .cloned()
+            .ok_or_else(|| broken("an upvalue past the closure's", span))
+    }
+
+    /// The cell a new closure's upvalue `d` captures in the frame at `base`.
+    fn capture(&mut self, base: usize, d: &UpvalDesc, span: Span) -> Result<Cell, Diagnostic> {
+        match d.kind {
+            UpvalKind::ParentLocal => {
+                let i = base.saturating_add(usize::from(d.index));
+                if let Some(Some(cell)) = self.cells.get(i) {
+                    return Ok(Rc::clone(cell));
+                }
+                Ok(Rc::new(RefCell::new(self.get_abs(i, span)?)))
+            }
+            UpvalKind::ParentUpvalue => self.upval(u32::from(d.index), span),
+        }
     }
 
     fn exec(&mut self, program: &Rc<Program>) -> Result<Value, Diagnostic> {
@@ -477,7 +588,7 @@ impl Machine<'_> {
 
             // ----- moves and constants ---------------------------------------
             Op::MOV => {
-                let v = self.get(base, d.b_u, span)?.clone();
+                let v = self.get(base, d.b_u, span)?;
                 self.set(base, d.a, v, span)?;
             }
             Op::LOADK => {
@@ -490,21 +601,21 @@ impl Machine<'_> {
 
             // ----- arithmetic, comparison, logic ------------------------------
             Op::ADD | Op::SUB | Op::MUL | Op::DIV | Op::MOD | Op::EQ | Op::LT | Op::LE => {
-                let l = self.get(base, d.b_u, span)?.clone();
-                let r = self.get(base, d.c, span)?.clone();
+                let l = self.get(base, d.b_u, span)?;
+                let r = self.get(base, d.c, span)?;
                 let v = operate(op_of(d.op), l, r, span)?;
                 self.set(base, d.a, v, span)?;
             }
             Op::ADDK | Op::SUBK | Op::MULK | Op::DIVK | Op::MODK | Op::EQK | Op::LTK | Op::LEK => {
-                let l = self.get(base, d.b_u, span)?.clone();
+                let l = self.get(base, d.b_u, span)?;
                 let r = konst(proto, d.c, span)?;
                 let v = operate(op_of(d.op), l, r, span)?;
                 self.set(base, d.a, v, span)?;
             }
             Op::POW | Op::POWK => {
-                let l = self.get(base, d.b_u, span)?.clone();
+                let l = self.get(base, d.b_u, span)?;
                 let r = if d.op == Op::POW {
-                    self.get(base, d.c, span)?.clone()
+                    self.get(base, d.c, span)?
                 } else {
                     konst(proto, d.c, span)?
                 };
@@ -515,7 +626,7 @@ impl Machine<'_> {
                 self.set(base, d.a, v, span)?;
             }
             Op::NEG => {
-                let v = negate(self.get(base, d.b_u, span)?.clone(), span)?;
+                let v = negate(self.get(base, d.b_u, span)?, span)?;
                 self.set(base, d.a, v, span)?;
             }
             Op::NOT => {
@@ -525,8 +636,8 @@ impl Machine<'_> {
 
             // ----- control ----------------------------------------------------
             Op::EQJ | Op::NEJ | Op::LTJ | Op::LEJ => {
-                let l = self.get(base, d.a, span)?.clone();
-                let r = self.get(base, d.b_u, span)?.clone();
+                let l = self.get(base, d.a, span)?;
+                let r = self.get(base, d.b_u, span)?;
                 let op = match d.op {
                     Op::EQJ => BinOp::Eq,
                     Op::NEJ => BinOp::Ne,
@@ -545,7 +656,7 @@ impl Machine<'_> {
                 }
             }
             Op::TESTSET => {
-                let v = self.get(base, d.b_u, span)?.clone();
+                let v = self.get(base, d.b_u, span)?;
                 if v.truthy() {
                     self.set(base, d.a, v, span)?;
                 } else {
@@ -568,7 +679,7 @@ impl Machine<'_> {
 
             // ----- calls ------------------------------------------------------------
             Op::CALL => {
-                let callee = self.get(base, d.a, span)?.clone();
+                let callee = self.get(base, d.a, span)?;
                 let args = self.window(base, d.a + 1, d.b_u, span)?;
                 let ret = Ret {
                     reg: base.saturating_add(d.a as usize),
@@ -578,7 +689,7 @@ impl Machine<'_> {
                     if let Some(caller) = self.frames.last_mut() {
                         caller.pc = next;
                     }
-                    self.push(program, f, cf.index, args, ret, span)?;
+                    self.push(program, f, cf, args, ret, span)?;
                     return Ok(Flow::Switched);
                 }
                 let v = self.interp.call(&callee, args, span)?;
@@ -594,14 +705,14 @@ impl Machine<'_> {
                 self.set(base, d.a, v, span)?;
             }
             Op::RET => {
-                let v = self.get(base, d.a, span)?.clone();
+                let v = self.get(base, d.a, span)?;
                 return Ok(Flow::Return(v));
             }
             Op::TAILCALL => {
-                let callee = self.get(base, d.a, span)?.clone();
+                let callee = self.get(base, d.a, span)?;
                 let args = self.window(base, d.a + 1, d.b_u, span)?;
                 if let Some((f, cf)) = compiled(&callee, program) {
-                    self.replace(program, f, cf.index, args, span)?;
+                    self.replace(program, f, cf, args, span)?;
                     return Ok(Flow::Switched);
                 }
                 let v = self.interp.call(&callee, args, span)?;
@@ -617,12 +728,9 @@ impl Machine<'_> {
                     .funcs
                     .get(child)
                     .ok_or_else(|| broken("no such function", span))?;
-                if target.upvalues > 0 {
-                    return Err(internal(format!(
-                        "the VM cannot run `{}` of a function that captures values yet: the package that builds it has not landed (cig-compile#31)",
-                        Op::CLOSURE
-                    ))
-                    .at(span));
+                let mut upvals = Vec::with_capacity(target.upvalues.len());
+                for u in &target.upvalues {
+                    upvals.push(self.capture(base, u, span)?);
                 }
                 let name = (!target.lambda && !target.name.is_empty()).then(|| target.name.clone());
                 let f = Function {
@@ -631,10 +739,169 @@ impl Machine<'_> {
                     body: FnBody::Compiled(CompiledFn {
                         program: Rc::clone(program),
                         index: child,
+                        upvals: Rc::from(upvals),
                     }),
                     closure: self.interp.globals.clone(),
                 };
                 self.set(base, d.a, Value::Func(Rc::new(f)), span)?;
+            }
+
+            // ----- closures and cells ---------------------------------------------
+            Op::GETUP | Op::CELLGET => {
+                let v = self.upval(d.b_u, span)?.borrow().clone();
+                self.set(base, d.a, v, span)?;
+            }
+            Op::SETUP | Op::CELLSET => {
+                let v = self.get(base, d.b_u, span)?;
+                *self.upval(d.a, span)?.borrow_mut() = v;
+            }
+            Op::CELLNEW => {
+                let v = self.get(base, d.a, span)?;
+                let i = base.saturating_add(d.a as usize);
+                let slot = self
+                    .cells
+                    .get_mut(i)
+                    .ok_or_else(|| broken("a register past its frame", span))?;
+                *slot = Some(Rc::new(RefCell::new(v)));
+            }
+
+            // ----- output and text ------------------------------------------------
+            Op::EXHALE => {
+                let values = self.window(base, d.a, d.b_u, span)?;
+                let mut line = String::new();
+                for (i, v) in values.iter().enumerate() {
+                    exhale_part(&mut line, i, v);
+                }
+                self.interp.write_exhaled(line)?;
+            }
+            Op::INTERP => {
+                let parts = self.window(base, d.b_u, d.c + 1, span)?;
+                let mut s = String::new();
+                for v in &parts {
+                    s.push_str(&v.display());
+                }
+                self.set(base, d.a, Value::str(s), span)?;
+            }
+
+            // ----- loops ----------------------------------------------------------
+            Op::FORPREP => {
+                let (start, turns) = self.for_window(base, d.a, span)?;
+                if turns == 0 {
+                    return Ok(Flow::Next(jump(pc, d.b_s, span)?));
+                }
+                self.put(base, d.a + 3, Value::Int(start), span)?;
+            }
+            Op::FORLOOP => {
+                let cur = self.int_at(base, d.a, Op::FORLOOP, span)?;
+                let limit = self.int_at(base, d.a + 1, Op::FORLOOP, span)?;
+                let step = self.int_at(base, d.a + 2, Op::FORLOOP, span)?;
+                let more =
+                    cur.checked_add(step)
+                        .filter(|n| if step > 0 { *n < limit } else { *n > limit });
+                if let Some(n) = more {
+                    self.set(base, d.a, Value::Int(n), span)?;
+                    self.put(base, d.a + 3, Value::Int(n), span)?;
+                    return Ok(Flow::Next(jump(pc, d.b_s, span)?));
+                }
+            }
+            Op::ITERPREP => {
+                let source = self.get(base, d.a, span)?;
+                let items = self.interp.iterate(source, span)?;
+                self.put(base, d.a + 1, Value::list(items), span)?;
+                self.put(base, d.a + 2, Value::Int(0), span)?;
+            }
+            Op::ITERNEXT => {
+                let Value::List(items) = self.get(base, d.a + 1, span)? else {
+                    return Err(misuse(
+                        d.op,
+                        "found no `iterprep` state in its window",
+                        span,
+                    ));
+                };
+                let Value::Int(at) = self.get(base, d.a + 2, span)? else {
+                    return Err(misuse(
+                        d.op,
+                        "found no `iterprep` state in its window",
+                        span,
+                    ));
+                };
+                let item = usize::try_from(at)
+                    .ok()
+                    .and_then(|i| items.borrow().get(i).cloned());
+                match item {
+                    Some(item) => {
+                        self.put(base, d.a + 3, item, span)?;
+                        self.set(base, d.a + 2, Value::Int(at.saturating_add(1)), span)?;
+                    }
+                    None => return Ok(Flow::Next(jump(pc, d.b_s, span)?)),
+                }
+            }
+
+            // ----- lists and maps -------------------------------------------------
+            Op::NEWLIST => {
+                self.set(
+                    base,
+                    d.a,
+                    Value::list(Vec::with_capacity(d.b_u as usize)),
+                    span,
+                )?;
+            }
+            Op::NEWMAP => {
+                let m = IndexMap::with_capacity(d.b_u as usize);
+                self.set(base, d.a, Value::map(m), span)?;
+            }
+            Op::APPENDLIST => {
+                let Value::List(list) = self.get(base, d.a, span)? else {
+                    return Err(misuse(d.op, "names a register that holds no list", span));
+                };
+                let v = self.get(base, d.b_u, span)?;
+                list.borrow_mut().push(v);
+            }
+            Op::INSERTMAP => {
+                let Value::Map(map) = self.get(base, d.a, span)? else {
+                    return Err(misuse(d.op, "names a register that holds no map", span));
+                };
+                let key = map_key(self.get(base, d.b_u, span)?, span)?;
+                let v = self.get(base, d.c, span)?;
+                map.borrow_mut().insert(key, v);
+            }
+            Op::GETFIELD => {
+                let obj = self.get(base, d.b_u, span)?;
+                let name = name(proto, d.c, span)?;
+                let hit = match &obj {
+                    Value::Map(map) => map.borrow().get(&*name).cloned(),
+                    _ => None,
+                };
+                let v = match hit {
+                    Some(v) => v,
+                    None => self.interp.member(obj, &name, false, span)?,
+                };
+                self.set(base, d.a, v, span)?;
+            }
+            Op::SETFIELD => {
+                let obj = self.get(base, d.a, span)?;
+                let name = name(proto, d.b_u, span)?;
+                let v = self.get(base, d.c, span)?;
+                set_field(&obj, &name, v, &std::cell::Cell::new(0), span)?;
+            }
+            Op::GETINDEX => {
+                let obj = self.get(base, d.b_u, span)?;
+                let idx = self.get(base, d.c, span)?;
+                let v = self.interp.index(obj, idx, span, span)?;
+                self.set(base, d.a, v, span)?;
+            }
+            Op::SETINDEX => {
+                let obj = self.get(base, d.a, span)?;
+                let idx = self.get(base, d.b_u, span)?;
+                let v = self.get(base, d.c, span)?;
+                set_index(&obj, &idx, v, span, span, span)?;
+            }
+            Op::CALLM => {
+                let recv = self.get(base, d.a, span)?;
+                let name = name(proto, d.b_u, span)?;
+                let args = self.window(base, d.a + 1, d.c, span)?;
+                let v = self.interp.call_method(recv, &name, args, span)?;
+                self.set(base, d.a, v, span)?;
             }
 
             Op::WIDE => return Err(broken("a bare `wide`", span)),
@@ -649,11 +916,12 @@ impl Machine<'_> {
         &mut self,
         program: &Program,
         f: &Function,
-        index: usize,
+        cf: &CompiledFn,
         args: Vec<Value>,
         ret: Ret,
         span: Span,
     ) -> Result<(), Diagnostic> {
+        let index = cf.index;
         let target = program
             .funcs
             .get(index)
@@ -678,6 +946,7 @@ impl Machine<'_> {
             held_calls: 1,
             nest: 0,
             held_nest: 0,
+            upvals: Rc::clone(&cf.upvals),
         });
         Ok(())
     }
@@ -689,10 +958,11 @@ impl Machine<'_> {
         &mut self,
         program: &Program,
         f: &Function,
-        index: usize,
+        cf: &CompiledFn,
         args: Vec<Value>,
         span: Span,
     ) -> Result<(), Diagnostic> {
+        let index = cf.index;
         let target = program
             .funcs
             .get(index)
@@ -708,11 +978,12 @@ impl Machine<'_> {
                 frame.nest = 0;
                 frame.func = index;
                 frame.pc = 0;
+                frame.upvals = Rc::clone(&cf.upvals);
                 frame.base
             }
             None => return Err(broken("an empty call stack", span)),
         };
-        self.stack.truncate(base);
+        self.shrink(base);
         self.grow(target.reg_count, span)?;
         for (slot, a) in self.stack.iter_mut().skip(base).zip(args) {
             *slot = a;
@@ -728,7 +999,7 @@ impl Machine<'_> {
             .pop()
             .ok_or_else(|| broken("an empty call stack", span))?;
         self.release(&frame);
-        self.stack.truncate(frame.base);
+        self.shrink(frame.base);
         match frame.ret {
             None => Ok(Some(v)),
             Some(ret) => {
@@ -742,15 +1013,73 @@ impl Machine<'_> {
     /// window, `R(A+1..A+C+1)`, is null (a CigScript call has one result).
     fn write_result(&mut self, ret: Ret, v: Value, span: Span) -> Result<(), Diagnostic> {
         let end = ret.reg.saturating_add(ret.extra).saturating_add(1);
-        let window = self
-            .stack
-            .get_mut(ret.reg..end)
-            .ok_or_else(|| broken("a result register past its frame", span))?;
+        if end > self.stack.len() {
+            return Err(broken("a result register past its frame", span));
+        }
         let mut v = Some(v);
-        for slot in window {
-            *slot = v.take().unwrap_or(Value::Null);
+        for i in ret.reg..end {
+            self.set_abs(i, v.take().unwrap_or(Value::Null), span)?;
         }
         Ok(())
+    }
+}
+
+impl Machine<'_> {
+    /// `R(r)` of a loop window, which holds an int when the lowering wrote
+    /// the loop right.
+    fn int_at(&self, base: usize, r: u32, op: Op, span: Span) -> Result<i64, Diagnostic> {
+        match self.get(base, r, span)? {
+            Value::Int(i) => Ok(i),
+            _ => Err(misuse(op, "found a loop window that holds no int", span)),
+        }
+    }
+
+    /// `forprep`'s window `R(A..A+3)` (start, limit, step): the start, the
+    /// step and how many turns the loop makes. With step 1 it is `a..b`
+    /// exactly: the tree-walker's E403 for bounds that are not ints and its
+    /// E512 for more than 10,000,000 numbers. Another step counts its turns
+    /// the same way, under the same limit.
+    fn for_window(&self, base: usize, a: u32, span: Span) -> Result<(i64, u64), Diagnostic> {
+        let start = self.get(base, a, span)?;
+        let limit = self.get(base, a + 1, span)?;
+        let (Value::Int(start), Value::Int(limit)) = (&start, &limit) else {
+            return match binary(BinOp::Range, start, limit, span) {
+                Err(e) => Err(e),
+                Ok(_) => Err(misuse(Op::FORPREP, "made a range it cannot run", span)),
+            };
+        };
+        let step = match self.get(base, a + 2, span)? {
+            Value::Int(s) if s != 0 => s,
+            _ => {
+                return Err(misuse(
+                    Op::FORPREP,
+                    "found a step that is not a nonzero int",
+                    span,
+                ))
+            }
+        };
+        let (start, limit) = (*start, *limit);
+        let width = if step > 0 {
+            i128::from(limit) - i128::from(start)
+        } else {
+            i128::from(start) - i128::from(limit)
+        };
+        let turns = if width <= 0 {
+            0
+        } else {
+            let s = i128::from(step).abs();
+            (width + s - 1) / s
+        };
+        range_fits(0, i64::try_from(turns).unwrap_or(i64::MAX), span)?;
+        Ok((start, u64::try_from(turns).unwrap_or(u64::MAX)))
+    }
+}
+
+/// The string constant `K[i]`: a field or method name (verified a string).
+fn name(proto: &Proto, i: u32, span: Span) -> Result<Rc<str>, Diagnostic> {
+    match proto.consts.get(i as usize) {
+        Some(Value::Str(s)) => Ok(Rc::clone(s)),
+        _ => Err(broken("a name that is not a string constant", span)),
     }
 }
 

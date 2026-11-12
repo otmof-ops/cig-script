@@ -407,6 +407,15 @@ pub enum VerifyError {
         /// capture, or `0` for the top-level function).
         max: u32,
     },
+    /// A cycle in the function's control flow passes no `steps` that
+    /// charges the step budget (`Bx >= 1`), so a run could go round it
+    /// without ever meeting `--max-steps`.
+    UnchargedCycle {
+        /// The function.
+        func: u32,
+        /// The lowest pc on the cycle.
+        pc: u32,
+    },
     /// The function nesting exceeded the verifier's maximum depth.
     /// The parser enforces the same limit on the wire.
     NestedTooDeep {
@@ -446,6 +455,7 @@ impl VerifyError {
             VerifyError::EmptyFunction { .. } => "empty-function",
             VerifyError::FrameTooLarge { .. } => "frame-too-large",
             VerifyError::UpvalueCaptureOutOfRange { .. } => "upvalue-capture-out-of-range",
+            VerifyError::UnchargedCycle { .. } => "uncharged-cycle",
             VerifyError::NestedTooDeep { .. } => "nested-too-deep",
         }
     }
@@ -476,7 +486,8 @@ impl VerifyError {
             | VerifyError::MidPairReference { func, .. }
             | VerifyError::EmptyFunction { func }
             | VerifyError::FrameTooLarge { func, .. }
-            | VerifyError::UpvalueCaptureOutOfRange { func, .. } => Some(*func),
+            | VerifyError::UpvalueCaptureOutOfRange { func, .. }
+            | VerifyError::UnchargedCycle { func, .. } => Some(*func),
             VerifyError::NestedTooDeep { .. } => None,
         }
     }
@@ -497,7 +508,8 @@ impl VerifyError {
             | VerifyError::CallArityTooHigh { pc, .. }
             | VerifyError::WideDangling { pc, .. }
             | VerifyError::BadOpcode { pc, .. }
-            | VerifyError::MidPairReference { pc, .. } => Some(*pc),
+            | VerifyError::MidPairReference { pc, .. }
+            | VerifyError::UnchargedCycle { pc, .. } => Some(*pc),
             _ => None,
         }
     }

@@ -44,6 +44,29 @@ project follows semantic versioning.
   checks. Nothing in the tree executes this bytecode yet; the format
   contract is `docs/BYTECODE.md`. The error registry's `E1050`
   entry gains a bytecode-verify cause.
+- **The bytecode VM runs output, loops over data, lists and maps, method
+  calls and closures** (cig-compile#31, stage B). `exhale` and string
+  interpolation write through the interpreter's own writer, so the
+  bytes are the tree-walker's; `forprep`/`forloop` run `for i in a..b`
+  and `iterprep`/`iternext` walk the interpreter's snapshot of a list,
+  a map's keys or a string's characters; `newlist`, `newmap`,
+  `appendlist`, `insertmap`, `getfield`, `setfield`, `getindex`,
+  `setindex` and `callm` are the interpreter's own access, store and
+  method call, with its errors. Closures capture through cells, one
+  per loop turn where the tree-walker makes a scope per turn, and a
+  compiled function is a value like any other: a builtin's callback
+  (`xs.map(f)`, a sort key) and the tree-walker call it, with the same
+  arity and depth errors. The verifier gains a rule,
+  `uncharged-cycle`: a cycle in a function's control flow must pass a
+  `steps` that charges the step budget, so bytecode cannot spin past
+  `--max-steps`. Only `try`, the burn instructions, `pack` and
+  `chain.make` are left to build. Tests: `cargo test --lib vm::`
+  (among them `exhale_writes_the_interpreters_bytes`,
+  `a_loop_over_data_visits_what_the_interpreter_visits`,
+  `closures_capture_per_iteration`,
+  `a_builtin_calls_back_a_compiled_function` and
+  `the_vm_and_the_interpreter_agree_on_every_data_operation`) and
+  `cargo test -p cig-bytecode` (`a_cycle_with_no_charged_step_is_refused`).
 - **The bytecode VM's core** (cig-compile#31, stage B). `src/vm/` runs
   a verified bytecode module: moves and constants, arithmetic,
   comparison and logic, jumps and the fused compare-and-jumps, calls
