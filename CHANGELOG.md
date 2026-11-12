@@ -65,6 +65,29 @@ project follows semantic versioning.
   `a_verified_module_never_panics`.
   The library re-exports the bytecode crate as `cigscript::cig_bytecode`,
   so a compiler builds modules with the copy of the crate the VM loads.
+- **A short program's heap is in small pages again** (cig-compile#30; carton 0.2.0 rows 9 and
+  10). mimalloc 3, as 1.21.0 linked it, reserved a 1 GiB arena at the first allocation and
+  asked for all of it to be backed with 2 MiB pages. A short program touches a few hundred KB
+  spread over its first 6 MB, so on a kernel whose transparent huge pages are `madvise`
+  (Ubuntu) or `always` (Debian, Arch) it zeroed and kept four 2 MiB pages: a compiled hello
+  peaked at 13.9 MB (5.2 MB on 1.20.0) and its own start took about 0.7 ms longer. The release
+  binaries now map that arena themselves before `main`, its first 8 MiB in 4 KiB pages and the
+  rest in 2 MiB pages, and give it to mimalloc only then; mimalloc's page map is mapped while
+  transparent huge pages are off for the process, and they are back on before `main`, so a
+  hop's processes have them as under any other parent. What it costs: a script whose working
+  set lives in those first 8 MiB runs in 4 KiB pages, 3 to 8% slower than on 1.21.0 (`strings`,
+  `maps`, `words`, `regex-ish`, `fib` on an i5-8265U), still 40 to 80% faster than on 1.20.0; one
+  that grows past them (`json`) is within 3%. Compiled start-up, dry run: hello 0.79 ms on
+  1.20.0, 1.62 on 1.21.0, 1.05 now (Linux 6.17, THP `madvise`). Peaks (dry run): hello 6.5 MB,
+  `lists` 17.0, `maps` 16.1, `json` 63.7 (1.21.0: 13.4 / 23.8 / 21.8 / 67.0). Only musl builds
+  change; every other target keeps its system allocator. `tests/heap_pages.rs` has
+  `the_heaps_head_is_in_small_pages`, `a_hop_keeps_transparent_huge_pages` and
+  `a_hello_peaks_within_its_memory_budget` (9 MiB); like `mmap_gate` they run on a musl build or
+  on `CIG_MMAP_BIN`.
+  The arena is taken over on 64-bit musl builds only, and not at all on a
+  kernel that refuses to overcommit (`vm.overcommit_memory = 2`), where a
+  writable mapping is charged in full when it is made: there mimalloc keeps
+  its own way of committing as the heap grows.
 
 ## 1.21.0 — 2026-11-12
 
