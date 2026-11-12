@@ -36,6 +36,14 @@ project follows semantic versioning.
   the folder-added check works on every platform. Catches
   `burn::runs::tests::run_start_is_constant_in_history` on
   `windows-latest` and `windows-11-arm`; carton 0.2.0 row 1.
+- **`cig-bytecode`, the stage-B bytecode format** (cig-compile#31). A
+  new workspace crate that defines the register bytecode CigScript's
+  stage-B VM will run and CigCompile will lower to: the module
+  format, a versioned binary serialization, a non-panicking parser
+  and a verifier that makes a module safe to run with no further
+  checks. Nothing in the tree executes this bytecode yet; the format
+  contract is `docs/BYTECODE.md`. The error registry's `E1050`
+  entry gains a bytecode-verify cause.
 
 ## 1.21.0 — 2026-11-12
 

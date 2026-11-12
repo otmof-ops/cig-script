@@ -12,8 +12,8 @@ categories = ["command-line-utilities", "development-tools"]
 default-run = "cig"
 
 [workspace]
-members = [".", "crates/cig-pass", "crates/cig-vault"]
-exclude = ["crates/cig-pass/fuzz"]
+members = [".", "crates/cig-bytecode", "crates/cig-pass", "crates/cig-vault"]
+exclude = ["crates/cig-bytecode/fuzz", "crates/cig-pass/fuzz"]
 
 [lib]
 name = "cigscript"

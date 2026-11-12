@@ -1,0 +1,23 @@
+# SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
+# SPDX-License-Identifier: FSL-1.1-ALv2
+
+[package]
+name = "cig-bytecode"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+description = "cig-bytecode: the register bytecode format, serializer and verifier for CigScript's stage-B VM"
+license = "FSL-1.1-ALv2"
+repository = "https://github.com/otmof-ops/cig-script"
+readme = "README.md"
+keywords = ["bytecode", "vm", "compiler", "verifier"]
+categories = ["compilers", "data-structures"]
+
+[lib]
+name = "cig_bytecode"
+path = "src/lib.rs"
+
+[dependencies]
+blake3 = { version = "1", features = ["pure"] }
+
+[dev-dependencies]
