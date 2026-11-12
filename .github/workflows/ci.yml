@@ -4,25 +4,87 @@ name: ci
 on:
   push:
     branches: [main]
-    tags: ["v*"]
   pull_request:
-  # Run by hand to build the whole release matrix without publishing anything.
-  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A new push to a pull request cancels its earlier run. A push to main finishes.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # A docs-only change (docs/** and *.md where the job does not build or test docs) skips the heavy
+  # jobs: the macOS/Windows/ARM test matrix, alpine, the passes rounds, the fuzz run and the
+  # freebsd VM. The Linux `test` matrix entry still runs (cargo test exercises README/doc
+  # examples), and `reuse` still runs because the licence headers cover docs too. One `ci-ok`
+  # verdict always reports. Plain `git`, no third-party action.
+  changes:
+    name: what changed
+    runs-on: ubuntu-latest
+    outputs:
+      code_changed: ${{ steps.filter.outputs.code_changed }}
+      test_oses: ${{ steps.filter.outputs.test_oses }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: filter
+        name: are any non-docs paths touched
+        env:
+          GH_EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          case "$GH_EVENT" in
+            pull_request)
+              base="$BASE_SHA"
+              git fetch --no-tags --prune --depth=50 origin "+refs/heads/*:refs/remotes/origin/*" >/dev/null 2>&1 || true
+              files=$(git diff --name-only "$base"...HEAD)
+              ;;
+            *)
+              if git rev-parse HEAD^ >/dev/null 2>&1; then
+                files=$(git diff --name-only HEAD^ HEAD)
+              else
+                files=$(git ls-tree -r --name-only HEAD)
+              fi
+              ;;
+          esac
+          echo "changed files:"
+          printf '%s\n' "$files"
+          code_changed=false
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            case "$f" in
+              docs/*|*.md) ;;
+              *) code_changed=true; break ;;
+            esac
+          done <<EOF
+          $files
+          EOF
+          if [ "$code_changed" = true ]; then
+            test_oses='["ubuntu-latest","ubuntu-24.04-arm","macos-latest","macos-15-intel","windows-latest","windows-11-arm"]'
+          else
+            test_oses='["ubuntu-latest"]'
+          fi
+          echo "code_changed=$code_changed" >> "$GITHUB_OUTPUT"
+          echo "test_oses=$test_oses" >> "$GITHUB_OUTPUT"
+          echo "code_changed=$code_changed"
+          echo "test_oses=$test_oses"
+
   test:
     name: test (${{ matrix.os }})
+    needs: changes
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        # Every OS GitHub hosts, on both architectures where it offers them.
-        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, macos-15-intel, windows-latest, windows-11-arm]
+        os: ${{ fromJSON(needs.changes.outputs.test_oses) }}
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
+      - name: Install Rust (pinned by rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       # The box needs unprivileged user namespaces, which Ubuntu's AppArmor
@@ -77,6 +139,8 @@ jobs:
   # aside as root and say so.
   test-alpine:
     name: test (alpine, musl, as root)
+    needs: changes
+    if: needs.changes.outputs.code_changed == 'true'
     runs-on: ubuntu-latest
     container: alpine:latest
     steps:
@@ -101,10 +165,13 @@ jobs:
   # holding.
   passes-issue:
     name: passes (issue and export)
+    needs: changes
+    if: needs.changes.outputs.code_changed == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust (pinned by rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
       - run: cargo build --release
       - name: issue and export
         run: |
@@ -123,11 +190,13 @@ jobs:
 
   passes-verify:
     name: passes (verify in another job)
-    needs: passes-issue
+    needs: [changes, passes-issue]
+    if: needs.changes.outputs.code_changed == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust (pinned by rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
       - run: cargo build --release
       - uses: actions/download-artifact@v4
         with:
@@ -149,6 +218,8 @@ jobs:
   # target runs for a minute on every push, after replaying the corpus.
   fuzz-cig-pass:
     name: fuzz (cig-pass)
+    needs: changes
+    if: needs.changes.outputs.code_changed == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -166,6 +237,8 @@ jobs:
   # misbehaves, so its failure is reported, not fatal; the log says.
   test-freebsd:
     name: test (freebsd)
+    needs: changes
+    if: needs.changes.outputs.code_changed == 'true'
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
@@ -183,177 +256,31 @@ jobs:
 
   reuse:
     name: licence headers (REUSE)
+    needs: changes
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: fsfe/reuse-action@v5
 
-  release:
-    name: release (${{ matrix.target }})
-    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
-    needs: [test, reuse]
-    runs-on: ${{ matrix.os }}
-    permissions:
-      contents: write
-      id-token: write
-      attestations: write
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # Linux assets are static musl builds, so they run on any glibc, on
-          # Alpine, and on Android under Termux. The asset names match
-          # update::asset_name (OS, then std::env::consts::ARCH).
-          - { os: ubuntu-latest,    target: x86_64-unknown-linux-musl,       asset: linux-x86_64,     ext: "",     tool: cargo }
-          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl,      asset: linux-aarch64,    ext: "",     tool: cargo }
-          - { os: ubuntu-latest,    target: armv7-unknown-linux-musleabihf,  asset: linux-arm,        ext: "",     tool: cross }
-          - { os: macos-latest,     target: aarch64-apple-darwin,            asset: macos-aarch64,    ext: "",     tool: cargo }
-          - { os: macos-15-intel,   target: x86_64-apple-darwin,             asset: macos-x86_64,     ext: "",     tool: cargo }
-          - { os: windows-latest,   target: x86_64-pc-windows-msvc,          asset: windows-x86_64,   ext: ".exe", tool: cargo }
-          - { os: windows-11-arm,   target: aarch64-pc-windows-msvc,         asset: windows-aarch64,  ext: ".exe", tool: cargo }
+  # The one verdict every pull request reports: did every needed job pass or skip.
+  ci-ok:
+    name: ci
+    if: always()
+    needs: [changes, test, test-alpine, passes-issue, passes-verify, fuzz-cig-pass, test-freebsd, reuse]
+    runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-      - name: cross, for a target this runner cannot link itself
-        if: matrix.tool == 'cross'
-        run: cargo install cross --locked
-      - name: musl C toolchain (mimalloc builds C on the musl targets, #146)
-        if: matrix.tool == 'cargo' && contains(matrix.target, 'linux-musl')
-        run: |
-          # Canonical's names can stop resolving for hours (2026-11-11: the runner's mirror list and
-          # archive.ubuntu.com alike, while public resolvers still answered). Each try is time-bound; after
-          # a failed one apt goes to the main archive, and a name this runner cannot resolve is pinned in
-          # /etc/hosts from DNS over HTTPS to 1.1.1.1, which needs no lookup. apt still checks signatures.
-          for i in 1 2 3 4; do
-            if timeout 300 sudo apt-get -o Acquire::Retries=3 update \
-              && timeout 300 sudo apt-get -o Acquire::Retries=3 install -y --no-install-recommends musl-tools; then
-              break
-            fi
-            if [ "$i" -eq 4 ]; then exit 1; fi
-            for f in /etc/apt/sources.list /etc/apt/sources.list.d/*; do
-              if [ -f "$f" ] && grep -q 'mirror+file:' "$f"; then
-                sudo sed -i 's#mirror+file:/etc/apt/apt-mirrors.txt#http://archive.ubuntu.com/ubuntu/#g' "$f"
-                echo "apt: $f now uses archive.ubuntu.com"
-              fi
-            done
-            for h in archive.ubuntu.com security.ubuntu.com; do
-              if ! getent hosts "$h" >/dev/null; then
-                ip=$(curl -fsS --max-time 10 -H 'accept: application/dns-json' "https://1.1.1.1/dns-query?name=$h&type=A" \
-                  | jq -r '[.Answer[]? | select(.type == 1) | .data][0] // empty' || true)
-                if [ -n "$ip" ]; then
-                  echo "$ip $h" | sudo tee -a /etc/hosts >/dev/null
-                  echo "apt: $h pinned to $ip"
-                fi
-              fi
-            done
-            sleep $((i * 15))
-          done
-      - run: ${{ matrix.tool }} build --release --target ${{ matrix.target }}
+      - name: every needed job passed or was skipped
         env:
-          CC_x86_64_unknown_linux_musl: musl-gcc
-          CC_aarch64_unknown_linux_musl: musl-gcc
-      - name: name and checksum the asset (matches update::asset_name)
-        shell: bash
+          NEEDS: ${{ toJSON(needs) }}
         run: |
-          ref="${GITHUB_REF_NAME//\//-}"
-          name="cig-${ref}-${{ matrix.asset }}${{ matrix.ext }}"
-          cp "target/${{ matrix.target }}/release/cig${{ matrix.ext }}" "$name"
-          if command -v sha256sum >/dev/null; then sha256sum "$name" > "$name.sha256"; else shasum -a 256 "$name" > "$name.sha256"; fi
-          cat "$name.sha256"
-          file "$name" 2>/dev/null || true
-      - name: keep the build (a dry run of the matrix)
-        if: "!startsWith(github.ref, 'refs/tags/v')"
-        uses: actions/upload-artifact@v4
-        with:
-          name: cig-${{ matrix.asset }}
-          path: cig-*-${{ matrix.asset }}${{ matrix.ext }}*
-      - name: attest the build (the humidor and install.sh check this with gh attestation verify)
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: actions/attest-build-provenance@v2
-        with:
-          subject-path: cig-${{ github.ref_name }}-${{ matrix.asset }}${{ matrix.ext }}
-      - uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/v')
-        with:
-          files: |
-            cig-*-${{ matrix.asset }}${{ matrix.ext }}
-            cig-*-${{ matrix.asset }}${{ matrix.ext }}.sha256
-
-  # The licence files go beside the assets once, from one job. When every
-  # build uploaded them, two builds replacing the same asset at once failed
-  # the release (v1.12.1: armv7 and aarch64-apple-darwin).
-  release-notices:
-    name: release (licence files)
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: [test, reuse]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-      # The release body is the CHANGELOG's section for this tag, so the
-      # page a reader lands on says what the release changes.
-      - name: the release body is this tag's CHANGELOG section
-        shell: bash
-        run: |
-          v="${GITHUB_REF_NAME#v}"
-          awk -v v="$v" '
-            $0 ~ "^## " v " " { on=1; next }
-            on && /^## / { exit }
-            on { print }
-          ' CHANGELOG.md > release-body.md
-          test -s release-body.md
-      - uses: softprops/action-gh-release@v2
-        with:
-          body_path: release-body.md
-          files: |
-            LICENSE
-            NOTICE
-            THIRD-PARTY-NOTICES.md
-
-  # FreeBSD has no hosted runner: a VM builds the asset natively. It must not
-  # hold the other assets back, so a failure here is reported, not fatal.
-  release-freebsd:
-    name: release (x86_64-unknown-freebsd)
-    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
-    needs: [test, reuse]
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    permissions:
-      contents: write
-      id-token: write
-      attestations: write
-    steps:
-      - uses: actions/checkout@v4
-      - name: build in a FreeBSD VM
-        uses: vmactions/freebsd-vm@v1
-        with:
-          release: "14.3"
-          usesh: true
-          prepare: pkg install -y rust
-          run: |
-            cargo build --release
-            ref="$(echo "${GITHUB_REF_NAME:-dispatch}" | tr / -)"
-            name="cig-${ref}-freebsd-x86_64"
-            cp target/release/cig "$name"
-            sha256 -q "$name" | awk -v n="$name" '{print $1 "  " n}' > "$name.sha256"
-            cat "$name.sha256"
-      - name: keep the build (a dry run of the matrix)
-        if: "!startsWith(github.ref, 'refs/tags/v')"
-        uses: actions/upload-artifact@v4
-        with:
-          name: cig-freebsd-x86_64
-          path: cig-*-freebsd-x86_64*
-      - name: attest the build
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: actions/attest-build-provenance@v2
-        with:
-          subject-path: cig-${{ github.ref_name }}-freebsd-x86_64
-      - uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/v')
-        with:
-          files: |
-            cig-*-freebsd-x86_64
-            cig-*-freebsd-x86_64.sha256
+          set -euo pipefail
+          printf '%s\n' "$NEEDS"
+          # test-freebsd has continue-on-error: treat its result as advisory; everything else must
+          # be success or skipped.
+          failed=$(printf '%s' "$NEEDS" \
+            | jq -r 'to_entries | map(select(.key != "test-freebsd" and .value.result != "success" and .value.result != "skipped")) | map(.key) | join(" ")')
+          if [ -n "$failed" ]; then
+            echo "::error::failed or cancelled: $failed"
+            exit 1
+          fi
+          echo "every needed job passed or was skipped"
