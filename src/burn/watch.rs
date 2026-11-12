@@ -669,7 +669,7 @@ mod linux {
                 flags: RESP_FLAG_CONTINUE,
             };
             let pid = n.pid as i32;
-            let nr = n.nr as i64;
+            let nr = n.nr as libc::c_long;
             if is_io_uring(nr) {
                 resp.flags = 0;
                 resp.error = -libc::EPERM;
@@ -787,7 +787,7 @@ mod linux {
     /// memory and canonicalized against `/`.
     fn decoy_hit<'a>(
         pid: i32,
-        nr: i64,
+        nr: libc::c_long,
         args: &[u64; 6],
         decoys: &'a [super::DecoyEntry],
     ) -> Option<&'a super::DecoyEntry> {
@@ -820,7 +820,7 @@ mod linux {
     /// them in `args[2]` (for openat) or inside `struct open_how` the
     /// hop pointed `args[2]` at (openat2). Legacy `open` has them in
     /// `args[1]`, `creat` implies O_WRONLY|O_CREAT|O_TRUNC.
-    fn open_flags(pid: i32, nr: i64, args: &[u64; 6]) -> u64 {
+    fn open_flags(pid: i32, nr: libc::c_long, args: &[u64; 6]) -> u64 {
         if nr == libc::SYS_openat {
             return args[2] & 0xffff_ffff;
         }
@@ -903,13 +903,13 @@ mod linux {
         serde_json::Value::Object(m)
     }
 
-    fn is_io_uring(nr: i64) -> bool {
+    fn is_io_uring(nr: libc::c_long) -> bool {
         nr == libc::SYS_io_uring_setup
             || nr == libc::SYS_io_uring_enter
             || nr == libc::SYS_io_uring_register
     }
 
-    fn io_uring_event(nr: i64) -> serde_json::Value {
+    fn io_uring_event(nr: libc::c_long) -> serde_json::Value {
         let call = if nr == libc::SYS_io_uring_setup {
             "io_uring_setup"
         } else if nr == libc::SYS_io_uring_enter {
@@ -1019,7 +1019,7 @@ mod linux {
         serde_json::json!({"family": family})
     }
 
-    fn describe(pid: i32, nr: i64, a: &[u64; 6], mode: Mode) -> Option<serde_json::Value> {
+    fn describe(pid: i32, nr: libc::c_long, a: &[u64; 6], mode: Mode) -> Option<serde_json::Value> {
         let mut ev = serde_json::Map::new();
         let put =
             |ev: &mut serde_json::Map<String, serde_json::Value>, k: &str, v: serde_json::Value| {
@@ -1113,39 +1113,42 @@ mod linux {
     }
 
     #[cfg(target_arch = "x86_64")]
-    fn is_open_legacy(nr: i64) -> bool {
+    fn is_open_legacy(nr: libc::c_long) -> bool {
         nr == libc::SYS_open || nr == libc::SYS_creat
     }
 
     #[cfg(not(target_arch = "x86_64"))]
-    fn is_open_legacy(_nr: i64) -> bool {
+    fn is_open_legacy(_nr: libc::c_long) -> bool {
         false
     }
 
     #[cfg(target_arch = "x86_64")]
-    fn is_creat(nr: i64) -> bool {
+    fn is_creat(nr: libc::c_long) -> bool {
         nr == libc::SYS_creat
     }
 
     #[cfg(not(target_arch = "x86_64"))]
-    fn is_creat(_nr: i64) -> bool {
+    fn is_creat(_nr: libc::c_long) -> bool {
         false
     }
 
     // ---- the ptrace route ----
 
     #[cfg(target_arch = "x86_64")]
-    fn syscall_of(r: &[u64; 64]) -> (i64, [u64; 6]) {
-        (r[15] as i64, [r[14], r[13], r[12], r[7], r[9], r[8]])
+    fn syscall_of(r: &[u64; 64]) -> (libc::c_long, [u64; 6]) {
+        (
+            r[15] as libc::c_long,
+            [r[14], r[13], r[12], r[7], r[9], r[8]],
+        )
     }
 
     #[cfg(target_arch = "aarch64")]
-    fn syscall_of(r: &[u64; 64]) -> (i64, [u64; 6]) {
-        (r[8] as i64, [r[0], r[1], r[2], r[3], r[4], r[5]])
+    fn syscall_of(r: &[u64; 64]) -> (libc::c_long, [u64; 6]) {
+        (r[8] as libc::c_long, [r[0], r[1], r[2], r[3], r[4], r[5]])
     }
 
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-    fn syscall_of(_r: &[u64; 64]) -> (i64, [u64; 6]) {
+    fn syscall_of(_r: &[u64; 64]) -> (libc::c_long, [u64; 6]) {
         (-1, [0; 6])
     }
 
