@@ -1,0 +1,231 @@
+# SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
+# SPDX-License-Identifier: FSL-1.1-ALv2
+name: release
+
+# A tag `vX.Y.Z` publishes cig for every machine: each asset with its sha256 and a build
+# attestation, beside the licence files and third-party notices. workflow_dispatch builds the
+# whole release matrix without publishing (a dry run of a changed release path).
+#
+# Row 7 of carton 0.2.0: the release reuses the tagged SHA's green ci.yml run instead of
+# rebuilding and retesting. The first job (`ci-green`) reads the commit's own ci.yml run through
+# the Actions API; nothing publishes if CI did not pass on this exact commit. On a
+# workflow_dispatch the check is skipped so the dry run still runs.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ci-green:
+    name: CI was green for this commit
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 100
+    permissions:
+      actions: read
+    steps:
+      - name: find and check the CI run for the tag's SHA
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.sha }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # The tag's commit must have a green ci.yml run. A run still in progress is waited for
+          # (a tag pushed straight after a merge), up to 90 minutes. Nothing publishes otherwise.
+          deadline=$(( $(date +%s) + 5400 ))
+          while :; do
+            runs="$(gh api --paginate \
+              "repos/$REPO/actions/workflows/ci.yml/runs?head_sha=$SHA&per_page=100" \
+              --jq '.workflow_runs[] | [.id, .status, .conclusion, .event, .html_url] | @tsv')"
+            printf 'ci.yml runs for %s:\n%s\n' "$SHA" "${runs:-none yet}"
+            if printf '%s\n' "$runs" | awk -F '\t' '$2 == "completed" && $3 == "success" { print "green run:", $5; found = 1 } END { exit found ? 0 : 1 }'; then
+              echo "ci.yml is green for $SHA"
+              exit 0
+            fi
+            if [ -n "$runs" ] && ! printf '%s\n' "$runs" | awk -F '\t' '$2 != "completed" { live = 1 } END { exit live ? 0 : 1 }'; then
+              echo "::error::ci.yml finished on $SHA without a success: get it green on main, then tag that commit"
+              exit 1
+            fi
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              echo "::error::no green ci.yml run for $SHA after 90 minutes: let CI finish, then rerun this workflow"
+              exit 1
+            fi
+            echo "waiting for ci.yml on $SHA"
+            sleep 60
+          done
+
+  release:
+    name: release (${{ matrix.target }})
+    needs: ci-green
+    if: always() && (needs.ci-green.result == 'success' || needs.ci-green.result == 'skipped')
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux assets are static musl builds, so they run on any glibc, on
+          # Alpine, and on Android under Termux. The asset names match
+          # update::asset_name (OS, then std::env::consts::ARCH).
+          - { os: ubuntu-latest,    target: x86_64-unknown-linux-musl,       asset: linux-x86_64,     ext: "",     tool: cargo }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl,      asset: linux-aarch64,    ext: "",     tool: cargo }
+          - { os: ubuntu-latest,    target: armv7-unknown-linux-musleabihf,  asset: linux-arm,        ext: "",     tool: cross }
+          - { os: macos-latest,     target: aarch64-apple-darwin,            asset: macos-aarch64,    ext: "",     tool: cargo }
+          - { os: macos-15-intel,   target: x86_64-apple-darwin,             asset: macos-x86_64,     ext: "",     tool: cargo }
+          - { os: windows-latest,   target: x86_64-pc-windows-msvc,          asset: windows-x86_64,   ext: ".exe", tool: cargo }
+          - { os: windows-11-arm,   target: aarch64-pc-windows-msvc,         asset: windows-aarch64,  ext: ".exe", tool: cargo }
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust (pinned by rust-toolchain.toml)
+        shell: bash
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add ${{ matrix.target }}
+      - name: cross, for a target this runner cannot link itself
+        if: matrix.tool == 'cross'
+        run: cargo install cross --locked
+      - name: musl C toolchain (mimalloc builds C on the musl targets, #146)
+        if: matrix.tool == 'cargo' && contains(matrix.target, 'linux-musl')
+        run: |
+          # Canonical's names can stop resolving for hours (2026-11-11: the runner's mirror list and
+          # archive.ubuntu.com alike, while public resolvers still answered). Each try is time-bound; after
+          # a failed one apt goes to the main archive, and a name this runner cannot resolve is pinned in
+          # /etc/hosts from DNS over HTTPS to 1.1.1.1, which needs no lookup. apt still checks signatures.
+          for i in 1 2 3 4; do
+            if timeout 300 sudo apt-get -o Acquire::Retries=3 update \
+              && timeout 300 sudo apt-get -o Acquire::Retries=3 install -y --no-install-recommends musl-tools; then
+              break
+            fi
+            if [ "$i" -eq 4 ]; then exit 1; fi
+            for f in /etc/apt/sources.list /etc/apt/sources.list.d/*; do
+              if [ -f "$f" ] && grep -q 'mirror+file:' "$f"; then
+                sudo sed -i 's#mirror+file:/etc/apt/apt-mirrors.txt#http://archive.ubuntu.com/ubuntu/#g' "$f"
+                echo "apt: $f now uses archive.ubuntu.com"
+              fi
+            done
+            for h in archive.ubuntu.com security.ubuntu.com; do
+              if ! getent hosts "$h" >/dev/null; then
+                ip=$(curl -fsS --max-time 10 -H 'accept: application/dns-json' "https://1.1.1.1/dns-query?name=$h&type=A" \
+                  | jq -r '[.Answer[]? | select(.type == 1) | .data][0] // empty' || true)
+                if [ -n "$ip" ]; then
+                  echo "$ip $h" | sudo tee -a /etc/hosts >/dev/null
+                  echo "apt: $h pinned to $ip"
+                fi
+              fi
+            done
+            sleep $((i * 15))
+          done
+      - run: ${{ matrix.tool }} build --release --target ${{ matrix.target }}
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
+          CC_aarch64_unknown_linux_musl: musl-gcc
+      - name: name and checksum the asset (matches update::asset_name)
+        shell: bash
+        run: |
+          ref="${GITHUB_REF_NAME//\//-}"
+          name="cig-${ref}-${{ matrix.asset }}${{ matrix.ext }}"
+          cp "target/${{ matrix.target }}/release/cig${{ matrix.ext }}" "$name"
+          if command -v sha256sum >/dev/null; then sha256sum "$name" > "$name.sha256"; else shasum -a 256 "$name" > "$name.sha256"; fi
+          cat "$name.sha256"
+          file "$name" 2>/dev/null || true
+      - name: keep the build (a dry run of the matrix)
+        if: "!startsWith(github.ref, 'refs/tags/v')"
+        uses: actions/upload-artifact@v4
+        with:
+          name: cig-${{ matrix.asset }}
+          path: cig-*-${{ matrix.asset }}${{ matrix.ext }}*
+      - name: attest the build (the humidor and install.sh check this with gh attestation verify)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: cig-${{ github.ref_name }}-${{ matrix.asset }}${{ matrix.ext }}
+      - uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/v')
+        with:
+          files: |
+            cig-*-${{ matrix.asset }}${{ matrix.ext }}
+            cig-*-${{ matrix.asset }}${{ matrix.ext }}.sha256
+
+  # The licence files go beside the assets once, from one job. When every
+  # build uploaded them, two builds replacing the same asset at once failed
+  # the release (v1.12.1: armv7 and aarch64-apple-darwin).
+  release-notices:
+    name: release (licence files)
+    needs: ci-green
+    if: startsWith(github.ref, 'refs/tags/v') && (needs.ci-green.result == 'success')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      # The release body is the CHANGELOG's section for this tag, so the
+      # page a reader lands on says what the release changes.
+      - name: the release body is this tag's CHANGELOG section
+        shell: bash
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          awk -v v="$v" '
+            $0 ~ "^## " v " " { on=1; next }
+            on && /^## / { exit }
+            on { print }
+          ' CHANGELOG.md > release-body.md
+          test -s release-body.md
+      - uses: softprops/action-gh-release@v2
+        with:
+          body_path: release-body.md
+          files: |
+            LICENSE
+            NOTICE
+            THIRD-PARTY-NOTICES.md
+
+  # FreeBSD has no hosted runner: a VM builds the asset natively. It must not
+  # hold the other assets back, so a failure here is reported, not fatal.
+  release-freebsd:
+    name: release (x86_64-unknown-freebsd)
+    needs: ci-green
+    if: always() && (needs.ci-green.result == 'success' || needs.ci-green.result == 'skipped')
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: build in a FreeBSD VM
+        uses: vmactions/freebsd-vm@v1
+        with:
+          release: "14.3"
+          usesh: true
+          prepare: pkg install -y rust
+          run: |
+            cargo build --release
+            ref="$(echo "${GITHUB_REF_NAME:-dispatch}" | tr / -)"
+            name="cig-${ref}-freebsd-x86_64"
+            cp target/release/cig "$name"
+            sha256 -q "$name" | awk -v n="$name" '{print $1 "  " n}' > "$name.sha256"
+            cat "$name.sha256"
+      - name: keep the build (a dry run of the matrix)
+        if: "!startsWith(github.ref, 'refs/tags/v')"
+        uses: actions/upload-artifact@v4
+        with:
+          name: cig-freebsd-x86_64
+          path: cig-*-freebsd-x86_64*
+      - name: attest the build
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: cig-${{ github.ref_name }}-freebsd-x86_64
+      - uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/v')
+        with:
+          files: |
+            cig-*-freebsd-x86_64
+            cig-*-freebsd-x86_64.sha256

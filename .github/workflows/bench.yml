@@ -129,7 +129,8 @@ jobs:
           fi
           echo "mode=$mode" >> "$GITHUB_OUTPUT"
 
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust (pinned by rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
         if: inputs.cig-version == '' || inputs.prepare != ''
 
       - name: Build cig from this repository

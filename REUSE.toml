@@ -5,7 +5,7 @@ SPDX-PackageSupplier = "Jay Taylor"
 SPDX-PackageDownloadLocation = "https://github.com/otmof-ops/cig-script"
 
 [[annotations]]
-path = ["src/**", "tests/**", "crates/**", "bench/**", "Cargo.toml", "Cargo.lock", "clippy.toml", "install.sh", "install.ps1", "YANKED", "scripts/**", "REUSE.toml", ".gitignore", ".gitattributes", ".github/**"]
+path = ["src/**", "tests/**", "crates/**", "bench/**", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "clippy.toml", "install.sh", "install.ps1", "YANKED", "scripts/**", "REUSE.toml", ".gitignore", ".gitattributes", ".github/**"]
 precedence = "aggregate"
 SPDX-FileCopyrightText = "2026 Jay Taylor (https://github.com/otmof-ops/cig-script)"
 SPDX-License-Identifier = "FSL-1.1-ALv2"
