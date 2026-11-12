@@ -291,6 +291,12 @@ pub fn keep(
     grouped: bool,
 ) -> io::Result<PathBuf> {
     let mut g = WRITER.lock().unwrap_or_else(|p| p.into_inner());
+    // A writer belongs to the tin it was made in. When the home changes
+    // under this process, its pack is another tin's: it is neither named
+    // nor written to again, whether or not its file is still there.
+    if g.as_ref().is_some_and(|w| !w.path.starts_with(root())) {
+        *g = None;
+    }
     if let Some(w) = g.as_mut() {
         if w.held.contains(sha256) {
             if let Some(d) = run_dir {
@@ -469,6 +475,50 @@ mod tests {
 
     fn name(b: &[u8]) -> String {
         hex::encode(Sha256::digest(b))
+    }
+
+    /// The writer is one per process, and a process can be handed another
+    /// home (every test here is). A record kept after that goes into a pack
+    /// of the new home's tin, even while the old pack's file still exists.
+    #[test]
+    fn a_writer_does_not_follow_the_process_into_another_home() {
+        let _lock = super::super::test_env_lock();
+        let old = std::env::var_os("CIGSCRIPT_HOME");
+        let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        std::env::set_var("CIGSCRIPT_HOME", a.path());
+        let first = keep(
+            b"kept in the first home",
+            &name(b"kept in the first home"),
+            None,
+            false,
+        );
+        std::env::set_var("CIGSCRIPT_HOME", b.path());
+        // the same bytes again, and new ones: neither may name the first home's pack
+        let again = keep(
+            b"kept in the first home",
+            &name(b"kept in the first home"),
+            None,
+            false,
+        );
+        let second = keep(
+            b"kept in the second home",
+            &name(b"kept in the second home"),
+            None,
+            false,
+        );
+        let in_second = is_packed(again.as_ref().unwrap()) && is_packed(second.as_ref().unwrap());
+        let read_back = read(second.as_ref().unwrap(), &name(b"kept in the second home"));
+        match old {
+            Some(v) => std::env::set_var("CIGSCRIPT_HOME", v),
+            None => std::env::remove_var("CIGSCRIPT_HOME"),
+        }
+        let (first, again, second) = (first.unwrap(), again.unwrap(), second.unwrap());
+        assert!(first.starts_with(a.path()), "{first:?}");
+        assert!(first.is_file(), "the first home's pack is still there");
+        assert!(again.starts_with(b.path()), "{again:?}");
+        assert!(second.starts_with(b.path()), "{second:?}");
+        assert!(in_second, "{again:?} {second:?}");
+        assert_eq!(read_back.unwrap(), b"kept in the second home");
     }
 
     #[test]
