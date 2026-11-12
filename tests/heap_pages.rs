@@ -25,6 +25,7 @@ use wait_timeout::ChildExt;
 /// 1.20.0 (musl's own allocator), 13.9 MB on 1.21.0 as released, 6.3 MB
 /// with the heap in small pages (Linux 6.17, THP `madvise`). The budget
 /// leaves room for a kernel or a machine that touches a little more.
+#[cfg(target_os = "linux")]
 const HELLO_PEAK_BUDGET: u64 = 9 << 20;
 
 /// The head of the arena in 4 KiB pages, as `src/main.rs` sets it.
