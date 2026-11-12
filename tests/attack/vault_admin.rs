@@ -41,12 +41,29 @@ fn a_dry_run_prints_the_steps_and_changes_nothing() {
     );
 }
 
+/// Make sure the test leaves no vault service, drop-in or install behind
+/// when it fails part-way (#105). Its `Drop` runs on a panic or an early
+/// return, so the next run of the attack suite starts on a clean box.
+/// Idempotent: removing what is not there is not an error.
+struct VaultCleanup;
+
+impl Drop for VaultCleanup {
+    fn drop(&mut self) {
+        let _ = sh("sudo rm -f /etc/sudoers.d/zz-cig-vault-test");
+        // The product's uninstall is best, when it is reachable; a direct
+        // teardown is the backstop.
+        let _ = sh("sudo systemctl stop cig-vault 2>/dev/null; sudo systemctl disable cig-vault.service 2>/dev/null; sudo rm -f /etc/systemd/system/cig-vault.service /etc/sudoers.d/cig-vault; sudo systemctl daemon-reload 2>/dev/null; sudo pkill -x -u _cigtin cig-vault 2>/dev/null; true");
+    }
+}
+
 #[test]
 fn the_vault_installs_collects_updates_and_uninstalls() {
     if !in_vm() {
         return;
     }
     ctl("stop");
+    // From here on, a panic leaves nothing of the install behind.
+    let _cleanup = VaultCleanup;
     let bin = vault_bin();
     let a = Sandbox::new();
     let out = a.cig_with("", &SEAL, &["tin", "vault", "install", "--binary", &bin]);

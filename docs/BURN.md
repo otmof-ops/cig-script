@@ -126,15 +126,26 @@ can act on. What "flushed" means is the platform's:
 ### Where a before-state is kept, and when it is flushed
 
 A native op's before-state (the file an overwrite, an append, a delete or a
-copy is about to change) is kept in the tin, as a hop's is: whole when the
-file is under 64 KiB, as content-defined chunks under a recipe above that, and
-named by its hash, so the same bytes kept fifty times are stored once and a
-one-byte change in a large file stores one new chunk. The journal entry names
-the tin object (or recipe), with the file's mode and modification time beside
-it. Secrets stay sealed and directories are still copied into the run's own
-`snapshots/` folder. A run from cig 1.20 or earlier has its snapshots in
-`runs/<id>/snapshots/` and unburns exactly as before: the restore reads either
-form.
+copy is about to change) is kept in the tin, as a hop's is, named by the hash
+of its own bytes, so the same bytes kept fifty times are stored once and a
+one-byte change in a large file stores one new chunk:
+
+- **under 16 KiB:** a record in a *pack*, one file holding many small
+  before-states (see "Packs" under "The tin"), so a 300-byte snapshot does
+  not take a 4 KiB block of its own;
+- **16 KiB to 2 MiB:** one object;
+- **2 MiB or more:** content-defined chunks under a recipe.
+
+An object, a chunk or a pack's record is kept compressed (zstd, level 3)
+where that saves at least a tenth, and as it is where it does not (noise,
+media, archives). Its name is the hash of the bytes uncompressed, so dedup,
+`cig tin verify`, `gc`, parcels and the vault agree on it whatever form it
+is stored in. The journal entry names the tin object, recipe or pack, with the
+file's mode and modification time beside it. Secrets stay sealed and
+directories are still copied into the run's own `snapshots/` folder. A run
+from cig 1.20 or earlier has its snapshots in `runs/<id>/snapshots/` and
+unburns exactly as before, as does a run that names plain tin objects: the
+restore reads every form.
 
 A finished run's journal stays at `journal.jsonl`: the layout a tool that
 reads a run's folder by name documents is unchanged. `CIG_JOURNAL_ZST=on`
@@ -307,7 +318,8 @@ per step; the journal records the effects.
 ~/.cigscript/runs/20260926T021500-3fa9c1/
   run.json        script, its SHA-256, args, cwd, pid, timings, status, burn counts, the failing diagnostic
   journal.jsonl   executed ops with before-states; compensations; `undone` markers left by a retry
-  snapshots/      copies of files and trees as they were before each op
+  snapshots/      copies of trees (and, from cig 1.20 or earlier, files) as they were before each op
+  tin.packs       the packs of small before-states the run wrote to, one id a line
   after.json      what the run left behind, for the changed-since check on unburn
   intents.jsonl   unlit burns (only when there were any)
 ```
@@ -330,7 +342,7 @@ and fifty runs of the same chain store it once. On rollback a modified or
 deleted file comes back from its object, which is re-hashed against its
 name first: a corrupt object is refused, never written.
 
-**Chunks and recipes.** A file of 64 KiB or more is not one object but a
+**Chunks and recipes.** A file of 2 MiB or more is not one object but a
 *recipe* (`tin/recipes/<sha256 of the file>`): the ordered list of its
 chunks, each an object named by its own hash, with the hash and size of
 the whole. The chunks are content-defined (FastCDC, 16 KiB at least, 64 KiB
@@ -348,6 +360,37 @@ every chunk a live recipe names. Smaller files cost exactly what they did
 before, and a large file a 1.4 cig kept whole restores as it always did.
 Measured in [FINDINGS.md](FINDINGS.md): twenty one-byte edits of a 200 MB
 file cost the tin 202 MB, where 1.4 stored 200 MB a run.
+
+**Packs.** A native op's before-state under 16 KiB is a record in a pack,
+`tin/packs/<id[..2]>/<id>` (`id`: 32 random hex digits). One cig process
+writes one pack at a time, front to back, and never appends to a pack
+another process wrote; a pack over 32 MiB is finished and the next record
+starts a new one. The file is `CIGPACK1` followed by records:
+
+```
+sha256 (32) | form (1: 0 as is, 1 zstd) | raw length (u32 LE) | stored length (u32 LE) | check (4) | bytes
+```
+
+`sha256` names the object's own bytes, uncompressed; `check` is the first
+four bytes of the SHA-256 of the 41 header bytes before it. The headers are
+the pack's index: an unburn reads a pack once, walks its headers, and
+restores every object it needs from it from memory, each decompressed and
+hashed against its name before it is written. The journal line naming a
+record is written only after the record's write returned, so a killed cig
+leaves at most one record cut short at the end of its pack, which no line
+names: the walk stops at a header or payload that is short, and a whole
+header that does not check is reported by `cig tin verify` as damage. A run
+lists its pack ids in `runs/<id>/tin.packs` before the pack's first record,
+so `cig tin gc` keeps a pack while any run lists or names it and removes it
+whole once none does. The same bytes kept twice by one process are one
+record; a small before-state the tin already holds as an object is not
+packed again.
+
+**Compressed objects.** An object or chunk that zstd shrinks by at least a
+tenth is `tin/objects/<ab>/<sha256>.zst`, one zstd frame whose bytes hash to
+`<sha256>`; the rest are kept as they are, under the bare name. Either form
+restores, verifies and goes to the vault (which keeps every object
+uncompressed under its name, packed or not) the same way.
 
 **Sealed.** A tin that is on for a whole project would keep every old
 `.env`, private key and kubeconfig it ever saw in the clear, for as long as
@@ -1167,7 +1210,7 @@ cig tin unparcel <dir> | --git <ref> [--repo <dir>]
 A parcel is a folder (default `cig-tin-parcel-<date>`, always new, never
 merged into another) holding every live run's record and journal under
 `runs/<id>/`, the objects their before-states need under `tin/objects`,
-`tin/recipes`, `tin/sealed` and `tin/keeps`, the ledger as `ledger.jsonl`,
+`tin/recipes`, `tin/packs`, `tin/sealed` and `tin/keeps`, the ledger as `ledger.jsonl`,
 and `manifest.json`: the SHA-256 of every file, the ledger's head, the
 state directory it came from, and the parent parcel it builds on.
 
@@ -1213,7 +1256,7 @@ A run's undo lives on the machine that ran it: the record under
 `~/.cigscript/runs/<id>/`, its snapshots, and the tin objects it refers to.
 `cig parcel <run>` writes them as one file, `<run>.cigparcel` (a gzipped
 tar): `run/` with the record, the journal and the after-state and every
-snapshot; `tin/` with every object, recipe, chunk and sealed object the
+snapshot; `tin/` with every object, recipe, chunk, pack and sealed object the
 journal refers to, and nothing another run holds; `git/` with the bytes of
 every blob git held for the run, carried whole so the other machine needs
 no repository; and `manifest.json` naming each file's SHA-256, the cig

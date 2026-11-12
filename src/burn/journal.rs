@@ -1328,9 +1328,10 @@ impl Journal {
                 },
             })
         } else {
-            // The bytes go into the tin, like a hop's: chunked when large,
-            // deduplicated by content, flushed with the group (#147).
-            let st = super::tin::stash_grouped(path)?;
+            // The bytes go into the tin, like a hop's: packed when small,
+            // chunked when large, deduplicated by content, flushed with the
+            // group (#147).
+            let st = super::tin::stash_native(path, dir)?;
             Ok(BeforeState {
                 path: path.to_path_buf(),
                 before: Before::File {
@@ -1402,6 +1403,16 @@ impl Journal {
                                 entry.seq,
                                 state.path.display()
                             ));
+                        } else if let Some(found) = super::tin::check_by_name(snapshot, sha256) {
+                            for p in found {
+                                problems.push(format!(
+                                    "op {}: {} for {} (expected in {})",
+                                    entry.seq,
+                                    p,
+                                    state.path.display(),
+                                    snapshot.display()
+                                ));
+                            }
                         } else if !snapshot.is_file() && !super::vault::heal(snapshot) {
                             problems.push(format!(
                                 "op {}: snapshot missing for {} (expected {})",
@@ -2585,7 +2596,7 @@ fn restore(
                     "no snapshot was taken (in-memory journal)",
                 ));
             }
-            if git.is_none() && !snapshot.is_file() {
+            if git.is_none() && !snapshot.is_file() && !super::tin::found_by_name(snapshot) {
                 return Err(io::Error::new(
                     io::ErrorKind::NotFound,
                     format!("snapshot {} is missing", snapshot.display()),
@@ -3523,13 +3534,21 @@ mod tests {
         )
         .unwrap();
         fs::write(root.join("m2.txt"), "two").unwrap();
-        // Lose the second snapshot (a tin object now: the journal names it).
+        // Lose the second snapshot: the last record of the run's pack (a
+        // small before-state is a record there), as a cut write leaves it.
         let loaded = Journal::load(&run_dir).unwrap();
         for e in loaded.entries().iter().filter(|e| e.seq == 2) {
             for b in &e.before {
                 if let Before::File { snapshot, .. } = &b.before {
-                    super::super::tin::lift_read_only(snapshot);
-                    fs::remove_file(snapshot).unwrap();
+                    assert!(super::super::tin::is_packed(snapshot), "{snapshot:?}");
+                    let len = fs::metadata(snapshot).unwrap().len();
+                    let cut = (super::super::tinpack::HEAD + "old2".len()) as u64;
+                    fs::OpenOptions::new()
+                        .write(true)
+                        .open(snapshot)
+                        .unwrap()
+                        .set_len(len - cut)
+                        .unwrap();
                 }
             }
         }

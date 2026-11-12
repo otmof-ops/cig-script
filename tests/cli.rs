@@ -880,15 +880,9 @@ fn unburn_checks_every_snapshot_before_touching_anything() {
     );
     sb.run_ok(&["run", "s.cig"]);
     let id = sb.runs()[0]["id"].as_str().unwrap().to_string();
-    // The before-states are tin objects now: lose the one that holds m2.txt's.
-    let mut removed = 0;
-    for p in tin_objects(&sb) {
-        if fs::read(&p).unwrap() == b"old2" {
-            force_remove(&p);
-            removed += 1;
-        }
-    }
-    assert_eq!(removed, 1, "one snapshot for m2.txt");
+    // The before-states are records in the run's pack: lose the one that
+    // holds m2.txt's, as a write cut short there would.
+    assert!(cut_pack_at(&sb, b"old2"), "one snapshot for m2.txt");
     let err = sb.run_err(&["unburn", &id], 1);
     assert!(
         err.contains("error[E703 burn]:") && err.contains("snapshot missing for"),
@@ -8293,13 +8287,14 @@ fn verify_and_unburn_agree() {
             },
         ),
         ("a snapshot gone", Some("E703"), |sb, id, _| {
-            // Native before-states are tin objects; the run's own folder
-            // holds only what is sealed or a directory.
+            // Native before-states are in the tin: a small one is a record
+            // in a pack, a larger one an object of its own. The run's own
+            // folder holds only what is sealed or a directory.
             let snaps = sb.home().join("runs").join(id).join("snapshots");
             for e in fs::read_dir(&snaps).unwrap().flatten() {
                 fs::remove_file(e.path()).unwrap();
             }
-            for p in tin_objects(sb) {
+            for p in tin_objects(sb).into_iter().chain(tin_packs(sb)) {
                 force_remove(&p);
             }
         }),
@@ -12299,9 +12294,11 @@ fn doctor_reports_history_and_suggests_a_budget_when_off() {
 fn history_budget_counts_the_tin_and_collects_it() {
     let sb = Sandbox::new();
     let size = 60 * 1024;
-    sb.write("p/big.bin", &"0".repeat(size));
+    // Noise: the tin compresses what shrinks, and a file of one repeated
+    // digit would be kept in a few bytes, far less than its run's folder.
+    sb.write("p/big.bin", &noise_text(100, size));
     for k in 1..=4 {
-        sb.write(&format!("src{k}.bin"), &k.to_string().repeat(size));
+        sb.write(&format!("src{k}.bin"), &noise_text(k as u64, size));
         sb.write(
             &format!("s{k}.cig"),
             &format!("pack {{ \"./p\" }}\nburn {{\n  proc.run(\"cp\", [\"src{k}.bin\", \"p/big.bin\"], {{touches: [\"big.bin\"]}})\n}}\n"),
@@ -12336,9 +12333,16 @@ fn history_budget_counts_the_tin_and_collects_it() {
             .unwrap()
     };
     let history = history_of(&sb);
-    assert!(history >= 4 * size as u64, "the tin is counted: {history}");
+    // What the four kept files take in the tin, as it holds them (hex noise
+    // shrinks to about half): far more than the four runs' own folders.
+    let stored = tin_stored(&sb);
+    assert!(stored >= size as u64, "the kept files are large: {stored}");
+    assert!(
+        history >= stored,
+        "the tin is counted: {history} of history, {stored} in the tin"
+    );
     // A budget that one prune meets: the history less half an object.
-    let budget = history - (size as u64) / 2;
+    let budget = history - stored / 8;
     sb.run_ok(&["config", "history_budget", &budget.to_string()]);
     // The age floor holds by default: every run is seconds old.
     sb.run_ok(&["runs", "--prune", "100"]);
@@ -12368,7 +12372,7 @@ fn history_budget_counts_the_tin_and_collects_it() {
     // What is left still unburns, byte for byte: the three runs' objects
     // are all there.
     sb.run_ok(&["unburn", "--last", "3", "--yes"]);
-    assert_eq!(sb.read("p/big.bin"), "1".repeat(size));
+    assert_eq!(sb.read("p/big.bin"), noise_text(1, size));
 }
 
 /// #148: a hop's `skip` globs and the `hop_skip` setting leave paths out of
@@ -17095,7 +17099,17 @@ fn age_the_run_to_1_15(sb: &Sandbox, id: &str) {
                 }
                 let name = format!("{n:05}-1-{}", snap.file_name().unwrap().to_string_lossy());
                 let to = run.join("snapshots").join(name);
-                fs::copy(&snap, &to).unwrap();
+                if snap.starts_with(sb.home().join("tin").join("packs")) {
+                    // A record in a pack: its bytes, as 1.15 copied them.
+                    let sha = b["sha256"].as_str().unwrap();
+                    fs::write(&to, cigscript::burn::tin::read_packed(&snap, sha).unwrap()).unwrap();
+                } else if snap.to_string_lossy().ends_with(".zst") {
+                    // A compressed object: its bytes, decompressed.
+                    let bytes = cigscript::burn::tin::unsqueeze_file(&snap, None).unwrap();
+                    fs::write(&to, bytes).unwrap();
+                } else {
+                    fs::copy(&snap, &to).unwrap();
+                }
                 b["snapshot"] = serde_json::Value::String(to.to_string_lossy().to_string());
                 b.as_object_mut().unwrap().remove("mode");
             }
@@ -17379,16 +17393,20 @@ fn a_missing_or_short_snapshot_is_refused_with_e703_never_restored_wrong() {
         let out = cig_timed(&sb, &["run", "s.cig"], &[]);
         assert!(out.status.success(), "{out:?}");
         let id = sb.runs()[0]["id"].as_str().unwrap().to_string();
-        let objects = tin_objects(&sb);
-        assert_eq!(objects.len(), 1, "{objects:?}");
-        let object = &objects[0];
-        let mut perms = fs::metadata(object).unwrap().permissions();
-        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o644);
-        fs::set_permissions(object, perms).unwrap();
+        // A small before-state is a record in the run's pack.
+        let packs = tin_packs(&sb);
+        assert_eq!(packs.len(), 1, "{packs:?}");
+        let pack = &packs[0];
         if damage == "missing" {
-            fs::remove_file(object).unwrap();
+            force_remove(pack);
         } else {
-            fs::write(object, "the orig").unwrap();
+            let len = fs::metadata(pack).unwrap().len();
+            fs::OpenOptions::new()
+                .write(true)
+                .open(pack)
+                .unwrap()
+                .set_len(len - 8)
+                .unwrap();
         }
         let out = cig_timed(&sb, &["unburn", &id], &[]);
         assert!(!out.status.success(), "{damage}: {out:?}");
@@ -19305,6 +19323,96 @@ fn ci_gates_and_the_nightly_matrix_are_wired() {
     }
 }
 
+/// The detached crash flusher starts with only stdio open: an inheritable
+/// pipe the parent held does not travel, so once the parent lets go of
+/// its own end the pipe is closed. Before the fix the child kept every
+/// descriptor cig had inherited, so anything that waited on one of them
+/// (a lock, a pipe a runner reads to its end) waited on the flusher too.
+/// Exercises the same
+/// `pre_exec` hook `spawn_flush` uses on a long-running `/bin/sleep`,
+/// so a short-lived cig that exited before the parent checked could not
+/// pass by accident.
+#[cfg(unix)]
+#[test]
+fn a_detached_flush_closes_the_pipes_it_inherited() {
+    use std::io::Read;
+    use std::os::unix::io::FromRawFd;
+    use std::os::unix::process::CommandExt;
+    let mut fds: [libc::c_int; 2] = [-1, -1];
+    // SAFETY: plain pipe(2); the fds are owned below.
+    assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+    let (r, w) = (fds[0], fds[1]);
+    // `pipe(2)` does not set FD_CLOEXEC: this is the leak the child
+    // must close. Make it explicit so a future std-library change that
+    // starts setting it does not quietly pass the test.
+    for fd in [r, w] {
+        // SAFETY: fcntl on a fd this process owns.
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        unsafe {
+            libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC);
+        }
+    }
+    // The child lives long enough to be measured: a short-lived cig
+    // that exited fast would close the pipe on exit no matter what
+    // our pre_exec did, so the test would pass without proving the
+    // fix. `/bin/sleep 5` keeps the child alive through the read.
+    let mut c = Command::new("/bin/sleep");
+    c.arg("5")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    // SAFETY: `pre_exec` runs after fork, before exec; the body makes
+    // only async-signal-safe calls.
+    unsafe {
+        c.pre_exec(|| {
+            cigscript::ashtray::cloexec_above_stdio();
+            Ok(())
+        });
+    }
+    let mut child = c.spawn().expect("spawn /bin/sleep");
+    // Parent lets go of its write end. The pipe stays open iff some
+    // other process (the child) still holds a copy of that end.
+    // SAFETY: closing a fd this process opened.
+    unsafe {
+        libc::close(w);
+    }
+    // Reader: once no writer is left, `read` returns 0 (EOF). Wrap
+    // the raw fd in `File` so the handle drops on return.
+    // SAFETY: `r` was opened by `pipe(2)` above and is owned here.
+    let mut rf = unsafe { std::fs::File::from_raw_fd(r) };
+    // Bounded: the pipe must EOF well before the sleep ends.
+    let mut tv = libc::timeval {
+        tv_sec: 3,
+        tv_usec: 0,
+    };
+    let mut set: libc::fd_set = unsafe { std::mem::zeroed() };
+    unsafe {
+        libc::FD_ZERO(&mut set);
+        libc::FD_SET(r, &mut set);
+    }
+    let ready = unsafe {
+        libc::select(
+            r + 1,
+            &mut set,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut tv,
+        )
+    };
+    assert!(
+        ready > 0,
+        "the pipe was still held three seconds after the parent let go"
+    );
+    let mut buf = [0u8; 1];
+    let n = rf.read(&mut buf).expect("read pipe");
+    assert_eq!(
+        n, 0,
+        "the detached child kept the inherited pipe open (read {n} byte(s))"
+    );
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 /// The same flag against the real `perf`, where the machine has it and lets
 /// a process be sampled: a busy loop is drawn, with samples. Skipped (and
 /// said) where perf is absent or forbidden.
@@ -19338,4 +19446,298 @@ fn profile_with_the_real_perf_when_it_is_allowed() {
     assert!(p["samples"].as_u64().unwrap() > 0, "{p}");
     let svg = fs::read_to_string(sb.path().join(p["svg"].as_str().unwrap())).unwrap();
     assert!(svg.contains("<svg ") && svg.contains("python3"), "{svg}");
+}
+
+// ----- #147: packs of small before-states -------------------------------------
+
+/// The pack files a sandbox's tin holds.
+fn tin_packs(sb: &Sandbox) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Ok(buckets) = fs::read_dir(sb.home().join("tin").join("packs")) {
+        for b in buckets.flatten() {
+            if let Ok(files) = fs::read_dir(b.path()) {
+                out.extend(files.flatten().map(|f| f.path()));
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// Cut the pack that holds `payload` (a small record kept as it is) at the
+/// start of that record, as a write cut short there would leave it. False
+/// when no pack holds it.
+fn cut_pack_at(sb: &Sandbox, payload: &[u8]) -> bool {
+    for p in tin_packs(sb) {
+        let bytes = fs::read(&p).unwrap();
+        // The record's header is 45 bytes, its payload right after.
+        if let Some(at) = bytes.windows(payload.len()).position(|w| w == payload) {
+            let f = fs::OpenOptions::new().write(true).open(&p).unwrap();
+            f.set_len((at - 45) as u64).unwrap();
+            return true;
+        }
+    }
+    false
+}
+
+#[cfg(unix)]
+#[test]
+fn small_snapshots_pack_into_one_file() {
+    let sb = Sandbox::new();
+    // Two hundred small files and one over the pack's 16 KiB bound.
+    for f in 0..200u64 {
+        let n = [100usize, 300, 1_600, 9_000, 16_383][(f % 5) as usize];
+        sb.write(&format!("w/s{f}.txt"), &noise_text(f + 100, n));
+    }
+    sb.write("w/big.txt", &noise_text(99, 20_000));
+    let before = tree_of(&sb.path().join("w"));
+    let mut s = String::from("burn {\n");
+    for f in 0..200 {
+        s.push_str(&format!(
+            "  fs.write_text(\"w/s{f}.txt\", \"changed {f}\")\n"
+        ));
+    }
+    // One small file written over fifty times with the same bytes: its
+    // before-states after the first are one record.
+    for _ in 0..50 {
+        s.push_str("  fs.write_text(\"w/s0.txt\", \"again\")\n");
+    }
+    s.push_str("  fs.write_text(\"w/big.txt\", \"small now\")\n}\n");
+    sb.write("s.cig", &s);
+    let out = cig_timed(&sb, &["run", "s.cig"], &[]);
+    assert!(out.status.success(), "{out:?}");
+    let id = sb.runs()[0]["id"].as_str().unwrap().to_string();
+    // One pack, listed by the run; the 20 KB file is an object of its own.
+    let packs = tin_packs(&sb);
+    assert_eq!(packs.len(), 1, "{packs:?}");
+    let pack = &packs[0];
+    let listed = fs::read_to_string(sb.home().join("runs").join(&id).join("tin.packs")).unwrap();
+    assert_eq!(
+        listed.trim(),
+        pack.file_name().unwrap().to_string_lossy(),
+        "{listed}"
+    );
+    assert_eq!(tin_objects(&sb).len(), 1, "{:?}", tin_objects(&sb));
+    // Every small before-state names the pack.
+    let journal = fs::read_to_string(journal_path(&sb, &id)).unwrap();
+    let in_pack = journal.matches(pack.to_string_lossy().as_ref()).count();
+    assert_eq!(in_pack, 250, "{journal}");
+    // 202 distinct small states (200 files, then "changed 0" and "again"
+    // once each): one record each, nothing else in the file.
+    let du: serde_json::Value = serde_json::from_str(&sb.run_ok(&["--json", "tin", "du"])).unwrap();
+    assert_eq!(du["packs"], 1, "{du}");
+    assert_eq!(du["packed"], 202, "{du}");
+    let raw: u64 = (0..200u64)
+        .map(|f| [100u64, 300, 1_600, 9_000, 16_383][(f % 5) as usize])
+        .sum::<u64>()
+        + "changed 0".len() as u64
+        + "again".len() as u64;
+    let bytes = fs::read(pack).unwrap();
+    let (records, end) = cigscript::burn::tinpack::walk(&bytes).unwrap();
+    assert_eq!(records.len(), 202, "one record per distinct state");
+    assert_eq!(end, cigscript::burn::tinpack::End::Clean);
+    assert_eq!(
+        records.iter().map(|r| u64::from(r.raw)).sum::<u64>(),
+        raw,
+        "the records hold the before-states and nothing else"
+    );
+    sb.run_ok(&["tin", "verify"]);
+    // A record cut short at the end (a later write that was killed) is
+    // never read: the verify and the unburn go on from what is whole.
+    {
+        use std::io::Write;
+        let mut f = fs::OpenOptions::new().append(true).open(pack).unwrap();
+        f.write_all(&[7u8; 30]).unwrap();
+    }
+    sb.run_ok(&["tin", "verify"]);
+    // A gc while the run lives keeps the pack.
+    let gc: serde_json::Value = serde_json::from_str(&sb.run_ok(&["--json", "tin", "gc"])).unwrap();
+    assert_eq!(gc["removed"], 0, "{gc}");
+    let out = cig_timed(&sb, &["unburn", &id], &[]);
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(tree_of(&sb.path().join("w")), before);
+    // Once no run needs it, the pack goes whole.
+    sb.run_ok(&["runs", "--prune", "0"]);
+    let gc: serde_json::Value = serde_json::from_str(&sb.run_ok(&["--json", "tin", "gc"])).unwrap();
+    assert_eq!(gc["removed"], 203, "{gc}");
+    assert!(tin_packs(&sb).is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_damaged_pack_record_is_refused_and_the_rest_restore() {
+    let sb = Sandbox::new();
+    sb.write("w/a.txt", "the first before-state\n");
+    sb.write("w/b.txt", "the second before-state\n");
+    sb.write(
+        "s.cig",
+        "burn {\n  fs.write_text(\"w/a.txt\", \"one\")\n  fs.write_text(\"w/b.txt\", \"two\")\n}\n",
+    );
+    sb.run_ok(&["run", "s.cig"]);
+    let id = sb.runs()[0]["id"].as_str().unwrap().to_string();
+    let pack = tin_packs(&sb).pop().expect("a pack");
+    // One byte of b.txt's record changed: the record is still found, and
+    // refused because it no longer hashes to its name.
+    let mut bytes = fs::read(&pack).unwrap();
+    let at = bytes
+        .windows(6)
+        .position(|w| w == b"second")
+        .expect("the record");
+    bytes[at] = b'S';
+    fs::write(&pack, &bytes).unwrap();
+    let err = sb.run_err(&["tin", "verify"], 1);
+    assert!(err.contains("does not hash to its name"), "{err}");
+    let err = sb.run_err(&["unburn", &id], 1);
+    assert!(err.contains("E703") && err.contains("corrupt"), "{err}");
+    assert_eq!(
+        sb.read("w/a.txt"),
+        "one",
+        "nothing restored before the check"
+    );
+    let out = sb.cig(&["unburn", &id, "--force"]);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert_eq!(sb.read("w/a.txt"), "the first before-state\n");
+    assert_eq!(sb.read("w/b.txt"), "two");
+}
+
+// ----- #147: zstd on packed objects, whole objects and chunks ------------------
+
+/// Words drawn from a small vocabulary, in lines: text that compresses
+/// about as well as source code or prose does.
+#[cfg(unix)]
+fn word_text(seed: u64, n: usize) -> String {
+    const WORDS: &[&str] = &[
+        "the", "kernel", "keeps", "a", "before", "state", "of", "every", "file", "it", "writes",
+        "over", "and", "puts", "back", "when", "run", "is", "unburned", "byte", "for", "journal",
+        "line", "names", "object", "in", "tin", "by", "its", "hash", "chunk", "recipe", "pack",
+        "record", "header", "check", "torn", "write", "never", "read", "fn", "let", "mut",
+        "return", "if", "else", "match", "self", "pub", "use",
+    ];
+    let mut x = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+    let mut s = String::with_capacity(n + 64);
+    let mut col = 0;
+    while s.len() < n {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        let w = WORDS[(x % WORDS.len() as u64) as usize];
+        s.push_str(w);
+        col += w.len() + 1;
+        if col > 72 {
+            s.push('\n');
+            col = 0;
+        } else {
+            s.push(' ');
+        }
+    }
+    s.truncate(n);
+    s
+}
+
+/// Bytes the tin keeps for objects, recipes and packs, as their files hold.
+#[cfg(unix)]
+fn tin_stored(sb: &Sandbox) -> u64 {
+    let mut total = 0;
+    for sub in ["objects", "recipes", "packs"] {
+        let mut stack = vec![sb.home().join("tin").join(sub)];
+        while let Some(d) = stack.pop() {
+            let Ok(rd) = fs::read_dir(&d) else { continue };
+            for e in rd.flatten() {
+                let m = e.metadata().unwrap();
+                if m.is_dir() {
+                    stack.push(e.path());
+                } else {
+                    total += m.len();
+                }
+            }
+        }
+    }
+    total
+}
+
+#[cfg(unix)]
+#[test]
+fn a_text_snapshot_costs_at_most_0_3_bytes_per_byte() {
+    // Text overwritten at three sizes: a packed one (8 KB), a whole object
+    // (300 KB) and a chunked one (3 MB). What the tin keeps for them is at
+    // most 0.3 bytes for every byte overwritten (#147, target 4).
+    let sb = Sandbox::new();
+    let sizes = [8_000usize, 300_000, 3_000_000];
+    for (i, n) in sizes.iter().enumerate() {
+        sb.write(&format!("w/t{i}.txt"), &word_text(i as u64 + 1, *n));
+    }
+    // And one of noise, which is kept as it is.
+    let mut x = 0x2545_F491_4F6C_DD1Du64;
+    let noise: Vec<u8> = (0..200_000)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            (x >> 24) as u8
+        })
+        .collect();
+    fs::write(sb.path().join("w/noise.bin"), &noise).unwrap();
+    let before = tree_of(&sb.path().join("w"));
+    sb.write(
+        "s.cig",
+        "burn {\n  fs.write_text(\"w/t0.txt\", \"x\")\n  fs.write_text(\"w/t1.txt\", \"x\")\n  fs.write_text(\"w/t2.txt\", \"x\")\n}\n",
+    );
+    let out = cig_timed(&sb, &["run", "s.cig"], &[]);
+    assert!(out.status.success(), "{out:?}");
+    let stored = tin_stored(&sb);
+    let overwritten: u64 = sizes.iter().map(|n| *n as u64).sum();
+    let ratio = stored as f64 / overwritten as f64;
+    assert!(
+        ratio <= 0.3,
+        "{stored} bytes kept for {overwritten} overwritten: {ratio:.3} per byte"
+    );
+    // The whole object is kept compressed, named by the hash of its bytes.
+    let zst: Vec<PathBuf> = tin_objects(&sb)
+        .into_iter()
+        .filter(|p| p.to_string_lossy().ends_with(".zst"))
+        .collect();
+    assert!(!zst.is_empty(), "{:?}", tin_objects(&sb));
+    sb.run_ok(&["tin", "verify"]);
+    // Noise gains nothing from zstd: kept as it is.
+    sb.write(
+        "n.cig",
+        "burn {\n  fs.write_text(\"w/noise.bin\", \"x\")\n}\n",
+    );
+    let out = cig_timed(&sb, &["run", "n.cig"], &[]);
+    assert!(out.status.success(), "{out:?}");
+    let plain = tin_objects(&sb)
+        .into_iter()
+        .any(|p| fs::read(&p).is_ok_and(|b| b == noise));
+    assert!(plain, "the noise is one plain object");
+    // Both runs come back byte for byte.
+    for r in sb.runs() {
+        let id = r["id"].as_str().unwrap().to_string();
+        let out = cig_timed(&sb, &["unburn", &id], &[]);
+        assert!(out.status.success(), "{out:?}");
+    }
+    assert_eq!(tree_of(&sb.path().join("w")), before);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_damaged_compressed_object_is_refused() {
+    let sb = Sandbox::new();
+    sb.write("w/t.txt", &word_text(9, 100_000));
+    sb.write("s.cig", "burn {\n  fs.write_text(\"w/t.txt\", \"x\")\n}\n");
+    sb.run_ok(&["run", "s.cig"]);
+    let id = sb.runs()[0]["id"].as_str().unwrap().to_string();
+    let object = tin_objects(&sb)
+        .into_iter()
+        .find(|p| p.to_string_lossy().ends_with(".zst"))
+        .expect("a compressed object");
+    let mut bytes = fs::read(&object).unwrap();
+    let mid = bytes.len() / 2;
+    bytes[mid] ^= 0x55;
+    force_remove(&object);
+    fs::write(&object, &bytes).unwrap();
+    let err = sb.run_err(&["tin", "verify"], 1);
+    assert!(err.contains(&object.display().to_string()), "{err}");
+    let err = sb.run_err(&["unburn", &id], 1);
+    assert!(err.contains("E703") && err.contains("corrupt"), "{err}");
+    assert_eq!(sb.read("w/t.txt"), "x", "nothing was restored");
 }

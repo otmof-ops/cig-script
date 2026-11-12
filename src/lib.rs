@@ -40,6 +40,12 @@ pub mod trial;
 pub mod tripwire;
 pub mod update;
 pub mod value;
+pub mod vm;
+
+/// The bytecode crate the VM runs, under this crate's name: a compiler
+/// that lowers to bytecode builds its modules with the same copy of the
+/// crate the VM loads, so a `Verified` it makes is one `vm::load` takes.
+pub use cig_bytecode;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 

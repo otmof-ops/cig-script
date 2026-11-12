@@ -4,6 +4,7 @@
 //! Statement execution and expression evaluation.
 
 use super::env::{AssignError, Env, Scope};
+use super::ops::{binary, fast_binary, negate, range_fits};
 use super::{Interp, MAX_CALL_DEPTH};
 use crate::diagnostics::{runtime, type_error, Diagnostic, Kind};
 use crate::syntax::ast::*;
@@ -285,20 +286,9 @@ impl Interp {
             Stmt::Exhale { values, .. } => {
                 let mut line = String::new();
                 for (i, e) in values.iter().enumerate() {
-                    if i > 0 {
-                        line.push(' ');
-                    }
-                    line.push_str(&self.eval(e, env)?.display());
+                    exhale_part(&mut line, i, &self.eval(e, env)?);
                 }
-                line.push('\n');
-                if let Err(e) = self.out.write_all(line.as_bytes()) {
-                    if e.kind() == std::io::ErrorKind::BrokenPipe {
-                        // The reader went away (e.g. `| head`): stop quietly.
-                        self.exit_requested = Some(0);
-                        return Err(runtime("output pipe closed").code("E513").into());
-                    }
-                    return Err(runtime(format!("could not write output: {e}")).into());
-                }
+                self.write_exhaled(line)?;
                 Ok(())
             }
             Stmt::Cough { value, span } => {
@@ -344,7 +334,7 @@ impl Interp {
                         self.loop_depth -= 1;
                         return result;
                     }
-                    let iterable = self.binary(BinOp::Range, l, r, iter.span)?;
+                    let iterable = binary(BinOp::Range, l, r, iter.span)?;
                     let items = self.iterate(iterable, *span)?;
                     self.loop_depth += 1;
                     let result = self.run_for(var, items, body, env, *span);
@@ -539,7 +529,7 @@ impl Interp {
                             Some(v) => v,
                             None => env.get(name).ok_or_else(|| unknown_name(name, env, span))?,
                         };
-                        self.binary(compound_op(op), current, rhs, span)?
+                        binary(compound_op(op), current, rhs, span)?
                     }
                 };
                 let result = match at {
@@ -568,93 +558,34 @@ impl Interp {
             AssignTarget::Index { object, index } => {
                 let obj = self.operand(object, env)?;
                 let idx = self.operand(index, env)?;
-                match (&obj, &idx) {
-                    (Value::List(list), Value::Int(i)) => {
-                        let len = list.borrow().len();
-                        let pos = normalize_index(*i, len).ok_or_else(|| {
-                            runtime(format!("index {i} is out of range for a list of {len}"))
-                                .code("E504")
-                                .at(span)
-                        })?;
-                        let new = match op {
-                            AssignOp::Set => rhs,
-                            _ => {
-                                let current = list.borrow()[pos].clone();
-                                self.binary(compound_op(op), current, rhs, span)?
-                            }
-                        };
-                        list.borrow_mut()[pos] = new;
-                        Ok(())
+                let new = match op {
+                    AssignOp::Set => rhs,
+                    _ => {
+                        let current = stored_at(&obj, &idx, span, index.span, object.span)?;
+                        binary(compound_op(op), current, rhs, span)?
                     }
-                    (Value::Map(map), Value::Str(key)) => {
-                        let new = match op {
-                            AssignOp::Set => rhs,
-                            _ => {
-                                let current =
-                                    map.borrow().get(&**key).cloned().ok_or_else(|| {
-                                        runtime(format!("map has no key `{key}`"))
-                                            .code("E505")
-                                            .at(span)
-                                    })?;
-                                self.binary(compound_op(op), current, rhs, span)?
-                            }
-                        };
-                        map.borrow_mut().insert(key.to_string(), new);
-                        Ok(())
-                    }
-                    (Value::List(_), other) => Err(type_error(format!(
-                        "list index must be an int, got {}",
-                        other.type_name()
-                    ))
-                    .at(index.span)
-                    .into()),
-                    (Value::Map(_), other) => Err(type_error(format!(
-                        "map key must be a string, got {}",
-                        other.type_name()
-                    ))
-                    .at(index.span)
-                    .into()),
-                    (other, _) => Err(type_error(format!(
-                        "cannot index into {}",
-                        other.type_name()
-                    ))
-                    .code("E405")
-                    .at(object.span)
-                    .into()),
-                }
+                };
+                set_index(&obj, &idx, new, span, index.span, object.span)?;
+                Ok(())
             }
             AssignTarget::Member { object, name, hint } => {
                 let obj = self.operand(object, env)?;
-                match &obj {
-                    Value::Map(map) => {
-                        let new = match op {
-                            AssignOp::Set => rhs,
-                            _ => {
-                                let current =
-                                    field(&map.borrow(), name, hint).cloned().ok_or_else(|| {
-                                        runtime(format!("map has no key `{name}`"))
-                                            .code("E505")
-                                            .at(span)
-                                    })?;
-                                self.binary(compound_op(op), current, rhs, span)?
-                            }
-                        };
-                        let mut map = map.borrow_mut();
-                        match field_index(&map, name, hint) {
-                            Some(i) => map[i] = new,
-                            None => {
-                                map.insert(name.clone(), new);
-                            }
-                        }
-                        Ok(())
+                let new = match (&obj, op) {
+                    (_, AssignOp::Set) => rhs,
+                    (Value::Map(map), _) => {
+                        let current =
+                            field(&map.borrow(), name, hint).cloned().ok_or_else(|| {
+                                runtime(format!("map has no key `{name}`"))
+                                    .code("E505")
+                                    .at(span)
+                            })?;
+                        binary(compound_op(op), current, rhs, span)?
                     }
-                    other => Err(type_error(format!(
-                        "cannot set `.{name}` on {}",
-                        other.type_name()
-                    ))
-                    .at(object.span)
-                    .into()),
-                }
+                    // Not a map: `set_field` says so before anything is read.
+                    _ => rhs,
+                };
+                set_field(&obj, name, new, hint, object.span)?;
+                Ok(())
             }
         }
     }
@@ -742,13 +673,16 @@ impl Interp {
                     if let Some(v) = fast_binary(*op, &l, &r) {
                         return Ok(v);
                     }
-                    self.binary(*op, l, r, span)
+                    binary(*op, l, r, span)
                 }
             },
             ExprKind::Call { callee, args } => {
                 let f = self.eval(callee, env)?;
                 if let Value::Func(func) = &f {
-                    if func.params.len() == args.len() {
+                    // A compiled function takes its arguments as values, not
+                    // a scope: it goes the general way, to `call_function`.
+                    if func.params.len() == args.len() && !matches!(func.body, FnBody::Compiled(_))
+                    {
                         // The arguments go straight into the callee's frame:
                         // no list, no allocation (cig-script#146).
                         let scope = Scope::child(&func.closure);
@@ -806,17 +740,7 @@ impl Interp {
                 for (key, value) in entries {
                     let k = match key {
                         MapKey::Static(s) => s.clone(),
-                        MapKey::Dynamic(e) => match self.eval(e, env)? {
-                            Value::Str(s) => s.to_string(),
-                            Value::Int(i) => i.to_string(),
-                            other => {
-                                return Err(type_error(format!(
-                                    "map keys must be strings, got {}",
-                                    other.type_name()
-                                ))
-                                .at(e.span))
-                            }
-                        },
+                        MapKey::Dynamic(e) => map_key(self.eval(e, env)?, e.span)?,
                     };
                     let v = self.eval(value, env)?;
                     map.insert(k, v);
@@ -827,17 +751,7 @@ impl Interp {
                 let v = self.eval(inner, env)?;
                 match op {
                     UnOp::Not => Ok(Value::Bool(!v.truthy())),
-                    UnOp::Neg => match v {
-                        Value::Int(i) => i.checked_neg().map(Value::Int).ok_or_else(|| {
-                            runtime("integer overflow in negation")
-                                .code("E503")
-                                .at(span)
-                        }),
-                        Value::Float(f) => Ok(Value::Float(-f)),
-                        other => Err(type_error(format!("cannot negate {}", other.type_name()))
-                            .code("E403")
-                            .at(span)),
-                    },
+                    UnOp::Neg => negate(v, span),
                 }
             }
             ExprKind::Method {
@@ -904,143 +818,7 @@ impl Interp {
     }
 
     #[inline(never)]
-    pub(crate) fn binary(&mut self, op: BinOp, l: Value, r: Value, span: Span) -> Eval {
-        use Value::*;
-        let type_err = |what: &str| {
-            type_error(format!(
-                "cannot {what} {} and {}",
-                l.type_name(),
-                r.type_name()
-            ))
-            .code("E403")
-            .at(span)
-        };
-        match op {
-            BinOp::Add => match (&l, &r) {
-                (Int(a), Int(b)) => a
-                    .checked_add(*b)
-                    .map(Int)
-                    .ok_or_else(|| runtime("integer overflow in `+`").code("E503").at(span)),
-                (Str(a), Str(b)) => Ok(Value::str(format!("{a}{b}"))),
-                (List(a), List(b)) => {
-                    let mut v = a.borrow().clone();
-                    v.extend(b.borrow().iter().cloned());
-                    Ok(Value::list(v))
-                }
-                (Str(_), other) | (other, Str(_)) if !matches!(other, Str(_)) => {
-                    Err(type_err("add").with_hint(
-                        "build strings with interpolation: \"total: ${n}\", or convert with str(n)",
-                    ))
-                }
-                _ => match (l.as_f64(), r.as_f64()) {
-                    (Some(a), Some(b)) => Ok(Float(a + b)),
-                    _ => Err(type_err("add")),
-                },
-            },
-            BinOp::Sub => match (&l, &r) {
-                (Int(a), Int(b)) => a
-                    .checked_sub(*b)
-                    .map(Int)
-                    .ok_or_else(|| runtime("integer overflow in `-`").code("E503").at(span)),
-                _ => match (l.as_f64(), r.as_f64()) {
-                    (Some(a), Some(b)) => Ok(Float(a - b)),
-                    _ => Err(type_err("subtract")),
-                },
-            },
-            BinOp::Mul => match (&l, &r) {
-                (Int(a), Int(b)) => a
-                    .checked_mul(*b)
-                    .map(Int)
-                    .ok_or_else(|| runtime("integer overflow in `*`").code("E503").at(span)),
-                (Str(s), Int(n)) | (Int(n), Str(s)) => {
-                    if *n < 0 {
-                        return Err(
-                            runtime("cannot repeat a string a negative number of times").at(span)
-                        );
-                    }
-                    crate::value::check_alloc(
-                        s.len() as u128 * *n as u128,
-                        "repeating this string",
-                        span,
-                    )?;
-                    Ok(Value::str(s.repeat(*n as usize)))
-                }
-                _ => match (l.as_f64(), r.as_f64()) {
-                    (Some(a), Some(b)) => Ok(Float(a * b)),
-                    _ => Err(type_err("multiply")),
-                },
-            },
-            BinOp::Div => match (&l, &r) {
-                (Int(_), Int(0)) => Err(runtime("division by zero").code("E502").at(span)),
-                // The one quotient that does not fit: `%` would overflow
-                // before `checked_div` got to say so.
-                (Int(i64::MIN), Int(-1)) => {
-                    Err(runtime("integer overflow in `/`").code("E503").at(span))
-                }
-                (Int(a), Int(b)) if a % b == 0 => a
-                    .checked_div(*b)
-                    .map(Int)
-                    .ok_or_else(|| runtime("integer overflow in `/`").code("E503").at(span)),
-                _ => match (l.as_f64(), r.as_f64()) {
-                    (Some(a), Some(b)) => {
-                        if b == 0.0 {
-                            Err(runtime("division by zero").code("E502").at(span))
-                        } else {
-                            Ok(Float(a / b))
-                        }
-                    }
-                    _ => Err(type_err("divide")),
-                },
-            },
-            BinOp::Rem => match (&l, &r) {
-                (Int(_), Int(0)) => Err(runtime("modulo by zero").code("E502").at(span)),
-                (Int(a), Int(b)) => Ok(Int(a.wrapping_rem(*b))),
-                _ => match (l.as_f64(), r.as_f64()) {
-                    (Some(a), Some(b)) => {
-                        if b == 0.0 {
-                            Err(runtime("modulo by zero").code("E502").at(span))
-                        } else {
-                            Ok(Float(a % b))
-                        }
-                    }
-                    _ => Err(type_err("take the remainder of")),
-                },
-            },
-            BinOp::Eq => Ok(Bool(l.equals(&r))),
-            BinOp::Ne => Ok(Bool(!l.equals(&r))),
-            BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
-                let ord = match (&l, &r) {
-                    (Int(a), Int(b)) => a.cmp(b),
-                    (Str(a), Str(b)) => a.cmp(b),
-                    _ => match (l.as_f64(), r.as_f64()) {
-                        (Some(a), Some(b)) => a
-                            .partial_cmp(&b)
-                            .ok_or_else(|| runtime("cannot order a NaN").at(span))?,
-                        _ => return Err(type_err("compare")),
-                    },
-                };
-                Ok(Bool(match op {
-                    BinOp::Lt => ord.is_lt(),
-                    BinOp::Le => ord.is_le(),
-                    BinOp::Gt => ord.is_gt(),
-                    _ => ord.is_ge(),
-                }))
-            }
-            BinOp::Range => match (&l, &r) {
-                (Int(a), Int(b)) => {
-                    range_fits(*a, *b, span)?;
-                    Ok(Value::list((*a..*b).map(Int).collect()))
-                }
-                _ => Err(type_err("make a range from").with_hint("write the range as `int..int`")),
-            },
-            BinOp::And | BinOp::Or | BinOp::Coalesce => {
-                unreachable!("short-circuit ops are handled in eval")
-            }
-        }
-    }
-
-    #[inline(never)]
-    fn member(&mut self, obj: Value, name: &str, safe: bool, span: Span) -> Eval {
+    pub(crate) fn member(&mut self, obj: Value, name: &str, safe: bool, span: Span) -> Eval {
         match &obj {
             Value::Null if safe => Ok(Value::Null),
             Value::Map(map) => match map.borrow().get(name) {
@@ -1086,7 +864,7 @@ impl Interp {
     }
 
     #[inline(never)]
-    fn index(&mut self, obj: Value, idx: Value, span: Span, idx_span: Span) -> Eval {
+    pub(crate) fn index(&mut self, obj: Value, idx: Value, span: Span, idx_span: Span) -> Eval {
         match (&obj, &idx) {
             (Value::List(list), Value::Int(i)) => {
                 let list = list.borrow();
@@ -1160,13 +938,7 @@ impl Interp {
     pub fn call(&mut self, f: &Value, args: Vec<Value>, span: Span) -> Eval {
         match f {
             Value::Func(func) => self.call_function(func, args, span),
-            Value::Builtin(b) => {
-                b.check_arity(args.len(), span)?;
-                if self.recording() {
-                    self.recording_admits(b, span)?;
-                }
-                (b.func)(self, &args, span).map_err(|e| e.or_at(span))
-            }
+            Value::Builtin(b) => self.call_builtin(b, &args, span),
             Value::Module(m) => Err(type_error(format!(
                 "`{}` is a module, not a function",
                 m.name
@@ -1184,18 +956,28 @@ impl Interp {
         }
     }
 
+    /// Call a builtin: its arity, the pass recorder's admission, then the
+    /// builtin itself, with the call's position on any error that has none.
+    pub(crate) fn call_builtin(
+        &mut self,
+        b: &crate::value::Builtin,
+        args: &[Value],
+        span: Span,
+    ) -> Eval {
+        b.check_arity(args.len(), span)?;
+        if self.recording() {
+            self.recording_admits(b, span)?;
+        }
+        (b.func)(self, args, span).map_err(|e| e.or_at(span))
+    }
+
     #[inline(never)]
     fn call_function(&mut self, func: &Rc<Function>, args: Vec<Value>, span: Span) -> Eval {
         if args.len() != func.params.len() {
-            let name = func.name.as_deref().unwrap_or("this pack");
-            return Err(type_error(format!(
-                "{name} expects {} argument{}, got {}",
-                func.params.len(),
-                if func.params.len() == 1 { "" } else { "s" },
-                args.len()
-            ))
-            .code("E401")
-            .at(span));
+            return Err(arity_mismatch(func, args.len(), span));
+        }
+        if let FnBody::Compiled(cf) = &func.body {
+            return crate::vm::call_compiled(self, func, cf, args, span);
         }
         let scope = Scope::child(&func.closure);
         for (param, arg) in func.params.iter().zip(args) {
@@ -1206,19 +988,15 @@ impl Interp {
 
     /// Run `func`'s body in `scope`, which already holds its arguments.
     fn run_call(&mut self, func: &Rc<Function>, scope: Env, span: Span) -> Eval {
-        if self.call_depth >= MAX_CALL_DEPTH {
-            return Err(runtime(format!(
-                "call depth exceeded {MAX_CALL_DEPTH}; is there unbounded recursion?"
-            ))
-            .code("E506")
-            .at(span));
-        }
-        self.call_depth += 1;
+        self.enter_call(span)?;
         let result = match &func.body {
             FnBody::Expr(e) => self.eval(e, &scope).map_err(Signal::Error),
             FnBody::Block(b) => self.exec_block_in(&b.stmts, &scope).map(|()| Value::Null),
+            // `call_function` sends a compiled function to the VM before a
+            // scope is made, and the fast call path leaves it to that.
+            FnBody::Compiled(_) => Err(Signal::Error(crate::vm::misrouted(span))),
         };
-        self.call_depth -= 1;
+        self.leave_call();
         Scope::release(scope);
         match result {
             Ok(v) => Ok(v),
@@ -1229,8 +1007,34 @@ impl Interp {
         }
     }
 
+    /// One more script call on the stack, or E506 at `span` when the
+    /// stack is already [`MAX_CALL_DEPTH`] deep. Pairs with
+    /// [`Interp::leave_call`].
+    pub(crate) fn enter_call(&mut self, span: Span) -> Result<(), Diagnostic> {
+        if self.call_depth >= MAX_CALL_DEPTH {
+            return Err(runtime(format!(
+                "call depth exceeded {MAX_CALL_DEPTH}; is there unbounded recursion?"
+            ))
+            .code("E506")
+            .at(span));
+        }
+        self.call_depth += 1;
+        Ok(())
+    }
+
+    /// The call [`Interp::enter_call`] counted has returned.
+    pub(crate) fn leave_call(&mut self) {
+        self.call_depth -= 1;
+    }
+
     #[inline(never)]
-    fn call_method(&mut self, recv: Value, name: &str, args: Vec<Value>, span: Span) -> Eval {
+    pub(crate) fn call_method(
+        &mut self,
+        recv: Value,
+        name: &str,
+        args: Vec<Value>,
+        span: Span,
+    ) -> Eval {
         // A map holding a function under that key is called as a plain function.
         if let Value::Map(map) = &recv {
             let f = map.borrow().get(name).cloned();
@@ -1299,45 +1103,157 @@ fn field<'m>(map: &'m IndexMap<String, Value>, name: &str, hint: &Cell<u32>) -> 
     field_index(map, name, hint).map(|i| &map[i])
 }
 
-/// The common cases of a binary operator, on two ints or two floats, without
-/// the general match. `None` is "not here": the general `binary` runs, and
-/// gives the same answer or the same error (overflow, division by zero, a
-/// NaN in an ordering) as before.
-#[inline(always)]
-fn fast_binary(op: BinOp, l: &Value, r: &Value) -> Option<Value> {
-    use Value::{Bool, Float, Int};
-    match (l, r) {
-        (Int(a), Int(b)) => match op {
-            BinOp::Add => a.checked_add(*b).map(Int),
-            BinOp::Sub => a.checked_sub(*b).map(Int),
-            BinOp::Mul => a.checked_mul(*b).map(Int),
-            BinOp::Rem if *b != 0 => Some(Int(a.wrapping_rem(*b))),
-            BinOp::Lt => Some(Bool(a < b)),
-            BinOp::Le => Some(Bool(a <= b)),
-            BinOp::Gt => Some(Bool(a > b)),
-            BinOp::Ge => Some(Bool(a >= b)),
-            BinOp::Eq => Some(Bool(a == b)),
-            BinOp::Ne => Some(Bool(a != b)),
-            _ => None,
-        },
-        (Float(a), Float(b)) => match op {
-            BinOp::Add => Some(Float(a + b)),
-            BinOp::Sub => Some(Float(a - b)),
-            BinOp::Mul => Some(Float(a * b)),
-            BinOp::Div if *b != 0.0 => Some(Float(a / b)),
-            BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
-                let ord = a.partial_cmp(b)?;
-                Some(Bool(match op {
-                    BinOp::Lt => ord.is_lt(),
-                    BinOp::Le => ord.is_le(),
-                    BinOp::Gt => ord.is_gt(),
-                    _ => ord.is_ge(),
-                }))
-            }
-            _ => None,
-        },
-        _ => None,
+/// One value of an `exhale` line: a space before every value but the first,
+/// then the value as `display` shows it. The tree-walker and the VM build
+/// the line with this, and write it with [`Interp::write_exhaled`].
+pub(crate) fn exhale_part(line: &mut String, i: usize, v: &Value) {
+    if i > 0 {
+        line.push(' ');
     }
+    line.push_str(&v.display());
+}
+
+impl Interp {
+    /// Write a finished `exhale` line, with its newline, to the output. A
+    /// reader that went away (`| head`) stops the script quietly (E513).
+    pub(crate) fn write_exhaled(&mut self, mut line: String) -> Result<(), Diagnostic> {
+        line.push('\n');
+        if let Err(e) = self.out.write_all(line.as_bytes()) {
+            if e.kind() == std::io::ErrorKind::BrokenPipe {
+                // The reader went away (e.g. `| head`): stop quietly.
+                self.exit_requested = Some(0);
+                return Err(runtime("output pipe closed").code("E513"));
+            }
+            return Err(runtime(format!("could not write output: {e}")));
+        }
+        Ok(())
+    }
+}
+
+/// A map literal's computed key: a string as itself, an int as its digits,
+/// anything else a type error at the key.
+pub(crate) fn map_key(v: Value, span: Span) -> Result<String, Diagnostic> {
+    match v {
+        Value::Str(s) => Ok(s.to_string()),
+        Value::Int(i) => Ok(i.to_string()),
+        other => Err(type_error(format!(
+            "map keys must be strings, got {}",
+            other.type_name()
+        ))
+        .at(span)),
+    }
+}
+
+/// `obj.name = new`: a map's key set in place, or added at the end; on
+/// anything else, the type error at `obj_span`.
+pub(crate) fn set_field(
+    obj: &Value,
+    name: &str,
+    new: Value,
+    hint: &Cell<u32>,
+    obj_span: Span,
+) -> Result<(), Diagnostic> {
+    match obj {
+        Value::Map(map) => {
+            let mut map = map.borrow_mut();
+            match field_index(&map, name, hint) {
+                Some(i) => map[i] = new,
+                None => {
+                    map.insert(name.to_string(), new);
+                }
+            }
+            Ok(())
+        }
+        other => {
+            Err(type_error(format!("cannot set `.{name}` on {}", other.type_name())).at(obj_span))
+        }
+    }
+}
+
+/// The value an indexed assignment target holds now, for `+=` and the like:
+/// E504 past a list's end, E505 for a missing key, and the store's own type
+/// errors otherwise.
+fn stored_at(
+    obj: &Value,
+    idx: &Value,
+    span: Span,
+    idx_span: Span,
+    obj_span: Span,
+) -> Result<Value, Diagnostic> {
+    match (obj, idx) {
+        (Value::List(list), Value::Int(i)) => {
+            let list = list.borrow();
+            let pos = list_slot(*i, list.len(), span)?;
+            Ok(list[pos].clone())
+        }
+        (Value::Map(map), Value::Str(key)) => map.borrow().get(&**key).cloned().ok_or_else(|| {
+            runtime(format!("map has no key `{key}`"))
+                .code("E505")
+                .at(span)
+        }),
+        _ => Err(store_type_error(obj, idx, idx_span, obj_span)),
+    }
+}
+
+/// `obj[idx] = new`: a list's element (E504 past its end) or a map's key.
+pub(crate) fn set_index(
+    obj: &Value,
+    idx: &Value,
+    new: Value,
+    span: Span,
+    idx_span: Span,
+    obj_span: Span,
+) -> Result<(), Diagnostic> {
+    match (obj, idx) {
+        (Value::List(list), Value::Int(i)) => {
+            let mut list = list.borrow_mut();
+            let pos = list_slot(*i, list.len(), span)?;
+            list[pos] = new;
+            Ok(())
+        }
+        (Value::Map(map), Value::Str(key)) => {
+            map.borrow_mut().insert(key.to_string(), new);
+            Ok(())
+        }
+        _ => Err(store_type_error(obj, idx, idx_span, obj_span)),
+    }
+}
+
+fn list_slot(i: i64, len: usize, span: Span) -> Result<usize, Diagnostic> {
+    normalize_index(i, len).ok_or_else(|| {
+        runtime(format!("index {i} is out of range for a list of {len}"))
+            .code("E504")
+            .at(span)
+    })
+}
+
+fn store_type_error(obj: &Value, idx: &Value, idx_span: Span, obj_span: Span) -> Diagnostic {
+    match obj {
+        Value::List(_) => type_error(format!(
+            "list index must be an int, got {}",
+            idx.type_name()
+        ))
+        .at(idx_span),
+        Value::Map(_) => {
+            type_error(format!("map key must be a string, got {}", idx.type_name())).at(idx_span)
+        }
+        other => type_error(format!("cannot index into {}", other.type_name()))
+            .code("E405")
+            .at(obj_span),
+    }
+}
+
+/// E401 for a script function called with the wrong number of arguments.
+pub(crate) fn arity_mismatch(func: &Function, got: usize, span: Span) -> Diagnostic {
+    let name = func.name.as_deref().unwrap_or("this pack");
+    type_error(format!(
+        "{name} expects {} argument{}, got {}",
+        func.params.len(),
+        if func.params.len() == 1 { "" } else { "s" },
+        got
+    ))
+    .code("E401")
+    .at(span)
 }
 
 fn compound_op(op: AssignOp) -> BinOp {
@@ -1378,17 +1294,6 @@ pub fn error_value(diag: &Diagnostic, payload: Option<Value>) -> Value {
         }
     }
     Value::map(map)
-}
-
-/// A range holds at most 10,000,000 numbers. The width is computed without
-/// overflow, so `i64::MIN..i64::MAX` is refused too, not wrapped.
-fn range_fits(a: i64, b: i64, span: Span) -> Result<(), Diagnostic> {
-    if i128::from(b) - i128::from(a) > 10_000_000 {
-        return Err(runtime("range is too large (limit 10,000,000)")
-            .code("E512")
-            .at(span));
-    }
-    Ok(())
 }
 
 fn unknown_name(name: &str, env: &Env, span: Span) -> Diagnostic {

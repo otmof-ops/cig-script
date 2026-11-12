@@ -3,6 +3,134 @@
 All notable changes to CigScript. The format follows Keep a Changelog; the
 project follows semantic versioning.
 
+## Unreleased
+
+- **Small before-states are packed, and the tin compresses what it
+  keeps** (#147). A native op's before-state under 16 KiB is a record in
+  a pack (`tin/packs/<id[..2]>/<id>`, one file per cig process, records
+  front to back, each with a checked header) instead of an object file
+  and a disk block of its own; an unburn reads a pack once and restores
+  every object in it from memory, hash-checked. A record cut short by a
+  killed cig is at the end of its pack and named by no journal line: the
+  walk stops there. Objects, chunks and pack records are kept as one zstd
+  frame (level 3) where that saves at least a tenth (`<sha256>.zst` in
+  `tin/objects`), and as they are where it does not; every name is still
+  the hash of the uncompressed bytes, so dedup, `cig tin verify`, `gc`,
+  parcels and the vault agree. A run lists its packs in
+  `runs/<id>/tin.packs`; `gc` removes a pack whole once no run lists or
+  names it. `cig tin du` reports `packs` and `packed`. Old runs, plain
+  objects and `snapshots/` folders restore as before. New tests:
+  `small_snapshots_pack_into_one_file`,
+  `a_damaged_pack_record_is_refused_and_the_rest_restore`,
+  `a_text_snapshot_costs_at_most_0_3_bytes_per_byte`,
+  `a_damaged_compressed_object_is_refused`.
+- **`cig tin vault update` waits for the restarted vault to answer**. The
+  service is `Type=simple`, so systemd calls it active as soon as
+  `ExecStart` has forked; the socket appears a moment later. `update`
+  now polls `/run/cig-vault/vault.sock` (`/var/run/cig-vault/vault.sock`
+  on macOS) up to 10 seconds through the same client the next caller
+  would use, and reports `E724 the vault refused or did not answer` on
+  timeout. Covered by the attack suite's
+  `vault_admin::the_vault_installs_collects_updates_and_uninstalls`;
+  the test also tidies the vault behind itself (`cig-vault.service` and
+  the two sudoers drop-ins) when it fails part-way.
+- **The detached crash flusher holds nothing the parent needs**. On
+  Unix, `spawn_flush` marks every inherited descriptor above stderr
+  close-on-exec in the child's `pre_exec` (`close_range` with
+  `CLOSE_RANGE_CLOEXEC`, or a per-fd `fcntl` fallback), so a lock
+  file, a jobserver pipe, or a CI runner's pipe does not travel with
+  it; on Windows the stdio streams go to null and no other handle is
+  inheritable by default. The flusher also carries a 60 second hard
+  deadline on itself (`CIG_FLUSH_DEADLINE_SECS`, written by
+  `spawn_flush`), so a stall in `gh`, `curl` or the tracker cannot
+  keep it alive past its run. New test:
+  `a_detached_flush_closes_the_pipes_it_inherited`.
+- **The runs index knows when the folder changed outside it, on
+  Windows too**. The index's "nothing added or removed" signal was the
+  runs folder's mtime and its hard-link count; on Windows (NTFS on the
+  `windows-11-arm` runner) the directory's `LastWriteTime` is not
+  updated reliably when a child is added, so a run an older cig wrote
+  into the folder without the index could be missed. The signal now
+  carries the folder's entry count on non-Unix in place of nlink, and
+  the folder-added check works on every platform. Catches
+  `burn::runs::tests::run_start_is_constant_in_history` on
+  `windows-latest` and `windows-11-arm`; carton 0.2.0 row 1.
+- **`cig-bytecode`, the stage-B bytecode format** (cig-compile#31). A
+  new workspace crate that defines the register bytecode CigScript's
+  stage-B VM will run and CigCompile will lower to: the module
+  format, a versioned binary serialization, a non-panicking parser
+  and a verifier that makes a module safe to run with no further
+  checks. Nothing in the tree executes this bytecode yet; the format
+  contract is `docs/BYTECODE.md`. The error registry's `E1050`
+  entry gains a bytecode-verify cause.
+- **The bytecode VM runs output, loops over data, lists and maps, method
+  calls and closures** (cig-compile#31, stage B). `exhale` and string
+  interpolation write through the interpreter's own writer, so the
+  bytes are the tree-walker's; `forprep`/`forloop` run `for i in a..b`
+  and `iterprep`/`iternext` walk the interpreter's snapshot of a list,
+  a map's keys or a string's characters; `newlist`, `newmap`,
+  `appendlist`, `insertmap`, `getfield`, `setfield`, `getindex`,
+  `setindex` and `callm` are the interpreter's own access, store and
+  method call, with its errors. Closures capture through cells, one
+  per loop turn where the tree-walker makes a scope per turn, and a
+  compiled function is a value like any other: a builtin's callback
+  (`xs.map(f)`, a sort key) and the tree-walker call it, with the same
+  arity and depth errors. The verifier gains a rule,
+  `uncharged-cycle`: a cycle in a function's control flow must pass a
+  `steps` that charges the step budget, so bytecode cannot spin past
+  `--max-steps`. Only `try`, the burn instructions, `pack` and
+  `chain.make` are left to build. Tests: `cargo test --lib vm::`
+  (among them `exhale_writes_the_interpreters_bytes`,
+  `a_loop_over_data_visits_what_the_interpreter_visits`,
+  `closures_capture_per_iteration`,
+  `a_builtin_calls_back_a_compiled_function` and
+  `the_vm_and_the_interpreter_agree_on_every_data_operation`) and
+  `cargo test -p cig-bytecode` (`a_cycle_with_no_charged_step_is_refused`).
+- **The bytecode VM's core** (cig-compile#31, stage B). `src/vm/` runs
+  a verified bytecode module: moves and constants, arithmetic,
+  comparison and logic, jumps and the fused compare-and-jumps, calls
+  of functions with no captured values, builtin calls by catalogue
+  index, tail calls, the step budget and error positions from each
+  function's line table. Every operator, builtin call, step and depth
+  check goes through the interpreter's own code (the operators now
+  live in `interp::ops`, which the tree-walker calls too), so a
+  program stops on the same step, with the same code, message and
+  line, under both. `cig_bytecode::verify_module` now returns a
+  `Verified` wrapper, the only thing the VM loads; loading refuses an
+  unknown builtin index or burn-op kind with `E1050`. The
+  instructions of later packages stop with an internal error that
+  names them. Nothing runs a program on the VM yet: the lowering and
+  the payload that carries bytecode come later. Tests:
+  `cargo test --lib vm::`, among them
+  `the_vm_and_the_interpreter_agree_on_every_operator`,
+  `the_step_budget_stops_at_the_same_step` and
+  `a_verified_module_never_panics`.
+  The library re-exports the bytecode crate as `cigscript::cig_bytecode`,
+  so a compiler builds modules with the copy of the crate the VM loads.
+- **A short program's heap is in small pages again** (cig-compile#30; carton 0.2.0 rows 9 and
+  10). mimalloc 3, as 1.21.0 linked it, reserved a 1 GiB arena at the first allocation and
+  asked for all of it to be backed with 2 MiB pages. A short program touches a few hundred KB
+  spread over its first 6 MB, so on a kernel whose transparent huge pages are `madvise`
+  (Ubuntu) or `always` (Debian, Arch) it zeroed and kept four 2 MiB pages: a compiled hello
+  peaked at 13.9 MB (5.2 MB on 1.20.0) and its own start took about 0.7 ms longer. The release
+  binaries now map that arena themselves before `main`, its first 8 MiB in 4 KiB pages and the
+  rest in 2 MiB pages, and give it to mimalloc only then; mimalloc's page map is mapped while
+  transparent huge pages are off for the process, and they are back on before `main`, so a
+  hop's processes have them as under any other parent. What it costs: a script whose working
+  set lives in those first 8 MiB runs in 4 KiB pages, 3 to 8% slower than on 1.21.0 (`strings`,
+  `maps`, `words`, `regex-ish`, `fib` on an i5-8265U), still 40 to 80% faster than on 1.20.0; one
+  that grows past them (`json`) is within 3%. Compiled start-up, dry run: hello 0.79 ms on
+  1.20.0, 1.62 on 1.21.0, 1.05 now (Linux 6.17, THP `madvise`). Peaks (dry run): hello 6.5 MB,
+  `lists` 17.0, `maps` 16.1, `json` 63.7 (1.21.0: 13.4 / 23.8 / 21.8 / 67.0). Only musl builds
+  change; every other target keeps its system allocator. `tests/heap_pages.rs` has
+  `the_heaps_head_is_in_small_pages`, `a_hop_keeps_transparent_huge_pages` and
+  `a_hello_peaks_within_its_memory_budget` (9 MiB); like `mmap_gate` they run on a musl build or
+  on `CIG_MMAP_BIN`.
+  The arena is taken over on 64-bit musl builds only, and not at all on a
+  kernel that refuses to overcommit (`vm.overcommit_memory = 2`), where a
+  writable mapping is charged in full when it is made: there mimalloc keeps
+  its own way of committing as the heap grows.
+
 ## 1.21.0 — 2026-11-12
 
 The burn kernel's throughput, the box's watch with decoys and

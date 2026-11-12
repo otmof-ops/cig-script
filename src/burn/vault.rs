@@ -41,6 +41,7 @@ mod stub {
     use std::path::Path;
     /// The vault runs on Unix; elsewhere the tin is all there is.
     pub fn keep_all(_items: &[super::Item]) {}
+    pub fn keep_bytes(_id: &str, _bytes: &[u8]) {}
     pub fn heal(_snapshot: &Path) -> bool {
         false
     }
@@ -213,9 +214,21 @@ mod imp {
                 left.push((k, id));
                 continue;
             }
-            let Ok(f) = fs::File::open(path_of(k, &id)) else {
+            let f = match fs::File::open(path_of(k, &id)) {
+                Ok(f) => f,
+                // Kept compressed, or a small before-state in a pack.
+                Err(_) if k == Kind::Object => {
+                    let z = super::super::tin::object_zst_path(&id);
+                    let bytes = super::super::tin::unsqueeze_file(&z, None)
+                        .ok()
+                        .or_else(|| super::super::tinpack::find_anywhere(&id));
+                    match bytes.map(|b| unnamed_with(&b)) {
+                        Some(Ok(f)) => f,
+                        _ => continue,
+                    }
+                }
                 // Gone from the tin (a gc): nothing to hand over.
-                continue;
+                Err(_) => continue,
             };
             match c.store(k, &id, &f) {
                 Ok(_) => handed += 1,
@@ -253,7 +266,14 @@ mod imp {
                 super::VKind::Sealed => Kind::Sealed,
             };
             let r = with_client(|c| {
-                let f = fs::File::open(path).map_err(|e| Error::Refused {
+                // The vault keeps an object's own bytes: one the tin keeps
+                // compressed is handed over decompressed.
+                let opened = if super::super::tin::is_compressed(path) {
+                    super::super::tin::unsqueeze_file(path, None).and_then(|b| unnamed_with(&b))
+                } else {
+                    fs::File::open(path)
+                };
+                let f = opened.map_err(|e| Error::Refused {
                     word: "io".to_string(),
                     msg: format!("{}: {e}", path.display()),
                 })?;
@@ -281,6 +301,67 @@ mod imp {
         }
     }
 
+    /// A file holding `bytes` with no name left on disk: what the vault is
+    /// handed for an object the tin keeps inside a pack.
+    fn unnamed_with(bytes: &[u8]) -> std::io::Result<fs::File> {
+        let dir = super::super::tin::dir();
+        let p = dir.join(format!(
+            ".vault-hand-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let mut opts = fs::OpenOptions::new();
+        opts.read(true).write(true).create_new(true).mode(0o600);
+        let mut f = opts.open(&p)?;
+        let _ = fs::remove_file(&p);
+        f.write_all(bytes)?;
+        Ok(f)
+    }
+
+    /// `keep_all` for an object the tin keeps in a pack: the vault is
+    /// handed its bytes, uncompressed, under its name. No file is written
+    /// when there is no vault to hand it to.
+    pub fn keep_bytes(id: &str, bytes: &[u8]) {
+        let (none, down) = {
+            let g = SESSION.lock().unwrap_or_else(|p| p.into_inner());
+            (matches!(*g, State::None), matches!(*g, State::Down))
+        };
+        if none {
+            return;
+        }
+        if down {
+            queue(Kind::Object, id);
+            return;
+        }
+        let r = with_client(|c| {
+            let f = unnamed_with(bytes).map_err(|e| Error::Refused {
+                word: "io".to_string(),
+                msg: e.to_string(),
+            })?;
+            c.store(Kind::Object, id, &f)
+        });
+        match r {
+            None if matches!(
+                *SESSION.lock().unwrap_or_else(|p| p.into_inner()),
+                State::None
+            ) => {}
+            None => queue(Kind::Object, id),
+            Some(Ok(_)) => {}
+            Some(Err(e)) => {
+                if e.transient() {
+                    queue(Kind::Object, id);
+                }
+                note_once(&format!(
+                    "the vault did not keep o {} ({e}); it is in the tin only",
+                    &id[..12]
+                ));
+            }
+        }
+    }
+
     fn tmp_beside(p: &Path) -> PathBuf {
         let mut s = p.as_os_str().to_os_string();
         s.push(".vault.tmp");
@@ -299,10 +380,7 @@ mod imp {
         if kind == Kind::Recipe {
             if let Ok(r) = super::super::tin::read_recipe(snapshot) {
                 for c in r.chunks {
-                    let o = super::super::tin::object_path(&c.sha256);
-                    let ok = fs::metadata(&o).map(|m| m.len()).ok() == Some(c.len)
-                        && super::super::journal::sha256_file(&o).ok().as_deref()
-                            == Some(&c.sha256);
+                    let ok = super::super::tin::held(&c.sha256, c.len).is_some();
                     if !ok {
                         healed |= fetch_into_place(Kind::Object, &c.sha256);
                     }
@@ -313,7 +391,12 @@ mod imp {
     }
 
     fn identify(p: &Path) -> Option<(Kind, String)> {
-        let id = p.file_name()?.to_string_lossy().to_string();
+        let name = p.file_name()?.to_string_lossy().to_string();
+        // A compressed object is the object its name says, to the vault.
+        let id = match name.strip_suffix(super::super::tin::ZST) {
+            Some(stem) if super::super::tin::is_compressed(p) => stem.to_string(),
+            _ => name,
+        };
         let kind = if p.starts_with(super::super::tin::sealed_dir()) {
             Kind::Sealed
         } else if super::super::tin::is_recipe(p) {

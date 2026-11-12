@@ -114,6 +114,8 @@ fn take_one(
     let child_tin = inbox_home.join("tin");
     move_objects(&child_tin.join("objects"), &tin::objects_root(), true)?;
     move_objects(&child_tin.join("recipes"), &tin::recipes_root(), false)?;
+    // Packs by their random names; every record is checked when it is read.
+    move_objects(&child_tin.join("packs"), &tin::packs_root(), false)?;
     move_sealed(&child_tin.join("sealed"), &tin::sealed_dir(), from_key)?;
     // The run directory itself, snapshots included.
     if let Some(parent) = dest.parent() {
@@ -198,9 +200,16 @@ fn move_objects(src: &Path, dst: &Path, verify: bool) -> Result<(), String> {
                 continue;
             }
             if verify {
-                let bytes = fs::read(&from).map_err(|e| e.to_string())?;
+                // A compressed object holds, decompressed, what its name says.
+                let (bytes, want) = match name.strip_suffix(tin::ZST) {
+                    Some(stem) => (
+                        tin::unsqueeze_file(&from, None).map_err(|e| e.to_string())?,
+                        stem.to_string(),
+                    ),
+                    None => (fs::read(&from).map_err(|e| e.to_string())?, name.clone()),
+                };
                 let actual = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(&bytes));
-                if actual != name {
+                if actual != want {
                     return Err(format!(
                         "object {name} does not hash to its name (sha256 {})",
                         &actual[..12]

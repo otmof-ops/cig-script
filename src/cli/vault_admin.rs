@@ -80,6 +80,13 @@ mod unix {
     const SUDOERS: &str = "/etc/sudoers.d/cig-vault";
     const PLIST: &str = "/Library/LaunchDaemons/com.otmof.cig-vault.plist";
 
+    /// How long `update` waits for the restarted vault to answer. The
+    /// service is `Type=simple`, so systemd calls it active as soon as
+    /// `ExecStart` has forked; the socket appears a moment later. If it
+    /// does not appear in this window, `update` returns E724 so a caller
+    /// never finds no socket after a successful `cig tin vault update`.
+    const UPDATE_WAIT: Duration = Duration::from_secs(10);
+
     /// One thing an administrator must do.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct Step {
@@ -283,6 +290,26 @@ dscl . -create /Users/{ACCOUNT} UserShell /usr/bin/false && dscl . -create /User
         v
     }
 
+    /// Poll the vault's socket until it answers, or `wait` runs out.
+    /// On timeout the error is the last reason seen. Connects
+    /// through `cig_vault::client::Client` so the check is the same the
+    /// caller will do next.
+    pub fn wait_for_socket(wait: Duration) -> Result<(), String> {
+        let socket = std::path::Path::new(cig_vault::DEFAULT_SOCKET);
+        let expect = account_uid();
+        let deadline = std::time::Instant::now() + wait;
+        loop {
+            let last = match cig_vault::client::Client::connect(socket, expect) {
+                Ok(_) => return Ok(()),
+                Err(e) => e.to_string(),
+            };
+            if std::time::Instant::now() >= deadline {
+                return Err(last);
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
     pub fn update_steps(bin: &Path) -> Vec<Step> {
         let bin = bin.to_string_lossy().to_string();
         let new = format!("{BIN}.new");
@@ -443,6 +470,13 @@ dscl . -create /Users/{ACCOUNT} UserShell /usr/bin/false && dscl . -create /User
         let (o, r, s) = (tin::objects_root(), tin::recipes_root(), tin::sealed_dir());
         let mut out = String::new();
         for p in tin::referenced() {
+            // A pack holds objects the vault keeps by their own names.
+            if tin::is_packed(&p) {
+                for id in tin::packed_ids(&p) {
+                    out.push_str(&format!("o {id}\n"));
+                }
+                continue;
+            }
             let kind = if p.starts_with(&o) {
                 cig_vault::Kind::Object
             } else if p.starts_with(&r) {
@@ -452,7 +486,12 @@ dscl . -create /Users/{ACCOUNT} UserShell /usr/bin/false && dscl . -create /User
             } else {
                 continue;
             };
-            if let Some(id) = p.file_name().map(|n| n.to_string_lossy().to_string()) {
+            let id = if tin::is_compressed(&p) {
+                tin::object_name(&p)
+            } else {
+                p.file_name().map(|n| n.to_string_lossy().to_string())
+            };
+            if let Some(id) = id {
                 if kind.id_ok(&id) {
                     out.push_str(&format!("{} {id}\n", kind.letter()));
                 }
@@ -554,10 +593,27 @@ dscl . -create /Users/{ACCOUNT} UserShell /usr/bin/false && dscl . -create /User
                     }
                 };
                 let code = run_all(ctx, &update_steps(&bin), dry_run);
-                if code == exit::OK && !dry_run {
-                    eprintln!("{} the daemon is swapped and restarted", ctx.green("ok:"));
+                if code != exit::OK || dry_run {
+                    return code;
                 }
-                code
+                // The restart step is `systemctl restart` or `launchctl
+                // kickstart`: neither waits for the `Type=simple` daemon's
+                // socket. Wait here so a next call never finds no socket
+                // after a successful update.
+                match wait_for_socket(UPDATE_WAIT) {
+                    Ok(()) => {
+                        eprintln!("{} the daemon is swapped and restarted", ctx.green("ok:"));
+                        exit::OK
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "{} the restarted vault did not answer within {}s: {e}",
+                            ctx.red("error[E724 burn]:"),
+                            UPDATE_WAIT.as_secs()
+                        );
+                        exit::SCRIPT_ERROR
+                    }
+                }
             }
         }
     }

@@ -12,8 +12,8 @@ categories = ["command-line-utilities", "development-tools"]
 default-run = "cig"
 
 [workspace]
-members = [".", "crates/cig-pass", "crates/cig-vault"]
-exclude = ["crates/cig-pass/fuzz"]
+members = [".", "crates/cig-bytecode", "crates/cig-pass", "crates/cig-vault"]
+exclude = ["crates/cig-bytecode/fuzz", "crates/cig-pass/fuzz"]
 
 [lib]
 name = "cigscript"
@@ -48,6 +48,7 @@ keyring = { version = "3.6", default-features = false, features = ["apple-native
 tar = "0.4"
 flate2 = "1"
 cig-pass = { path = "crates/cig-pass", version = "0.1.0" }
+cig-bytecode = { path = "crates/cig-bytecode", version = "0.1.0" }
 blake3 = { version = "1", features = ["pure"] }
 zstd = { version = "0.13", default-features = false }
 

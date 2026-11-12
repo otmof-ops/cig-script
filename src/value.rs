@@ -58,6 +58,8 @@ pub struct Function {
 pub enum FnBody {
     Block(Rc<Block>),
     Expr(Rc<Expr>),
+    /// A function of a bytecode module, run by the VM (cig-compile#31).
+    Compiled(crate::vm::CompiledFn),
 }
 
 /// What a builtin does to the world. Anything except `Pure` and `Read`

@@ -3590,7 +3590,7 @@ E1050 a damaged program  (usage, build family, since 1.15.0)
 
   kind of no: not one of the four  (a mistake in the text, in the arithmetic, or in CigScript; syntax, type or logic error; an internal error)
 
-  This program's bytes do not match the sha256 in its trailer, its record does not read, or its trailer is not at its end: it was cut short, edited, or had bytes written after it once it was compiled, and it refuses to run. A program knows it is one even without its trailer (its record starts where its runtime's image ends), so a damaged program never runs as cig. Zero padding, or a Windows certificate table from signing, may follow the trailer. The sha256 catches damage, not tampering: programs are unsigned.
+  This program's bytes do not match the sha256 in its trailer, its record does not read, its trailer is not at its end, or its bytecode does not verify (format 2 and later): it was cut short, edited, had bytes written after it once it was compiled, or carries a bytecode the verifier refuses. A program knows it is one even without its trailer (its record starts where its runtime's image ends), so a damaged program never runs as cig. Zero padding, or a Windows certificate table from signing, may follow the trailer. The sha256 catches damage, not tampering: programs are unsigned. A bytecode that fails to verify is refused with the rule and the `fn+pc` where it failed.
 
   what to type next: compile it again (cigcompile build), or fetch it again from where it came from
 
@@ -3601,6 +3601,9 @@ E1050 a damaged program  (usage, build family, since 1.15.0)
   2. something was written after the program: a tool that appends data, or a signature that is not a PE certificate table
      probe: file-hash (the current hash of a file against the hash the journal recorded)
      remedy: build it again, then sign it with a tool that keeps the program's end (cig-compile#10)
+  3. the program's bytecode (format 2 and later, cig-compile#31) does not verify: a register is past the frame, a jump targets outside the function, a constant index is out of range, a handler range interleaves another, or a `BURN.OP` sits outside its region
+     probe: none; a suggestion, not a finding
+     remedy: compile it again with the cigcompile that matches this cig, since the verifier runs on every build
 
   arises in: run  ·  related: E1051
 

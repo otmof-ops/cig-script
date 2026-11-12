@@ -1398,6 +1398,7 @@ fn tin_objects() -> Vec<(std::path::PathBuf, u64)> {
         .into_iter()
         .chain(crate::burn::tin::recipes())
         .chain(crate::burn::tin::sealed())
+        .chain(crate::burn::tin::packs())
         .collect()
 }
 

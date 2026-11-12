@@ -294,7 +294,7 @@ pub fn write_with(
                 }
                 if let Ok(r) = super::tin::read_recipe(snapshot) {
                     for c in &r.chunks {
-                        let o = super::tin::object_path_pub(&c.sha256);
+                        let o = super::tin::object_file(&c.sha256);
                         if let Some(name) = tin_rel(&o) {
                             sources.insert(name, o);
                         }
@@ -306,7 +306,7 @@ pub fn write_with(
                         sealed += 1;
                     }
                 }
-            } else if super::tin::holds(snapshot) {
+            } else if super::tin::holds(snapshot) || super::tin::is_packed(snapshot) {
                 if let Some(name) = tin_rel(snapshot) {
                     sources.insert(name, snapshot.clone());
                 }

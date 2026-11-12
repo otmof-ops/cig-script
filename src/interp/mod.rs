@@ -5,8 +5,10 @@
 
 pub mod env;
 mod eval;
+pub(crate) mod ops;
 pub(crate) mod record;
 
+pub(crate) use eval::{arity_mismatch, exhale_part, map_key, set_field, set_index};
 pub use eval::{closest, error_value, normalize_index};
 
 use crate::burn::{Decision, Kernel, Op};
@@ -120,6 +122,12 @@ impl Interp {
                 Diagnostic::new(Kind::Runtime, "`break` or `continue` outside of a loop").at(span),
             ),
         }
+    }
+
+    /// How many script calls are on the stack now.
+    #[cfg(test)]
+    pub(crate) fn call_depth_for_tests(&self) -> usize {
+        self.call_depth
     }
 
     /// Set the step budget (0 disables it).

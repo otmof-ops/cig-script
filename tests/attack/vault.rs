@@ -57,12 +57,17 @@ pub(super) fn ids(kind: &str) -> Vec<String> {
         .collect()
 }
 
+/// The size `project` writes for the large file: above `CHUNK_FILE_MIN`
+/// (2 MiB; `src/burn/tin.rs`), so the tin keeps it as chunks under a
+/// recipe, the same choice as `tin.rs`'s own tests.
+const BIG_BYTES: usize = 3 << 20;
+
 /// A pack with a small file, a secret and a large file (which the tin keeps
 /// as chunks under a recipe): all three kinds of object.
 pub(super) fn project(sb: &Sandbox) {
     sb.write("p/data.txt", "one\n");
     sb.write("p/.env", "SECRET=one\n");
-    let big: Vec<u8> = (0..400_000u32)
+    let big: Vec<u8> = (0..BIG_BYTES as u32)
         .map(|i| (i.wrapping_mul(2654435761) >> 13) as u8)
         .collect();
     fs::write(sb.path().join("p/big.bin"), &big).unwrap();
@@ -193,7 +198,7 @@ fn the_vault_has_no_delete() {
     assert_eq!(sb.read("p/.env"), "SECRET=one\n");
     assert_eq!(
         fs::metadata(sb.path().join("p/big.bin")).unwrap().len(),
-        400_000
+        BIG_BYTES as u64
     );
     assert!(text(&out).contains("from the vault"), "{}", text(&out));
 

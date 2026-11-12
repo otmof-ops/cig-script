@@ -223,6 +223,7 @@ fn is_tin_object(rel: &str) -> bool {
     rel.starts_with("tin/objects/")
         || rel.starts_with("tin/recipes/")
         || rel.starts_with("tin/sealed/")
+        || rel.starts_with("tin/packs/")
 }
 
 fn rel_of(base: &Path, p: &Path) -> Option<String> {
@@ -424,13 +425,16 @@ pub fn write(target: &Target, since: Option<&str>) -> Result<Written, Error> {
         if sealed_obj {
             sealed += 1;
         }
+        // A pack's name is random and a live run appends to it: like a
+        // sealed object, it is always read and compared.
+        let named_by_hash = object && !sealed_obj && !rel.starts_with("tin/packs/");
         // A plain object is named by its hash: a parent holding that name
         // holds those bytes, so it is not read again. A sealed object's
         // name is random and a rekey rewrites it in place, so it is
         // always read and compared.
         let mut sha = String::new();
         let mut known = false;
-        if object && !sealed_obj {
+        if named_by_hash {
             if let Some(h) = held.get(&rel) {
                 sha = h.clone();
                 known = true;
@@ -929,6 +933,18 @@ pub fn verify_dir(dir: &Path, live: Option<&Path>) -> Result<Verified, Error> {
             problems.push(format!(
                 "{rel}: does not hash to what the manifest says (changed since it was written)"
             ));
+        } else if let Some(stem) = rel
+            .strip_prefix("tin/objects/")
+            .and_then(|r| r.rsplit('/').next())
+            .and_then(|n| n.strip_suffix(super::tin::ZST))
+        {
+            // Compressed: what it decompresses to is named by its hash.
+            let named = super::tin::unsqueeze_file(&p, None).is_ok_and(|b| sha_bytes(&b) == stem);
+            if !named {
+                problems.push(format!(
+                    "{rel}: an object is named by its own hash and this one does not decompress to it"
+                ));
+            }
         } else if rel.starts_with("tin/objects/") && rel.rsplit('/').next() != Some(sha.as_str()) {
             problems.push(format!(
                 "{rel}: an object is named by its own hash and this one is not"
@@ -1007,7 +1023,7 @@ pub fn verify_dir(dir: &Path, live: Option<&Path>) -> Result<Verified, Error> {
                         &c.sha256[..2.min(c.sha256.len())],
                         c.sha256
                     );
-                    if !present(&need) {
+                    if !present(&need) && !present(&format!("{need}{}", super::tin::ZST)) {
                         problems.push(format!("{rel}: chunk {} of {} ({}) is not in the parcel (an incomplete parcel)", i + 1, r.chunks.len(), &c.sha256[..12.min(c.sha256.len())]));
                     }
                 }
@@ -1261,6 +1277,16 @@ fn restore_from(dir: &Path, home: &Path, label: String) -> Result<Restored, Erro
         let src = locate(&v, rel).ok_or_else(|| {
             Error::Unverified(vec![format!("{rel}: nowhere in the parcel chain")])
         })?;
+        // A pack here that starts with the parcel's bytes is the same pack,
+        // grown since by the run that writes it: it is kept, never cut
+        // back to the older copy.
+        if rel.starts_with("tin/packs/") && dst.is_file() {
+            let (mine, theirs) = (fs::read(&dst)?, fs::read(&src)?);
+            if mine.starts_with(&theirs) {
+                present += 1;
+                continue;
+            }
+        }
         bytes += fs::metadata(&src)?.len();
         install(&src, &dst, is_tin_object(rel))?;
         written += 1;
