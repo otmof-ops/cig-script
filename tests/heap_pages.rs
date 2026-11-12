@@ -14,7 +14,8 @@
 //!
 //! Like `mmap_gate`, these run on a musl build (the Alpine CI job, or any
 //! musl host), or on the binary `CIG_MMAP_BIN` names. `CIG_REQUIRE_MMAP_GATE=1`
-//! turns a skip into a failure.
+//! turns a skip into a failure. The memory budget is held on an optimized
+//! binary only: the Alpine job builds one first and names it.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -213,6 +214,17 @@ fn a_hello_peaks_within_its_memory_budget() {
         eprintln!("hello memory budget skipped: not a musl build and CIG_MMAP_BIN is not set");
         return;
     };
+    // The budget is for the optimized binary, the one that ships. An
+    // unoptimized build's own code is several times larger, and a hello
+    // peaks near 20 MB on it whatever the heap does.
+    if std::env::var_os("CIG_MMAP_BIN").is_none() && cfg!(debug_assertions) {
+        assert!(
+            !required,
+            "the memory budget needs an optimized binary: build one and name it in CIG_MMAP_BIN"
+        );
+        eprintln!("hello memory budget skipped: an unoptimized build (set CIG_MMAP_BIN)");
+        return;
+    }
     let peak = peak_of(&cig, HELLO);
     assert!(
         peak <= HELLO_PEAK_BUDGET,

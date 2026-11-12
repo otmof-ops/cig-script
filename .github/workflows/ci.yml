@@ -149,13 +149,14 @@ jobs:
       - run: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
       - run: |
           . "$HOME/.cargo/env"
-          cargo test --workspace
-        # musl links mimalloc (#146): the mmap gate must run here, not skip
+          cargo build --release
+          CIG_MMAP_BIN="$PWD/target/release/cig" cargo test --workspace
+        # musl links mimalloc (#146): the mmap gate must run here, not skip. The gate and the
+        # heap's memory budget are held on the optimized binary, the one that ships.
         env:
           CIG_REQUIRE_MMAP_GATE: "1"
       - run: |
           . "$HOME/.cargo/env"
-          cargo build --release
           CIG="$PWD/target/release/cig" bash tests/portability/probe.sh | tee probe.txt
           ! grep -q '^FAIL' probe.txt
 
