@@ -8287,13 +8287,14 @@ fn verify_and_unburn_agree() {
             },
         ),
         ("a snapshot gone", Some("E703"), |sb, id, _| {
-            // Native before-states are tin objects; the run's own folder
-            // holds only what is sealed or a directory.
+            // Native before-states are in the tin: a small one is a record
+            // in a pack, a larger one an object of its own. The run's own
+            // folder holds only what is sealed or a directory.
             let snaps = sb.home().join("runs").join(id).join("snapshots");
             for e in fs::read_dir(&snaps).unwrap().flatten() {
                 fs::remove_file(e.path()).unwrap();
             }
-            for p in tin_objects(sb) {
+            for p in tin_objects(sb).into_iter().chain(tin_packs(sb)) {
                 force_remove(&p);
             }
         }),
@@ -12293,9 +12294,11 @@ fn doctor_reports_history_and_suggests_a_budget_when_off() {
 fn history_budget_counts_the_tin_and_collects_it() {
     let sb = Sandbox::new();
     let size = 60 * 1024;
-    sb.write("p/big.bin", &"0".repeat(size));
+    // Noise: the tin compresses what shrinks, and a file of one repeated
+    // digit would be kept in a few bytes, far less than its run's folder.
+    sb.write("p/big.bin", &noise_text(100, size));
     for k in 1..=4 {
-        sb.write(&format!("src{k}.bin"), &k.to_string().repeat(size));
+        sb.write(&format!("src{k}.bin"), &noise_text(k as u64, size));
         sb.write(
             &format!("s{k}.cig"),
             &format!("pack {{ \"./p\" }}\nburn {{\n  proc.run(\"cp\", [\"src{k}.bin\", \"p/big.bin\"], {{touches: [\"big.bin\"]}})\n}}\n"),
@@ -12330,9 +12333,16 @@ fn history_budget_counts_the_tin_and_collects_it() {
             .unwrap()
     };
     let history = history_of(&sb);
-    assert!(history >= 4 * size as u64, "the tin is counted: {history}");
+    // What the four kept files take in the tin, as it holds them (hex noise
+    // shrinks to about half): far more than the four runs' own folders.
+    let stored = tin_stored(&sb);
+    assert!(stored >= size as u64, "the kept files are large: {stored}");
+    assert!(
+        history >= stored,
+        "the tin is counted: {history} of history, {stored} in the tin"
+    );
     // A budget that one prune meets: the history less half an object.
-    let budget = history - (size as u64) / 2;
+    let budget = history - stored / 8;
     sb.run_ok(&["config", "history_budget", &budget.to_string()]);
     // The age floor holds by default: every run is seconds old.
     sb.run_ok(&["runs", "--prune", "100"]);
@@ -12362,7 +12372,7 @@ fn history_budget_counts_the_tin_and_collects_it() {
     // What is left still unburns, byte for byte: the three runs' objects
     // are all there.
     sb.run_ok(&["unburn", "--last", "3", "--yes"]);
-    assert_eq!(sb.read("p/big.bin"), "1".repeat(size));
+    assert_eq!(sb.read("p/big.bin"), noise_text(1, size));
 }
 
 /// #148: a hop's `skip` globs and the `hop_skip` setting leave paths out of
