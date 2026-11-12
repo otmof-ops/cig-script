@@ -1135,17 +1135,20 @@ mod linux {
     // ---- the ptrace route ----
 
     #[cfg(target_arch = "x86_64")]
-    fn syscall_of(r: &[u64; 64]) -> (i64, [u64; 6]) {
-        (r[15] as i64, [r[14], r[13], r[12], r[7], r[9], r[8]])
+    fn syscall_of(r: &[u64; 64]) -> (libc::c_long, [u64; 6]) {
+        (
+            r[15] as libc::c_long,
+            [r[14], r[13], r[12], r[7], r[9], r[8]],
+        )
     }
 
     #[cfg(target_arch = "aarch64")]
-    fn syscall_of(r: &[u64; 64]) -> (i64, [u64; 6]) {
-        (r[8] as i64, [r[0], r[1], r[2], r[3], r[4], r[5]])
+    fn syscall_of(r: &[u64; 64]) -> (libc::c_long, [u64; 6]) {
+        (r[8] as libc::c_long, [r[0], r[1], r[2], r[3], r[4], r[5]])
     }
 
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-    fn syscall_of(_r: &[u64; 64]) -> (i64, [u64; 6]) {
+    fn syscall_of(_r: &[u64; 64]) -> (libc::c_long, [u64; 6]) {
         (-1, [0; 6])
     }
 
