@@ -63,6 +63,8 @@ project follows semantic versioning.
   `the_vm_and_the_interpreter_agree_on_every_operator`,
   `the_step_budget_stops_at_the_same_step` and
   `a_verified_module_never_panics`.
+  The library re-exports the bytecode crate as `cigscript::cig_bytecode`,
+  so a compiler builds modules with the copy of the crate the VM loads.
 
 ## 1.21.0 — 2026-11-12
 
