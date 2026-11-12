@@ -3,7 +3,14 @@
 All notable changes to CigScript. The format follows Keep a Changelog; the
 project follows semantic versioning.
 
-## Unreleased
+## 1.21.0 — 2026-11-12
+
+The burn kernel's throughput, the box's watch with decoys and
+`pass_reads`, a faster tree-walker, cig bench's whole toolkit, the
+whole-tin parcel and the vault, the move to FSL-1.1-ALv2, and cig
+handing install, update, uninstall and crash reports over to
+`ciginstaller` (#105, #106, #141, #145, #146, #147, #148, #149, #179,
+#184).
 
 - **Burn kernel throughput: native snapshots in the tin, a group sync, opt-in compressed journals** (#147).
   An overwrite's before-state now goes into the tin as a hop's does: files under 2 MiB as one whole-file object named by its hash; files 2 MiB and above as content-defined chunks under a recipe, deduplicated. The threshold rose from 64 KiB to 2 MiB because the bench measured chunking below that as pure overhead (one or a few chunks per file, a recipe per entry, two opens per restore against one for a whole object) on workloads where the overwrites were new bytes. Runs written before still unburn: `materialize` reads both forms. The flushes of these snapshots are grouped (64 snapshots or 10 ms, and before a process runs, the run record, and close) while the journal's own sync stays per line; `CIG_SNAPSHOT_SYNC=op` restores the per-op flush. A finished run's journal stays as `runs/<id>/journal.jsonl` (the documented layout); `CIG_JOURNAL_ZST=on` stores it compressed as `journal.jsonl.zst`, and the chain is checked through the stream either way. An unburn's "restored" markers are now written in one batch and synced once at the end (the restore they describe already happened); a crash between an unflushed marker and the sync redoes the restore on the next unburn and never writes wrong bytes. The chunked restore path's `fsync` became `fdatasync` (the file is freshly created, so the size metadata is flushed with the data), and the chunk hash on restore folds into the whole-file hash check in the same pass instead of being done twice. New crates: `zstd`, `zstd-safe`, `zstd-sys` (BSD-3-Clause, with the zstd library the last builds from C source) and `jobserver` (Apache-2.0 OR MIT); THIRD-PARTY-NOTICES.md is regenerated. Also fixed: loading a journal, marking entries restored and checking a run before an unburn each walked every entry per entry (quadratic in the run's length).
@@ -380,7 +387,7 @@ project follows semantic versioning.
   rewrite, no `fsync`). A write through a writable `mmap` raises no
   notification, which is why `hop_watch` is opt-in.
 
-- **License: FSL-1.1-ALv2 from the next release.** The code moves from Apache-2.0 to
+- **License: FSL-1.1-ALv2.** The code moves from Apache-2.0 to
   the Functional Source License 1.1 with an Apache-2.0 future license: free to
   use, study, change and share, not to sell or to offer in a competing
   product or service, and each version becomes Apache-2.0 two years after it

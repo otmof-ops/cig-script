@@ -1,6 +1,6 @@
 [package]
 name = "cigscript"
-version = "1.20.0"
+version = "1.21.0"
 edition = "2021"
 rust-version = "1.82"
 description = "CigScript: a small scripting language where nothing real happens unless you burn"
