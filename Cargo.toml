@@ -48,6 +48,7 @@ keyring = { version = "3.6", default-features = false, features = ["apple-native
 tar = "0.4"
 flate2 = "1"
 cig-pass = { path = "crates/cig-pass", version = "0.1.0" }
+cig-bytecode = { path = "crates/cig-bytecode", version = "0.1.0" }
 blake3 = { version = "1", features = ["pure"] }
 zstd = { version = "0.13", default-features = false }
 

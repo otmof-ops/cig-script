@@ -46,4 +46,4 @@ pub use module::{
 pub use opcode::{Op, OpInfo, OperandKind};
 pub use parse::parse_module;
 pub use serialize::serialize_module;
-pub use verify::verify_module;
+pub use verify::{verify_module, Verified};

@@ -44,6 +44,25 @@ project follows semantic versioning.
   checks. Nothing in the tree executes this bytecode yet; the format
   contract is `docs/BYTECODE.md`. The error registry's `E1050`
   entry gains a bytecode-verify cause.
+- **The bytecode VM's core** (cig-compile#31, stage B). `src/vm/` runs
+  a verified bytecode module: moves and constants, arithmetic,
+  comparison and logic, jumps and the fused compare-and-jumps, calls
+  of functions with no captured values, builtin calls by catalogue
+  index, tail calls, the step budget and error positions from each
+  function's line table. Every operator, builtin call, step and depth
+  check goes through the interpreter's own code (the operators now
+  live in `interp::ops`, which the tree-walker calls too), so a
+  program stops on the same step, with the same code, message and
+  line, under both. `cig_bytecode::verify_module` now returns a
+  `Verified` wrapper, the only thing the VM loads; loading refuses an
+  unknown builtin index or burn-op kind with `E1050`. The
+  instructions of later packages stop with an internal error that
+  names them. Nothing runs a program on the VM yet: the lowering and
+  the payload that carries bytecode come later. Tests:
+  `cargo test --lib vm::`, among them
+  `the_vm_and_the_interpreter_agree_on_every_operator`,
+  `the_step_budget_stops_at_the_same_step` and
+  `a_verified_module_never_panics`.
 
 ## 1.21.0 — 2026-11-12
 

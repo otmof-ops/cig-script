@@ -279,7 +279,7 @@ followed by `TESTN`, not a swapped operand pair.
 | `pack` A, B | ABC | `pack(R(A..A+B))` (once, before any burn) |
 | `exhale` A, B | ABC | `exhale(R(A..A+B))` |
 | `chain.make` A, B | ABC | `R(A) = chain(R(A+1..A+1+B))` |
-| `steps` Bx | ABx | charge the step budget by `Bx` ticks |
+| `steps` A, Bx | ABx | set the frame's loop nesting to `A`, then charge the step budget by `Bx` ticks ("How the VM reads it" says where a lowering puts one) |
 
 ## Jump semantics (one rule)
 
@@ -416,6 +416,68 @@ refuses the module (or the call) with the interpreter's own error.
   index inside the parent's `reg_count`, a parent-upvalue capture
   inside the parent's upvalue count. The module's top-level
   function has no parent, so it has no upvalues.
+
+## How the VM reads it
+
+The VM core (`src/vm/`) settles these points the tables above leave
+open. A lowering writes to them.
+
+- **Only a verified module runs.** `verify_module` returns a
+  `Verified`, which nothing else can make, and `vm::load` takes only
+  that. `vm::refusal` words a `VerifyError` as the `E1050` above.
+- **Load-time checks.** Every function is decoded once, through
+  `crate::instr::decode`, into a table by pc. A `callb` index past the
+  builtin catalogue refuses the module with `E1050` (`unknown-builtin
+  at fn<i>+<pc>`), and so does a `burn.op` kind past the burn-op
+  catalogue (`unknown-burn-op`).
+- **The builtin catalogue** is `stdlib::builtin_catalogue()`: the
+  global functions, then the functions of `fs`, `path`, `json`,
+  `text`, `proc`, `time`, `hash`, `cig`, `pass`, `math`, `env`, `csv`
+  and `log`, each in its table's order. An index is valid for the cig
+  the program was compiled against.
+- **Positions.** An error at a pc takes its position from the line
+  row at that pc; a pc with no row takes the nearest row before it,
+  and a pc before every row takes `span_base`. A lowering gives a row
+  to every pc whose error the interpreter positions differently from
+  the instruction before it.
+- **The step budget.** `steps A, Bx` sets the frame's loop nesting to
+  `A`, then counts `Bx` steps one at a time on the interpreter's
+  counter, each checked against the budget with the pc's position.
+  The interpreter's loop depth (which picks the wording of `E515`) is
+  the sum of the nestings of the frames on the stack. To stop on the
+  same step and line as the tree-walker, a lowering emits `steps k, 1`
+  where the tree-walker counts a step (each statement, at the
+  statement's span; each turn of a `while` after its condition holds,
+  and each item of a `for`, at the loop's span), `steps k, 0` where a
+  loop starts (before its condition, with `k` the nesting inside it)
+  and `steps k-1, 0` where it ends (the nesting outside it).
+  A `steps` with `Bx > 1` stops at that one instruction, so folding is
+  exact only where nothing between the folded steps can be observed.
+- **`loop`** is a back-edge jump. It counts nothing; the step a loop
+  turn costs is the `steps` on the loop's path. A cycle with no
+  `steps` on it never meets the budget.
+- **Operators.** Every arithmetic and comparison instruction calls the
+  interpreter's own operator (`interp::ops`). `pow`/`powk` are
+  `math.pow`: CigScript has no power operator. There is no `gt` or
+  `ge`: `a > b` is `le a, b` then `not`, and `a >= b` is `lt a, b`
+  then `not` (or the fused jump with the branches swapped). Keeping
+  the operand order keeps the interpreter's `E403` wording (`cannot
+  compare int and string`); ordering a NaN is an error either way.
+- **Calls.** `call A, B, C` with a compiled function in `R(A)` checks
+  the arity (`E401`) and the depth (`E506`, at 4000) as the
+  interpreter does, then runs the callee in a new frame whose `R(0..B)`
+  are the arguments. Anything else in `R(A)` (a builtin, a module, a
+  number) goes to the interpreter's own call. The result goes to
+  `R(A)`; `R(A+1..A+C+1)`, the rest of the row's window, is set to
+  null. `tailcall` reuses the frame, and still counts one call of
+  depth and keeps the replaced frame's loop nesting until the chain
+  returns, so `E506` and `E515` read as they would after a plain call.
+- **`closure`** of a child with no upvalues makes a function value
+  (`<pull name>`, or `<pack>` for a lambda). A child with upvalues,
+  and every instruction of the closures, data, `try`, burn, `pack`,
+  `exhale`, chain and iteration groups, stops with an internal error
+  that names the instruction until the package that builds it lands
+  (`vm::NOT_BUILT` lists them).
 
 ## Versioning
 

@@ -95,6 +95,34 @@ pub fn prelude() -> Vec<(&'static str, Value)> {
     out
 }
 
+/// The builtin catalogue a bytecode `callb` indexes (cig-compile#31): the
+/// global functions, then each module's functions in the order the
+/// prelude declares the modules. An index is valid for the cig it was
+/// compiled against; the VM refuses a module naming an index past the
+/// end (E1050) when it loads it.
+pub fn builtin_catalogue() -> &'static [&'static Builtin] {
+    static CATALOGUE: std::sync::OnceLock<Vec<&'static Builtin>> = std::sync::OnceLock::new();
+    CATALOGUE.get_or_init(|| {
+        let tables: [&'static [Builtin]; 14] = [
+            core::GLOBALS,
+            fs::TABLE,
+            path::TABLE,
+            json::TABLE,
+            text::TABLE,
+            proc::TABLE,
+            time::TABLE,
+            hash::TABLE,
+            cig::TABLE,
+            pass::TABLE,
+            math::TABLE,
+            env::TABLE,
+            csv::TABLE,
+            log::TABLE,
+        ];
+        tables.iter().flat_map(|t| t.iter()).collect()
+    })
+}
+
 /// Label for an ad-hoc chain step, for the interpreter.
 pub fn chain_label(v: &Value, index: usize) -> String {
     chain::label_for(v, index)

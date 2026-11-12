@@ -19,14 +19,38 @@ use crate::module::{
 };
 use crate::opcode::{Fmt, Op, OperandKind};
 
-/// Verify a module. Returns the first failing rule, or `Ok(())` when
-/// every rule holds.
-pub fn verify_module(m: &Module) -> Result<(), VerifyError> {
+/// A module the verifier has accepted.
+///
+/// Only [`verify_module`] makes one: the field is private and there is
+/// no other constructor, so a VM that accepts nothing but a `Verified`
+/// cannot be handed a module that skipped the verifier.
+///
+/// ```compile_fail
+/// use cig_bytecode::{Module, Verified};
+/// let m = Module::empty("x.cig");
+/// let v = Verified { module: &m }; // private field: does not compile
+/// ```
+#[derive(Clone, Copy, Debug)]
+pub struct Verified<'m> {
+    module: &'m Module,
+}
+
+impl<'m> Verified<'m> {
+    /// The module the verifier accepted.
+    pub fn module(&self) -> &'m Module {
+        self.module
+    }
+}
+
+/// Verify a module. Returns the first failing rule, or the module
+/// wrapped as [`Verified`] when every rule holds.
+pub fn verify_module(m: &Module) -> Result<Verified<'_>, VerifyError> {
     // Depth-first walk, assigning a running id for the error's `func`
     // field. The id is a pre-order index: 0 is main, each child
     // continues the sequence.
     let mut counter = 0u32;
-    verify_function(&m.main, None, &mut counter, 0)
+    verify_function(&m.main, None, &mut counter, 0)?;
+    Ok(Verified { module: m })
 }
 
 fn verify_function(

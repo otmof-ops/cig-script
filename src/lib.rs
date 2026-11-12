@@ -40,6 +40,7 @@ pub mod trial;
 pub mod tripwire;
 pub mod update;
 pub mod value;
+pub mod vm;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
