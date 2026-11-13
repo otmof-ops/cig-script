@@ -736,6 +736,14 @@ open. A lowering writes to them.
   before `pack` runs; the tree-walker checks each as soon as it is
   evaluated, so a lowering whose later roots have effects keeps that in
   mind.
+- **`getindex A, B, C`** may be followed by one `nop`, whose row is the
+  index's position: a wrong index type for the object (a list or a string
+  and not an int, a map and not a string) is raised there, and every other
+  error at the instruction's own. **`setindex A, B, C`** may be followed by
+  two: a wrong index type for a list or a map is raised at the first, an
+  object that is neither a list nor a map at the second, and every other
+  error at the instruction's own; without them everything is at the
+  instruction's. The run goes on past them.
 - **`chain.make A, B`** builds the chain `chain name { steps }` declares:
   `R(A+1)` is its name (a string), then a pair per step, the step's label
   (its name in the source for an identifier or a member, else null) and

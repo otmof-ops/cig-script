@@ -1028,7 +1028,7 @@ impl Machine<'_> {
             Op::GETINDEX => {
                 let obj = self.stack.get(r(d.b_u))?;
                 let idx = self.stack.get(r(d.c))?;
-                match (obj, idx) {
+                let v = match (obj, idx) {
                     (Value::List(list), Value::Int(i)) => {
                         let at = usize::try_from(*i).ok()?;
                         list.try_borrow().ok()?.get(at)?.clone()
@@ -1037,7 +1037,9 @@ impl Machine<'_> {
                         map.try_borrow().ok()?.get(&**key)?.clone()
                     }
                     _ => return None,
-                }
+                };
+                *self.stack.get_mut(r(d.a))? = v;
+                return Some(past_nops(proto, next, 1));
             }
             Op::GETFIELD => {
                 let Value::Map(map) = self.stack.get(r(d.b_u))? else {
@@ -1079,7 +1081,7 @@ impl Machine<'_> {
                 let old = std::mem::replace(slot, v);
                 drop(list);
                 drop(old);
-                return Some(next);
+                return Some(past_nops(proto, next, 2));
             }
             _ => return None,
         };
@@ -1536,17 +1538,29 @@ impl Machine<'_> {
                     .ok_or_else(|| broken("a pc past the function", span))?;
                 set_field(&obj, &name, v, hint, span)?;
             }
+            // A trailing `nop` gives the index its position, a second one
+            // the object's (`setindex`): `index` and `set_index` raise a
+            // wrong index type there, and a store into what is not a list
+            // or a map at the object's, as the tree-walker does. The run
+            // goes on past them.
             Op::GETINDEX => {
                 let obj = self.get(base, d.b_u, span)?;
                 let idx = self.get(base, d.c, span)?;
-                let v = self.interp.index(obj, idx, span, span)?;
+                let at = part_spans(proto, next, 1, span);
+                let idx_span = at.first().copied().unwrap_or(span);
+                let v = self.interp.index(obj, idx, span, idx_span)?;
                 self.set(base, d.a, v, span)?;
+                return Ok(Flow::Next(past_nops(proto, next, 1)));
             }
             Op::SETINDEX => {
                 let obj = self.get(base, d.a, span)?;
                 let idx = self.get(base, d.b_u, span)?;
                 let v = self.get(base, d.c, span)?;
-                set_index(&obj, &idx, v, span, span, span)?;
+                let at = part_spans(proto, next, 2, span);
+                let idx_span = at.first().copied().unwrap_or(span);
+                let obj_span = at.get(1).copied().unwrap_or(span);
+                set_index(&obj, &idx, v, span, idx_span, obj_span)?;
+                return Ok(Flow::Next(past_nops(proto, next, 2)));
             }
 
             _ => return Err(broken("an instruction sent to the wrong group", span).into()),
@@ -2324,4 +2338,16 @@ fn field_index(
     let i = map.get_index_of(name)?;
     hint.set(u32::try_from(i).unwrap_or(0));
     Some(i)
+}
+
+/// The pc after the instruction ending at `next` and the run of at most
+/// `max` `nop`s right after it, which carry its parts' positions and do
+/// nothing when run.
+#[inline(always)]
+fn past_nops(proto: &Proto, next: usize, max: usize) -> usize {
+    let mut pc = next;
+    while pc < next + max && matches!(proto.code.get(pc), Some(Some(d)) if d.op == Op::NOP) {
+        pc += 1;
+    }
+    pc
 }
