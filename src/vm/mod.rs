@@ -29,8 +29,8 @@
 //! one decoder), with each function's constants made into values and each
 //! pc's source position read from its line table. Loading also checks
 //! what the verifier cannot know: every `callb` index against the builtin
-//! catalogue and every `burn.op` kind against the burn-op catalogue, both
-//! refused with E1050.
+//! catalogue, every `loadg` name against the prelude and every `burn.op`
+//! kind against the burn-op catalogue, each refused with E1050.
 //!
 //! Captured variables live in cells. A register can carry a cell (after
 //! `cellnew`): every read of that register reads the cell and every write
@@ -39,9 +39,18 @@
 //! carries one shares it, capturing a plain register gives the closure a
 //! cell of its own holding a copy, and capturing an upvalue shares that.
 //!
-//! The instructions of later packages (`try`, burns, `pack`, chains) stop
-//! with one internal error that names the instruction; [`NOT_BUILT`] lists
-//! them.
+//! An error raised anywhere (an instruction, a builtin, a callee, a
+//! callback) is offered to the tries open in the frame that raised it, then
+//! in each caller at the pc of its call, innermost first, by the
+//! tree-walker's rule: a catch takes any error unless `exit()` was asked
+//! for, a finally runs on every way out, and a finally's own error, `break`,
+//! `continue` or `snuff` replaces what was pending. The error keeps the
+//! position it was raised at, as the tree-walker's does: there is no other
+//! frame list to print. `throw` is the interpreter's `cough`, and `loadg`
+//! reads a builtin, a module or `args` from the interpreter's own prelude.
+//!
+//! The instructions of later packages (burns, `pack`, chains) stop with one
+//! internal error that names the instruction; [`NOT_BUILT`] lists them.
 
 #![forbid(unsafe_code)]
 #![cfg_attr(
@@ -56,14 +65,16 @@
 
 use crate::diagnostics::{internal, usage, Diagnostic};
 use crate::interp::ops::{binary, fast_binary, negate, range_fits};
-use crate::interp::{arity_mismatch, exhale_part, map_key, set_field, set_index, Interp};
+use crate::interp::{
+    arity_mismatch, error_value, exhale_part, map_key, set_field, set_index, Interp,
+};
 use crate::syntax::ast::BinOp;
 use crate::syntax::span::Span;
 use crate::value::{Builtin, FnBody, Function, Value};
 use cig_bytecode::instr::walk;
 use cig_bytecode::{
-    Constant, DecodedInstr, FuncKind, Function as BcFunction, LineEntry, Op, SpanBase, UpvalDesc,
-    UpvalKind, Verified, VerifyError,
+    Constant, DecodedInstr, FuncKind, Function as BcFunction, HandlerEntry, LineEntry, Op,
+    SpanBase, UpvalDesc, UpvalKind, Verified, VerifyError, RESERVED_U32,
 };
 use indexmap::IndexMap;
 use std::cell::RefCell;
@@ -89,10 +100,7 @@ pub const BURN_OP_KINDS: [&str; 9] = [
 
 /// The instructions this VM does not run yet: each stops with an internal
 /// error that names it. A later package builds them, one at a time.
-pub const NOT_BUILT: [Op; 10] = [
-    Op::TRY_ENTER,
-    Op::TRY_LEAVE,
-    Op::THROW,
+pub const NOT_BUILT: [Op; 7] = [
     Op::BURN_ENTER,
     Op::BURN_OP,
     Op::BURN_LEAVE,
@@ -131,6 +139,8 @@ struct Proto {
     consts: Vec<Value>,
     /// Indices into [`Program::funcs`] of this function's children.
     children: Vec<usize>,
+    /// The function's try/catch/finally regions, as the module has them.
+    handlers: Vec<HandlerEntry>,
 }
 
 /// A variable a closure shares with the function that made it.
@@ -197,15 +207,37 @@ fn broken(what: &str, span: Span) -> Diagnostic {
 /// kind).
 pub fn load(v: Verified<'_>) -> Result<Rc<Program>, Diagnostic> {
     let catalogue = crate::stdlib::builtin_catalogue();
+    let names = prelude_names();
+    let known = Known {
+        builtins: catalogue.len(),
+        prelude: &names,
+    };
     let mut funcs = Vec::new();
-    flatten(&v.module().main, &mut funcs, catalogue.len())?;
+    flatten(&v.module().main, &mut funcs, &known)?;
     let pow = catalogue.iter().copied().find(|b| b.name == "math.pow");
     Ok(Rc::new(Program { funcs, pow }))
 }
 
+/// The names `loadg` may load: the interpreter's prelude (its global
+/// builtins and its modules) and `args`.
+pub fn prelude_names() -> Vec<&'static str> {
+    let mut names: Vec<&'static str> = crate::stdlib::prelude()
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
+    names.push("args");
+    names
+}
+
+/// What a module's operands may name beyond what the verifier checks.
+struct Known<'a> {
+    builtins: usize,
+    prelude: &'a [&'static str],
+}
+
 /// Append `f` and then its children, recursively, in the verifier's
 /// pre-order. The verifier bounds the nesting at 64 levels.
-fn flatten(f: &BcFunction, out: &mut Vec<Proto>, n_builtins: usize) -> Result<usize, Diagnostic> {
+fn flatten(f: &BcFunction, out: &mut Vec<Proto>, known: &Known<'_>) -> Result<usize, Diagnostic> {
     let index = out.len();
     let mut code: Vec<Option<DecodedInstr>> = vec![None; f.instrs.len()];
     for d in walk(&f.instrs) {
@@ -215,8 +247,17 @@ fn flatten(f: &BcFunction, out: &mut Vec<Proto>, n_builtins: usize) -> Result<us
             ))
         })?;
         match d.op {
-            Op::CALLB if d.b_u as usize >= n_builtins => {
+            Op::CALLB if d.b_u as usize >= known.builtins => {
                 return Err(refused("unknown-builtin", index, d.pc));
+            }
+            Op::LOADG => {
+                let named = match f.constants.get(d.b_u as usize) {
+                    Some(Constant::Str(s)) => known.prelude.contains(&s.as_str()),
+                    _ => false,
+                };
+                if !named {
+                    return Err(refused("unknown-prelude-name", index, d.pc));
+                }
             }
             Op::BURN_OP => {
                 let kind = if d.wide { d.c & 0xFF } else { d.c & 0x0F };
@@ -240,11 +281,12 @@ fn flatten(f: &BcFunction, out: &mut Vec<Proto>, n_builtins: usize) -> Result<us
         spans: spans(&f.span_base, &f.lines, f.instrs.len()),
         consts: f.constants.iter().map(constant).collect(),
         children: Vec::new(),
+        handlers: f.handlers.clone(),
     };
     out.push(proto);
     let mut children = Vec::with_capacity(f.children.len());
     for c in &f.children {
-        children.push(flatten(c, out, n_builtins)?);
+        children.push(flatten(c, out, known)?);
     }
     if let Some(p) = out.get_mut(index) {
         p.children = children;
@@ -369,12 +411,14 @@ fn run_frame(
     m.frames.push(Frame {
         func: index,
         pc: 0,
+        site: 0,
         base: 0,
         ret: None,
         held_calls: 0,
         nest: 0,
         held_nest: 0,
         upvals,
+        tries: Vec::new(),
     });
     let result = m.exec(program);
     // Whatever stopped the run, the interpreter's depth and loop counters
@@ -396,6 +440,10 @@ struct Ret {
 struct Frame {
     func: usize,
     pc: usize,
+    /// The pc of the call this frame is waiting on (`pc` is where it goes
+    /// on after it): where an error from the callee is offered to this
+    /// frame's tries.
+    site: usize,
     /// The frame's `R(0)` in the register stack.
     base: usize,
     ret: Option<Ret>,
@@ -408,6 +456,36 @@ struct Frame {
     held_nest: u32,
     /// The running closure's upvalues.
     upvals: Rc<[Cell]>,
+    /// The tries open in this frame, innermost last.
+    tries: Vec<Open>,
+}
+
+/// A try the frame has entered and not yet left.
+struct Open {
+    /// Index into the function's handlers.
+    handler: usize,
+    /// The frame's loop nesting at `try.enter`: what the catch and the
+    /// finally run at.
+    nest: u32,
+    stage: Stage,
+    /// What the finally goes on to when it ends.
+    pending: Pending,
+    /// The cough payload the finally set aside, given back when it ends.
+    payload: Option<Value>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Stage {
+    Body,
+    Catch,
+    Finally,
+}
+
+enum Pending {
+    /// Go on at this pc.
+    Next(usize),
+    /// Raise this error again, as it was.
+    Raise(Diagnostic),
 }
 
 struct Machine<'i> {
@@ -542,6 +620,17 @@ impl Machine<'_> {
 
     fn exec(&mut self, program: &Rc<Program>) -> Result<Value, Diagnostic> {
         loop {
+            match self.turn(program) {
+                Ok(Some(v)) => return Ok(v),
+                Ok(None) => {}
+                Err(e) => self.unwind(program, e)?,
+            }
+        }
+    }
+
+    /// Run one instruction. `Some(v)` when the entry frame returned `v`.
+    fn turn(&mut self, program: &Rc<Program>) -> Result<Option<Value>, Diagnostic> {
+        {
             let (fi, pc, base) = match self.frames.last() {
                 Some(f) => (f.func, f.pc, f.base),
                 None => return Err(broken("an empty call stack", Span::default())),
@@ -565,15 +654,50 @@ impl Machine<'_> {
                 }
                 Flow::Return(v) => {
                     if let Some(v) = self.ret(v, span)? {
-                        return Ok(v);
+                        return Ok(Some(v));
                     }
                 }
                 Flow::Switched => {}
             }
         }
+        Ok(None)
     }
 
+    /// Run one instruction. The groups are functions of their own, so the
+    /// frame each re-entry (a builtin calling back into the VM) leaves on
+    /// the Rust stack is a small one: `step` and the group it went to.
     fn step(
+        &mut self,
+        program: &Rc<Program>,
+        proto: &Proto,
+        d: &DecodedInstr,
+        base: usize,
+        span: Span,
+    ) -> Result<Flow, Diagnostic> {
+        match d.op {
+            Op::CALL | Op::CALLB | Op::CALLM | Op::RET | Op::TAILCALL | Op::CLOSURE => {
+                self.call_op(program, proto, d, base, span)
+            }
+            Op::GETUP | Op::CELLGET | Op::SETUP | Op::CELLSET | Op::CELLNEW => {
+                self.cell_op(d, base, span)
+            }
+            Op::EXHALE | Op::INTERP => self.text_op(d, base, span),
+            Op::FORPREP | Op::FORLOOP | Op::ITERPREP | Op::ITERNEXT => self.loop_op(d, base, span),
+            Op::NEWLIST
+            | Op::NEWMAP
+            | Op::APPENDLIST
+            | Op::INSERTMAP
+            | Op::GETFIELD
+            | Op::SETFIELD
+            | Op::GETINDEX
+            | Op::SETINDEX => self.data_op(proto, d, base, span),
+            Op::TRY_ENTER | Op::TRY_LEAVE | Op::THROW => self.try_op(proto, d, base, span),
+            _ => self.basic_op(program, proto, d, base, span),
+        }
+    }
+
+    /// Moves, constants, operators, jumps and the step budget.
+    fn basic_op(
         &mut self,
         program: &Rc<Program>,
         proto: &Proto,
@@ -585,7 +709,6 @@ impl Machine<'_> {
         let next = pc + d.width as usize;
         match d.op {
             Op::NOP => {}
-
             // ----- moves and constants ---------------------------------------
             Op::MOV => {
                 let v = self.get(base, d.b_u, span)?;
@@ -598,6 +721,12 @@ impl Machine<'_> {
             Op::LOADNULL => self.set(base, d.a, Value::Null, span)?,
             Op::LOADBOOL => self.set(base, d.a, Value::Bool(d.b_u != 0), span)?,
             Op::LOADINT => self.set(base, d.a, Value::Int(i64::from(d.b_s)), span)?,
+            Op::LOADG => {
+                let v = self
+                    .interp
+                    .prelude_value(&name(proto, d.b_u, span)?, span)?;
+                self.set(base, d.a, v, span)?;
+            }
 
             // ----- arithmetic, comparison, logic ------------------------------
             Op::ADD | Op::SUB | Op::MUL | Op::DIV | Op::MOD | Op::EQ | Op::LT | Op::LE => {
@@ -666,18 +795,31 @@ impl Machine<'_> {
 
             // ----- the step budget ------------------------------------------------
             Op::STEPS => {
-                let nest = d.a;
-                if let Some(f) = self.frames.last_mut() {
-                    let depth = self.interp.loop_depth.saturating_sub(f.nest);
-                    self.interp.loop_depth = depth.saturating_add(nest);
-                    f.nest = nest;
-                }
+                self.set_nest(d.a);
                 for _ in 0..d.b_u {
                     self.interp.tick(span)?;
                 }
             }
 
-            // ----- calls ------------------------------------------------------------
+            Op::WIDE => return Err(broken("a bare `wide`", span)),
+
+            op => return Err(not_built(op, span)),
+        }
+        Ok(Flow::Next(next))
+    }
+
+    /// Calls, returns and `closure`.
+    fn call_op(
+        &mut self,
+        program: &Rc<Program>,
+        proto: &Proto,
+        d: &DecodedInstr,
+        base: usize,
+        span: Span,
+    ) -> Result<Flow, Diagnostic> {
+        let pc = d.pc as usize;
+        let next = pc + d.width as usize;
+        match d.op {
             Op::CALL => {
                 let callee = self.get(base, d.a, span)?;
                 let args = self.window(base, d.a + 1, d.b_u, span)?;
@@ -686,10 +828,12 @@ impl Machine<'_> {
                     extra: d.c as usize,
                 };
                 if let Some((f, cf)) = compiled(&callee, program) {
-                    if let Some(caller) = self.frames.last_mut() {
-                        caller.pc = next;
-                    }
                     self.push(program, f, cf, args, ret, span)?;
+                    let caller = self.frames.len().checked_sub(2);
+                    if let Some(caller) = caller.and_then(|i| self.frames.get_mut(i)) {
+                        caller.pc = next;
+                        caller.site = pc;
+                    }
                     return Ok(Flow::Switched);
                 }
                 let v = self.interp.call(&callee, args, span)?;
@@ -717,6 +861,13 @@ impl Machine<'_> {
                 }
                 let v = self.interp.call(&callee, args, span)?;
                 return Ok(Flow::Return(v));
+            }
+            Op::CALLM => {
+                let recv = self.get(base, d.a, span)?;
+                let name = name(proto, d.b_u, span)?;
+                let args = self.window(base, d.a + 1, d.c, span)?;
+                let v = self.interp.call_method(recv, &name, args, span)?;
+                self.set(base, d.a, v, span)?;
             }
             Op::CLOSURE => {
                 let child = proto
@@ -746,7 +897,15 @@ impl Machine<'_> {
                 self.set(base, d.a, Value::Func(Rc::new(f)), span)?;
             }
 
-            // ----- closures and cells ---------------------------------------------
+            _ => return Err(broken("an instruction sent to the wrong group", span)),
+        }
+        Ok(Flow::Next(next))
+    }
+
+    /// Upvalues and cells.
+    fn cell_op(&mut self, d: &DecodedInstr, base: usize, span: Span) -> Result<Flow, Diagnostic> {
+        let next = d.pc as usize + d.width as usize;
+        match d.op {
             Op::GETUP | Op::CELLGET => {
                 let v = self.upval(d.b_u, span)?.borrow().clone();
                 self.set(base, d.a, v, span)?;
@@ -765,7 +924,15 @@ impl Machine<'_> {
                 *slot = Some(Rc::new(RefCell::new(v)));
             }
 
-            // ----- output and text ------------------------------------------------
+            _ => return Err(broken("an instruction sent to the wrong group", span)),
+        }
+        Ok(Flow::Next(next))
+    }
+
+    /// `exhale` and `interp`.
+    fn text_op(&mut self, d: &DecodedInstr, base: usize, span: Span) -> Result<Flow, Diagnostic> {
+        let next = d.pc as usize + d.width as usize;
+        match d.op {
             Op::EXHALE => {
                 let values = self.window(base, d.a, d.b_u, span)?;
                 let mut line = String::new();
@@ -783,7 +950,16 @@ impl Machine<'_> {
                 self.set(base, d.a, Value::str(s), span)?;
             }
 
-            // ----- loops ----------------------------------------------------------
+            _ => return Err(broken("an instruction sent to the wrong group", span)),
+        }
+        Ok(Flow::Next(next))
+    }
+
+    /// The loop instructions.
+    fn loop_op(&mut self, d: &DecodedInstr, base: usize, span: Span) -> Result<Flow, Diagnostic> {
+        let pc = d.pc as usize;
+        let next = pc + d.width as usize;
+        match d.op {
             Op::FORPREP => {
                 let (start, turns) = self.for_window(base, d.a, span)?;
                 if turns == 0 {
@@ -837,7 +1013,21 @@ impl Machine<'_> {
                 }
             }
 
-            // ----- lists and maps -------------------------------------------------
+            _ => return Err(broken("an instruction sent to the wrong group", span)),
+        }
+        Ok(Flow::Next(next))
+    }
+
+    /// Lists and maps.
+    fn data_op(
+        &mut self,
+        proto: &Proto,
+        d: &DecodedInstr,
+        base: usize,
+        span: Span,
+    ) -> Result<Flow, Diagnostic> {
+        let next = d.pc as usize + d.width as usize;
+        match d.op {
             Op::NEWLIST => {
                 self.set(
                     base,
@@ -896,19 +1086,200 @@ impl Machine<'_> {
                 let v = self.get(base, d.c, span)?;
                 set_index(&obj, &idx, v, span, span, span)?;
             }
-            Op::CALLM => {
-                let recv = self.get(base, d.a, span)?;
-                let name = name(proto, d.b_u, span)?;
-                let args = self.window(base, d.a + 1, d.c, span)?;
-                let v = self.interp.call_method(recv, &name, args, span)?;
-                self.set(base, d.a, v, span)?;
-            }
 
-            Op::WIDE => return Err(broken("a bare `wide`", span)),
-
-            op => return Err(not_built(op, span)),
+            _ => return Err(broken("an instruction sent to the wrong group", span)),
         }
         Ok(Flow::Next(next))
+    }
+
+    /// `try.enter`, `try.leave` and `throw`.
+    fn try_op(
+        &mut self,
+        proto: &Proto,
+        d: &DecodedInstr,
+        base: usize,
+        span: Span,
+    ) -> Result<Flow, Diagnostic> {
+        let next = d.pc as usize + d.width as usize;
+        match d.op {
+            Op::TRY_ENTER => {
+                let handler = d.b_u as usize;
+                if let Some(f) = self.frames.last_mut() {
+                    // Entering a try again (a loop around it) ends the
+                    // earlier entry and everything opened inside it.
+                    if let Some(at) = f.tries.iter().position(|o| o.handler == handler) {
+                        f.tries.truncate(at);
+                    }
+                    let nest = f.nest;
+                    f.tries.push(Open {
+                        handler,
+                        nest,
+                        stage: Stage::Body,
+                        pending: Pending::Next(next),
+                        payload: None,
+                    });
+                }
+            }
+            Op::TRY_LEAVE => return self.leave(proto, d, next, span),
+            Op::THROW => {
+                let v = self.get(base, d.a, span)?;
+                return Err(self.interp.cough(v, span));
+            }
+
+            _ => return Err(broken("an instruction sent to the wrong group", span)),
+        }
+        Ok(Flow::Next(next))
+    }
+
+    /// Set the current frame's loop nesting, keeping the interpreter's loop
+    /// depth (the sum over the frames) in step.
+    fn set_nest(&mut self, nest: u32) {
+        if let Some(f) = self.frames.last_mut() {
+            let depth = self.interp.loop_depth.saturating_sub(f.nest);
+            self.interp.loop_depth = depth.saturating_add(nest);
+            f.nest = nest;
+        }
+    }
+
+    /// `try.leave A`. With `A = 0`: out of the body or the catch, the
+    /// finally runs (then goes on after this instruction), or the try is
+    /// closed when it has none; at the end of the finally, the try is
+    /// closed and what was pending goes on: the next pc, or the error
+    /// raised again. With `A != 0`: the try is closed and whatever it had
+    /// pending is dropped (a finally's own `break`, `continue`, `snuff`).
+    fn leave(
+        &mut self,
+        proto: &Proto,
+        d: &DecodedInstr,
+        next: usize,
+        span: Span,
+    ) -> Result<Flow, Diagnostic> {
+        let Some(open) = self.frames.last_mut().and_then(|f| f.tries.pop()) else {
+            return Err(misuse(d.op, "found no open try in its frame", span));
+        };
+        if d.a != 0 {
+            return Ok(Flow::Next(next));
+        }
+        if open.stage == Stage::Finally {
+            self.interp.cough_payload = open.payload;
+            return match open.pending {
+                Pending::Next(pc) => Ok(Flow::Next(pc)),
+                Pending::Raise(e) => Err(e),
+            };
+        }
+        let h = proto
+            .handlers
+            .get(open.handler)
+            .ok_or_else(|| broken("a handler past the table", span))?;
+        if h.finally_pc == RESERVED_U32 {
+            return Ok(Flow::Next(next));
+        }
+        Ok(Flow::Next(self.enter_finally(open, h, Pending::Next(next))))
+    }
+
+    /// Put `open` back in the finally stage with `pending` to go on to, at
+    /// the try's loop nesting: the pc to go to.
+    fn enter_finally(&mut self, mut open: Open, h: &HandlerEntry, pending: Pending) -> usize {
+        open.stage = Stage::Finally;
+        open.pending = pending;
+        open.payload = self.interp.cough_payload.take();
+        let nest = open.nest;
+        if let Some(f) = self.frames.last_mut() {
+            f.tries.push(open);
+        }
+        self.set_nest(nest);
+        h.finally_pc as usize
+    }
+
+    /// An error was raised: offer it to the open tries, innermost first,
+    /// from the frame that raised it out through its callers (each at the
+    /// pc of its call). A try that takes it moves the run to its catch or
+    /// its finally; a frame with none that does is left. Past the VM's
+    /// entry frame the error is the run's.
+    fn unwind(&mut self, program: &Program, mut e: Diagnostic) -> Result<(), Diagnostic> {
+        let mut at: Option<usize> = None;
+        loop {
+            let Some(frame) = self.frames.last() else {
+                return Err(e);
+            };
+            let pc = at.unwrap_or(frame.pc);
+            let entry = frame.ret.is_none();
+            let Some(proto) = program.funcs.get(frame.func) else {
+                return Err(e);
+            };
+            e = match self.offer(proto, pc, e)? {
+                Some(e) => e,
+                None => return Ok(()),
+            };
+            if entry {
+                // The caller of `run_frame` gives the frame back.
+                return Err(e);
+            }
+            if let Some(f) = self.frames.pop() {
+                self.release(&f);
+                self.shrink(f.base);
+            }
+            at = self.frames.last().map(|f| f.site);
+        }
+    }
+
+    /// Offer `e`, raised at `pc` of the current frame, to the frame's open
+    /// tries. `None` when one took it (the frame's pc is now its catch or
+    /// its finally); `Some(e)` when none did, every try passed over closed.
+    fn offer(
+        &mut self,
+        proto: &Proto,
+        pc: usize,
+        e: Diagnostic,
+    ) -> Result<Option<Diagnostic>, Diagnostic> {
+        let span = e.span.unwrap_or_default();
+        loop {
+            let Some(frame) = self.frames.last_mut() else {
+                return Ok(Some(e));
+            };
+            let base = frame.base;
+            let Some(open) = frame.tries.pop() else {
+                return Ok(Some(e));
+            };
+            let Some(h) = proto.handlers.get(open.handler) else {
+                return Err(broken("a handler past the table", span));
+            };
+            let in_range = (h.pc_start as usize..h.pc_end as usize).contains(&pc);
+            let catches = h.handler_pc != h.finally_pc;
+            let finally = h.finally_pc != RESERVED_U32;
+            match open.stage {
+                // Raised in the body, outside the try's range: the body
+                // was left without `try.leave`, and the try with it.
+                Stage::Body if !in_range => continue,
+                Stage::Body if catches && self.interp.exit_requested.is_none() => {
+                    let payload = self.interp.cough_payload.take();
+                    if h.catch_reg != RESERVED_U32 {
+                        self.put(base, h.catch_reg, error_value(&e, payload), span)?;
+                    }
+                    let nest = open.nest;
+                    let to = h.handler_pc as usize;
+                    if let Some(f) = self.frames.last_mut() {
+                        f.tries.push(Open {
+                            stage: Stage::Catch,
+                            ..open
+                        });
+                        f.pc = to;
+                    }
+                    self.set_nest(nest);
+                    return Ok(None);
+                }
+                Stage::Body | Stage::Catch if finally => {
+                    let to = self.enter_finally(open, h, Pending::Raise(e));
+                    if let Some(f) = self.frames.last_mut() {
+                        f.pc = to;
+                    }
+                    return Ok(None);
+                }
+                // No catch and no finally, or raised in the finally: its
+                // own error replaces what was pending.
+                _ => continue,
+            }
+        }
     }
 
     /// A call of a compiled function: arity, depth, then a new frame.
@@ -941,12 +1312,14 @@ impl Machine<'_> {
         self.frames.push(Frame {
             func: index,
             pc: 0,
+            site: 0,
             base,
             ret: Some(ret),
             held_calls: 1,
             nest: 0,
             held_nest: 0,
             upvals: Rc::clone(&cf.upvals),
+            tries: Vec::new(),
         });
         Ok(())
     }
@@ -979,6 +1352,8 @@ impl Machine<'_> {
                 frame.func = index;
                 frame.pc = 0;
                 frame.upvals = Rc::clone(&cf.upvals);
+                // The replaced function's tries end with it.
+                frame.tries.clear();
                 frame.base
             }
             None => return Err(broken("an empty call stack", span)),

@@ -182,6 +182,7 @@ signed pc-relative jump, `U(i)` is an upvalue.
 | `loadnull` A | ABC | `R(A) = null` |
 | `loadbool` A, B | ABC | `R(A) = (B != 0)` |
 | `loadint` A, sBx | AsBx | `R(A) = sBx as int` |
+| `loadg` A, Bx | ABx | `R(A) = the prelude value named K[Bx]` (a builtin, a module or `args`; `K[Bx]` is a string) |
 
 ### Arithmetic
 
@@ -258,9 +259,9 @@ followed by `TESTN`, not a swapped operand pair.
 
 | op | fmt | effect |
 |----|-----|--------|
-| `try.enter` H | ABx | enter handler `H` |
-| `try.leave` | ABC | leave the current handler |
-| `throw` A | ABC | throw `R(A)` |
+| `try.enter` H | ABx | open handler `H` (of this function's `handlers`) |
+| `try.leave` A | ABC | leave the innermost open try: `A = 0` normally (into its finally, if it has one), `A != 0` dropping what its finally had pending |
+| `throw` A | ABC | throw `R(A)` (`cough`) |
 
 ### Burns
 
@@ -376,9 +377,11 @@ The rules (one bullet per `VerifyError` variant, matched by its
   after `ret`, `tailcall`, `throw`, `jmp` and `loop`), every jump operand
   (the plain and fused jumps, `forprep`, `forloop`, `iternext`), and an
   edge from every pc inside a handler's range to its `handler_pc` and
-  `finally_pc` and on to every handler around it. The error names the
-  lowest pc on the cycle. The check is linear in the function's size
-  and does not recurse.
+  `finally_pc` and on to every handler around it. A charging `steps`
+  ends every edge out of it but one: inside a handler's range it keeps
+  its edge to that handler, because once the budget is spent it raises
+  each time it runs. The error names the lowest pc on the cycle. The
+  check is linear in the function's size and does not recurse.
 
 A module that satisfies every rule is safe to run with no further
 bounds checks — with the one carve-out named in "What the verifier
@@ -395,6 +398,10 @@ refuses the module (or the call) with the interpreter's own error.
   catalogue when it loads a module (cig has about 230 builtins today;
   a growing set means the format allows 16 bits). An unknown builtin
   refuses the module with `E1050`.
+- **`loadg`'s name.** The verifier checks that `K[Bx]` is a string.
+  The VM checks the name against the interpreter's prelude (its global
+  builtins, its modules, and `args`) when it loads a module, and
+  refuses an unknown one with `E1050`.
 - **`burn.op`'s kind.** The low 4 bits (or low 8 with `WIDE`) of
   `burn.op`'s packed `C` operand name a burn-op kind. The VM checks
   it against the kernel's catalogue at load time.
@@ -438,7 +445,8 @@ open. A lowering writes to them.
 - **Load-time checks.** Every function is decoded once, through
   `crate::instr::decode`, into a table by pc. A `callb` index past the
   builtin catalogue refuses the module with `E1050` (`unknown-builtin
-  at fn<i>+<pc>`), and so does a `burn.op` kind past the burn-op
+  at fn<i>+<pc>`), and so do a `loadg` name the prelude does not have
+  (`unknown-prelude-name`) and a `burn.op` kind past the burn-op
   catalogue (`unknown-burn-op`).
 - **The builtin catalogue** is `stdlib::builtin_catalogue()`: the
   global functions, then the functions of `fs`, `path`, `json`,
@@ -487,7 +495,11 @@ open. A lowering writes to them.
   callback (`xs.map(f)`, a sort key) call a compiled function, and the
   VM calls an interpreted one, each with the other's arity (`E401`) and
   depth (`E506`) rules. A callback into a compiled function runs in a
-  VM of its own until it returns.
+  VM of its own until it returns. A call from compiled code to compiled
+  code of the same program takes no Rust stack (the VM's frames are a
+  list); a callback level takes some, no more than the tree-walker
+  takes for the same recursion, so `E506`'s 4000 levels fit in the
+  stack `cig` gives its evaluator.
 - **Cells.** A register can carry a cell. `cellnew A` gives `R(A)` a
   fresh cell holding `R(A)`'s value; from then on every read of `R(A)`
   reads the cell and every write writes it, until the frame ends.
@@ -533,9 +545,79 @@ open. A lowering writes to them.
   shows each value as soon as it is evaluated, so a lowering whose
   later parts can change an earlier part's list or map turns each part
   to text first (a one-part `interp`).
-- The `try`, burn, `pack` and chain instructions stop with an internal
-  error that names the instruction until the package that builds them
-  lands (`vm::NOT_BUILT` lists them).
+- **`loadg A, Bx`** puts in `R(A)` the value the interpreter's prelude
+  holds under the name `K[Bx]`: the same builtin, module or `args` list a
+  tree-walked script gets when it names it (`roll f = len`, `stick p =
+  path`, `args`). It reads the prelude itself, so a script's own global
+  of the same name does not hide it: the lowering uses `loadg` only for
+  a name that resolves to the prelude. `args` before the script's
+  arguments are set is the interpreter's `E501`.
+- **Errors and handlers.** Each frame keeps the tries it has opened and
+  not left, innermost last. `try.enter H` opens handler `H` in its body
+  and records the frame's loop nesting; opening `H` again (a loop around
+  the try) first closes `H` and everything opened inside it. A handler
+  has a catch when `handler_pc != finally_pc` (`try { } finally { }`
+  sets both to the finally), a finally when `finally_pc` is not the
+  sentinel, and a binding when `catch_reg` is not.
+
+  An error raised at a pc (by an instruction, a builtin, a callee or a
+  builtin's callback; in each caller, at the pc of its call) is offered
+  to the frame's open tries, innermost first:
+
+  - a try in its **body** takes it only when the pc is inside its
+    `[pc_start, pc_end)`; one whose range does not hold the pc was left
+    without `try.leave` and is closed. With a catch, and unless `exit()`
+    was asked for, the error becomes the value an `ashtray` binding
+    reads (the interpreter's: `message`, `kind`, `line`, a `cough`
+    map's own fields, `value`), written to `catch_reg` as a plain
+    register, and the run goes on at `handler_pc`. Otherwise, with a
+    finally, the run goes on at `finally_pc` with the error pending.
+    Otherwise the try is closed and the next one is asked;
+  - a try in its **catch** sends the error to its finally, pending, or is
+    closed when it has none. The catch's code may lie anywhere: it is
+    the code the run reaches from `handler_pc`;
+  - a try in its **finally** is closed: the finally's own error replaces
+    the pending one.
+
+  When no try in the frame takes it, the frame is left and its caller
+  is asked; past the VM's entry the error is the run's. Every move to
+  `handler_pc` or `finally_pc` sets the frame's loop nesting back to
+  the try's, as the tree-walker leaves each loop on its way out, so the
+  step budget's wording in a handler is the tree-walker's. The finally
+  takes the pending `cough` payload aside and gives it back when it
+  ends, as the tree-walker does.
+
+  `try.leave 0` leaves the innermost open try. From its body or its
+  catch, with a finally: the finally runs, and when it ends the run goes
+  on after this `try.leave`; without one, the try is closed and the run
+  goes on. At the end of a finally: the try is closed and what was
+  pending goes on: the pc after the `try.leave` that entered it, or the
+  error, raised again unchanged (code, message, position). `try.leave 1`
+  closes the innermost try and drops what it had pending, for a
+  finally's own way out.
+
+  A lowering writes a `try` as `try.enter H`, the body (the handler's
+  range, which takes in the body's `try.leave 0`), a jump past the rest,
+  the catch (ending `try.leave 0` and a jump past the finally), and the
+  finally (ending `try.leave 0`); the catch and the finally lie outside
+  the range. `break`, `continue` and `snuff` out of a try are one
+  `try.leave 0` per try they cross, innermost first, then the jump or
+  the `ret` (with the snuffed value already in a register the finally
+  does not write). Out of a finally they are `try.leave 1` for that
+  try, then the same. A captured binding takes `cellnew catch_reg` at
+  `handler_pc`. A `ret` or a tail call closes the frame's tries without
+  running anything, so a lowering does not tail-call inside a try.
+- **`throw A`** is `cough R(A)`: a map's `message` (or the map shown) is
+  the message, any other value is shown, and the value is the payload
+  the catch reads.
+- **Positions through calls and handlers.** An error keeps the
+  position it was raised at, through every frame it leaves, a catch it
+  passes, a finally that raises it again, a builtin's callback and a
+  call into or out of the tree-walker. The tree-walker prints no frame
+  list, only that position, so the VM adds none.
+- The burn, `pack` and chain instructions stop with an internal error
+  that names the instruction until the package that builds them lands
+  (`vm::NOT_BUILT` lists them).
 
 ## Versioning
 
