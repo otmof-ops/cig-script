@@ -14,11 +14,11 @@
 #     bench:
 #       uses: otmof-ops/cig-script/.github/workflows/bench.yml@main
 #       with:
-#         cig-version: "1.20.0"        # leave empty in cig-script itself: it builds its own cig
+#         cig-version: "1.21.0"        # leave empty in cig-script itself: it builds its own cig
 #         prepare: |                   # optional: what the suite needs beside cig
 #           cargo build --release --locked --bin <product>
 #           echo "$PWD/target/release" >> "$GITHUB_PATH"
-#       permissions:
+#       permissions:                   # the calling job's grants are the only ones this workflow has
 #         contents: write              # the nightly appends to the bench-history branch
 #         pull-requests: write         # the PR comment
 #
@@ -27,7 +27,7 @@
 # a manual run) runs the whole suite and appends one JSON line per run to
 # `history/<product>.jsonl` on the `bench-history` branch, which
 # `cig bench history <case>` reads. Heavy suites run nightly, never on a pull
-# request (DECISIONS 11).
+# request.
 #
 # What fails a run: a case whose output is WRONG (`cig bench` exits 1), a gate
 # named in `gate` that trips, or a suite that cannot be read or built. A timing
@@ -86,8 +86,11 @@ on:
         type: string
         default: ""
 
-permissions:
-  contents: read
+# No top-level `permissions:` here, on purpose. A called workflow can only lower
+# what its caller grants, never raise it: a block here (even `contents: read`)
+# turned the nightly callers' `contents: write` into read, and every push to the
+# history branch was refused. Without one, this workflow runs with exactly what
+# the calling job grants: write for the nightly, read for a pull request.
 
 jobs:
   bench:
@@ -123,8 +126,8 @@ jobs:
           mode="${{ inputs.mode }}"
           if [ "$mode" = auto ]; then
             case "${{ github.event_name }}" in
-              schedule|workflow_dispatch) mode=nightly ;;
-              *) mode=pr ;;
+              schedule|workflow_dispatch) mode="nightly" ;;
+              *) mode="pr" ;;
             esac
           fi
           echo "mode=$mode" >> "$GITHUB_OUTPUT"
@@ -196,10 +199,18 @@ jobs:
       - name: Record the filesystem
         if: inputs.filesystem == '' || runner.os != 'Linux'
         run: |
+          # A probe may come back empty; it never fails the step. `diskutil info`
+          # takes a device or a mount point, not a folder, so ask about the
+          # volume the folder is on.
+          fs=""
           case "$RUNNER_OS" in
-            macOS) fs="$(diskutil info "$RUNNER_TEMP" 2>/dev/null | awk -F: '/Type \(Bundle\)/ {gsub(/ /, "", $2); print $2}')" ;;
-            Windows) fs="$(powershell -NoProfile -Command "(Get-Volume -DriveLetter ('$RUNNER_TEMP'.Substring(0,1))).FileSystem" 2>/dev/null | tr -d '\r')" ;;
-            *) fs="$(findmnt -no FSTYPE -T "$RUNNER_TEMP" 2>/dev/null)" ;;
+            macOS)
+              dev="$( { df -P "$RUNNER_TEMP" 2>/dev/null || true; } | awk 'NR==2 {print $1}')" || dev=""
+              if [ -n "$dev" ]; then
+                fs="$( { diskutil info "$dev" 2>/dev/null || true; } | awk -F: '/Type \(Bundle\)/ {gsub(/ /, "", $2); print $2}')" || fs=""
+              fi ;;
+            Windows) fs="$( { powershell -NoProfile -Command "(Get-Volume -DriveLetter ('$RUNNER_TEMP'.Substring(0,1))).FileSystem" 2>/dev/null || true; } | tr -d '\r')" || fs="" ;;
+            *) fs="$(findmnt -no FSTYPE -T "$RUNNER_TEMP" 2>/dev/null || true)" ;;
           esac
           echo "FS_TYPE=${fs:-unknown}" >> "$GITHUB_ENV"
           echo "filesystem: ${fs:-unknown}"
@@ -273,7 +284,12 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           for attempt in 1 2 3 4 5 6; do
+            # Start every attempt clean: a failed push leaves the worktree's
+            # entry and the local branch behind, and the next `checkout
+            # --orphan` then stops with "a branch named ... already exists".
             rm -rf "$RUNNER_TEMP/hist"
+            git worktree prune
+            git branch -D "$HISTORY_BRANCH" > /dev/null 2>&1 || true
             if git ls-remote --exit-code --heads origin "$HISTORY_BRANCH" > /dev/null; then
               git fetch origin "$HISTORY_BRANCH"
               git worktree add "$RUNNER_TEMP/hist" "origin/$HISTORY_BRANCH"
@@ -290,7 +306,10 @@ jobs:
             if git -C "$RUNNER_TEMP/hist" push origin "HEAD:$HISTORY_BRANCH"; then
               exit 0
             fi
-            git worktree remove --force "$RUNNER_TEMP/hist"
+            git worktree remove --force "$RUNNER_TEMP/hist" || true
+            # The series of one nightly push to the same branch: wait a
+            # different time each before trying again on the new tip.
+            sleep $(( (RANDOM % 8) + attempt * 3 ))
           done
           echo "could not push to $HISTORY_BRANCH"
           exit 1
