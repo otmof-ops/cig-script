@@ -4,9 +4,10 @@
 //! Compiled programs (src/program.rs, docs/PROGRAMS.md): a script appended
 //! to this `cig` runs as the program, through the same run as `cig run`.
 //! Each test builds its programs the way cigcompile does, from the `cig`
-//! this test run built, and runs them beside `cig run`.
+//! this test run built, and runs them beside `cig run`. Programs are
+//! format 2 unless a test says format 1.
 
-use cigscript::program::{self, Program};
+use cigscript::program::{self, Build, Encoding, Program, Section, Stage};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -35,18 +36,40 @@ impl Sandbox {
     }
 
     /// The program cigcompile would make from `script`: this cig with the
-    /// script appended.
+    /// script appended, in format 2.
     fn compile(&self, name: &str, script: &str) -> PathBuf {
+        self.make2(&self.build(name, script))
+    }
+
+    /// What [`Sandbox::compile`] builds from, for a test to change first.
+    fn build(&self, name: &str, script: &str) -> Build {
+        let source = fs::read_to_string(self.path().join(script)).unwrap();
+        Build::new(name, script, &source, "test-compiler 0", &target())
+    }
+
+    /// The same program in format 1, as cigs before format 2 made it.
+    fn compile1(&self, name: &str, script: &str) -> PathBuf {
         let source = fs::read_to_string(self.path().join(script)).unwrap();
         self.make(&Program::new(name, script, &source, "test-compiler 0"))
     }
 
     fn make(&self, p: &Program) -> PathBuf {
         let runtime = fs::read(env!("CARGO_BIN_EXE_cig")).unwrap();
-        let file = format!("{}{}", p.name, std::env::consts::EXE_SUFFIX);
+        self.place(&p.name, &program::append(&runtime, p))
+    }
+
+    fn make2(&self, b: &Build) -> PathBuf {
+        let runtime = fs::read(env!("CARGO_BIN_EXE_cig")).unwrap();
+        self.place(&b.name, &program::append2(&runtime, b).unwrap())
+    }
+
+    /// `bytes` as an executable named `name` (a new file each time: macOS
+    /// keeps a binary's code-signing state by file).
+    fn place(&self, name: &str, bytes: &[u8]) -> PathBuf {
+        let file = format!("{name}{}", std::env::consts::EXE_SUFFIX);
         let out = self.path().join("bin").join(file);
         fs::create_dir_all(out.parent().unwrap()).unwrap();
-        fs::write(&out, program::append(&runtime, p)).unwrap();
+        fs::write(&out, bytes).unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -95,6 +118,30 @@ fn output(c: &mut Command) -> std::io::Result<Output> {
         }
     }
     c.output()
+}
+
+/// The target a test program records.
+fn target() -> String {
+    format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS)
+}
+
+/// A test-only section, optional or required.
+fn test_section(required: bool) -> Section {
+    Section {
+        id: "zz-test".to_string(),
+        version: 1,
+        encoding: Encoding::Stored,
+        required,
+        bytes: b"a test-only section".to_vec(),
+    }
+}
+
+/// Where section `id`'s body starts in the program at `exe`.
+fn body_at(exe: &Path, id: &str) -> usize {
+    let mut f = fs::File::open(exe).unwrap();
+    let l = program::read(&mut f).unwrap().unwrap();
+    let e = l.entry(id).unwrap();
+    (l.start + e.offset) as usize
 }
 
 fn text(b: &[u8]) -> String {
@@ -451,56 +498,56 @@ fn the_cig_binarys_image_ends_where_its_file_does() {
 }
 
 /// A program cut short, or with bytes after its trailer, is damaged; it
-/// never runs as `cig` (#135). Zero padding after the trailer is fine.
+/// never runs as `cig` (#135). Zero padding after the trailer is fine. The
+/// same for both formats.
 #[test]
 fn a_cut_or_extended_program_is_damaged_never_cig() {
     let s = Sandbox::new();
     s.write("x.cig", "burn {\n  fs.write_text(\"x.txt\", \"x\")\n}\n");
-    let exe = s.compile("x", "x.cig");
-    let whole = fs::read(&exe).unwrap();
-    let mut cases: Vec<(String, Vec<u8>)> = [1usize, 48, 200]
-        .iter()
-        .map(|cut| {
-            (
-                format!("{cut} bytes cut"),
-                whole[..whole.len() - cut].to_vec(),
-            )
-        })
-        .collect();
-    let mut junk = whole.clone();
-    junk.extend_from_slice(b"XX");
-    cases.push(("XX after it".to_string(), junk));
-    // Each case is a file of its own: macOS keeps a binary's code-signing
-    // state by file, and one rewritten in place after it ran can be killed
-    // when it is started again.
-    let place = |n: usize, bytes: &[u8]| {
-        let p = exe.with_file_name(format!("x{n}{}", std::env::consts::EXE_SUFFIX));
-        fs::write(&p, bytes).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
+    for (format, exe) in [(2, s.compile("x", "x.cig")), (1, s.compile1("x1", "x.cig"))] {
+        let whole = fs::read(&exe).unwrap();
+        let mut cases: Vec<(String, Vec<u8>)> = [1usize, 48, 56, 200]
+            .iter()
+            .map(|cut| {
+                (
+                    format!("format {format}, {cut} bytes cut"),
+                    whole[..whole.len() - cut].to_vec(),
+                )
+            })
+            .collect();
+        let mut junk = whole.clone();
+        junk.extend_from_slice(b"XX");
+        cases.push((format!("format {format}, XX after it"), junk));
+        // Each case is a file of its own: macOS keeps a binary's code-signing
+        // state by file, and one rewritten in place after it ran can be killed
+        // when it is started again.
+        for (n, (what, bytes)) in cases.into_iter().enumerate() {
+            let exe = s.place(&format!("x{format}-{n}"), &bytes);
+            let out = s.prog(&exe, &["run", "x.cig"]);
+            let err = text(&out.stderr);
+            assert_eq!(out.status.code(), Some(3), "{what}: {err}");
+            assert!(err.contains("E1050"), "{what}: {err}");
+            assert!(
+                !err.contains("unrecognized subcommand"),
+                "{what}: ran as cig: {err}"
+            );
+            assert!(!s.exists("x.txt"), "{what}: the damaged program ran");
         }
-        p
-    };
-    for (n, (what, bytes)) in cases.into_iter().enumerate() {
-        let exe = place(n, &bytes);
-        let out = s.prog(&exe, &["run", "x.cig"]);
-        let err = text(&out.stderr);
-        assert_eq!(out.status.code(), Some(3), "{what}: {err}");
-        assert!(err.contains("E1050"), "{what}: {err}");
+        let mut padded = whole.clone();
+        padded.extend_from_slice(&[0; 512]);
+        let exe = s.place(&format!("x{format}-padded"), &padded);
+        let out = s.prog(&exe, &[]);
         assert!(
-            !err.contains("unrecognized subcommand"),
-            "{what}: ran as cig: {err}"
+            out.status.success(),
+            "format {format}, padded: {}",
+            text(&out.stderr)
         );
-        assert!(!s.exists("x.txt"), "{what}: the damaged program ran");
+        assert!(
+            s.exists("x.txt"),
+            "format {format}: the padded program did not run"
+        );
+        fs::remove_file(s.path().join("x.txt")).unwrap();
     }
-    let mut padded = whole.clone();
-    padded.extend_from_slice(&[0; 512]);
-    let exe = place(99, &padded);
-    let out = s.prog(&exe, &[]);
-    assert!(out.status.success(), "padded: {}", text(&out.stderr));
-    assert!(s.exists("x.txt"), "the padded program did not run");
 }
 
 #[cfg(unix)]
@@ -678,4 +725,260 @@ fn a_program_puts_back_a_stretch_of_its_own_runs() {
     let bad = s.prog(&exe, &["--unburn-since", "soon"]);
     assert_eq!(bad.status.code(), Some(3));
     assert!(text(&bad.stderr).contains("E1052"), "{}", text(&bad.stderr));
+}
+
+#[test]
+fn format_1_programs_still_run() {
+    let s = Sandbox::new();
+    s.write(
+        "hello.cig",
+        "stick name = args.get(0, \"world\")\nexhale \"hello, ${name}\"\n",
+    );
+    let exe = s.compile1("hello", "hello.cig");
+    same(
+        &s.cig(&["run", "hello.cig"]),
+        &s.prog(&exe, &[]),
+        "format 1",
+    );
+    same(
+        &s.cig(&["run", "hello.cig", "--", "you"]),
+        &s.prog(&exe, &["you"]),
+        "format 1, an argument",
+    );
+    let v: serde_json::Value =
+        serde_json::from_slice(&s.prog(&exe, &["--cig-program", "--json"]).stdout).unwrap();
+    assert_eq!(v["format"], 1);
+    let keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+    assert_eq!(
+        keys.len(),
+        7,
+        "format 1 prints what it always did: {keys:?}"
+    );
+    assert!(v.get("sections").is_none() && v.get("stage").is_none());
+    let info = text(&s.prog(&exe, &["--cig-program"]).stdout);
+    assert!(!info.contains("sections"), "{info}");
+}
+
+#[test]
+fn a_format_2_program_lists_its_record_and_sections() {
+    let s = Sandbox::new();
+    s.write("f.cig", "exhale \"ran\"\n");
+    let mut b = s.build("f", "f.cig");
+    b.sections.push(test_section(false));
+    let exe = s.make2(&b);
+    let v: serde_json::Value =
+        serde_json::from_slice(&s.prog(&exe, &["--cig-program", "--json"]).stdout).unwrap();
+    assert_eq!(v["format"], 2);
+    assert_eq!(v["stage"], "a");
+    assert_eq!(v["opt"], "0");
+    assert_eq!(v["target"], target());
+    let runtime = fs::read(env!("CARGO_BIN_EXE_cig")).unwrap();
+    use sha2::Digest as _;
+    assert_eq!(
+        v["runtime_sha256"],
+        hex::encode(sha2::Sha256::digest(&runtime))
+    );
+    assert!(v.get("own_flags").is_none());
+    let sections = v["sections"].as_array().unwrap();
+    assert_eq!(sections.len(), 2);
+    assert_eq!(sections[0]["id"], "source");
+    assert_eq!(sections[0]["bytes"], 13);
+    assert_eq!(sections[0]["decoded"], 13);
+    assert_eq!(sections[0]["encoding"], "stored");
+    assert_eq!(sections[0]["required"], true);
+    assert_eq!(sections[1]["id"], "zz-test");
+    assert_eq!(sections[1]["required"], false);
+    assert_eq!(sections[1]["sha256"].as_str().unwrap().len(), 64);
+    let info = text(&s.prog(&exe, &["--cig-program"]).stdout);
+    for want in [
+        "format         2, stage a",
+        "sections",
+        "source",
+        "zz-test",
+        "optional",
+    ] {
+        assert!(info.contains(want), "{want}: {info}");
+    }
+}
+
+/// A script long enough to be kept DEFLATE-compressed runs, and errs at
+/// the line `cig run` names.
+#[test]
+fn a_deflated_program_says_what_cig_run_says() {
+    let s = Sandbox::new();
+    let mut script: String = (0..300).map(|n| format!("stick v{n} = {n}\n")).collect();
+    script.push_str("exhale \"last ${v299}\"\nstick bad = 1 / 0\n");
+    assert!(script.len() >= program::DEFLATE_FROM);
+    s.write("long.cig", &script);
+    let exe = s.compile("long", "long.cig");
+    let mut f = fs::File::open(&exe).unwrap();
+    let l = program::read(&mut f).unwrap().unwrap();
+    assert_eq!(
+        l.entry("source").unwrap().encoding(),
+        Some(Encoding::Deflate)
+    );
+    let (c, p) = (s.cig(&["run", "long.cig"]), s.prog(&exe, &[]));
+    same(&c, &p, "a deflated script's error");
+    assert_eq!(p.status.code(), Some(1));
+    assert!(text(&p.stdout).contains("last 299"), "{}", text(&p.stdout));
+    assert!(
+        text(&p.stderr).contains("long.cig:302:"),
+        "{}",
+        text(&p.stderr)
+    );
+}
+
+/// A changed byte in a body is refused when the body is used, and at once
+/// under CIG_VALIDATE=1; a start reads no body, so `--help` and
+/// `--cig-program` still answer.
+#[test]
+fn archive_tamper_refused() {
+    let s = Sandbox::new();
+    s.write("t.cig", "burn {\n  fs.write_text(\"t.txt\", \"t\")\n}\n");
+    let mut b = s.build("t", "t.cig");
+    b.sections.push(test_section(false));
+    let good = fs::read(s.make2(&b)).unwrap();
+    let exe = s.place("t-good", &good);
+    for id in ["source", "zz-test"] {
+        let mut bad = good.clone();
+        bad[body_at(&exe, id) + 3] ^= 0x20;
+        let exe = s.place(&format!("t-{id}"), &bad);
+        let want = format!("section `{id}`'s bytes do not match the sha256 in the section table");
+        let out = s.prog(&exe, &[]);
+        let err = text(&out.stderr);
+        if id == "source" {
+            assert_eq!(out.status.code(), Some(3), "{err}");
+            assert!(err.contains("E1050") && err.contains(&want), "{err}");
+            assert!(!s.exists("t.txt"), "a changed script ran");
+            let out = s.prog(&exe, &["--chains"]);
+            assert!(text(&out.stderr).contains(&want), "{}", text(&out.stderr));
+        } else {
+            // Nothing uses the test section: the program runs.
+            assert!(out.status.success(), "{err}");
+            fs::remove_file(s.path().join("t.txt")).unwrap();
+        }
+        let help = s.prog(&exe, &["--help"]);
+        assert!(help.status.success(), "{}", text(&help.stderr));
+        let validated = output(
+            s.command(&exe)
+                .env(program::VALIDATE_ENV, "1")
+                .arg("--help"),
+        )
+        .unwrap();
+        let err = text(&validated.stderr);
+        assert_eq!(validated.status.code(), Some(3), "{id}: {err}");
+        assert!(err.contains("E1050") && err.contains(&want), "{id}: {err}");
+    }
+    let ok = output(s.command(&exe).env(program::VALIDATE_ENV, "1")).unwrap();
+    assert!(ok.status.success(), "{}", text(&ok.stderr));
+}
+
+/// A program whose `source` body is damaged still answers `--help` and
+/// `--cig-program`: a start reads the trailer, the record and the table.
+#[test]
+fn the_head_is_all_a_start_hashes() {
+    let s = Sandbox::new();
+    s.write("h.cig", "exhale \"h\"\n");
+    let exe = s.compile("h", "h.cig");
+    let mut bytes = fs::read(&exe).unwrap();
+    let at = body_at(&exe, "source");
+    for b in &mut bytes[at..at + 10] {
+        *b = b'#';
+    }
+    let exe = s.place("h-damaged", &bytes);
+    let help = s.prog(&exe, &["--help"]);
+    assert!(help.status.success(), "{}", text(&help.stderr));
+    assert!(
+        text(&help.stdout).contains("usage: h"),
+        "{}",
+        text(&help.stdout)
+    );
+    let info = s.prog(&exe, &["--cig-program", "--json"]);
+    assert!(info.status.success(), "{}", text(&info.stderr));
+    let v: serde_json::Value = serde_json::from_slice(&info.stdout).unwrap();
+    assert_eq!(v["name"], "h");
+    let run = s.prog(&exe, &[]);
+    assert_eq!(run.status.code(), Some(3));
+    assert!(text(&run.stderr).contains("E1050"), "{}", text(&run.stderr));
+    assert!(text(&run.stdout).is_empty());
+}
+
+#[test]
+fn an_unknown_required_section_is_refused() {
+    let s = Sandbox::new();
+    s.write("u.cig", "exhale \"ran\"\n");
+    let mut b = s.build("u", "u.cig");
+    b.sections.push(test_section(true));
+    let exe = s.make2(&b);
+    for args in [&[][..], &["--help"]] {
+        let out = s.prog(&exe, args);
+        let err = text(&out.stderr);
+        assert_eq!(out.status.code(), Some(3), "{err}");
+        assert!(err.contains("E1050"), "{err}");
+        assert!(
+            err.contains("the program needs section `zz-test`, which this cig does not read"),
+            "{err}"
+        );
+        assert!(text(&out.stdout).is_empty());
+    }
+}
+
+#[test]
+fn an_unknown_optional_section_is_skipped() {
+    let s = Sandbox::new();
+    s.write("o.cig", "exhale \"ran\"\n");
+    let mut b = s.build("o", "o.cig");
+    b.sections.push(test_section(false));
+    let exe = s.make2(&b);
+    let out = s.prog(&exe, &[]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert_eq!(text(&out.stdout), "ran\n");
+}
+
+/// Another cig's program is E1051 before its table is looked at: a section
+/// this cig does not know does not change the answer.
+#[test]
+fn a_format_2_program_for_another_cig_is_e1051() {
+    let s = Sandbox::new();
+    s.write("x.cig", "exhale \"x\"\n");
+    let mut b = s.build("old", "x.cig");
+    b.cig = "0.0.1".to_string();
+    b.sections.push(test_section(true));
+    let exe = s.make2(&b);
+    let out = s.prog(&exe, &[]);
+    let err = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(3), "{err}");
+    assert!(
+        err.contains("E1051") && err.contains("compiled for cig 0.0.1"),
+        "{err}"
+    );
+}
+
+/// This cig does not run bytecode yet: a stage `b` program says what it is
+/// and refuses to run.
+#[test]
+fn a_stage_b_program_is_refused_for_now() {
+    let s = Sandbox::new();
+    s.write("b.cig", "burn {\n  fs.write_text(\"b.txt\", \"b\")\n}\n");
+    let mut b = s.build("b", "b.cig");
+    b.stage = Stage::B;
+    b.sections.push(Section {
+        id: "bytecode".to_string(),
+        version: 1,
+        encoding: Encoding::Stored,
+        required: true,
+        bytes: b"CIGB".to_vec(),
+    });
+    let exe = s.make2(&b);
+    let v: serde_json::Value =
+        serde_json::from_slice(&s.prog(&exe, &["--cig-program", "--json"]).stdout).unwrap();
+    assert_eq!(v["stage"], "b");
+    let out = s.prog(&exe, &[]);
+    let err = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(3), "{err}");
+    assert!(
+        err.contains("E1050") && err.contains("this cig does not run stage `b` programs yet"),
+        "{err}"
+    );
+    assert!(!s.exists("b.txt"));
 }

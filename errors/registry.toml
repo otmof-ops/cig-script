@@ -3576,12 +3576,28 @@ why = "the file came from somewhere else with a name built to read differently o
 probe = "none"
 remedy = "rename it, and look at what else that source sent"
 
-# ----- E1050-E1099: a compiled program at run time (emitted by cig) -------
+[[code]]
+code = "E1010"
+title = "a script that cannot be a stage b program"
+meaning = "`cigcompile build --stage b` makes a program that runs as bytecode on cig's VM, and such a program never falls back to running its source. This script holds a construct the lowering to bytecode does not cover, or needs an instruction the pinned runtime's VM does not run; the message names the first one and its line. Without `--stage b`, cigcompile makes a stage a program from such a script and says so."
+fix = "build it without --stage b, or rewrite the construct the message names"
+no = "none"
+arises = ["compile"]
+tags = ["compiler"]
+since = "1.22.0"
+[[code.cause]]
+why = "the script uses a construct the lowering to bytecode does not cover yet"
+probe = "none"
+remedy = "build it without --stage b: a stage a program runs the same script on the tree-walker; name the construct in an issue if it should lower"
+[[code.cause]]
+why = "the runtime cigcompile pins is older than its lowering, and that runtime's VM does not run an instruction the script needs"
+probe = "none"
+remedy = "build with the cigcompile and the cig that were released together, or without --stage b"
 
 [[code]]
 code = "E1050"
 title = "a damaged program"
-meaning = "This program's bytes do not match the sha256 in its trailer, its record does not read, its trailer is not at its end, or its bytecode does not verify (format 2 and later): it was cut short, edited, had bytes written after it once it was compiled, or carries a bytecode the verifier refuses. A program knows it is one even without its trailer (its record starts where its runtime's image ends), so a damaged program never runs as cig. Zero padding, or a Windows certificate table from signing, may follow the trailer. The sha256 catches damage, not tampering: programs are unsigned. A bytecode that fails to verify is refused with the rule and the `fn+pc` where it failed."
+meaning = "This program's bytes do not match the sha256 in its trailer, its record does not read, its trailer is not at its end, a section's bytes do not match the table, or the table does not read (format 2), or its bytecode does not verify (format 2 and later): it was cut short, edited, had bytes written after it once it was compiled, or carries a bytecode the verifier refuses. A format 2 program's start checks its trailer, its record and its section table; a section's bytes are checked when the program first uses that section, or at start for every section with CIG_VALIDATE=1. The message names the rule that failed. A program knows it is one even without its trailer (its record starts where its runtime's image ends), so a damaged program never runs as cig. Zero padding, or a Windows certificate table from signing, may follow the trailer. The sha256 catches damage, not tampering: programs are unsigned. A bytecode that fails to verify is refused with the rule and the `fn+pc` where it failed."
 fix = "compile it again (cigcompile build), or fetch it again from where it came from"
 no = "none"
 arises = ["run"]
@@ -3599,6 +3615,18 @@ remedy = "build it again, then sign it with a tool that keeps the program's end 
 why = "the program's bytecode (format 2 and later, cig-compile#31) does not verify: a register is past the frame, a jump targets outside the function, a constant index is out of range, a handler range interleaves another, or a `BURN.OP` sits outside its region"
 probe = "none"
 remedy = "compile it again with the cigcompile that matches this cig, since the verifier runs on every build"
+[[code.cause]]
+why = "a section's bytes do not match the sha256 in the section table (format 2): the body was changed after the program was built. A start reads no body, so this shows when the program first uses the section (its script, for a run or --chains), or at once with CIG_VALIDATE=1"
+probe = "file-hash"
+remedy = "compile it again, or fetch it again; CIG_VALIDATE=1 checks every section before the program starts"
+[[code.cause]]
+why = "the section table does not read (format 2): an id that is not lower-case ASCII or is repeated or out of order, a body outside the space between the record and the table, overlapping another, off its 16-byte alignment or with padding that is not zero, an encoding or flag bit this cig does not know, or a size over 64 MiB"
+probe = "none"
+remedy = "compile it again with the cigcompile for this cig"
+[[code.cause]]
+why = "the program needs a section this cig does not read, or the section its stage runs is missing; a stage `b` program (bytecode) is refused by a cig that does not run stage `b` yet"
+probe = "none"
+remedy = "compile it again with the cigcompile for this cig"
 
 [[code]]
 code = "E1051"

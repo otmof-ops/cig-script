@@ -5,7 +5,7 @@
 //! then the program's own arguments. See docs/PROGRAMS.md.
 
 use super::{exit, run, Ctx, RunArgs};
-use crate::program::{Program, Unrunnable};
+use crate::program::{Loaded, Opened, Stage, Unrunnable};
 use std::path::PathBuf;
 
 /// What a program's command line asked for.
@@ -138,7 +138,7 @@ fn steps(v: &str) -> Result<u64, (String, String)> {
     })
 }
 
-fn usage_text(p: &Program) -> String {
+fn usage_text(p: &Loaded) -> String {
     format!(
         "{name}: a CigScript program ({file}, compiled by {compiler} for cig {cig})
 
@@ -162,10 +162,10 @@ run flags (before the program's own arguments):
   --explain <code>   what an error code means and what to do (cig explain)
   --cig-program      what this program is, and what it was compiled from
   --                 everything after this is the program's own",
-        name = p.name,
-        file = p.file,
-        compiler = p.compiler,
-        cig = p.cig,
+        name = p.name(),
+        file = p.file(),
+        compiler = p.compiler(),
+        cig = p.cig(),
     )
 }
 
@@ -178,8 +178,11 @@ fn context(o: &Opts) -> Ctx {
     }
 }
 
-/// Run the program appended to this binary.
-pub fn main(p: Program) -> i32 {
+/// Run the program appended to this binary. Its record and table are read
+/// and checked ([`crate::program::own`]); a body is read here only when the
+/// command line uses it: `--help`, `--explain`, `--cig-program` and the
+/// `--unburn` family read none.
+pub fn main(p: Opened) -> i32 {
     crate::program::set_running();
     let mut argv = Vec::new();
     for (n, a) in std::env::args_os().skip(1).enumerate() {
@@ -199,7 +202,7 @@ pub fn main(p: Program) -> i32 {
         Err((message, hint)) => {
             let d = crate::diagnostics::usage(message)
                 .code("E1052")
-                .with_hint(format!("{hint}; {} --help lists the run flags", p.name));
+                .with_hint(format!("{hint}; {} --help lists the run flags", p.name()));
             run::report(&context(&Opts::default()), &d, None, None);
             return exit::USAGE;
         }
@@ -213,19 +216,13 @@ pub fn main(p: Program) -> i32 {
         return super::explain::explain(&ctx, Some(code), false);
     }
     if o.chains {
-        return super::chains::chains_source(&ctx, &p.file, &p.source);
+        return match p.source() {
+            Ok(source) => super::chains::chains_source(&ctx, p.file(), source),
+            Err(e) => damaged(&ctx, &e),
+        };
     }
     if o.info {
-        let mut v = p.summary();
-        v["runtime"] = serde_json::json!(crate::VERSION);
-        if ctx.json {
-            outln!("{}", serde_json::to_string(&v).unwrap_or_default());
-        } else {
-            outln!("{}  a CigScript program", p.name);
-            outln!("  compiled from  {}  (sha256 {})", p.file, p.sha256);
-            outln!("  compiled by    {}", p.compiler);
-            outln!("  runs on        cig {} (this binary)", crate::VERSION);
-        }
+        info(&ctx, &p);
         return exit::OK;
     }
     if let Some(fd) = o.seal_key_fd {
@@ -260,7 +257,7 @@ pub fn main(p: Program) -> i32 {
                 force: false,
                 accept_unsigned: false,
                 yes: false,
-                only_program: Some(p.sha256.clone()),
+                only_program: Some(p.sha256().to_string()),
             },
         );
     }
@@ -271,11 +268,12 @@ pub fn main(p: Program) -> i32 {
                 .program
                 .as_ref()
                 .and_then(|v| v["sha256"].as_str())
-                .is_some_and(|sha| sha == p.sha256);
+                .is_some_and(|sha| sha == p.sha256());
             if !ours {
                 let d = crate::diagnostics::usage(format!(
                     "run {} was not made by this program ({})",
-                    rec.id, p.name
+                    rec.id,
+                    p.name()
                 ))
                 .code("E1053")
                 .with_hint(format!("cig unburn {} puts back any run", rec.id));
@@ -285,8 +283,14 @@ pub fn main(p: Program) -> i32 {
         }
         return super::runs::unburn(&ctx, id, o.dry_run, false, false);
     }
+    if p.stage() == Stage::B {
+        return damaged(
+            &ctx,
+            "it is a stage `b` program (bytecode), and this cig does not run stage `b` programs yet",
+        );
+    }
     let args = RunArgs {
-        file: PathBuf::from(&p.file),
+        file: PathBuf::from(p.file()),
         dry_run: o.dry_run,
         no_rollback: o.no_rollback,
         // Checked when it was compiled; a program does not lint itself on
@@ -305,17 +309,64 @@ pub fn main(p: Program) -> i32 {
     code
 }
 
+/// `--cig-program`: the record without the script and, for format 2, the
+/// section table. A format 1 program prints what it always did.
+fn info(ctx: &Ctx, p: &Loaded) {
+    let mut v = p.summary();
+    v["runtime"] = serde_json::json!(crate::VERSION);
+    if p.format() >= 2 {
+        v["sections"] = p.sections_json();
+    }
+    if ctx.json {
+        outln!("{}", serde_json::to_string(&v).unwrap_or_default());
+        return;
+    }
+    outln!("{}  a CigScript program", p.name());
+    outln!("  compiled from  {}  (sha256 {})", p.file(), p.sha256());
+    outln!("  compiled by    {}", p.compiler());
+    outln!("  runs on        cig {} (this binary)", crate::VERSION);
+    let Some(r) = p.record() else {
+        return;
+    };
+    outln!("  format         {}, stage {}", r.format, r.stage.as_str());
+    outln!("  built          opt {} for {}", r.opt, r.target);
+    outln!("  runtime        sha256 {}", r.runtime_sha256);
+    if r.own_flags {
+        outln!("  own flags      every argument is the program's");
+    }
+    outln!("  sections");
+    for e in p.table() {
+        outln!(
+            "    {:<8}  {:>9} bytes  {:>9} decoded  {:<7}  {:<8}  sha256 {}",
+            e.id(),
+            e.length,
+            e.decoded_len,
+            e.encoding().map_or("unknown", |x| x.name()),
+            if e.required() { "required" } else { "optional" },
+            e.sha256_hex()
+        );
+    }
+}
+
+/// The diagnostic for a damaged program (E1050).
+fn damaged_diagnostic(e: &str) -> crate::diagnostics::Diagnostic {
+    crate::diagnostics::usage(format!("this program is damaged: {e}"))
+        .code("E1050")
+        .with_hint("compile it again (cigcompile build), or fetch it again from where it came from")
+}
+
+/// A program found damaged once it started: a body it uses does not match
+/// its table or its record (E1050).
+pub fn damaged(ctx: &Ctx, e: &str) -> i32 {
+    run::report(ctx, &damaged_diagnostic(e), None, None);
+    exit::USAGE
+}
+
 /// A binary that carries a program it will not run.
 pub fn refuse(why: &Unrunnable) -> i32 {
     let ctx = context(&Opts::default());
     let d = match why {
-        Unrunnable::Damaged(e) => crate::diagnostics::usage(format!(
-            "this program is damaged: {e}"
-        ))
-        .code("E1050")
-        .with_hint(
-            "compile it again (cigcompile build), or fetch it again from where it came from",
-        ),
+        Unrunnable::Damaged(e) => damaged_diagnostic(e),
         Unrunnable::OtherCig { name, cig } => crate::diagnostics::usage(format!(
             "{name} was compiled for cig {cig}, and its runtime is cig {}",
             crate::VERSION

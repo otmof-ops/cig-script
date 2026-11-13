@@ -5,6 +5,38 @@ project follows semantic versioning.
 
 ## Unreleased
 
+- **Programs move to payload format 2: a record, a table of hashed
+  sections, and a start that hashes only the head** (cig-compile#31,
+  cig-compile#71, cig-compile#8, cig-compile#40; cig-compile's decision
+  0004). `program::append2` writes
+  the record (`format`, `name`, `file`, `sha256`, `cig`, `compiler`,
+  `stage`, `opt`, `target`, `runtime_sha256`, and `own_flags` when set),
+  the `source` section (raw DEFLATE from 4 KiB, stored below), any further
+  sections, each body at a file offset that is a multiple of 16, a
+  64-byte entry per section and a 56-byte `CIGPROG2` trailer whose
+  sha256 covers the record and the table. `program::read` reads both
+  formats and returns a `Loaded`; a format 2 start reads the trailer,
+  the record and the table, whatever the script's size, and a body is
+  read, checked against its table entry and decoded only when it is
+  used. Every rule of the layout is refused with `E1050` and a message
+  that names it: trailer fields and flags, record and table sizes, ids,
+  order, bounds, overlap, alignment, padding, encodings, flag bits,
+  sizes, a required section this cig does not read, a stage without its
+  section. `--help`, `--explain` and `--cig-program` read no body; a run
+  and `--chains` read `source`. `--cig-program` lists the new record keys
+  and the section table, as text and with `--json`; a format 1 program
+  prints what it did. `CIG_VALIDATE=1` checks every section before a
+  start. A stage `b` program is refused (`E1050`) until this cig runs
+  bytecode. Format 1 programs read and run as before, and `append` still
+  writes them for one release. `E1050` names the section and table
+  causes; `E1010` is registered for cigcompile (a script that cannot be
+  a stage `b` program). New tests: `archive_tamper_refused`,
+  `format_1_programs_still_run`, `an_unknown_required_section_is_refused`,
+  `an_unknown_optional_section_is_skipped`,
+  `the_head_is_all_a_start_hashes`, `a_damaged_format_2_program_never_panics`,
+  one `rule_*` test per table rule, and format 2 cases of the cut,
+  padding and signed-program tests.
+
 - **`cig runs --verify` no longer says `ok` for a key or ledger it could
   not read** (#215). A load error was taken for "no ledger": a key file
   holding `garbage` gave `ok: 5 runs` and exit 0. It is now a problem
