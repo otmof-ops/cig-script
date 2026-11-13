@@ -26,6 +26,21 @@ pub struct Program {
     pub body: Vec<Stmt>,
 }
 
+impl Program {
+    /// Whether the script's `pack { }` says `own_flags: true`: a program
+    /// compiled from it takes every argument as its own, and no run flags
+    /// (docs/PROGRAMS.md). Only the literal `true` counts; a script that
+    /// does not pass `cig check` is never compiled.
+    pub fn own_flags(&self) -> bool {
+        self.body.iter().any(|s| match s {
+            Stmt::Pack(p) => p
+                .option(PACK_OWN_FLAGS)
+                .is_some_and(|o| matches!(o.value.kind, ExprKind::Bool(true))),
+            _ => false,
+        })
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Block {
     pub stmts: Vec<Stmt>,
@@ -96,10 +111,34 @@ pub struct ChainDecl {
 }
 
 /// `pack { "./build", "~/Downloads" }`: the scope every write must stay in.
+/// Beside the roots, options: `pack { ".", own_flags: true }`. A pack with
+/// no root declares no scope (`pack { own_flags: true }`).
 #[derive(Clone, Debug)]
 pub struct PackDecl {
     pub roots: Vec<Expr>,
+    /// `name: value` beside the roots, in the order written.
+    pub options: Vec<PackOption>,
     pub span: Span,
+}
+
+/// The pack options cig knows.
+pub const PACK_OWN_FLAGS: &str = "own_flags";
+pub const PACK_OPTIONS: &[&str] = &[PACK_OWN_FLAGS];
+
+/// One `name: value` in a `pack { }`.
+#[derive(Clone, Debug)]
+pub struct PackOption {
+    pub name: String,
+    /// Where the name is written.
+    pub name_span: Span,
+    pub value: Expr,
+}
+
+impl PackDecl {
+    /// The first option called `name`, if the pack gives one.
+    pub fn option(&self, name: &str) -> Option<&PackOption> {
+        self.options.iter().find(|o| o.name == name)
+    }
 }
 
 #[derive(Clone, Debug)]

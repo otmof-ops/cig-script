@@ -96,6 +96,18 @@ Leading flags are the run's. The first word that is not a flag, or everything af
 
 `--max-steps`, `--unburn`, `--unburn-last`, `--unburn-since`, `--unburn-to`, `--explain`, `--light` and `--seal-key-fd` also take `--flag=value`. Exit codes are those of `cig run`: `0` ok, `1` script error, `2` syntax error, `3` usage.
 
+### A program with its own flags
+
+A script that says `own_flags: true` in its `pack` (`pack { ".", own_flags: true }`) compiles to a program whose record carries `own_flags`. Every argument on such a program's command line goes to its script as written, flags included: `tool --version`, `tool --help` and `tool -- x` all reach the script, which is what a program that stands in for a command-line tool needs.
+
+Such a program takes **no run flags**, from its command line or from anywhere else: nothing outside the program can turn its run into a dry run, a help page or the undoing of an earlier run. What the run flags do is still available from outside it:
+
+- `cig runs` lists its runs, and `cig unburn <run>` puts one back;
+- `cig run <script>` runs the same script on the interpreter, with every run flag;
+- the record and the section table are in the file (the format is above).
+
+A program without `own_flags` is unchanged.
+
 ## Same as `cig run`, and what differs
 
 The same: the kernel, burns, rollback, `--dry-run`, error positions (they point at `file` as compiled), and the burn protocol.

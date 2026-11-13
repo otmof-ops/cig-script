@@ -688,6 +688,7 @@ impl<'a> Checker<'a> {
                     self.errors.push(pack_misplaced(PackPlace::Second, p.span));
                 }
                 self.pack_seen = true;
+                self.pack_options(&p.options);
                 for r in &p.roots {
                     match literal_text(r) {
                         Some(text) if text.trim().is_empty() => {
@@ -701,6 +702,42 @@ impl<'a> Checker<'a> {
                 }
             }
             Stmt::Expr(e) => self.expr(e),
+        }
+    }
+
+    /// A pack's options (E766): each one cig knows, given once, its value
+    /// the literal `true` or `false`. They change what a compiled program
+    /// does, never the scope, so nothing else here reads them.
+    fn pack_options(&mut self, options: &[PackOption]) {
+        for (i, o) in options.iter().enumerate() {
+            if !PACK_OPTIONS.contains(&o.name.as_str()) {
+                self.error_code(
+                    "E766",
+                    format!("`{}` is not a pack option", o.name),
+                    o.name_span,
+                )
+                .hint = Some(format!(
+                    "the pack's option is {PACK_OWN_FLAGS}: true; a root is a string, pack {{ \"./build\" }}"
+                ));
+                continue;
+            }
+            if options[..i].iter().any(|e| e.name == o.name) {
+                self.error_code(
+                    "E766",
+                    format!("the pack gives `{}` twice", o.name),
+                    o.name_span,
+                )
+                .hint = Some("keep one".to_string());
+                continue;
+            }
+            if !matches!(o.value.kind, ExprKind::Bool(_)) {
+                self.error_code(
+                    "E766",
+                    format!("`{}` takes true or false, written as it is", o.name),
+                    o.value.span,
+                )
+                .hint = Some(format!("pack {{ {}: true }}", o.name));
+            }
         }
     }
 
@@ -945,5 +982,39 @@ mod tests {
     fn module_typos_are_caught() {
         let r = run("exhale fs.read_txt(\"x\")");
         assert!(r.errors[0].hint.as_deref().unwrap().contains("read_text"));
+    }
+
+    #[test]
+    fn pack_options_are_checked_where_they_are_written() {
+        assert!(run("pack { own_flags: true }\n").ok());
+        assert!(run("pack { \".\", own_flags: false }\n").ok());
+        let at = |src: &str| -> Vec<(String, u32, u32, String)> {
+            run(src)
+                .errors
+                .iter()
+                .map(|e| {
+                    let s = e.span.expect("a position");
+                    (e.code.to_string(), s.line, s.col, e.message.clone())
+                })
+                .collect()
+        };
+        let e = at("pack { \".\", own_flag: true }\n");
+        assert_eq!(e.len(), 1, "{e:?}");
+        assert_eq!((e[0].0.as_str(), e[0].1, e[0].2), ("E766", 1, 13), "{e:?}");
+        assert!(e[0].3.contains("`own_flag` is not a pack option"), "{e:?}");
+        let e = at("pack {\n  own_flags: true\n  own_flags: false\n}\n");
+        assert_eq!(e.len(), 1, "{e:?}");
+        assert_eq!((e[0].0.as_str(), e[0].1, e[0].2), ("E766", 3, 3), "{e:?}");
+        assert!(e[0].3.contains("twice"), "{e:?}");
+        for value in ["\"true\"", "1", "yes", "not false", "null"] {
+            let e = at(&format!("roll yes = true\npack {{ own_flags: {value} }}\n"));
+            let e: Vec<_> = e.into_iter().filter(|e| e.0 == "E766").collect();
+            assert_eq!(e.len(), 1, "{value}: {e:?}");
+            assert_eq!((e[0].1, e[0].2), (2, 19), "{value}: {e:?}");
+            assert!(e[0].3.contains("true or false"), "{e:?}");
+        }
+        // The pack's other rules hold for a rootless pack as for any.
+        let e = at("roll x = 1\npack { own_flags: true }\n");
+        assert_eq!(e[0].0, "E753", "{e:?}");
     }
 }

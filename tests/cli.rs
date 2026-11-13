@@ -19914,3 +19914,160 @@ fn a_damaged_compressed_object_is_refused() {
     assert!(err.contains("E703") && err.contains("corrupt"), "{err}");
     assert_eq!(sb.read("w/t.txt"), "x", "nothing was restored");
 }
+
+// ----- pack options (`pack { own_flags: true }`, cig-compile#8) -----------------
+
+/// Run `s.cig` for real and return the id of the run it recorded.
+fn run_new(sb: &Sandbox) -> String {
+    let ids = |sb: &Sandbox| -> Vec<String> {
+        sb.runs()
+            .iter()
+            .filter_map(|r| r["id"].as_str().map(str::to_string))
+            .collect()
+    };
+    let before = ids(sb);
+    sb.run_ok(&["run", "s.cig"]);
+    let new: Vec<String> = ids(sb)
+        .into_iter()
+        .filter(|i| !before.contains(i))
+        .collect();
+    assert_eq!(new.len(), 1, "{new:?}");
+    new.into_iter().next().unwrap()
+}
+
+#[test]
+fn a_pack_option_is_checked_where_it_is_written() {
+    let sb = Sandbox::new();
+    for (script, said, at) in [
+        (
+            "pack { \".\", own_flag: true }\n",
+            "error[E766 check]: `own_flag` is not a pack option",
+            "s.cig:1:13",
+        ),
+        (
+            "pack {\n  own_flags: true\n  own_flags: true\n}\n",
+            "error[E766 check]: the pack gives `own_flags` twice",
+            "s.cig:3:3",
+        ),
+        (
+            "pack { own_flags: \"true\" }\n",
+            "error[E766 check]: `own_flags` takes true or false, written as it is",
+            "s.cig:1:19",
+        ),
+        (
+            "stick yes = true\npack { own_flags: yes }\n",
+            "error[E766 check]: `own_flags` takes true or false",
+            "s.cig:2:19",
+        ),
+    ] {
+        sb.write("s.cig", script);
+        let err = sb.run_err(&["check", "s.cig"], 2);
+        assert!(err.contains(said), "{script}: {err}");
+        assert!(err.contains(&format!("--> {at}")), "{script}: {err}");
+        // `cig run` checks first: nothing runs.
+        let err = sb.run_err(&["run", "s.cig"], 2);
+        assert!(err.contains("E766"), "{script}: {err}");
+    }
+    sb.write("s.cig", "pack { own_flags: true, \".\" }\nexhale \"ok\"\n");
+    assert_eq!(sb.run_ok(&["check", "s.cig"]).trim(), "");
+    assert!(sb.cig(&["explain", "E766"]).status.success());
+}
+
+#[test]
+fn a_rootless_pack_declares_no_scope() {
+    let sb = Sandbox::new();
+    // The same lines with and without the pack, so the plans agree.
+    let rootless = "pack { own_flags: true }\nburn {\n  fs.write_text(\"free.txt\", \"x\")\n}\n";
+    let none = "\nburn {\n  fs.write_text(\"free.txt\", \"x\")\n}\n";
+    let mut plans = Vec::new();
+    let mut runs = Vec::new();
+    for script in [rootless, none] {
+        sb.write("s.cig", script);
+        assert_eq!(sb.run_ok(&["check", "s.cig"]).trim(), "");
+        let plan = sb.cig(&["run", "--dry-run", "s.cig"]);
+        assert!(plan.status.success());
+        plans.push(String::from_utf8_lossy(&plan.stderr).to_string());
+        assert!(!sb.exists("free.txt"));
+        let id = run_new(&sb);
+        assert_eq!(sb.read("free.txt"), "x");
+        fs::remove_file(sb.path().join("free.txt")).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&sb.run_ok(&["runs", &id, "--json"])).unwrap();
+        runs.push(v["run"].get("pack").cloned());
+        let chains: serde_json::Value =
+            serde_json::from_str(&sb.run_ok(&["--json", "chains", "s.cig"])).unwrap();
+        assert!(chains["pack"].is_null(), "{chains}");
+    }
+    assert_eq!(plans[0], plans[1], "the plans differ");
+    assert!(!plans[0].contains("pack"), "{}", plans[0]);
+    assert_eq!(runs, vec![None, None]);
+}
+
+#[test]
+fn a_pack_with_roots_fences_the_same_with_the_option() {
+    let sb = Sandbox::new();
+    fs::create_dir(sb.path().join("out")).unwrap();
+    let body = "burn {\n  fs.write_text(\"free.txt\", \"x\")\n}\n";
+    let computed = "stick f = \"fr\" + \"ee.txt\"\nburn {\n  fs.write_text(f, \"x\")\n  fs.write_text(\"out/in.txt\", \"y\")\n}\n";
+    let inside = "burn {\n  fs.write_text(\"out/in.txt\", \"y\")\n}\n";
+    // The option's place among the roots changes no column the errors name.
+    let heads = [
+        "pack { \"out\" }",
+        "pack { \"out\", own_flags: true }",
+        "pack { \"out\", own_flags: false }",
+    ];
+    let mut seen: Vec<(String, String, String, Option<serde_json::Value>)> = Vec::new();
+    for head in heads {
+        sb.write("s.cig", &format!("{head}\n{body}"));
+        let literal = sb.run_err(&["run", "s.cig"], 2);
+        assert!(literal.contains("error[E750 check]"), "{head}: {literal}");
+        sb.write("s.cig", &format!("{head}\n{computed}"));
+        let at_run = sb.run_err(&["run", "s.cig"], 1);
+        assert!(at_run.contains("error[E751 burn]"), "{head}: {at_run}");
+        assert!(!sb.exists("free.txt") && !sb.exists("out/in.txt"));
+        sb.write("s.cig", &format!("{head}\n{inside}"));
+        let plan = sb.cig(&["run", "--dry-run", "s.cig"]);
+        let plan = String::from_utf8_lossy(&plan.stderr).to_string();
+        assert!(plan.contains("pack: "), "{plan}");
+        let id = run_new(&sb);
+        assert_eq!(sb.read("out/in.txt"), "y");
+        fs::remove_file(sb.path().join("out/in.txt")).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&sb.run_ok(&["runs", &id, "--json"])).unwrap();
+        seen.push((literal, at_run, plan, v["run"].get("pack").cloned()));
+    }
+    assert!(seen[0]
+        .3
+        .as_ref()
+        .is_some_and(|p| p.as_array().is_some_and(|a| a.len() == 1)));
+    for s in &seen[1..] {
+        assert_eq!(
+            s, &seen[0],
+            "a pack with roots fences differently with the option"
+        );
+    }
+}
+
+#[test]
+fn cig_run_of_a_script_with_the_option_is_unchanged() {
+    let sb = Sandbox::new();
+    let mut outs = Vec::new();
+    for head in ["pack { \".\" }", "pack { \".\", own_flags: true }"] {
+        sb.write("s.cig", &format!("{head}\nexhale args\n"));
+        let mut o = Vec::new();
+        for args in [
+            &["run", "s.cig"][..],
+            &["run", "s.cig", "--", "--version", "x"][..],
+            &["run", "--dry-run", "s.cig", "--", "--help"][..],
+        ] {
+            let out = sb.cig(args);
+            o.push((
+                out.status.code(),
+                String::from_utf8_lossy(&out.stdout).to_string(),
+            ));
+        }
+        outs.push(o);
+    }
+    assert_eq!(outs[0], outs[1]);
+    assert_eq!(outs[0][1].1.trim(), "[\"--version\", \"x\"]");
+}

@@ -244,11 +244,16 @@ impl Interp {
 
     /// Declare the pack, as `pack { }` does: the roots, each already
     /// checked by [`pack_root`], go to the kernel; its errors are at `span`.
+    /// A pack with no root (`pack { own_flags: true }`) declares no scope:
+    /// the kernel is not told, and writes go where they go without a pack.
     pub(crate) fn declare_pack(
         &mut self,
         roots: Vec<std::path::PathBuf>,
         span: Span,
     ) -> Result<(), Diagnostic> {
+        if roots.is_empty() {
+            return Ok(());
+        }
         self.kernel.set_pack(roots).map_err(|d| d.or_at(span))
     }
 

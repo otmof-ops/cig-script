@@ -96,6 +96,25 @@ project follows semantic versioning.
   `a_damaged_pack_record_is_refused_and_the_rest_restore`,
   `a_text_snapshot_costs_at_most_0_3_bytes_per_byte`,
   `a_damaged_compressed_object_is_refused`.
+- **A compiled program can take every argument itself: `own_flags: true`
+  in the `pack`** (cig-compile#8). A `pack` may carry an option beside its
+  roots, in any order (`pack { ".", own_flags: true }`); the one option is
+  `own_flags`, a fact about the program a compiler makes from the script.
+  A program whose record carries it gives its whole command line to its
+  script, flags included, so `tool --version` reaches the script where it
+  was refused (`E1052`); it takes no run flags, from its command line or
+  from anywhere else. `cig run` ignores the option. An option cig does not
+  know, one given twice, or a value that is not the literal `true` or
+  `false` is `E766`. A pack with only options declares no scope and the
+  kernel is never told of one; a pack with a root fences as before.
+  `syntax::ast::Program::own_flags()` tells a compiler whether a script
+  asks for it. Format 1 programs and programs without the key start as
+  before. Tests: `a_program_with_own_flags_gets_every_argument`,
+  `an_old_program_keeps_its_bytes`,
+  `a_rootless_pack_in_a_program_writes_where_no_pack_writes`,
+  `a_pack_option_is_checked_where_it_is_written`,
+  `a_rootless_pack_declares_no_scope`,
+  `a_pack_with_roots_fences_the_same_with_the_option`.
 - **`cig tin vault update` waits for the restarted vault to answer**. The
   service is `Type=simple`, so systemd calls it active as soon as
   `ExecStart` has forked; the socket appears a moment later. `update`

@@ -1586,3 +1586,223 @@ fn light_and_chains_answer_the_same_at_stage_b() {
     assert_eq!(lit.status.code(), Some(2));
     assert_eq!(text(&lit.stdout), "hi\n");
 }
+
+// ----- own flags: a program that takes every argument (cig-compile#8) ------------
+
+impl Sandbox {
+    /// The stage `a` program [`Sandbox::compile`] makes, with `own_flags`.
+    fn compile_own(&self, name: &str, script: &str) -> PathBuf {
+        let mut b = self.build(name, script);
+        b.own_flags = true;
+        self.make2(&b)
+    }
+
+    /// A stage `b` program with `own_flags`, from `m`.
+    fn compile_own_b(&self, name: &str, script: &str, m: &Module) -> PathBuf {
+        let mut b = self.build(name, script);
+        b.own_flags = true;
+        b.stage = Stage::B;
+        b.sections.push(Section {
+            id: "bytecode".to_string(),
+            version: 1,
+            encoding: Encoding::Stored,
+            required: true,
+            bytes: bc::serialize_module(m),
+        });
+        self.make2(&b)
+    }
+}
+
+/// `exhale args`, as a lowering writes it.
+const ARGS_SCRIPT: &str = "exhale args\n";
+
+fn args_module() -> Module {
+    let src = ARGS_SCRIPT;
+    let mut a = Asm::default();
+    let k = a.s("args");
+    a.at(src, "args").i(Instr::abx(Op::LOADG, 1, k));
+    a.at(src, "exhale args").op(Op::EXHALE, 1, 1, 0);
+    a.ret_null(0);
+    a.module("a.cig", 2)
+}
+
+#[test]
+fn a_program_with_own_flags_gets_every_argument() {
+    let s = Sandbox::new();
+    s.write("a.cig", ARGS_SCRIPT);
+    let a = s.compile_own("a", "a.cig");
+    let b = s.compile_own_b("a", "a.cig", &args_module());
+    let every = [
+        "--version",
+        "--help",
+        "--",
+        "x",
+        "--dry-run",
+        "-h",
+        "--max-steps=1",
+    ];
+    for (args, said) in [
+        (
+            &every[..],
+            "[\"--version\", \"--help\", \"--\", \"x\", \"--dry-run\", \"-h\", \"--max-steps=1\"]",
+        ),
+        (&["--version"][..], "[\"--version\"]"),
+        (&["--help"][..], "[\"--help\"]"),
+        (&["--", "x"][..], "[\"--\", \"x\"]"),
+        (&["--cig-program"][..], "[\"--cig-program\"]"),
+        (&[][..], "[]"),
+    ] {
+        let at_a = s.prog(&a, args);
+        assert!(at_a.status.success(), "{args:?}: {}", text(&at_a.stderr));
+        assert_eq!(text(&at_a.stdout).trim(), said, "{args:?}");
+        // Stage `b` gets the same arguments, the same way.
+        same(&at_a, &s.prog(&b, args), &format!("stage b, {args:?}"));
+    }
+    for exe in [&a, &b] {
+        let read = program::read(&mut fs::File::open(exe).unwrap())
+            .unwrap()
+            .unwrap();
+        assert!(read.own_flags(), "the record carries the key");
+    }
+    // It takes no run flags from anywhere: a variable in its environment
+    // that names some changes nothing.
+    let with_env = output(
+        s.command(&a)
+            .env("CIG_RUN_FLAGS", "--dry-run --help")
+            .args(["x"]),
+    )
+    .expect("run the program");
+    assert!(with_env.status.success(), "{}", text(&with_env.stderr));
+    assert_eq!(text(&with_env.stdout).trim(), "[\"x\"]");
+    // A program without the key still takes the run flags first.
+    let plain = s.compile("p", "a.cig");
+    let refused = s.prog(&plain, &["--version"]);
+    assert_eq!(refused.status.code(), Some(3));
+    assert!(text(&refused.stderr).contains("E1052"));
+    assert_eq!(
+        text(&s.prog(&plain, &["--", "--version"]).stdout).trim(),
+        "[\"--version\"]"
+    );
+}
+
+#[test]
+fn an_old_program_keeps_its_bytes() {
+    let s = Sandbox::new();
+    let source = "stick name = args.get(0, \"world\")\nexhale \"hello, ${name}\"\n";
+    s.write("hello.cig", source);
+    let runtime = fs::read(env!("CARGO_BIN_EXE_cig")).unwrap();
+    // Format 1, as `append` has always written it: the runtime, the record
+    // as JSON in its field order, then `CIGPROG1`, the payload's length and
+    // its sha256.
+    use sha2::Digest;
+    let payload = format!(
+        "{{\"format\":1,\"name\":\"hello\",\"file\":\"hello.cig\",\"source\":{},\"sha256\":\"{}\",\"cig\":\"{}\",\"compiler\":\"test-compiler 0\"}}",
+        serde_json::to_string(source).unwrap(),
+        hex::encode(sha2::Sha256::digest(source.as_bytes())),
+        cigscript::VERSION,
+    );
+    let mut expected = runtime.clone();
+    expected.extend_from_slice(payload.as_bytes());
+    expected.extend_from_slice(b"CIGPROG1");
+    expected.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+    expected.extend_from_slice(&sha2::Sha256::digest(payload.as_bytes()));
+    let p = Program::new("hello", "hello.cig", source, "test-compiler 0");
+    assert!(
+        program::append(&runtime, &p) == expected,
+        "format 1's bytes changed"
+    );
+    let exe = s.place("hello", &expected);
+    // It still runs, and its flags are still the run's.
+    same(
+        &s.cig(&["run", "hello.cig"]),
+        &s.prog(&exe, &[]),
+        "format 1",
+    );
+    same(
+        &s.cig(&["run", "hello.cig", "--", "--version"]),
+        &s.prog(&exe, &["--", "--version"]),
+        "format 1, an argument after --",
+    );
+    let refused = s.prog(&exe, &["--version"]);
+    assert_eq!(refused.status.code(), Some(3));
+    assert!(
+        text(&refused.stderr).contains("E1052"),
+        "{}",
+        text(&refused.stderr)
+    );
+    // A format 2 program without the key: no key in its record, and it
+    // starts as before.
+    let b = s.build("hello", "hello.cig");
+    let two = program::append2(&runtime, &b).unwrap();
+    let rec = text(&two[runtime.len()..]);
+    assert!(
+        !rec.contains("own_flags"),
+        "the key is written only when set"
+    );
+    let exe = s.place("hello2", &two);
+    same(
+        &s.cig(&["run", "hello.cig", "--", "you"]),
+        &s.prog(&exe, &["you"]),
+        "format 2",
+    );
+    assert_eq!(s.prog(&exe, &["--version"]).status.code(), Some(3));
+    let v: serde_json::Value =
+        serde_json::from_slice(&s.prog(&exe, &["--cig-program", "--json"]).stdout).unwrap();
+    assert!(v.get("own_flags").is_none(), "{v}");
+}
+
+#[test]
+fn a_rootless_pack_in_a_program_writes_where_no_pack_writes() {
+    let s = Sandbox::new();
+    // The same lines with and without the pack, so the plans agree.
+    let rootless = "pack { own_flags: true }\nburn {\n  fs.write_text(\"free.txt\", \"x\")\n}\n";
+    let none = "\nburn {\n  fs.write_text(\"free.txt\", \"x\")\n}\n";
+    s.write("r.cig", rootless);
+    s.write("n.cig", none);
+    let r = s.compile_own("r", "r.cig");
+    let n = s.compile("n", "n.cig");
+    // The plan, from the same script compiled without own flags (a program
+    // with them takes no `--dry-run`).
+    let planned = s.compile("rp", "r.cig");
+    let pr = s.prog(&planned, &["--dry-run"]);
+    let pn = s.prog(&n, &["--dry-run"]);
+    assert!(pr.status.success(), "{}", text(&pr.stderr));
+    assert!(
+        text(&pr.stderr).contains("dry-run plan"),
+        "{}",
+        text(&pr.stderr)
+    );
+    assert_eq!(text(&pr.stdout), text(&pn.stdout), "the outputs differ");
+    assert_eq!(text(&pr.stderr), text(&pn.stderr), "the plans differ");
+    assert!(!text(&pr.stderr).contains("pack"), "{}", text(&pr.stderr));
+    let (out, id_r) = s.prog_run(&r, &[]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert_eq!(s.read("free.txt").as_deref(), Some("x"));
+    fs::remove_file(s.path().join("free.txt")).unwrap();
+    let (_, id_n) = s.prog_run(&n, &[]);
+    assert_eq!(s.read("free.txt").as_deref(), Some("x"));
+    let (run_r, _) = s.run_json(&id_r);
+    let (run_n, _) = s.run_json(&id_n);
+    assert!(
+        run_r.get("pack").is_none() && run_n.get("pack").is_none(),
+        "{run_r}"
+    );
+    // At stage `b`, a `pack` instruction with no root declares no scope
+    // either (a lowering writes none for a rootless pack).
+    fs::remove_file(s.path().join("free.txt")).unwrap();
+    let mut m = Asm::default();
+    m.at(rootless, "pack { own_flags: true }")
+        .op(Op::PACK, 1, 0, 0);
+    m.at(rootless, "burn {").burn_enter();
+    m.loadk(3, "free.txt").loadk(4, "x");
+    m.at(rootless, "fs.write_text(\"free.txt\", \"x\")")
+        .burn_op(2, "fs.write_text", 2)
+        .op(Op::BURN_LEAVE, 0, 0, 0);
+    m.ret_null(0);
+    let b = s.compile_own_b("r", "r.cig", &m.module("r.cig", 5));
+    let (out, id_b) = s.prog_run(&b, &[]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert_eq!(s.read("free.txt").as_deref(), Some("x"));
+    let (run_b, _) = s.run_json(&id_b);
+    assert!(run_b.get("pack").is_none(), "{run_b}");
+}

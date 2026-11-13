@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: FSL-1.1-ALv2
 
 //! A compiled program's command line: the flags a `cig run` script takes,
-//! then the program's own arguments. See docs/PROGRAMS.md.
+//! then the program's own arguments. A program compiled with `own_flags`
+//! gives its whole command line to its script and takes no run flags. See
+//! docs/PROGRAMS.md.
 
 use super::{exit, run, Ctx, RunArgs};
 use crate::program::{Loaded, Opened, Stage, Unrunnable};
@@ -99,6 +101,15 @@ fn parse(argv: &[String]) -> Result<Opts, (String, String)> {
     }
     o.args = argv[i.min(argv.len())..].to_vec();
     Ok(o)
+}
+
+/// An own-flags program's options: every word is the program's, and the
+/// run's options are their defaults.
+fn own_command_line(argv: Vec<String>) -> Opts {
+    Opts {
+        args: argv,
+        ..Opts::default()
+    }
 }
 
 fn take(o: &mut Opts, flag: &str, v: &str) -> Result<(), (String, String)> {
@@ -200,7 +211,15 @@ pub fn main(p: Opened) -> i32 {
             }
         }
     }
-    let o = match parse(&argv) {
+    // A program compiled with own flags gives its whole command line to its
+    // script: none of it is read as a run flag, and it takes none from
+    // anywhere else.
+    let parsed = if p.own_flags() {
+        Ok(own_command_line(argv))
+    } else {
+        parse(&argv)
+    };
+    let o = match parsed {
         Ok(o) => o,
         Err((message, hint)) => {
             let d = crate::diagnostics::usage(message)
@@ -400,6 +419,22 @@ mod tests {
 
     fn words(s: &[&str]) -> Vec<String> {
         s.iter().map(|w| w.to_string()).collect()
+    }
+
+    #[test]
+    fn an_own_flags_program_gives_its_whole_command_line_away() {
+        let argv = words(&[
+            "--version",
+            "--help",
+            "--",
+            "x",
+            "--dry-run",
+            "--max-steps=1",
+        ]);
+        let o = own_command_line(argv.clone());
+        assert_eq!(o.args, argv);
+        // Nothing in it was read as a run flag.
+        assert_eq!(Opts { args: vec![], ..o }, Opts::default());
     }
 
     #[test]

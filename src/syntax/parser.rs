@@ -477,6 +477,7 @@ impl Parser {
                 self.advance();
                 let open = self.expect(TokenKind::LBrace, "`{`")?;
                 let mut roots = Vec::new();
+                let mut options = Vec::new();
                 self.skip_newlines();
                 while !self.at(&TokenKind::RBrace) {
                     if self.at(&TokenKind::Eof) {
@@ -484,7 +485,21 @@ impl Parser {
                             .code("E202")
                             .with_hint("add a matching `}`"));
                     }
-                    roots.push(self.expr()?);
+                    // `name: value` is an option; no root starts that way.
+                    match (self.peek().clone(), self.peek_at(1)) {
+                        (TokenKind::Ident(name), TokenKind::Colon) => {
+                            let name_span = self.advance().span;
+                            self.advance();
+                            self.skip_newlines();
+                            let value = self.expr()?;
+                            options.push(PackOption {
+                                name,
+                                name_span,
+                                value,
+                            });
+                        }
+                        _ => roots.push(self.expr()?),
+                    }
                     match self.peek() {
                         TokenKind::Comma | TokenKind::Newline | TokenKind::Semicolon => {
                             self.advance();
@@ -503,12 +518,13 @@ impl Parser {
                     }
                 }
                 self.advance();
-                if roots.is_empty() {
+                if roots.is_empty() && options.is_empty() {
                     return Err(syntax("a pack declares at least one root", start)
                         .with_hint("pack { \"./build\" }"));
                 }
                 Ok(Stmt::Pack(PackDecl {
                     roots,
+                    options,
                     span: start.to(self.prev_span()),
                 }))
             }
@@ -1292,5 +1308,30 @@ mod tests {
             panic!()
         };
         assert!(matches!(pieces[1], StrPiece::Expr(_)));
+    }
+
+    #[test]
+    fn a_pack_takes_options_beside_its_roots() {
+        let p = ok("pack { \"./a\", own_flags: true, \"./b\" }\n");
+        let Stmt::Pack(d) = &p.body[0] else { panic!() };
+        assert_eq!(d.roots.len(), 2);
+        assert_eq!(d.options.len(), 1);
+        assert_eq!(d.options[0].name, "own_flags");
+        assert_eq!(
+            (d.options[0].name_span.line, d.options[0].name_span.col),
+            (1, 15)
+        );
+        assert!(p.own_flags());
+        // No root: allowed, a pack that declares no scope.
+        let p = ok("pack {\n  own_flags: true\n}\n");
+        let Stmt::Pack(d) = &p.body[0] else { panic!() };
+        assert!(d.roots.is_empty() && p.own_flags());
+        assert!(!ok("pack { own_flags: false }\n").own_flags());
+        assert!(!ok("pack { \".\" }\n").own_flags());
+        assert!(!ok("exhale 1\n").own_flags());
+        // Only the literal `true` says so; anything else is the checker's.
+        assert!(!ok("pack { own_flags: \"true\" }\n").own_flags());
+        // Neither root nor option is still a syntax error.
+        assert!(err("pack { }\n").message.contains("at least one root"));
     }
 }

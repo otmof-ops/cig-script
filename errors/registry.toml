@@ -2745,6 +2745,24 @@ probe = "env-var"
 remedy = "point CIG_SEAL_KEY_FILE at the key file, or unset it to use seal.key in the keys folder"
 
 [[code]]
+code = "E766"
+title = "bad pack option"
+meaning = "A pack gives an option beside its roots (`pack { \".\", own_flags: true }`) that cig does not know, gives one twice, or gives a value that is not the literal true or false. The pack's one option is own_flags, which a compiled program reads: with it, every argument is the program's and it takes no run flags. It never changes the pack's scope. The script is refused before anything runs."
+fix = "write the option as own_flags: true or own_flags: false, once, beside the pack's roots"
+no = "none"
+arises = ["check"]
+since = "1.22.0"
+related = ["E753", "E755", "E1052"]
+[[code.cause]]
+why = "a misspelt option name, or a root written as name: value"
+probe = "source-line"
+remedy = "the option is own_flags; a root is a string, pack { \"./build\" }"
+[[code.cause]]
+why = "own_flags given twice, or given a string, a number or a variable"
+probe = "source-line"
+remedy = "keep one own_flags, with the word true or false after it"
+
+[[code]]
 code = "E800"
 title = "usage error"
 meaning = "The command line or the environment is wrong."
@@ -3677,7 +3695,7 @@ remedy = "chmod 755 the program"
 [[code]]
 code = "E1052"
 title = "not one of the program's run flags"
-meaning = "A compiled program takes the run's flags first and its own arguments after them; this one is not a run flag, it lacks its value, or an argument is not valid UTF-8. Nothing ran."
+meaning = "A compiled program takes the run's flags first and its own arguments after them; this one is not a run flag, it lacks its value, or an argument is not valid UTF-8. Nothing ran. A program compiled with own_flags takes no run flags: every argument is its own, so only an argument that is not valid UTF-8 is refused."
 fix = "put the program's own arguments after --: tool -- --flag (tool --help lists the run flags)"
 no = "none"
 arises = ["run"]
