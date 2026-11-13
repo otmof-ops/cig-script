@@ -378,18 +378,7 @@ impl Interp {
                 let label_text = match label {
                     Some(e) => {
                         let v = self.eval(e, env)?;
-                        match &v {
-                            Value::Str(s) => Some(s.to_string()),
-                            other => {
-                                return Err(type_error(format!(
-                                    "a burn's label is a string, got {}",
-                                    other.type_name()
-                                ))
-                                .at(e.span)
-                                .with_hint("burn (s, \"deploy\") { ... }: the name the plan and a rollback call this burn by")
-                                .into());
-                            }
-                        }
+                        Some(burn_label(&v, e.span)?)
                     }
                     None => None,
                 };
@@ -1042,6 +1031,22 @@ fn field_index(map: &IndexMap<String, Value>, name: &str, hint: &Cell<u32>) -> O
 #[inline]
 fn field<'m>(map: &'m IndexMap<String, Value>, name: &str, hint: &Cell<u32>) -> Option<&'m Value> {
     field_index(map, name, hint).map(|i| &map[i])
+}
+
+/// A burn's label, as the tree-walker and the VM's `burn.enter` read it: a
+/// string, else a type error at the label, `span`.
+pub(crate) fn burn_label(v: &Value, span: Span) -> Result<String, Diagnostic> {
+    match v {
+        Value::Str(s) => Ok(s.to_string()),
+        other => Err(type_error(format!(
+            "a burn's label is a string, got {}",
+            other.type_name()
+        ))
+        .at(span)
+        .with_hint(
+            "burn (s, \"deploy\") { ... }: the name the plan and a rollback call this burn by",
+        )),
+    }
 }
 
 /// One root of `pack { }`, as the tree-walker and the VM's `pack` check it:

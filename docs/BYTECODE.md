@@ -85,7 +85,12 @@ A `null` constant is not needed: `LOADNULL` loads null directly.
 | field | type | notes |
 |-------|------|-------|
 | class | `u8` | `0` = normal, `1` = unlit |
-| label | `u32` | string-constant index into this function's pool, or `0xFFFF_FFFF` for none |
+| label kind | `u8` | `0` = none, `1` = a string constant, `2` = a register |
+| label | `u32` | kind `1`: a constant index into this function's pool; kind `2`: a register of the frame, read when `burn.enter` runs; kind `0`: `0xFFFF_FFFF` |
+
+Six bytes an entry. A label of kind `0` with any other `label`, or an
+unknown kind, is refused by the parser (`ParseError::BadTag`, `region
+label kind`): each label has one encoding.
 
 ### Function
 
@@ -267,10 +272,10 @@ followed by `TESTN`, not a swapped operand pair.
 
 | op | fmt | effect |
 |----|-----|--------|
-| `burn.enter` class, Rg | ABx | enter region `Bx` (of this function's `regions`) with class `A` (the region's own class) |
+| `burn.enter` class, Rg | ABx | enter region `Bx` (of this function's `regions`) with class `A` (the region's own class); a register label is read here |
 | `burn.op` A, K, packed | ABC | `R(A) = burn_op(callee=K[B], kind=low 4 of C, args=R(A+1..A+1+(C>>4)))` (unwidened); with `WIDE`, `C` is 16 bits, low 8 are the kind and high 8 are the arg count |
 | `burn.leave` | ABC | leave the current burn |
-| `comp.enter` A, B, C | ABC | the current burn has an `unburn { }`: `R(A)` is its state map, `K[B]` the compensation's source, `K[C]` the state's name (empty for none) |
+| `comp.enter` A, K, K | ABC | the current burn has an `unburn { }`: `R(A)` is its state map, `K[B]` the compensation's source, `K[C]` the state's name (empty for none) |
 | `comp.leave` | ABC | the burn's body ends: the compensation stops covering its ops |
 
 ### The rest
@@ -314,8 +319,10 @@ The rules (one bullet per `VerifyError` variant, matched by its
 
 - **`bad-opcode`** — an instruction's opcode byte is not one of the
   defined values.
-- **`register-out-of-range`** — an operand of kind `Reg` or
-  `BurnClass` is past the function's `reg_count`.
+- **`register-out-of-range`** — an operand of kind `Reg` is past the
+  function's `reg_count`, or a `burn.enter` enters a region whose label
+  is a register past it. `burn.enter`'s class is not a register: a
+  one-register function may hold an unlit burn.
 - **`register-range-out-of-range`** — the inclusive end of a register
   range (`CALL`, `CALLB`, `CALLM`, `TAILCALL`, `PACK`, `EXHALE`,
   `CHAIN.MAKE`, `INTERP`, `BURN.OP`) is past `reg_count`.
@@ -337,14 +344,42 @@ The rules (one bullet per `VerifyError` variant, matched by its
   >= n_instr` (when not sentinel).
 - **`handler-ranges-interleave`** — two handlers overlap without one
   containing the other. Handlers nest.
-- **`burn-unbalanced`** — a forward walk through the function ends
-  with a non-zero burn stack (`enter-without-leave`), or a
-  `BURN.LEAVE` is reached without a matching `BURN.ENTER`
-  (`leave-without-enter`).
-- **`burn-op-outside-region`** — a `BURN.OP` is not inside a
-  `BURN.ENTER`/`BURN.LEAVE` pair in this function, is not covered by
-  a region row whose `region` is not the sentinel, and the function
-  is not marked `requires_burn`.
+- **`burn-unbalanced`** — the burn instructions do not fit the
+  function's **burn rows**: its region rows that name a region (a row
+  whose `region` is the sentinel is outside every burn and takes no part).
+  A burn row is one burn's pcs, from its `burn.enter` to the pc after its
+  last instruction. The rule names what failed (`VerifyError`'s `why`):
+  - `rows-interleave`: two burn rows overlap without one holding the
+    other, or start at the same pc. A burn's code is one range, and burns
+    nest as their blocks do;
+  - `row-without-enter`: a row's first instruction is not a `burn.enter`
+    of the row's region. The only way into a burn is its `burn.enter`;
+  - `row-falls-out`: a row's last instruction is not a `burn.leave` and
+    falls through (anything but `ret`, `tailcall`, `throw`, `jmp`,
+    `loop`). The run cannot walk off a burn's end with it still open;
+  - `enter-outside-row`: a `burn.enter` lies in no row of its region. Every
+    burn a run can enter is in the table. A `burn.enter` inside its row
+    but not at its start (a re-entry after a jump, which no run reaches)
+    is accepted;
+  - `leave-outside-row`: a run of `burn.leave`s, with only `comp.leave`s
+    between them, has more `burn.leave`s than there are burn rows around
+    its first. Each closes one burn around it: leaving two burns at once
+    on a `break` is two, and a leave outside every row is too many;
+  - `jump-into-row`: a jump operand, or a handler's `handler_pc` or
+    `finally_pc`, lands inside a burn row other than at its start, from
+    outside that row (for a handler: its range is not inside the row).
+    Only the `burn.enter` is entered from outside.
+
+  These are rules on the table, not on the order of instructions: a
+  `burn.leave` on a way out (`comp.leave`, `burn.leave`, then the jump a
+  `break` or `continue` makes) needs nothing after the jump, and a body
+  that ends in a terminator needs no `burn.leave` after it. They refuse
+  a malformed module early; they do not prove a burn is open when a
+  `burn.op` runs. The VM's burn stack does that (below).
+- **`burn-class-mismatch`** — a `burn.enter`'s class `A` is not its
+  region's class.
+- **`burn-op-outside-region`** — a `BURN.OP` lies in no burn row and the
+  function is not marked `requires_burn`.
 - **`region-out-of-range`** / **`region-bad-range`** — the region
   table references an unknown region id in this function, or has
   `pc_start >= pc_end`, or `pc_end > n_instr`.
@@ -407,12 +442,10 @@ refuses the module (or the call) with the interpreter's own error.
   `K[B]` names the builtin. The VM checks at load time that `K[B]` is a
   builtin of its catalogue whose kind is that kind (`vm::burn_op_kind`),
   and refuses anything else with `E1050` (`unknown-burn-op`).
-- **`burn.enter`'s class** must be its region's class
-  (`burn-class-mismatch`), and a region's label, when it has one, must
-  be a string constant (`region-label`).
-- **`comp.enter`'s operands.** The format gives them no kind; the VM
-  checks at load that `A` is a register of the frame and that `K[B]` and
-  `K[C]` are string constants (`comp-operands`).
+- **A region's constant label** must be a string constant
+  (`region-label`), checked at load. A register label is read when
+  `burn.enter` runs: a string is the label, anything else the
+  tree-walker's own error (below).
 - **`requires_burn`'s bargain.** A function marked `requires_burn`
   verifies a bare `BURN.OP` wherever it sits in that function's body.
   In exchange, its `burn.op` is refused at run time when no burn is open
@@ -422,17 +455,18 @@ refuses the module (or the call) with the interpreter's own error.
   outside a burn in the tree-walker as long as the effect is not taken,
   and so it does on the VM. The format does not attempt to prove the
   call site through static means.
-- **Burn state at run time.** The verifier's burn-balance check is
-  **lexical**: it walks the instruction stream in order. A jump can
-  enter or leave a burn's pc range, so lexical balance does not
-  imply a burn is open at the moment `burn.op` runs. **The VM carries
-  the burn stack at run time** and refuses:
-  - a `burn.leave` with no burn open in its frame (an internal error
-    that names the instruction: the tree-walker has no such state);
+- **Burn state at run time.** The verifier's burn rules are on the
+  region rows; a jump can still leave a burn without `burn.leave`, or
+  reach a `burn.op` after its burn's `burn.leave`, so they do not imply a
+  burn is open at the moment `burn.op` runs. **The VM carries the burn
+  stack at run time** and refuses:
+  - a `burn.leave`, `comp.enter` or `comp.leave` with no burn (or no
+    compensation) open in its frame (an internal error that names the
+    instruction: the tree-walker has no such state);
   - a `burn.op` in a function that is not `requires_burn` while its
     frame has no burn open: the interpreter's `E701`.
 
-  Neither lands on `E1050`. The verifier's check is there to catch a
+  Neither lands on `E1050`. The verifier's rules are there to catch a
   malformed module early, not to be the VM's guarantee.
 - **Frame-size and nesting ceilings.** The verifier refuses a
   `reg_count` greater than **65 536** (the widest register index is
@@ -640,9 +674,21 @@ open. A lowering writes to them.
   `unburn` block's braces, as the parser slices it. A burn without
   `unburn { }`, or an unlit one (`burn.enter 1, Rg`), has no `comp.*`;
   in an unlit burn they do nothing, as the tree-walker records no
-  compensation for one. A burn's label is its region's constant: a
-  lowering whose label is not a string literal does not lower the burn
-  yet.
+  compensation for one. The burn's region row runs from `burn.enter` to
+  the pc after the body's last instruction.
+
+  A **computed label**, `burn (s, name) { }`, is a region of label kind
+  `2`: the lowering evaluates the label into a register before
+  `newmap R(s)` (the tree-walker reads it before the state map is made,
+  in the enclosing scope), then writes `burn.enter 0, Rg` and, right
+  after it, a `nop` whose row is the label expression's position.
+  `burn.enter` reads the register when it runs, each time (a burn in a
+  loop takes each turn's label): a string is the label in the journal's
+  compensation and the plan; anything else is the tree-walker's own
+  error, `a burn's label is a string, got <type>` with its hint
+  (`crate::interp::eval::burn_label`, the one function both engines
+  call), at the `nop`'s row, else at `burn.enter`'s own, and the burn is
+  not entered.
 
   Each frame keeps the burns it opened, innermost last; an open try
   keeps how many were open at its `try.enter`. Leaving a burn closes it:
@@ -657,8 +703,13 @@ open. A lowering writes to them.
   only when `exit()` was asked for, as in the tree-walker. An error
   recording a compensation replaces the one going on, at the burn's
   position. A lowering writes `comp.leave` and `burn.leave` on every
-  other way out of a burn (a `jmp` out of it), and does not tail-call
-  inside one.
+  other way out of a burn (a `jmp` out of it, after them), and does not
+  tail-call inside one. It writes no instruction that no run reaches: a
+  `break` out of a burn is `comp.leave`, `burn.leave`, `jmp` (two burns:
+  both pairs, innermost first, then one `jmp`) with nothing after the
+  jump, and a body that ends in a terminator (`break`, `continue`,
+  `snuff`, `cough`) ends its row there, with no `comp.leave` or
+  `burn.leave` after it.
 - **`burn.op A, K, packed`** calls the builtin `K[B]` with
   `R(A+1..A+1+n)` through the interpreter's own builtin call, so the
   kernel gets the op the builtin builds (`Interp::effect`), with its plan,

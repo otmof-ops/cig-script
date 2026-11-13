@@ -263,18 +263,28 @@ pub enum VerifyError {
         /// The inner handler in the function's slice.
         b: u32,
     },
-    /// `BURN.ENTER`/`BURN.LEAVE` are not balanced on every path: a
-    /// forward walk through the function ends with a non-empty burn
-    /// stack, or `BURN.LEAVE` is reached without a matching
-    /// `BURN.ENTER`.
+    /// The burn instructions do not fit the function's burn rows (its
+    /// region rows that name a region): the rows interleave or share a
+    /// start, a row does not start with its own `BURN.ENTER` or runs off
+    /// its end, a `BURN.ENTER` lies outside every row of its region, a
+    /// run of `BURN.LEAVE`s leaves more burns than there are rows around
+    /// it, or a jump or a handler lands inside a row from outside it.
     BurnUnbalanced {
         /// The function.
         func: u32,
-        /// The pc where the imbalance was found.
+        /// The pc where the rule failed.
         pc: u32,
-        /// What is wrong, in one word (`leave-without-enter` or
-        /// `enter-without-leave`).
+        /// Which rule, in one word: `rows-interleave`,
+        /// `row-without-enter`, `row-falls-out`, `enter-outside-row`,
+        /// `leave-outside-row` or `jump-into-row`.
         why: &'static str,
+    },
+    /// A `BURN.ENTER`'s class operand is not its region's class.
+    BurnClassMismatch {
+        /// The function.
+        func: u32,
+        /// The pc of the `BURN.ENTER`.
+        pc: u32,
     },
     /// The verifier's main rule (V4/T1-T3): a `BURN.OP` sits outside
     /// every `BURN.ENTER`/`BURN.LEAVE` range in its function, and the
@@ -442,6 +452,7 @@ impl VerifyError {
             VerifyError::HandlerBadRange { .. } => "handler-bad-range",
             VerifyError::HandlerRangesInterleave { .. } => "handler-ranges-interleave",
             VerifyError::BurnUnbalanced { .. } => "burn-unbalanced",
+            VerifyError::BurnClassMismatch { .. } => "burn-class-mismatch",
             VerifyError::BurnOpOutsideRegion { .. } => "burn-op-outside-region",
             VerifyError::RegionOutOfRange { .. } => "region-out-of-range",
             VerifyError::RegionBadRange { .. } => "region-bad-range",
@@ -474,6 +485,7 @@ impl VerifyError {
             | VerifyError::HandlerBadRange { func, .. }
             | VerifyError::HandlerRangesInterleave { func, .. }
             | VerifyError::BurnUnbalanced { func, .. }
+            | VerifyError::BurnClassMismatch { func, .. }
             | VerifyError::BurnOpOutsideRegion { func, .. }
             | VerifyError::RegionOutOfRange { func, .. }
             | VerifyError::RegionBadRange { func, .. }
@@ -504,6 +516,7 @@ impl VerifyError {
             | VerifyError::UpvalueOutOfRange { pc, .. }
             | VerifyError::HandlerOutOfRange { pc, .. }
             | VerifyError::BurnUnbalanced { pc, .. }
+            | VerifyError::BurnClassMismatch { pc, .. }
             | VerifyError::BurnOpOutsideRegion { pc, .. }
             | VerifyError::CallArityTooHigh { pc, .. }
             | VerifyError::WideDangling { pc, .. }

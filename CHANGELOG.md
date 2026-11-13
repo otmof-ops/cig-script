@@ -78,6 +78,27 @@ project follows semantic versioning.
   checks. Nothing in the tree executes this bytecode yet; the format
   contract is `docs/BYTECODE.md`. The error registry's `E1050`
   entry gains a bytecode-verify cause.
+- **The bytecode format closes its burn gaps** (cig-compile#31, format
+  version 1). A burn region's label is none, a string constant or a
+  register: the region table gains a label-kind byte (six bytes an
+  entry), and `burn.enter` reads a register label when it runs, so a
+  computed label (`burn (s, name) { }`) lowers; a label that is not a
+  string is the tree-walker's own error, from one function both engines
+  call. The verifier's burn balance follows the region rows instead of
+  counting `burn.enter` and `burn.leave` in order (`burn-unbalanced`
+  names the rule: `rows-interleave`, `row-without-enter`,
+  `row-falls-out`, `enter-outside-row`, `leave-outside-row`,
+  `jump-into-row`), so a burn left by a jump needs no `burn.enter` after
+  it. `burn.enter`'s class is checked against its region's
+  (`burn-class-mismatch`, now the verifier's) and is no longer read as a
+  register, so a one-register function may hold an unlit burn;
+  `comp.enter`'s operands are a register and two string constants the
+  verifier checks. The disassembler prints `burn.enter`, `chain.make`
+  and `comp.enter` with their operands, and a region's label. Tests:
+  `cargo test -p cig-bytecode --test burns`, and in `cargo test --lib
+  vm::` `a_computed_label_agrees_with_the_interpreter`,
+  `one_burn_entered_twice_takes_each_turns_label` and
+  `a_burn_left_by_a_jump_runs_with_nothing_after_the_jump`.
 - **The bytecode VM runs burns, compensations, `pack` and chains**
   (cig-compile#31, stage B). `burn.enter`, `burn.op`, `burn.leave`,
   `comp.enter`, `comp.leave`, `pack` and `chain.make` run, so every
@@ -92,8 +113,7 @@ project follows semantic versioning.
   `break`, `snuff` and `exit()` do. `pack` checks its roots and refuses
   a misplaced `pack` with the checker's own `E753`s; `chain.make` builds
   the chain `light` runs. Loading refuses a `burn.op` callee that is not
-  a builtin of its kind, a `burn.enter` class that is not its region's,
-  bad `comp.enter` operands and a region label that is not a string
+  a builtin of its kind and a region label that is not a string
   (`E1050`). The burn-op kinds gain `layer_apply` and `layer_discard`.
   Tests: `cargo test --lib vm::`, among them
   `burns_agree_with_the_interpreter`, `burns_go_through_one_kernel_entry`,

@@ -9,7 +9,8 @@ pub(crate) mod ops;
 pub(crate) mod record;
 
 pub(crate) use eval::{
-    arity_mismatch, chain_step, exhale_part, make_chain, map_key, pack_root, set_field, set_index,
+    arity_mismatch, burn_label, chain_step, exhale_part, make_chain, map_key, pack_root, set_field,
+    set_index,
 };
 pub use eval::{closest, error_value, normalize_index};
 

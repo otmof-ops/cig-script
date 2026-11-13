@@ -40,8 +40,9 @@ pub use instr::{
     decode, first_word_pcs, wide_prefix, DecodeError, DecodedInstr, FirstWordPcs, Instr,
 };
 pub use module::{
-    BurnRegion, Constant, FuncKind, Function, HandlerEntry, LineEntry, Module, RegionRow, SpanBase,
-    UpvalDesc, UpvalKind, FORMAT_VERSION, MAGIC, MAX_FUNCTION_DEPTH, MAX_REG_COUNT, RESERVED_U32,
+    BurnRegion, Constant, FuncKind, Function, HandlerEntry, LineEntry, Module, RegionLabel,
+    RegionRow, SpanBase, UpvalDesc, UpvalKind, FORMAT_VERSION, MAGIC, MAX_FUNCTION_DEPTH,
+    MAX_REG_COUNT, RESERVED_U32,
 };
 pub use opcode::{Op, OpInfo, OperandKind};
 pub use parse::parse_module;
