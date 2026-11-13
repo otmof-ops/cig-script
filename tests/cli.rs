@@ -7002,6 +7002,7 @@ fn a_contained_hops_network_works_with_cig_under_tmp() {
 /// can hit ETXTBSY: another test's fork still holds the new file open for
 /// writing between its fork and its exec. That passes in a moment; try
 /// again.
+#[cfg(target_os = "linux")]
 fn output_of_a_copy(c: &mut Command) -> std::io::Result<Output> {
     for _ in 0..80 {
         match c.output() {
