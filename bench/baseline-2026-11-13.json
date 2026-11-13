@@ -1,0 +1,6984 @@
+{
+ "format": 1,
+ "kind": "baseline",
+ "date": "2026-11-13",
+ "product": "cig",
+ "measured": "cig 1.21.0 (carton 0.1.0, the released binaries)",
+ "manifest_tree": "main at b936521",
+ "notes": [],
+ "conditions": {
+  "cpu": "Intel(R) Core(TM) i5-8265U CPU @ 1.60GHz",
+  "cores_physical": 4,
+  "cores_logical": 8,
+  "memory_gib": 7.4,
+  "os": "Parrot Security 7.4 (echo)",
+  "kernel": "7.2.11+parrot7.1-amd64",
+  "governor": "powersave",
+  "power_profile": "balanced",
+  "power": "mains",
+  "filesystem": "btrfs",
+  "storage": "NVMe SSD",
+  "page_cache": "warm (one untimed warm-up per case), except the `cold` group, which drops the page cache before every sample",
+  "machine": "a 2018 laptop: Intel Core i5-8265U (4 cores, 8 threads, 1.6 to 3.9 GHz), 7.4 GiB RAM, NVMe SSD",
+  "rounds": [
+   {
+    "round": "r1",
+    "job": "startup",
+    "date": "2026-11-13T08:33:41+00:00",
+    "battery_percent": "77",
+    "power": "mains",
+    "loadavg_at_start": "0.15 1.09 1.27"
+   },
+   {
+    "round": "r1",
+    "job": "cig",
+    "date": "2026-11-13T08:36:19+00:00",
+    "battery_percent": "77",
+    "power": "mains",
+    "loadavg_at_start": "1.19 1.18 1.27"
+   },
+   {
+    "round": "r1",
+    "job": "cigo",
+    "date": "2026-11-13T08:37:03+00:00",
+    "battery_percent": "77",
+    "power": "mains",
+    "loadavg_at_start": "1.05 1.14 1.25"
+   },
+   {
+    "round": "r1",
+    "job": "cigcompile",
+    "date": "2026-11-13T08:37:55+00:00",
+    "battery_percent": "77",
+    "power": "mains",
+    "loadavg_at_start": "1.02 1.11 1.24"
+   },
+   {
+    "round": "r1",
+    "job": "cigar",
+    "date": "2026-11-13T08:41:32+00:00",
+    "battery_percent": "77",
+    "power": "mains",
+    "loadavg_at_start": "1.11 1.10 1.20"
+   },
+   {
+    "round": "r1",
+    "job": "installer",
+    "date": "2026-11-13T08:46:33+00:00",
+    "battery_percent": "77",
+    "power": "mains",
+    "loadavg_at_start": "1.00 1.02 1.13"
+   },
+   {
+    "round": "r1",
+    "job": "compute",
+    "date": "2026-11-13T08:35:15+00:00",
+    "battery_percent": "77",
+    "power": "mains",
+    "loadavg_at_start": "1.39 1.20 1.29"
+   },
+   {
+    "round": "r1",
+    "job": "instr",
+    "date": "2026-11-13T08:36:13+00:00",
+    "battery_percent": "77",
+    "power": "mains",
+    "loadavg_at_start": "1.21 1.18 1.27"
+   },
+   {
+    "round": "r2",
+    "job": "startup",
+    "date": "2026-11-13T08:58:14+00:00",
+    "battery_percent": "77",
+    "power": "mains",
+    "loadavg_at_start": "5.21 2.62 1.65"
+   },
+   {
+    "round": "r2",
+    "job": "cig",
+    "date": "2026-11-13T09:00:52+00:00",
+    "battery_percent": "77",
+    "power": "mains",
+    "loadavg_at_start": "1.32 1.95 1.55"
+   },
+   {
+    "round": "r2",
+    "job": "cigo",
+    "date": "2026-11-13T09:01:38+00:00",
+    "battery_percent": "77",
+    "power": "mains",
+    "loadavg_at_start": "1.15 1.82 1.52"
+   },
+   {
+    "round": "r2",
+    "job": "cigcompile",
+    "date": "2026-11-13T09:02:30+00:00",
+    "battery_percent": "77",
+    "power": "mains",
+    "loadavg_at_start": "1.06 1.69 1.49"
+   },
+   {
+    "round": "r2",
+    "job": "cigar",
+    "date": "2026-11-13T09:06:08+00:00",
+    "battery_percent": "77",
+    "power": "mains",
+    "loadavg_at_start": "1.03 1.34 1.39"
+   },
+   {
+    "round": "r2",
+    "job": "installer",
+    "date": "2026-11-13T09:11:08+00:00",
+    "battery_percent": "77",
+    "power": "mains",
+    "loadavg_at_start": "1.01 1.14 1.28"
+   },
+   {
+    "round": "r2",
+    "job": "compute",
+    "date": "2026-11-13T08:59:49+00:00",
+    "battery_percent": "77",
+    "power": "mains",
+    "loadavg_at_start": "1.97 2.19 1.59"
+   },
+   {
+    "round": "r2",
+    "job": "instr",
+    "date": "2026-11-13T09:00:46+00:00",
+    "battery_percent": "77",
+    "power": "mains",
+    "loadavg_at_start": "1.38 1.99 1.55"
+   }
+  ],
+  "versions": {
+   "cig": "cig 1.21.0",
+   "cigo": "cig-orchestrator 1.19.0 (cig 1.21.0)",
+   "cigcompile": "cigcompile 0.4.0 (makes programs for cig 1.21.0)",
+   "cigar": "cigar 0.1.0",
+   "ciginstaller": "ciginstaller 0.1.0",
+   "python3": "Python 3.13.5",
+   "node": "v20.19.2",
+   "go": "go version go1.27.3 linux/amd64",
+   "make": "GNU Make 4.4.1",
+   "bash": "GNU bash, version 5.2.37(1)-release (x86_64-pc-linux-gnu)",
+   "just": "just 1.40.0",
+   "tsc": "Version 4.9.5",
+   "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+   "rustup": "rustup 1.29.3 (edbc831ce 2026-11-02)",
+   "perf": "perf version 7.2.11",
+   "task": "not installed",
+   "mise": "not installed"
+  },
+  "sizes_bytes": {
+   "cig": 15799128,
+   "cigcompile": 16644096,
+   "cigar": 14439720,
+   "cigo": 10609,
+   "cigo orchestrate.cig": 933043,
+   "ciginstaller": 8169728,
+   "shim (cigi-shim)": 455344
+  },
+  "load": "the test laptop ran one job at a time under a lock; nothing else ran during a timing job",
+  "versions_round_2_same": true
+ },
+ "suites": [
+  {
+   "suite": "bench/bench.toml",
+   "harness": "cig bench (cig 1.21.0), --json",
+   "exit_round_1": 0,
+   "exit_round_2": 0,
+   "cases": [
+    {
+     "name": "hello",
+     "group": "start-up",
+     "budget": "5 ms",
+     "outcome": {
+      "state": "timed",
+      "median_ms": 7.98083885,
+      "p10_ms": 4.8918406999999995,
+      "p90_ms": 8.025886,
+      "cv": 0.1680497031651607,
+      "noisy": true,
+      "samples": 5,
+      "rss_bytes": 14860288,
+      "metrics": []
+     },
+     "outcome_round_2": {
+      "state": "timed",
+      "median_ms": 8.02175675,
+      "p10_ms": 2.37418205,
+      "p90_ms": 9.13880775,
+      "cv": 0.3793553968882027,
+      "noisy": true,
+      "samples": 5,
+      "rss_bytes": 14929920,
+      "metrics": []
+     },
+     "spread_between_rounds": 0.0051,
+     "noisy_between_rounds": false
+    },
+    {
+     "name": "startup-0",
+     "group": "start-up",
+     "budget": null,
+     "outcome": {
+      "state": "timed",
+      "median_ms": 2.3955292999999998,
+      "p10_ms": 2.3719844500000002,
+      "p90_ms": 7.0406660500000005,
+      "cv": 0.5192379334683053,
+      "noisy": true,
+      "samples": 5,
+      "rss_bytes": 14929920,
+      "metrics": []
+     },
+     "outcome_round_2": {
+      "state": "timed",
+      "median_ms": 8.034395499999999,
+      "p10_ms": 8.01388065,
+      "p90_ms": 8.05253265,
+      "cv": 0.001671893324613402,
+      "noisy": false,
+      "samples": 5,
+      "rss_bytes": 14860288,
+      "metrics": []
+     },
+     "spread_between_rounds": 2.3539,
+     "noisy_between_rounds": true
+    },
+    {
+     "name": "startup-1",
+     "group": "start-up",
+     "budget": null,
+     "outcome": {
+      "state": "timed",
+      "median_ms": 2.8571438000000002,
+      "p10_ms": 2.3820826,
+      "p90_ms": 5.3303345,
+      "cv": 0.33852321151685566,
+      "noisy": true,
+      "samples": 5,
+      "rss_bytes": 14929920,
+      "metrics": []
+     },
+     "outcome_round_2": {
+      "state": "timed",
+      "median_ms": 7.91293345,
+      "p10_ms": 7.26731135,
+      "p90_ms": 8.08743445,
+      "cv": 0.0482297065418327,
+      "noisy": false,
+      "samples": 5,
+      "rss_bytes": 14860288,
+      "metrics": []
+     },
+     "spread_between_rounds": 1.7695,
+     "noisy_between_rounds": true
+    },
+    {
+     "name": "startup-10",
+     "group": "start-up",
+     "budget": null,
+     "outcome": {
+      "state": "timed",
+      "median_ms": 7.367331699999999,
+      "p10_ms": 6.444741950000001,
+      "p90_ms": 7.3948601,
+      "cv": 0.051710979197583856,
+      "noisy": true,
+      "samples": 5,
+      "rss_bytes": 14991360,
+      "metrics": []
+     },
+     "outcome_round_2": {
+      "state": "timed",
+      "median_ms": 7.4396258500000005,
+      "p10_ms": 7.42147155,
+      "p90_ms": 7.45820095,
+      "cv": 0.0016258370658302427,
+      "noisy": false,
+      "samples": 5,
+      "rss_bytes": 14991360,
+      "metrics": []
+     },
+     "spread_between_rounds": 0.0098,
+     "noisy_between_rounds": false
+    },
+    {
+     "name": "burn one write",
+     "group": "start-up",
+     "budget": "7 ms",
+     "outcome": {
+      "state": "timed",
+      "median_ms": 7.809862,
+      "p10_ms": 7.744638,
+      "p90_ms": 7.985783,
+      "cv": 0.011371391991963513,
+      "noisy": false,
+      "samples": 5,
+      "rss_bytes": 14987264,
+      "metrics": []
+     },
+     "outcome_round_2": {
+      "state": "timed",
+      "median_ms": 7.877438000000001,
+      "p10_ms": 7.8648810000000005,
+      "p90_ms": 7.900254,
+      "cv": 0.0017410475832899139,
+      "noisy": false,
+      "samples": 5,
+      "rss_bytes": 14987264,
+      "metrics": []
+     },
+     "spread_between_rounds": 0.0087,
+     "noisy_between_rounds": false
+    },
+    {
+     "name": "closures",
+     "group": "compute",
+     "budget": null,
+     "outcome": {
+      "state": "timed",
+      "median_ms": 45.426618000000005,
+      "p10_ms": 45.394895,
+      "p90_ms": 45.469080000000005,
+      "cv": 0.0005983745403801163,
+      "noisy": false,
+      "samples": 5,
+      "rss_bytes": 14729216,
+      "metrics": []
+     },
+     "outcome_round_2": {
+      "state": "timed",
+      "median_ms": 45.501263,
+      "p10_ms": 45.395155,
+      "p90_ms": 45.581323,
+      "cv": 0.0016186212800100876,
+      "noisy": false,
+      "samples": 5,
+      "rss_bytes": 14725120,
+      "metrics": []
+     },
+     "spread_between_rounds": 0.0016,
+     "noisy_between_rounds": false
+    },
+    {
+     "name": "csv",
+     "group": "compute",
+     "budget": null,
+     "outcome": {
+      "state": "timed",
+      "median_ms": 48.653432,
+      "p10_ms": 47.984688,
+      "p90_ms": 48.70884,
+      "cv": 0.005806798577374914,
+      "noisy": false,
+      "samples": 5,
+      "rss_bytes": 34787328,
+      "metrics": []
+     },
+     "outcome_round_2": {
+      "state": "timed",
+      "median_ms": 48.09915,
+      "p10_ms": 47.752545,
+      "p90_ms": 48.718540999999995,
+      "cv": 0.007080931712987057,
+      "noisy": false,
+      "samples": 5,
+      "rss_bytes": 34787328,
+      "metrics": []
+     },
+     "spread_between_rounds": 0.0115,
+     "noisy_between_rounds": false
+    },
+    {
+     "name": "deltablue",
+     "group": "compute",
+     "budget": null,
+     "outcome": {
+      "state": "timed",
+      "median_ms": 6.924169,
+      "p10_ms": 6.869419,
+      "p90_ms": 6.98017,
+      "cv": 0.005429133689055568,
+      "noisy": false,
+      "samples": 5,
+      "rss_bytes": 14725120,
+      "metrics": []
+     },
+     "outcome_round_2": {
+      "state": "timed",
+      "median_ms": 6.961298,
+      "p10_ms": 6.919369,
+      "p90_ms": 6.984431,
+      "cv": 0.003182160714100781,
+      "noisy": false,
+      "samples": 5,
+      "rss_bytes": 14729216,
+      "metrics": []
+     },
+     "spread_between_rounds": 0.0054,
+     "noisy_between_rounds": false
+    },
+    {
+     "name": "dispatch",
+     "group": "compute",
+     "budget": null,
+     "outcome": {
+      "state": "timed",
+      "median_ms": 70.482621,
+      "p10_ms": 68.962373,
+      "p90_ms": 78.332864,
+      "cv": 0.056423400671329976,
+      "noisy": true,
+      "samples": 5,
+      "rss_bytes": 14712832,
+      "metrics": []
+     },
+     "outcome_round_2": {
+      "state": "timed",
+      "median_ms": 69.006744,
+      "p10_ms": 68.883271,
+      "p90_ms": 69.62415399999999,
+      "cv": 0.003771942544527796,
+      "noisy": false,
+      "samples": 5,
+      "rss_bytes": 14708736,
+      "metrics": []
+     },
+     "spread_between_rounds": 0.0214,
+     "noisy_between_rounds": false
+    },
+    {
+     "name": "fannkuch",
+     "group": "compute",
+     "budget": null,
+     "outcome": {
+      "state": "timed",
+      "median_ms": 294.497021,
+      "p10_ms": 294.05906300000004,
+      "p90_ms": 297.630605,
+      "cv": 0.0046086847836655075,
+      "noisy": false,
+      "samples": 5,
+      "rss_bytes": 14729216,
+      "metrics": []
+     },
+     "outcome_round_2": {
+      "state": "timed",
+      "median_ms": 298.915345,
+      "p10_ms": 296.962008,
+      "p90_ms": 306.817967,
+      "cv": 0.01177535898503005,
+      "noisy": false,
+      "samples": 5,
+      "rss_bytes": 14725120,
+      "metrics": []
+     },
+     "spread_between_rounds": 0.015,
+     "noisy_between_rounds": false
+    },
+    {
+     "name": "fib",
+     "group": "compute",
+     "budget": null,
+     "outcome": {
+      "state": "timed",
+      "median_ms": 50.295191,
+      "p10_ms": 50.190155,
+      "p90_ms": 50.393677,
+      "cv": 0.001595365524873035,
+      "noisy": false,
+      "samples": 5,
+      "rss_bytes": 14712832,
+      "metrics": []
+     },
+     "outcome_round_2": {
+      "state": "timed",
+      "median_ms": 50.667095,
+      "p10_ms": 50.19795,
+      "p90_ms": 58.500724,
+      "cv": 0.06313562509076533,
+      "noisy": true,
+      "samples": 5,
+      "rss_bytes": 14712832,
+      "metrics": []
+     },
+     "spread_between_rounds": 0.0074,
+     "noisy_between_rounds": false
+    },
+    {
+     "name": "json-deep",
+     "group": "compute",
+     "budget": null,
+     "outcome": {
+      "state": "timed",
+      "median_ms": 4.483279,
+      "p10_ms": 4.413125,
+      "p90_ms": 4.673584,
+      "cv": 0.020299650329419272,
+      "noisy": false,
+      "samples": 5,
+      "rss_bytes": 14708736,
+      "metrics": []
+     },
+     "outcome_round_2": {
+      "state": "timed",
+      "median_ms": 4.475867,
+      "p10_ms": 4.455436,
+      "p90_ms": 4.629266,
+      "cv": 0.014487487796844688,
+      "noisy": false,
+      "samples": 5,
+      "rss_bytes": 14712832,
+      "metrics": []
+     },
+     "spread_between_rounds": 0.0017,
+     "noisy_between_rounds": false
+    },
+    {
+     "name": "json",
+     "group": "compute",
+     "budget": null,
+     "outcome": {
+      "state": "timed",
+      "median_ms": 68.842062,
+      "p10_ms": 67.409913,
+      "p90_ms": 69.820345,
+      "cv": 0.013123563961602459,
+      "noisy": false,
+      "samples": 5,
+      "rss_bytes": 69259264,
+      "metrics": []
+     },
+     "outcome_round_2": {
+      "state": "timed",
+      "median_ms": 69.340743,
+      "p10_ms": 68.203086,
+      "p90_ms": 70.051485,
+      "cv": 0.009228453087451082,
+      "noisy": false,
+      "samples": 5,
+      "rss_bytes": 69259264,
+      "metrics": []
+     },
+     "spread_between_rounds": 0.0072,
+     "noisy_between_rounds": false
+    },
+    {
+     "name": "lists",
+     "group": "compute",
+     "budget": null,
+     "outcome": {
+      "state": "timed",
+      "median_ms": 31.104588,
+      "p10_ms": 30.941124000000002,
+      "p90_ms": 31.522057,
+      "cv": 0.007427647245988583,
+      "noisy": false,
+      "samples": 5,
+      "rss_bytes": 25210880,
+      "metrics": []
+     },
+     "outcome_round_2": {
+      "state": "timed",
+      "median_ms": 31.282525,
+      "p10_ms": 30.957002,
+      "p90_ms": 31.49115,
+      "cv": 0.00550230260532265,
+      "noisy": false,
+      "samples": 5,
+      "rss_bytes": 25214976,
+      "metrics": []
+     },
+     "spread_between_rounds": 0.0057,
+     "noisy_between_rounds": false
+    },
+    {
+     "name": "loop",
+     "group": "compute",
+     "budget": null,
+     "outcome": {
+      "state": "timed",
+      "median_ms": 57.185736,
+      "p10_ms": 57.120865,
+      "p90_ms": 57.494664,
+      "cv": 0.0023480434982245902,
+      "noisy": false,
+      "samples": 5,
+      "rss_bytes": 14725120,
+      "metrics": []
+     },
+     "outcome_round_2": {
+      "state": "timed",
+      "median_ms": 57.309115,
+      "p10_ms": 57.250761999999995,
+      "p90_ms": 57.390524,
+      "cv": 0.0008251231601363658,
+      "noisy": false,
+      "samples": 5,
+      "rss_bytes": 14729216,
+      "metrics": []
+     },
+     "spread_between_rounds": 0.0022,
+     "noisy_between_rounds": false
+    },
+    {
+     "name": "mandel",
+     "group": "compute",
+     "budget": null,
+     "outcome": {
+      "state": "timed",
+      "median_ms": 331.41526300000004,
+      "p10_ms": 330.953822,
+      "p90_ms": 334.712385,
+      "cv": 0.004121919488736829,
+      "noisy": false,
+      "samples": 5,
+      "rss_bytes": 14725120,
+      "metrics": []
+     },
+     "outcome_round_2": {
+      "state": "timed",
+      "median_ms": 332.19500899999997,
+      "p10_ms": 330.666965,
+      "p90_ms": 376.210937,
+      "cv": 0.05320388861293626,
+      "noisy": true,
+      "samples": 5,
+      "rss_bytes": 14725120,
+      "metrics": []
+     },
+     "spread_between_rounds": 0.0024,
+     "noisy_between_rounds": false
+    },
+    {
+     "name": "maps",
+     "group": "compute",
+     "budget": null,
+     "outcome": {
+      "state": "timed",
+      "median_ms": 46.756982,
+      "p10_ms": 46.352661000000005,
+      "p90_ms": 47.106132,
+      "cv": 0.005335653222609576,
+      "noisy": false,
+      "samples": 5,
+      "rss_bytes": 23117824,
+      "metrics": []
+     },
+     "outcome_round_2": {
+      "state": "timed",
+      "median_ms": 52.451029000000005,
+      "p10_ms": 52.216929,
+      "p90_ms": 52.467985,
+      "cv": 0.0022108056859943027,
+      "noisy": false,
+      "samples": 5,
+      "rss_bytes": 23117824,
+      "metrics": []
+     },
+     "spread_between_rounds": 0.1218,
+     "noisy_between_rounds": true
+    },
+    {
+     "name": "nbody",
+     "group": "compute",
+     "budget": null,
+     "outcome": {
+      "state": "timed",
+      "median_ms": 433.58271399999995,
+      "p10_ms": 432.407556,
+      "p90_ms": 443.843118,
+      "cv": 0.009754123673001536,
+      "noisy": false,
+      "samples": 5,
+      "rss_bytes": 14708736,
+      "metrics": []
+     },
+     "outcome_round_2": {
+      "state": "timed",
+      "median_ms": 504.203708,
+      "p10_ms": 502.659525,
+      "p90_ms": 506.269047,
+      "cv": 0.0025953377869972374,
+      "noisy": false,
+      "samples": 5,
+      "rss_bytes": 14708736,
+      "metrics": []
+     },
+     "spread_between_rounds": 0.1629,
+     "noisy_between_rounds": true
+    },
+    {
+     "name": "regex-ish",
+     "group": "compute",
+     "budget": null,
+     "outcome": {
+      "state": "timed",
+      "median_ms": 50.49821,
+      "p10_ms": 50.418791999999996,
+      "p90_ms": 50.795332,
+      "cv": 0.0028445295943634024,
+      "noisy": false,
+      "samples": 5,
+      "rss_bytes": 29409280,
+      "metrics": []
+     },
+     "outcome_round_2": {
+      "state": "timed",
+      "median_ms": 56.659785,
+      "p10_ms": 56.4853,
+      "p90_ms": 56.675421,
+      "cv": 0.0013150637534873068,
+      "noisy": false,
+      "samples": 5,
+      "rss_bytes": 29409280,
+      "metrics": []
+     },
+     "spread_between_rounds": 0.122,
+     "noisy_between_rounds": true
+    },
+    {
+     "name": "richards",
+     "group": "compute",
+     "budget": null,
+     "outcome": {
+      "state": "timed",
+      "median_ms": 19.544857,
+      "p10_ms": 19.468979,
+      "p90_ms": 19.664127,
+      "cv": 0.0033984516593739806,
+      "noisy": false,
+      "samples": 5,
+      "rss_bytes": 14725120,
+      "metrics": []
+     },
+     "outcome_round_2": {
+      "state": "timed",
+      "median_ms": 21.716257,
+      "p10_ms": 21.609122000000003,
+      "p90_ms": 21.892829,
+      "cv": 0.0043743875432803335,
+      "noisy": false,
+      "samples": 5,
+      "rss_bytes": 14725120,
+      "metrics": []
+     },
+     "spread_between_rounds": 0.1111,
+     "noisy_between_rounds": true
+    },
+    {
+     "name": "sieve",
+     "group": "compute",
+     "budget": null,
+     "outcome": {
+      "state": "timed",
+      "median_ms": 179.59655899999998,
+      "p10_ms": 178.86925300000001,
+      "p90_ms": 179.67123700000002,
+      "cv": 0.0017003883825678296,
+      "noisy": false,
+      "samples": 5,
+      "rss_bytes": 50384896,
+      "metrics": []
+     },
+     "outcome_round_2": {
+      "state": "timed",
+      "median_ms": 197.415807,
+      "p10_ms": 197.123456,
+      "p90_ms": 202.727194,
+      "cv": 0.012271455447403727,
+      "noisy": false,
+      "samples": 5,
+      "rss_bytes": 50380800,
+      "metrics": []
+     },
+     "spread_between_rounds": 0.0992,
+     "noisy_between_rounds": true
+    },
+    {
+     "name": "spectral",
+     "group": "compute",
+     "budget": null,
+     "outcome": {
+      "state": "timed",
+      "median_ms": 192.889524,
+      "p10_ms": 191.808824,
+      "p90_ms": 208.259636,
+      "cv": 0.032394759503985134,
+      "noisy": false,
+      "samples": 5,
+      "rss_bytes": 14708736,
+      "metrics": []
+     },
+     "outcome_round_2": {
+      "state": "timed",
+      "median_ms": 215.94287,
+      "p10_ms": 214.02220599999998,
+      "p90_ms": 218.622795,
+      "cv": 0.007823867852159591,
+      "noisy": false,
+      "samples": 5,
+      "rss_bytes": 14708736,
+      "metrics": []
+     },
+     "spread_between_rounds": 0.1195,
+     "noisy_between_rounds": true
+    },
+    {
+     "name": "strbuild",
+     "group": "compute",
+     "budget": null,
+     "outcome": {
+      "state": "timed",
+      "median_ms": 7.555167,
+      "p10_ms": 7.52103,
+      "p90_ms": 7.609317,
+      "cv": 0.0038146409188674446,
+      "noisy": false,
+      "samples": 5,
+      "rss_bytes": 14725120,
+      "metrics": []
+     },
+     "outcome_round_2": {
+      "state": "timed",
+      "median_ms": 8.309315,
+      "p10_ms": 8.267472,
+      "p90_ms": 8.513556,
+      "cv": 0.010437455273010232,
+      "noisy": false,
+      "samples": 5,
+      "rss_bytes": 14729216,
+      "metrics": []
+     },
+     "spread_between_rounds": 0.0998,
+     "noisy_between_rounds": true
+    },
+    {
+     "name": "strings",
+     "group": "compute",
+     "budget": null,
+     "outcome": {
+      "state": "timed",
+      "median_ms": 30.422399,
+      "p10_ms": 30.333478,
+      "p90_ms": 30.452282,
+      "cv": 0.0013854263036637555,
+      "noisy": false,
+      "samples": 5,
+      "rss_bytes": 18927616,
+      "metrics": []
+     },
+     "outcome_round_2": {
+      "state": "timed",
+      "median_ms": 32.961573,
+      "p10_ms": 32.755265,
+      "p90_ms": 33.01573,
+      "cv": 0.002754361659347459,
+      "noisy": false,
+      "samples": 5,
+      "rss_bytes": 18923520,
+      "metrics": []
+     },
+     "spread_between_rounds": 0.0835,
+     "noisy_between_rounds": true
+    },
+    {
+     "name": "trees",
+     "group": "compute",
+     "budget": null,
+     "outcome": {
+      "state": "timed",
+      "median_ms": 362.43164,
+      "p10_ms": 333.298461,
+      "p90_ms": 386.77332800000005,
+      "cv": 0.05904199801603928,
+      "noisy": true,
+      "samples": 5,
+      "rss_bytes": 14708736,
+      "metrics": []
+     },
+     "outcome_round_2": {
+      "state": "timed",
+      "median_ms": 388.18109699999997,
+      "p10_ms": 382.74240799999995,
+      "p90_ms": 410.032487,
+      "cv": 0.024596821764727803,
+      "noisy": false,
+      "samples": 5,
+      "rss_bytes": 14716928,
+      "metrics": []
+     },
+     "spread_between_rounds": 0.071,
+     "noisy_between_rounds": true
+    },
+    {
+     "name": "words",
+     "group": "compute",
+     "budget": null,
+     "outcome": {
+      "state": "timed",
+      "median_ms": 49.740806,
+      "p10_ms": 49.640402,
+      "p90_ms": 50.621520000000004,
+      "cv": 0.007397535804547987,
+      "noisy": false,
+      "samples": 5,
+      "rss_bytes": 27312128,
+      "metrics": []
+     },
+     "outcome_round_2": {
+      "state": "timed",
+      "median_ms": 49.707439,
+      "p10_ms": 49.612868999999996,
+      "p90_ms": 49.879843,
+      "cv": 0.001927058264506227,
+      "noisy": false,
+      "samples": 5,
+      "rss_bytes": 27312128,
+      "metrics": []
+     },
+     "spread_between_rounds": 0.0007,
+     "noisy_between_rounds": false
+    },
+    {
+     "name": "burn small tree",
+     "group": "kernel",
+     "budget": null,
+     "outcome": {
+      "state": "timed",
+      "median_ms": 7.459655,
+      "p10_ms": 7.437685999999999,
+      "p90_ms": 7.497402,
+      "cv": 0.0025802400857459222,
+      "noisy": false,
+      "samples": 5,
+      "rss_bytes": 15118336,
+      "metrics": [
+       {
+        "name": "tin-growth",
+        "unit": "bytes",
+        "value": 0.0,
+        "note": null
+       },
+       {
+        "name": "disk-per-byte",
+        "unit": "bytes per byte",
+        "value": 4.8,
+        "note": null
+       },
+       {
+        "name": "fsyncs-per-op",
+        "unit": "fsyncs per op",
+        "value": 1.099009900990099,
+        "note": null
+       }
+      ]
+     },
+     "outcome_round_2": {
+      "state": "timed",
+      "median_ms": 7.479734,
+      "p10_ms": 7.443713,
+      "p90_ms": 7.588848,
+      "cv": 0.006514392461503283,
+      "noisy": false,
+      "samples": 5,
+      "rss_bytes": 15118336,
+      "metrics": [
+       {
+        "name": "tin-growth",
+        "unit": "bytes",
+        "value": 0.0,
+        "note": null
+       },
+       {
+        "name": "disk-per-byte",
+        "unit": "bytes per byte",
+        "value": 4.8,
+        "note": null
+       },
+       {
+        "name": "fsyncs-per-op",
+        "unit": "fsyncs per op",
+        "value": 1.099009900990099,
+        "note": null
+       }
+      ]
+     },
+     "spread_between_rounds": 0.0027,
+     "noisy_between_rounds": false
+    },
+    {
+     "name": "burn big tree",
+     "group": "kernel",
+     "budget": null,
+     "outcome": {
+      "state": "timed",
+      "median_ms": 180.929789,
+      "p10_ms": 175.87526,
+      "p90_ms": 183.183191,
+      "cv": 0.013395520776899858,
+      "noisy": false,
+      "samples": 5,
+      "rss_bytes": 27705344,
+      "metrics": [
+       {
+        "name": "tin-growth",
+        "unit": "bytes",
+        "value": 0.0,
+        "note": null
+       },
+       {
+        "name": "disk-per-byte",
+        "unit": "bytes per byte",
+        "value": 1.0405,
+        "note": null
+       },
+       {
+        "name": "fsyncs-per-op",
+        "unit": "fsyncs per op",
+        "value": 1.00999000999001,
+        "note": null
+       }
+      ]
+     },
+     "outcome_round_2": {
+      "state": "timed",
+      "median_ms": 175.147851,
+      "p10_ms": 170.392355,
+      "p90_ms": 176.079727,
+      "cv": 0.011969649181846358,
+      "noisy": false,
+      "samples": 5,
+      "rss_bytes": 27570176,
+      "metrics": [
+       {
+        "name": "tin-growth",
+        "unit": "bytes",
+        "value": 0.0,
+        "note": null
+       },
+       {
+        "name": "disk-per-byte",
+        "unit": "bytes per byte",
+        "value": 1.0405,
+        "note": null
+       },
+       {
+        "name": "fsyncs-per-op",
+        "unit": "fsyncs per op",
+        "value": 1.00999000999001,
+        "note": null
+       }
+      ]
+     },
+     "spread_between_rounds": 0.033,
+     "noisy_between_rounds": false
+    },
+    {
+     "name": "unburn small tree",
+     "group": "kernel",
+     "budget": null,
+     "outcome": {
+      "state": "timed",
+      "median_ms": 10.419091,
+      "p10_ms": 10.389522999999999,
+      "p90_ms": 10.451122,
+      "cv": 0.0019060532855996934,
+      "noisy": false,
+      "samples": 5,
+      "rss_bytes": 19845120,
+      "metrics": [
+       {
+        "name": "tin-growth",
+        "unit": "bytes",
+        "value": 0.0,
+        "note": null
+       },
+       {
+        "name": "fsyncs-per-op",
+        "unit": "fsyncs per op",
+        "value": 0.0891089108910891,
+        "note": null
+       }
+      ]
+     },
+     "outcome_round_2": {
+      "state": "timed",
+      "median_ms": 10.170388,
+      "p10_ms": 10.097912,
+      "p90_ms": 10.405790999999999,
+      "cv": 0.01056723261323686,
+      "noisy": false,
+      "samples": 5,
+      "rss_bytes": 19841024,
+      "metrics": [
+       {
+        "name": "tin-growth",
+        "unit": "bytes",
+        "value": 0.0,
+        "note": null
+       },
+       {
+        "name": "fsyncs-per-op",
+        "unit": "fsyncs per op",
+        "value": 0.0891089108910891,
+        "note": null
+       }
+      ]
+     },
+     "spread_between_rounds": 0.0245,
+     "noisy_between_rounds": false
+    },
+    {
+     "name": "unburn big tree",
+     "group": "kernel",
+     "budget": null,
+     "outcome": {
+      "state": "timed",
+      "median_ms": 257.997455,
+      "p10_ms": 256.47625800000003,
+      "p90_ms": 259.758802,
+      "cv": 0.004093819075623892,
+      "noisy": false,
+      "samples": 5,
+      "rss_bytes": 26136576,
+      "metrics": [
+       {
+        "name": "tin-growth",
+        "unit": "bytes",
+        "value": 0.0,
+        "note": null
+       },
+       {
+        "name": "fsyncs-per-op",
+        "unit": "fsyncs per op",
+        "value": 0.008991008991008992,
+        "note": null
+       }
+      ]
+     },
+     "outcome_round_2": {
+      "state": "timed",
+      "median_ms": 253.729541,
+      "p10_ms": 253.437474,
+      "p90_ms": 257.69557100000003,
+      "cv": 0.0062829293256953574,
+      "noisy": false,
+      "samples": 5,
+      "rss_bytes": 26136576,
+      "metrics": [
+       {
+        "name": "tin-growth",
+        "unit": "bytes",
+        "value": 0.0,
+        "note": null
+       },
+       {
+        "name": "fsyncs-per-op",
+        "unit": "fsyncs per op",
+        "value": 0.008991008991008992,
+        "note": null
+       }
+      ]
+     },
+     "spread_between_rounds": 0.0168,
+     "noisy_between_rounds": false
+    },
+    {
+     "name": "overwrite big file",
+     "group": "kernel",
+     "budget": null,
+     "outcome": {
+      "state": "timed",
+      "median_ms": 575.204445,
+      "p10_ms": 574.914402,
+      "p90_ms": 604.911428,
+      "cv": 0.02018511310273805,
+      "noisy": false,
+      "samples": 5,
+      "rss_bytes": 120852480,
+      "metrics": [
+       {
+        "name": "tin-growth",
+        "unit": "bytes",
+        "value": 274432.0,
+        "note": null
+       },
+       {
+        "name": "disk-per-byte",
+        "unit": "bytes per byte",
+        "value": 0.008544921875,
+        "note": null
+       },
+       {
+        "name": "fsyncs-per-op",
+        "unit": "fsyncs per op",
+        "value": 15.0,
+        "note": null
+       },
+       {
+        "name": "file:$CIGSCRIPT_HOME/work/big.bin",
+        "unit": "bytes",
+        "value": 33554432.0,
+        "note": null
+       }
+      ]
+     },
+     "outcome_round_2": {
+      "state": "timed",
+      "median_ms": 578.9014649999999,
+      "p10_ms": 570.860582,
+      "p90_ms": 599.583185,
+      "cv": 0.01792489822387178,
+      "noisy": false,
+      "samples": 5,
+      "rss_bytes": 120848384,
+      "metrics": [
+       {
+        "name": "tin-growth",
+        "unit": "bytes",
+        "value": 274432.0,
+        "note": null
+       },
+       {
+        "name": "disk-per-byte",
+        "unit": "bytes per byte",
+        "value": 0.008544921875,
+        "note": null
+       },
+       {
+        "name": "fsyncs-per-op",
+        "unit": "fsyncs per op",
+        "value": 15.0,
+        "note": null
+       },
+       {
+        "name": "file:$CIGSCRIPT_HOME/work/big.bin",
+        "unit": "bytes",
+        "value": 33554432.0,
+        "note": null
+       }
+      ]
+     },
+     "spread_between_rounds": 0.0064,
+     "noisy_between_rounds": false
+    },
+    {
+     "name": "restore big file",
+     "group": "kernel",
+     "budget": null,
+     "outcome": {
+      "state": "timed",
+      "median_ms": 690.5111029999999,
+      "p10_ms": 686.62583,
+      "p90_ms": 732.633482,
+      "cv": 0.024533249759222973,
+      "noisy": false,
+      "samples": 5,
+      "rss_bytes": 57671680,
+      "metrics": [
+       {
+        "name": "tin-growth",
+        "unit": "bytes",
+        "value": 0.0,
+        "note": null
+       },
+       {
+        "name": "fsyncs-per-op",
+        "unit": "fsyncs per op",
+        "value": 138.0,
+        "note": null
+       },
+       {
+        "name": "file:$CIGSCRIPT_HOME/work/big.bin",
+        "unit": "bytes",
+        "value": 33554432.0,
+        "note": null
+       }
+      ]
+     },
+     "outcome_round_2": {
+      "state": "timed",
+      "median_ms": 689.0013280000001,
+      "p10_ms": 685.7145019999999,
+      "p90_ms": 706.57152,
+      "cv": 0.012515679003761984,
+      "noisy": false,
+      "samples": 5,
+      "rss_bytes": 55771136,
+      "metrics": [
+       {
+        "name": "tin-growth",
+        "unit": "bytes",
+        "value": 0.0,
+        "note": null
+       },
+       {
+        "name": "fsyncs-per-op",
+        "unit": "fsyncs per op",
+        "value": 138.0,
+        "note": null
+       },
+       {
+        "name": "file:$CIGSCRIPT_HOME/work/big.bin",
+        "unit": "bytes",
+        "value": 33554432.0,
+        "note": null
+       }
+      ]
+     },
+     "spread_between_rounds": 0.0022,
+     "noisy_between_rounds": false
+    },
+    {
+     "name": "hop, 2,000 files unchanged",
+     "group": "kernel",
+     "budget": null,
+     "outcome": {
+      "state": "timed",
+      "median_ms": 94.574499,
+      "p10_ms": 93.795502,
+      "p90_ms": 97.16640699999999,
+      "cv": 0.012491896458682471,
+      "noisy": false,
+      "samples": 5,
+      "rss_bytes": 54456320,
+      "metrics": [
+       {
+        "name": "tin-growth",
+        "unit": "bytes",
+        "value": 0.0,
+        "note": null
+       },
+       {
+        "name": "fsyncs-per-op",
+        "unit": "fsyncs per op",
+        "value": 12.0,
+        "note": null
+       }
+      ]
+     },
+     "outcome_round_2": {
+      "state": "timed",
+      "median_ms": 94.570701,
+      "p10_ms": 92.90582599999999,
+      "p90_ms": 95.337588,
+      "cv": 0.010237889037788491,
+      "noisy": false,
+      "samples": 5,
+      "rss_bytes": 56614912,
+      "metrics": [
+       {
+        "name": "tin-growth",
+        "unit": "bytes",
+        "value": 0.0,
+        "note": null
+       },
+       {
+        "name": "fsyncs-per-op",
+        "unit": "fsyncs per op",
+        "value": 12.0,
+        "note": null
+       }
+      ]
+     },
+     "spread_between_rounds": 0.0,
+     "noisy_between_rounds": false
+    }
+   ]
+  }
+ ],
+ "compute_against_references": {
+  "harness": "cig bench, one manifest: each program's .cig (cig run), its CPython and its Node version from cig-compile's bench/ref, each held to the program's .expect; samples 9, per 1, warm-up 1",
+  "cases": [
+   {
+    "name": "closures: cig",
+    "group": "compute",
+    "budget": null,
+    "outcome": {
+     "state": "timed",
+     "median_ms": 45.698839,
+     "p10_ms": 45.614491,
+     "p90_ms": 45.87194,
+     "cv": 0.0021310997063674134,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 14639104,
+     "metrics": []
+    },
+    "outcome_round_2": {
+     "state": "timed",
+     "median_ms": 45.67668,
+     "p10_ms": 45.582809000000005,
+     "p90_ms": 46.306697,
+     "cv": 0.007756335994143009,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 14635008,
+     "metrics": []
+    },
+    "spread_between_rounds": 0.0005,
+    "noisy_between_rounds": false
+   },
+   {
+    "name": "closures: python",
+    "group": "compute",
+    "budget": null,
+    "outcome": {
+     "state": "timed",
+     "median_ms": 38.427442,
+     "p10_ms": 38.169008999999996,
+     "p90_ms": 38.726473,
+     "cv": 0.007712050802645443,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 9949184,
+     "metrics": []
+    },
+    "outcome_round_2": {
+     "state": "timed",
+     "median_ms": 38.453889999999994,
+     "p10_ms": 38.115773,
+     "p90_ms": 38.810427000000004,
+     "cv": 0.007701361622241685,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 9564160,
+     "metrics": []
+    },
+    "spread_between_rounds": 0.0007,
+    "noisy_between_rounds": false
+   },
+   {
+    "name": "closures: node",
+    "group": "compute",
+    "budget": null,
+    "outcome": {
+     "state": "timed",
+     "median_ms": 110.411862,
+     "p10_ms": 108.598335,
+     "p90_ms": 115.705221,
+     "cv": 0.026272178442951738,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 60772352,
+     "metrics": []
+    },
+    "outcome_round_2": {
+     "state": "timed",
+     "median_ms": 111.098531,
+     "p10_ms": 107.096717,
+     "p90_ms": 113.85659700000001,
+     "cv": 0.02546442999615455,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 60952576,
+     "metrics": []
+    },
+    "spread_between_rounds": 0.0062,
+    "noisy_between_rounds": false
+   },
+   {
+    "name": "deltablue: cig",
+    "group": "compute",
+    "budget": null,
+    "outcome": {
+     "state": "timed",
+     "median_ms": 7.052539,
+     "p10_ms": 7.0091019999999995,
+     "p90_ms": 7.080681,
+     "cv": 0.003881517319165631,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 14639104,
+     "metrics": []
+    },
+    "outcome_round_2": {
+     "state": "timed",
+     "median_ms": 7.0797810000000005,
+     "p10_ms": 7.00342,
+     "p90_ms": 7.1592210000000005,
+     "cv": 0.010153237363240517,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 14639104,
+     "metrics": []
+    },
+    "spread_between_rounds": 0.0039,
+    "noisy_between_rounds": false
+   },
+   {
+    "name": "deltablue: python",
+    "group": "compute",
+    "budget": null,
+    "outcome": {
+     "state": "timed",
+     "median_ms": 16.314928,
+     "p10_ms": 16.124706,
+     "p90_ms": 16.469324,
+     "cv": 0.010031635886714102,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 9715712,
+     "metrics": []
+    },
+    "outcome_round_2": {
+     "state": "timed",
+     "median_ms": 16.200025,
+     "p10_ms": 16.104385,
+     "p90_ms": 16.27019,
+     "cv": 0.004315174740385484,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 9728000,
+     "metrics": []
+    },
+    "spread_between_rounds": 0.0071,
+    "noisy_between_rounds": false
+   },
+   {
+    "name": "deltablue: node",
+    "group": "compute",
+    "budget": null,
+    "outcome": {
+     "state": "timed",
+     "median_ms": 107.961821,
+     "p10_ms": 103.218981,
+     "p90_ms": 112.776999,
+     "cv": 0.04340342125765659,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 58609664,
+     "metrics": []
+    },
+    "outcome_round_2": {
+     "state": "timed",
+     "median_ms": 106.076474,
+     "p10_ms": 103.904658,
+     "p90_ms": 110.748599,
+     "cv": 0.030046782402186563,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 58585088,
+     "metrics": []
+    },
+    "spread_between_rounds": 0.0178,
+    "noisy_between_rounds": false
+   },
+   {
+    "name": "dispatch: cig",
+    "group": "compute",
+    "budget": null,
+    "outcome": {
+     "state": "timed",
+     "median_ms": 68.874704,
+     "p10_ms": 68.795102,
+     "p90_ms": 69.008241,
+     "cv": 0.0013589658617262372,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 14622720,
+     "metrics": []
+    },
+    "outcome_round_2": {
+     "state": "timed",
+     "median_ms": 68.89661199999999,
+     "p10_ms": 68.734117,
+     "p90_ms": 68.994919,
+     "cv": 0.0026452904901379747,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 14622720,
+     "metrics": []
+    },
+    "spread_between_rounds": 0.0003,
+    "noisy_between_rounds": false
+   },
+   {
+    "name": "dispatch: python",
+    "group": "compute",
+    "budget": null,
+    "outcome": {
+     "state": "timed",
+     "median_ms": 47.759339,
+     "p10_ms": 46.494831,
+     "p90_ms": 49.379851,
+     "cv": 0.025648260354381967,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 9715712,
+     "metrics": []
+    },
+    "outcome_round_2": {
+     "state": "timed",
+     "median_ms": 46.977275999999996,
+     "p10_ms": 46.584390000000006,
+     "p90_ms": 47.436377,
+     "cv": 0.008396245800750468,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 9728000,
+     "metrics": []
+    },
+    "spread_between_rounds": 0.0166,
+    "noisy_between_rounds": false
+   },
+   {
+    "name": "dispatch: node",
+    "group": "compute",
+    "budget": null,
+    "outcome": {
+     "state": "timed",
+     "median_ms": 114.734803,
+     "p10_ms": 113.25990599999999,
+     "p90_ms": 127.823362,
+     "cv": 0.05166584353762472,
+     "noisy": true,
+     "samples": 9,
+     "rss_bytes": 59920384,
+     "metrics": []
+    },
+    "outcome_round_2": {
+     "state": "timed",
+     "median_ms": 112.055783,
+     "p10_ms": 110.500509,
+     "p90_ms": 117.20945,
+     "cv": 0.028898904064362314,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 59912192,
+     "metrics": []
+    },
+    "spread_between_rounds": 0.0239,
+    "noisy_between_rounds": false
+   },
+   {
+    "name": "fannkuch: cig",
+    "group": "compute",
+    "budget": null,
+    "outcome": {
+     "state": "timed",
+     "median_ms": 295.12269000000003,
+     "p10_ms": 294.905737,
+     "p90_ms": 296.180191,
+     "cv": 0.0020964528506791434,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 14635008,
+     "metrics": []
+    },
+    "outcome_round_2": {
+     "state": "timed",
+     "median_ms": 296.316477,
+     "p10_ms": 295.25108,
+     "p90_ms": 304.013376,
+     "cv": 0.025982740755196295,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 14639104,
+     "metrics": []
+    },
+    "spread_between_rounds": 0.004,
+    "noisy_between_rounds": false
+   },
+   {
+    "name": "fannkuch: python",
+    "group": "compute",
+    "budget": null,
+    "outcome": {
+     "state": "timed",
+     "median_ms": 104.319089,
+     "p10_ms": 102.35883799999999,
+     "p90_ms": 106.27679900000001,
+     "cv": 0.016913221275527558,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 9715712,
+     "metrics": []
+    },
+    "outcome_round_2": {
+     "state": "timed",
+     "median_ms": 103.116554,
+     "p10_ms": 99.895099,
+     "p90_ms": 105.68688900000001,
+     "cv": 0.02965037225822131,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 9687040,
+     "metrics": []
+    },
+    "spread_between_rounds": 0.0117,
+    "noisy_between_rounds": false
+   },
+   {
+    "name": "fannkuch: node",
+    "group": "compute",
+    "budget": null,
+    "outcome": {
+     "state": "timed",
+     "median_ms": 113.909048,
+     "p10_ms": 112.888561,
+     "p90_ms": 118.43264,
+     "cv": 0.023170571391503175,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 61243392,
+     "metrics": []
+    },
+    "outcome_round_2": {
+     "state": "timed",
+     "median_ms": 111.730587,
+     "p10_ms": 111.223653,
+     "p90_ms": 113.271708,
+     "cv": 0.014567499099057782,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 61132800,
+     "metrics": []
+    },
+    "spread_between_rounds": 0.0195,
+    "noisy_between_rounds": false
+   },
+   {
+    "name": "fib: cig",
+    "group": "compute",
+    "budget": null,
+    "outcome": {
+     "state": "timed",
+     "median_ms": 50.608406,
+     "p10_ms": 50.564827,
+     "p90_ms": 50.719865000000006,
+     "cv": 0.0013374052129042544,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 14626816,
+     "metrics": []
+    },
+    "outcome_round_2": {
+     "state": "timed",
+     "median_ms": 50.609137,
+     "p10_ms": 50.504303,
+     "p90_ms": 50.715511,
+     "cv": 0.002968219319681694,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 14622720,
+     "metrics": []
+    },
+    "spread_between_rounds": 0.0,
+    "noisy_between_rounds": false
+   },
+   {
+    "name": "fib: python",
+    "group": "compute",
+    "budget": null,
+    "outcome": {
+     "state": "timed",
+     "median_ms": 23.243748,
+     "p10_ms": 23.130797,
+     "p90_ms": 23.300945,
+     "cv": 0.0052605478445129205,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 9555968,
+     "metrics": []
+    },
+    "outcome_round_2": {
+     "state": "timed",
+     "median_ms": 23.297277,
+     "p10_ms": 23.167815,
+     "p90_ms": 23.385808,
+     "cv": 0.005408554421382238,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 9596928,
+     "metrics": []
+    },
+    "spread_between_rounds": 0.0023,
+    "noisy_between_rounds": false
+   },
+   {
+    "name": "fib: node",
+    "group": "compute",
+    "budget": null,
+    "outcome": {
+     "state": "timed",
+     "median_ms": 106.73384499999999,
+     "p10_ms": 104.152103,
+     "p90_ms": 109.67239,
+     "cv": 0.025146736671048532,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 57933824,
+     "metrics": []
+    },
+    "outcome_round_2": {
+     "state": "timed",
+     "median_ms": 104.312077,
+     "p10_ms": 103.629905,
+     "p90_ms": 112.068238,
+     "cv": 0.03251115092683543,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 57913344,
+     "metrics": []
+    },
+    "spread_between_rounds": 0.0232,
+    "noisy_between_rounds": false
+   },
+   {
+    "name": "json-deep: cig",
+    "group": "compute",
+    "budget": null,
+    "outcome": {
+     "state": "timed",
+     "median_ms": 4.647616,
+     "p10_ms": 4.556126,
+     "p90_ms": 4.738779,
+     "cv": 0.019812912350708478,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 14618624,
+     "metrics": []
+    },
+    "outcome_round_2": {
+     "state": "timed",
+     "median_ms": 4.6536,
+     "p10_ms": 4.592117,
+     "p90_ms": 4.7583269999999995,
+     "cv": 0.02838364588953349,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 14622720,
+     "metrics": []
+    },
+    "spread_between_rounds": 0.0013,
+    "noisy_between_rounds": false
+   },
+   {
+    "name": "json-deep: python",
+    "group": "compute",
+    "budget": null,
+    "outcome": {
+     "state": "timed",
+     "median_ms": 28.168324000000002,
+     "p10_ms": 27.899905,
+     "p90_ms": 29.515398,
+     "cv": 0.10172823081017686,
+     "noisy": true,
+     "samples": 9,
+     "rss_bytes": 12857344,
+     "metrics": []
+    },
+    "outcome_round_2": {
+     "state": "timed",
+     "median_ms": 28.162985000000003,
+     "p10_ms": 28.002739,
+     "p90_ms": 28.501989,
+     "cv": 0.03802090720026585,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 12779520,
+     "metrics": []
+    },
+    "spread_between_rounds": 0.0002,
+    "noisy_between_rounds": false
+   },
+   {
+    "name": "json-deep: node",
+    "group": "compute",
+    "budget": null,
+    "outcome": {
+     "state": "timed",
+     "median_ms": 106.304339,
+     "p10_ms": 105.08859600000001,
+     "p90_ms": 111.49211000000001,
+     "cv": 0.027599948208064305,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 54509568,
+     "metrics": []
+    },
+    "outcome_round_2": {
+     "state": "timed",
+     "median_ms": 104.649705,
+     "p10_ms": 102.732857,
+     "p90_ms": 106.173682,
+     "cv": 0.024822033986053267,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 54575104,
+     "metrics": []
+    },
+    "spread_between_rounds": 0.0158,
+    "noisy_between_rounds": false
+   },
+   {
+    "name": "loop: cig",
+    "group": "compute",
+    "budget": null,
+    "outcome": {
+     "state": "timed",
+     "median_ms": 57.499016,
+     "p10_ms": 57.395365,
+     "p90_ms": 57.940371999999996,
+     "cv": 0.004706596289263808,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 14635008,
+     "metrics": []
+    },
+    "outcome_round_2": {
+     "state": "timed",
+     "median_ms": 57.557167,
+     "p10_ms": 57.398644999999995,
+     "p90_ms": 58.1309,
+     "cv": 0.005448031353724452,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 14635008,
+     "metrics": []
+    },
+    "spread_between_rounds": 0.001,
+    "noisy_between_rounds": false
+   },
+   {
+    "name": "loop: python",
+    "group": "compute",
+    "budget": null,
+    "outcome": {
+     "state": "timed",
+     "median_ms": 68.910764,
+     "p10_ms": 68.104355,
+     "p90_ms": 79.788657,
+     "cv": 0.06849671340220523,
+     "noisy": true,
+     "samples": 9,
+     "rss_bytes": 9728000,
+     "metrics": []
+    },
+    "outcome_round_2": {
+     "state": "timed",
+     "median_ms": 68.293229,
+     "p10_ms": 67.474404,
+     "p90_ms": 69.61358800000001,
+     "cv": 0.012536231557317415,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 9728000,
+     "metrics": []
+    },
+    "spread_between_rounds": 0.009,
+    "noisy_between_rounds": false
+   },
+   {
+    "name": "loop: node",
+    "group": "compute",
+    "budget": null,
+    "outcome": {
+     "state": "timed",
+     "median_ms": 110.447244,
+     "p10_ms": 108.974029,
+     "p90_ms": 113.23796999999999,
+     "cv": 0.017795110656132835,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 59617280,
+     "metrics": []
+    },
+    "outcome_round_2": {
+     "state": "timed",
+     "median_ms": 108.616924,
+     "p10_ms": 107.467613,
+     "p90_ms": 111.047052,
+     "cv": 0.013884171729985965,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 59514880,
+     "metrics": []
+    },
+    "spread_between_rounds": 0.0169,
+    "noisy_between_rounds": false
+   },
+   {
+    "name": "mandel: cig",
+    "group": "compute",
+    "budget": null,
+    "outcome": {
+     "state": "timed",
+     "median_ms": 332.79569,
+     "p10_ms": 332.259136,
+     "p90_ms": 334.871552,
+     "cv": 0.0033948773330696033,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 14639104,
+     "metrics": []
+    },
+    "outcome_round_2": {
+     "state": "timed",
+     "median_ms": 332.476774,
+     "p10_ms": 331.791877,
+     "p90_ms": 334.740722,
+     "cv": 0.02503947722323058,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 14635008,
+     "metrics": []
+    },
+    "spread_between_rounds": 0.001,
+    "noisy_between_rounds": false
+   },
+   {
+    "name": "mandel: python",
+    "group": "compute",
+    "budget": null,
+    "outcome": {
+     "state": "timed",
+     "median_ms": 227.088572,
+     "p10_ms": 225.405092,
+     "p90_ms": 243.353923,
+     "cv": 0.05780480650481618,
+     "noisy": true,
+     "samples": 9,
+     "rss_bytes": 9728000,
+     "metrics": []
+    },
+    "outcome_round_2": {
+     "state": "timed",
+     "median_ms": 228.73650600000002,
+     "p10_ms": 222.867051,
+     "p90_ms": 241.28134300000002,
+     "cv": 0.07611217056339906,
+     "noisy": true,
+     "samples": 9,
+     "rss_bytes": 9883648,
+     "metrics": []
+    },
+    "spread_between_rounds": 0.0073,
+    "noisy_between_rounds": false
+   },
+   {
+    "name": "mandel: node",
+    "group": "compute",
+    "budget": null,
+    "outcome": {
+     "state": "timed",
+     "median_ms": 111.094963,
+     "p10_ms": 110.361604,
+     "p90_ms": 113.67148,
+     "cv": 0.01879185374300895,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 60907520,
+     "metrics": []
+    },
+    "outcome_round_2": {
+     "state": "timed",
+     "median_ms": 111.15391199999999,
+     "p10_ms": 108.66712100000001,
+     "p90_ms": 114.30747500000001,
+     "cv": 0.025904945743054214,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 60932096,
+     "metrics": []
+    },
+    "spread_between_rounds": 0.0005,
+    "noisy_between_rounds": false
+   },
+   {
+    "name": "nbody: cig",
+    "group": "compute",
+    "budget": null,
+    "outcome": {
+     "state": "timed",
+     "median_ms": 433.819621,
+     "p10_ms": 431.101582,
+     "p90_ms": 435.868268,
+     "cv": 0.019404252028507384,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 14622720,
+     "metrics": []
+    },
+    "outcome_round_2": {
+     "state": "timed",
+     "median_ms": 430.54157799999996,
+     "p10_ms": 430.16828200000003,
+     "p90_ms": 433.645566,
+     "cv": 0.007574727817028113,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 14622720,
+     "metrics": []
+    },
+    "spread_between_rounds": 0.0076,
+    "noisy_between_rounds": false
+   },
+   {
+    "name": "nbody: python",
+    "group": "compute",
+    "budget": null,
+    "outcome": {
+     "state": "timed",
+     "median_ms": 113.195634,
+     "p10_ms": 112.241878,
+     "p90_ms": 113.40664100000001,
+     "cv": 0.004560101032474355,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 10379264,
+     "metrics": []
+    },
+    "outcome_round_2": {
+     "state": "timed",
+     "median_ms": 113.462703,
+     "p10_ms": 112.32174,
+     "p90_ms": 115.76270199999999,
+     "cv": 0.05147578432650342,
+     "noisy": true,
+     "samples": 9,
+     "rss_bytes": 10301440,
+     "metrics": []
+    },
+    "spread_between_rounds": 0.0024,
+    "noisy_between_rounds": false
+   },
+   {
+    "name": "nbody: node",
+    "group": "compute",
+    "budget": null,
+    "outcome": {
+     "state": "timed",
+     "median_ms": 114.255914,
+     "p10_ms": 113.270751,
+     "p90_ms": 119.832823,
+     "cv": 0.024187633074462405,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 61431808,
+     "metrics": []
+    },
+    "outcome_round_2": {
+     "state": "timed",
+     "median_ms": 116.697977,
+     "p10_ms": 115.293629,
+     "p90_ms": 120.634761,
+     "cv": 0.01782175980834265,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 62103552,
+     "metrics": []
+    },
+    "spread_between_rounds": 0.0214,
+    "noisy_between_rounds": false
+   },
+   {
+    "name": "regex-ish: cig",
+    "group": "compute",
+    "budget": null,
+    "outcome": {
+     "state": "timed",
+     "median_ms": 50.779136,
+     "p10_ms": 50.644835,
+     "p90_ms": 51.010149999999996,
+     "cv": 0.0035196208783483036,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 29319168,
+     "metrics": []
+    },
+    "outcome_round_2": {
+     "state": "timed",
+     "median_ms": 50.79224,
+     "p10_ms": 50.706641,
+     "p90_ms": 51.014309,
+     "cv": 0.0026303528873364936,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 29319168,
+     "metrics": []
+    },
+    "spread_between_rounds": 0.0003,
+    "noisy_between_rounds": false
+   },
+   {
+    "name": "regex-ish: python",
+    "group": "compute",
+    "budget": null,
+    "outcome": {
+     "state": "timed",
+     "median_ms": 36.906113,
+     "p10_ms": 36.526655,
+     "p90_ms": 37.277794,
+     "cv": 0.008056151823815492,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 23531520,
+     "metrics": []
+    },
+    "outcome_round_2": {
+     "state": "timed",
+     "median_ms": 37.264725999999996,
+     "p10_ms": 37.008248,
+     "p90_ms": 37.433338,
+     "cv": 0.007376684923289068,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 23531520,
+     "metrics": []
+    },
+    "spread_between_rounds": 0.0097,
+    "noisy_between_rounds": false
+   },
+   {
+    "name": "regex-ish: node",
+    "group": "compute",
+    "budget": null,
+    "outcome": {
+     "state": "timed",
+     "median_ms": 170.67092,
+     "p10_ms": 167.661989,
+     "p90_ms": 177.097518,
+     "cv": 0.022329382618190195,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 91090944,
+     "metrics": []
+    },
+    "outcome_round_2": {
+     "state": "timed",
+     "median_ms": 167.608358,
+     "p10_ms": 166.552314,
+     "p90_ms": 172.915341,
+     "cv": 0.01854744420248358,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 90914816,
+     "metrics": []
+    },
+    "spread_between_rounds": 0.0183,
+    "noisy_between_rounds": false
+   },
+   {
+    "name": "richards: cig",
+    "group": "compute",
+    "budget": null,
+    "outcome": {
+     "state": "timed",
+     "median_ms": 19.842661,
+     "p10_ms": 19.800443,
+     "p90_ms": 19.882965,
+     "cv": 0.002522292777407427,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 14635008,
+     "metrics": []
+    },
+    "outcome_round_2": {
+     "state": "timed",
+     "median_ms": 19.800213,
+     "p10_ms": 19.720069,
+     "p90_ms": 19.998976000000003,
+     "cv": 0.006197854330531023,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 14639104,
+     "metrics": []
+    },
+    "spread_between_rounds": 0.0021,
+    "noisy_between_rounds": false
+   },
+   {
+    "name": "richards: python",
+    "group": "compute",
+    "budget": null,
+    "outcome": {
+     "state": "timed",
+     "median_ms": 23.626577,
+     "p10_ms": 23.295268,
+     "p90_ms": 23.96943,
+     "cv": 0.014281140380784395,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 9601024,
+     "metrics": []
+    },
+    "outcome_round_2": {
+     "state": "timed",
+     "median_ms": 23.475491,
+     "p10_ms": 23.111823,
+     "p90_ms": 23.771608,
+     "cv": 0.015605758655903395,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 9621504,
+     "metrics": []
+    },
+    "spread_between_rounds": 0.0064,
+    "noisy_between_rounds": false
+   },
+   {
+    "name": "richards: node",
+    "group": "compute",
+    "budget": null,
+    "outcome": {
+     "state": "timed",
+     "median_ms": 110.37513899999999,
+     "p10_ms": 106.939334,
+     "p90_ms": 111.296201,
+     "cv": 0.017623861823735345,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 58212352,
+     "metrics": []
+    },
+    "outcome_round_2": {
+     "state": "timed",
+     "median_ms": 104.718815,
+     "p10_ms": 103.637892,
+     "p90_ms": 110.786965,
+     "cv": 0.027857274222848574,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 58605568,
+     "metrics": []
+    },
+    "spread_between_rounds": 0.054,
+    "noisy_between_rounds": true
+   },
+   {
+    "name": "sieve: cig",
+    "group": "compute",
+    "budget": null,
+    "outcome": {
+     "state": "timed",
+     "median_ms": 179.795974,
+     "p10_ms": 179.049813,
+     "p90_ms": 194.524044,
+     "cv": 0.03716350929484361,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 50294784,
+     "metrics": []
+    },
+    "outcome_round_2": {
+     "state": "timed",
+     "median_ms": 178.713236,
+     "p10_ms": 178.64084799999998,
+     "p90_ms": 179.205983,
+     "cv": 0.0021312067433057595,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 50294784,
+     "metrics": []
+    },
+    "spread_between_rounds": 0.0061,
+    "noisy_between_rounds": false
+   },
+   {
+    "name": "sieve: python",
+    "group": "compute",
+    "budget": null,
+    "outcome": {
+     "state": "timed",
+     "median_ms": 80.46929999999999,
+     "p10_ms": 79.02702000000001,
+     "p90_ms": 82.553277,
+     "cv": 0.020185933408623694,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 11816960,
+     "metrics": []
+    },
+    "outcome_round_2": {
+     "state": "timed",
+     "median_ms": 80.18220600000001,
+     "p10_ms": 79.125903,
+     "p90_ms": 81.872374,
+     "cv": 0.03842355558898947,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 11808768,
+     "metrics": []
+    },
+    "spread_between_rounds": 0.0036,
+    "noisy_between_rounds": false
+   },
+   {
+    "name": "sieve: node",
+    "group": "compute",
+    "budget": null,
+    "outcome": {
+     "state": "timed",
+     "median_ms": 120.32012999999999,
+     "p10_ms": 119.378466,
+     "p90_ms": 122.207459,
+     "cv": 0.02291313702919276,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 67887104,
+     "metrics": []
+    },
+    "outcome_round_2": {
+     "state": "timed",
+     "median_ms": 120.260994,
+     "p10_ms": 117.672989,
+     "p90_ms": 122.854485,
+     "cv": 0.018681275525097955,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 67899392,
+     "metrics": []
+    },
+    "spread_between_rounds": 0.0005,
+    "noisy_between_rounds": false
+   },
+   {
+    "name": "spectral: cig",
+    "group": "compute",
+    "budget": null,
+    "outcome": {
+     "state": "timed",
+     "median_ms": 194.495109,
+     "p10_ms": 193.676015,
+     "p90_ms": 196.229882,
+     "cv": 0.006048679871632184,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 14622720,
+     "metrics": []
+    },
+    "outcome_round_2": {
+     "state": "timed",
+     "median_ms": 193.808279,
+     "p10_ms": 193.436845,
+     "p90_ms": 194.88751100000002,
+     "cv": 0.04151358978625098,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 14618624,
+     "metrics": []
+    },
+    "spread_between_rounds": 0.0035,
+    "noisy_between_rounds": false
+   },
+   {
+    "name": "spectral: python",
+    "group": "compute",
+    "budget": null,
+    "outcome": {
+     "state": "timed",
+     "median_ms": 83.32735600000001,
+     "p10_ms": 82.60125000000001,
+     "p90_ms": 83.570782,
+     "cv": 0.006337716086505592,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 9920512,
+     "metrics": []
+    },
+    "outcome_round_2": {
+     "state": "timed",
+     "median_ms": 81.721083,
+     "p10_ms": 81.232074,
+     "p90_ms": 81.929328,
+     "cv": 0.0036409913730954535,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 9846784,
+     "metrics": []
+    },
+    "spread_between_rounds": 0.0197,
+    "noisy_between_rounds": false
+   },
+   {
+    "name": "spectral: node",
+    "group": "compute",
+    "budget": null,
+    "outcome": {
+     "state": "timed",
+     "median_ms": 110.734784,
+     "p10_ms": 109.104465,
+     "p90_ms": 115.955249,
+     "cv": 0.028618436263698362,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 61747200,
+     "metrics": []
+    },
+    "outcome_round_2": {
+     "state": "timed",
+     "median_ms": 109.948881,
+     "p10_ms": 108.455065,
+     "p90_ms": 113.214392,
+     "cv": 0.018391157670817386,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 61603840,
+     "metrics": []
+    },
+    "spread_between_rounds": 0.0071,
+    "noisy_between_rounds": false
+   },
+   {
+    "name": "strbuild: cig",
+    "group": "compute",
+    "budget": null,
+    "outcome": {
+     "state": "timed",
+     "median_ms": 7.704523,
+     "p10_ms": 7.640778,
+     "p90_ms": 7.818025,
+     "cv": 0.01232864663430203,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 14639104,
+     "metrics": []
+    },
+    "outcome_round_2": {
+     "state": "timed",
+     "median_ms": 7.783007,
+     "p10_ms": 7.695655,
+     "p90_ms": 7.99215,
+     "cv": 0.014981158410145464,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 14639104,
+     "metrics": []
+    },
+    "spread_between_rounds": 0.0102,
+    "noisy_between_rounds": false
+   },
+   {
+    "name": "strbuild: python",
+    "group": "compute",
+    "budget": null,
+    "outcome": {
+     "state": "timed",
+     "median_ms": 14.757429,
+     "p10_ms": 14.675414,
+     "p90_ms": 14.78027,
+     "cv": 0.005893017868667414,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 9596928,
+     "metrics": []
+    },
+    "outcome_round_2": {
+     "state": "timed",
+     "median_ms": 14.728134,
+     "p10_ms": 14.535523,
+     "p90_ms": 14.982776999999999,
+     "cv": 0.011937398781731416,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 9592832,
+     "metrics": []
+    },
+    "spread_between_rounds": 0.002,
+    "noisy_between_rounds": false
+   },
+   {
+    "name": "strbuild: node",
+    "group": "compute",
+    "budget": null,
+    "outcome": {
+     "state": "timed",
+     "median_ms": 106.925648,
+     "p10_ms": 104.192363,
+     "p90_ms": 109.556986,
+     "cv": 0.02845374224212428,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 58191872,
+     "metrics": []
+    },
+    "outcome_round_2": {
+     "state": "timed",
+     "median_ms": 107.10078200000001,
+     "p10_ms": 105.17055,
+     "p90_ms": 109.04401800000001,
+     "cv": 0.018538265265784597,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 58290176,
+     "metrics": []
+    },
+    "spread_between_rounds": 0.0016,
+    "noisy_between_rounds": false
+   },
+   {
+    "name": "trees: cig",
+    "group": "compute",
+    "budget": null,
+    "outcome": {
+     "state": "timed",
+     "median_ms": 343.25318799999997,
+     "p10_ms": 337.793901,
+     "p90_ms": 348.51150600000005,
+     "cv": 0.02337766523038648,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 14618624,
+     "metrics": []
+    },
+    "outcome_round_2": {
+     "state": "timed",
+     "median_ms": 334.116199,
+     "p10_ms": 332.855065,
+     "p90_ms": 336.157269,
+     "cv": 0.004607302743412399,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 14622720,
+     "metrics": []
+    },
+    "spread_between_rounds": 0.0273,
+    "noisy_between_rounds": false
+   },
+   {
+    "name": "trees: python",
+    "group": "compute",
+    "budget": null,
+    "outcome": {
+     "state": "timed",
+     "median_ms": 109.601479,
+     "p10_ms": 108.366867,
+     "p90_ms": 110.56128,
+     "cv": 0.008726218743077389,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 10907648,
+     "metrics": []
+    },
+    "outcome_round_2": {
+     "state": "timed",
+     "median_ms": 109.56592599999999,
+     "p10_ms": 108.542126,
+     "p90_ms": 110.339863,
+     "cv": 0.026669317251222794,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 10903552,
+     "metrics": []
+    },
+    "spread_between_rounds": 0.0003,
+    "noisy_between_rounds": false
+   },
+   {
+    "name": "trees: node",
+    "group": "compute",
+    "budget": null,
+    "outcome": {
+     "state": "timed",
+     "median_ms": 122.834787,
+     "p10_ms": 119.867059,
+     "p90_ms": 125.28069599999999,
+     "cv": 0.020627951663778583,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 66043904,
+     "metrics": []
+    },
+    "outcome_round_2": {
+     "state": "timed",
+     "median_ms": 122.051535,
+     "p10_ms": 118.366948,
+     "p90_ms": 132.434575,
+     "cv": 0.053373269528323226,
+     "noisy": true,
+     "samples": 9,
+     "rss_bytes": 66310144,
+     "metrics": []
+    },
+    "spread_between_rounds": 0.0064,
+    "noisy_between_rounds": false
+   },
+   {
+    "name": "words: cig",
+    "group": "compute",
+    "budget": null,
+    "outcome": {
+     "state": "timed",
+     "median_ms": 45.178949,
+     "p10_ms": 45.05772,
+     "p90_ms": 45.516567,
+     "cv": 0.004538675603747243,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 27222016,
+     "metrics": []
+    },
+    "outcome_round_2": {
+     "state": "timed",
+     "median_ms": 44.922924,
+     "p10_ms": 44.902114,
+     "p90_ms": 45.223791999999996,
+     "cv": 0.004868417377406703,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 27222016,
+     "metrics": []
+    },
+    "spread_between_rounds": 0.0057,
+    "noisy_between_rounds": false
+   },
+   {
+    "name": "words: python",
+    "group": "compute",
+    "budget": null,
+    "outcome": {
+     "state": "timed",
+     "median_ms": 27.776324000000002,
+     "p10_ms": 27.604343,
+     "p90_ms": 27.894672,
+     "cv": 0.010553312898696054,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 12206080,
+     "metrics": []
+    },
+    "outcome_round_2": {
+     "state": "timed",
+     "median_ms": 27.774896000000002,
+     "p10_ms": 27.630050999999998,
+     "p90_ms": 27.822571,
+     "cv": 0.004676004293293348,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 12169216,
+     "metrics": []
+    },
+    "spread_between_rounds": 0.0001,
+    "noisy_between_rounds": false
+   },
+   {
+    "name": "words: node",
+    "group": "compute",
+    "budget": null,
+    "outcome": {
+     "state": "timed",
+     "median_ms": 123.678037,
+     "p10_ms": 121.476844,
+     "p90_ms": 126.47540299999999,
+     "cv": 0.020927428510460845,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 65982464,
+     "metrics": []
+    },
+    "outcome_round_2": {
+     "state": "timed",
+     "median_ms": 121.80191699999999,
+     "p10_ms": 119.987873,
+     "p90_ms": 125.477952,
+     "cv": 0.022336827511104,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 66007040,
+     "metrics": []
+    },
+    "spread_between_rounds": 0.0154,
+    "noisy_between_rounds": false
+   },
+   {
+    "name": "hello: cig",
+    "group": "start-up",
+    "budget": null,
+    "outcome": {
+     "state": "timed",
+     "median_ms": 2.3293369999999998,
+     "p10_ms": 2.284903,
+     "p90_ms": 2.507893,
+     "cv": 0.04509819051521828,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 14635008,
+     "metrics": []
+    },
+    "outcome_round_2": {
+     "state": "timed",
+     "median_ms": 2.3409720000000003,
+     "p10_ms": 2.277816,
+     "p90_ms": 2.475437,
+     "cv": 0.03141274342168072,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 14639104,
+     "metrics": []
+    },
+    "spread_between_rounds": 0.005,
+    "noisy_between_rounds": false
+   },
+   {
+    "name": "hello: python",
+    "group": "start-up",
+    "budget": null,
+    "outcome": {
+     "state": "timed",
+     "median_ms": 12.975565999999999,
+     "p10_ms": 12.898111,
+     "p90_ms": 13.030215,
+     "cv": 0.0067128415477192924,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 9568256,
+     "metrics": []
+    },
+    "outcome_round_2": {
+     "state": "timed",
+     "median_ms": 12.828165,
+     "p10_ms": 12.792325,
+     "p90_ms": 13.022357999999999,
+     "cv": 0.008860044508742705,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 9596928,
+     "metrics": []
+    },
+    "spread_between_rounds": 0.0115,
+    "noisy_between_rounds": false
+   },
+   {
+    "name": "hello: node",
+    "group": "start-up",
+    "budget": null,
+    "outcome": {
+     "state": "timed",
+     "median_ms": 105.681515,
+     "p10_ms": 103.199004,
+     "p90_ms": 108.837984,
+     "cv": 0.02342482741567038,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 54325248,
+     "metrics": []
+    },
+    "outcome_round_2": {
+     "state": "timed",
+     "median_ms": 104.45144400000001,
+     "p10_ms": 102.625161,
+     "p90_ms": 108.16590500000001,
+     "cv": 0.020732784982604165,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 54325248,
+     "metrics": []
+    },
+    "spread_between_rounds": 0.0118,
+    "noisy_between_rounds": false
+   },
+   {
+    "name": "startup-0: cig",
+    "group": "start-up",
+    "budget": null,
+    "outcome": {
+     "state": "timed",
+     "median_ms": 2.3811829999999996,
+     "p10_ms": 2.328954,
+     "p90_ms": 2.445301,
+     "cv": 0.0259043426091473,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 14635008,
+     "metrics": []
+    },
+    "outcome_round_2": {
+     "state": "timed",
+     "median_ms": 2.419911,
+     "p10_ms": 2.3003020000000003,
+     "p90_ms": 2.516017,
+     "cv": 0.035726366373254416,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 14639104,
+     "metrics": []
+    },
+    "spread_between_rounds": 0.0163,
+    "noisy_between_rounds": false
+   },
+   {
+    "name": "startup-0: python",
+    "group": "start-up",
+    "budget": null,
+    "outcome": {
+     "state": "timed",
+     "median_ms": 13.030302,
+     "p10_ms": 12.907633,
+     "p90_ms": 13.114858,
+     "cv": 0.007123089633135801,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 9592832,
+     "metrics": []
+    },
+    "outcome_round_2": {
+     "state": "timed",
+     "median_ms": 13.008097999999999,
+     "p10_ms": 12.843185,
+     "p90_ms": 13.135337,
+     "cv": 0.008898518838407829,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 9592832,
+     "metrics": []
+    },
+    "spread_between_rounds": 0.0017,
+    "noisy_between_rounds": false
+   },
+   {
+    "name": "startup-0: node",
+    "group": "start-up",
+    "budget": null,
+    "outcome": {
+     "state": "timed",
+     "median_ms": 104.703715,
+     "p10_ms": 103.590609,
+     "p90_ms": 106.738477,
+     "cv": 0.024441233815281148,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 54329344,
+     "metrics": []
+    },
+    "outcome_round_2": {
+     "state": "timed",
+     "median_ms": 103.230514,
+     "p10_ms": 102.303815,
+     "p90_ms": 104.49067400000001,
+     "cv": 0.018286955530988885,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 54374400,
+     "metrics": []
+    },
+    "spread_between_rounds": 0.0143,
+    "noisy_between_rounds": false
+   },
+   {
+    "name": "startup-1: cig",
+    "group": "start-up",
+    "budget": null,
+    "outcome": {
+     "state": "timed",
+     "median_ms": 2.365326,
+     "p10_ms": 2.286601,
+     "p90_ms": 2.463261,
+     "cv": 0.03401405582693602,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 14639104,
+     "metrics": []
+    },
+    "outcome_round_2": {
+     "state": "timed",
+     "median_ms": 2.414411,
+     "p10_ms": 2.398469,
+     "p90_ms": 2.45887,
+     "cv": 0.02341164552489622,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 14635008,
+     "metrics": []
+    },
+    "spread_between_rounds": 0.0208,
+    "noisy_between_rounds": false
+   },
+   {
+    "name": "startup-1: python",
+    "group": "start-up",
+    "budget": null,
+    "outcome": {
+     "state": "timed",
+     "median_ms": 13.069238,
+     "p10_ms": 13.01227,
+     "p90_ms": 13.112092,
+     "cv": 0.005116683754973287,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 9789440,
+     "metrics": []
+    },
+    "outcome_round_2": {
+     "state": "timed",
+     "median_ms": 13.060156999999998,
+     "p10_ms": 12.897408,
+     "p90_ms": 13.107064999999999,
+     "cv": 0.007769774416706257,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 9789440,
+     "metrics": []
+    },
+    "spread_between_rounds": 0.0007,
+    "noisy_between_rounds": false
+   },
+   {
+    "name": "startup-1: node",
+    "group": "start-up",
+    "budget": null,
+    "outcome": {
+     "state": "timed",
+     "median_ms": 106.24254499999999,
+     "p10_ms": 100.98003899999999,
+     "p90_ms": 109.905941,
+     "cv": 0.03978355018219104,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 54423552,
+     "metrics": []
+    },
+    "outcome_round_2": {
+     "state": "timed",
+     "median_ms": 104.143006,
+     "p10_ms": 101.044175,
+     "p90_ms": 109.64649299999999,
+     "cv": 0.03420670701916651,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 54329344,
+     "metrics": []
+    },
+    "spread_between_rounds": 0.0202,
+    "noisy_between_rounds": false
+   },
+   {
+    "name": "startup-10: cig",
+    "group": "start-up",
+    "budget": null,
+    "outcome": {
+     "state": "timed",
+     "median_ms": 2.431679,
+     "p10_ms": 2.369805,
+     "p90_ms": 2.495517,
+     "cv": 0.022005053859697952,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 14753792,
+     "metrics": []
+    },
+    "outcome_round_2": {
+     "state": "timed",
+     "median_ms": 2.448349,
+     "p10_ms": 2.393296,
+     "p90_ms": 2.562034,
+     "cv": 0.046294653589801185,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 14749696,
+     "metrics": []
+    },
+    "spread_between_rounds": 0.0069,
+    "noisy_between_rounds": false
+   },
+   {
+    "name": "startup-10: python",
+    "group": "start-up",
+    "budget": null,
+    "outcome": {
+     "state": "timed",
+     "median_ms": 51.801108,
+     "p10_ms": 51.554211,
+     "p90_ms": 52.235205,
+     "cv": 0.008058502243719307,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 21635072,
+     "metrics": []
+    },
+    "outcome_round_2": {
+     "state": "timed",
+     "median_ms": 51.808458,
+     "p10_ms": 51.715681,
+     "p90_ms": 52.485258,
+     "cv": 0.005896932294484472,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 21671936,
+     "metrics": []
+    },
+    "spread_between_rounds": 0.0001,
+    "noisy_between_rounds": false
+   },
+   {
+    "name": "startup-10: node",
+    "group": "start-up",
+    "budget": null,
+    "outcome": {
+     "state": "timed",
+     "median_ms": 115.27603,
+     "p10_ms": 109.48837999999999,
+     "p90_ms": 120.363273,
+     "cv": 0.044441261127918325,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 55418880,
+     "metrics": []
+    },
+    "outcome_round_2": {
+     "state": "timed",
+     "median_ms": 109.840584,
+     "p10_ms": 109.294577,
+     "p90_ms": 114.616629,
+     "cv": 0.025692481360017193,
+     "noisy": false,
+     "samples": 9,
+     "rss_bytes": 55427072,
+     "metrics": []
+    },
+    "spread_between_rounds": 0.0495,
+    "noisy_between_rounds": false
+   }
+  ]
+ },
+ "start_up": [
+  {
+   "name": "true",
+   "group": "floor",
+   "budget": null,
+   "outcome": {
+    "state": "timed",
+    "median_ms": 0.5115928,
+    "p10_ms": 0.49481505,
+    "p90_ms": 0.5481612499999999,
+    "cv": 0.05777725161183104,
+    "noisy": true,
+    "samples": 15,
+    "rss_bytes": 9084928,
+    "metrics": []
+   },
+   "outcome_round_2": {
+    "state": "timed",
+    "median_ms": 0.73444705,
+    "p10_ms": 0.5917943,
+    "p90_ms": 0.7427504,
+    "cv": 0.06980133436139116,
+    "noisy": true,
+    "samples": 15,
+    "rss_bytes": 9084928,
+    "metrics": []
+   },
+   "spread_between_rounds": 0.4356,
+   "noisy_between_rounds": true
+  },
+  {
+   "name": "bash -c :",
+   "group": "floor",
+   "budget": null,
+   "outcome": {
+    "state": "timed",
+    "median_ms": 1.71144085,
+    "p10_ms": 1.2418471,
+    "p90_ms": 1.7931914,
+    "cv": 0.13215668218021795,
+    "noisy": true,
+    "samples": 15,
+    "rss_bytes": 9089024,
+    "metrics": []
+   },
+   "outcome_round_2": {
+    "state": "timed",
+    "median_ms": 2.37303575,
+    "p10_ms": 1.2966951500000001,
+    "p90_ms": 2.5778392,
+    "cv": 0.264100330582872,
+    "noisy": true,
+    "samples": 15,
+    "rss_bytes": 9080832,
+    "metrics": []
+   },
+   "spread_between_rounds": 0.3866,
+   "noisy_between_rounds": true
+  },
+  {
+   "name": "python3 -S -c pass",
+   "group": "floor",
+   "budget": null,
+   "outcome": {
+    "state": "timed",
+    "median_ms": 7.642238799999999,
+    "p10_ms": 7.5738796,
+    "p90_ms": 14.289401849999999,
+    "cv": 0.2926602827439909,
+    "noisy": true,
+    "samples": 15,
+    "rss_bytes": 9084928,
+    "metrics": []
+   },
+   "outcome_round_2": {
+    "state": "timed",
+    "median_ms": 7.6919741,
+    "p10_ms": 7.6111851999999995,
+    "p90_ms": 10.605353050000002,
+    "cv": 0.16007335932027147,
+    "noisy": true,
+    "samples": 15,
+    "rss_bytes": 9080832,
+    "metrics": []
+   },
+   "spread_between_rounds": 0.0065,
+   "noisy_between_rounds": false
+  },
+  {
+   "name": "python3 -c pass",
+   "group": "floor",
+   "budget": null,
+   "outcome": {
+    "state": "timed",
+    "median_ms": 13.0569827,
+    "p10_ms": 12.964726250000002,
+    "p90_ms": 13.2975774,
+    "cv": 0.011131738176585118,
+    "noisy": false,
+    "samples": 15,
+    "rss_bytes": 9633792,
+    "metrics": []
+   },
+   "outcome_round_2": {
+    "state": "timed",
+    "median_ms": 13.0880199,
+    "p10_ms": 13.001215299999998,
+    "p90_ms": 13.2019038,
+    "cv": 0.005416111303712565,
+    "noisy": false,
+    "samples": 15,
+    "rss_bytes": 9596928,
+    "metrics": []
+   },
+   "spread_between_rounds": 0.0024,
+   "noisy_between_rounds": false
+  },
+  {
+   "name": "node -e 0",
+   "group": "floor",
+   "budget": null,
+   "outcome": {
+    "state": "timed",
+    "median_ms": 91.2105692,
+    "p10_ms": 89.61959565,
+    "p90_ms": 93.21763785,
+    "cv": 0.01360720625022146,
+    "noisy": false,
+    "samples": 15,
+    "rss_bytes": 54181888,
+    "metrics": []
+   },
+   "outcome_round_2": {
+    "state": "timed",
+    "median_ms": 95.23496259999999,
+    "p10_ms": 91.77504365,
+    "p90_ms": 98.87924355,
+    "cv": 0.023836853166303726,
+    "noisy": false,
+    "samples": 15,
+    "rss_bytes": 54181888,
+    "metrics": []
+   },
+   "spread_between_rounds": 0.0441,
+   "noisy_between_rounds": false
+  },
+  {
+   "name": "make --version",
+   "group": "floor",
+   "budget": null,
+   "outcome": {
+    "state": "timed",
+    "median_ms": 0.8147574499999999,
+    "p10_ms": 0.6238703,
+    "p90_ms": 1.6753846499999998,
+    "cv": 0.4081763009411886,
+    "noisy": true,
+    "samples": 15,
+    "rss_bytes": 9084928,
+    "metrics": []
+   },
+   "outcome_round_2": {
+    "state": "timed",
+    "median_ms": 0.78755475,
+    "p10_ms": 0.6377668000000001,
+    "p90_ms": 0.871855,
+    "cv": 0.11865246653059973,
+    "noisy": true,
+    "samples": 15,
+    "rss_bytes": 9080832,
+    "metrics": []
+   },
+   "spread_between_rounds": 0.0345,
+   "noisy_between_rounds": false
+  },
+  {
+   "name": "just --version",
+   "group": "floor",
+   "budget": null,
+   "outcome": {
+    "state": "timed",
+    "median_ms": 2.4776800000000003,
+    "p10_ms": 2.46857055,
+    "p90_ms": 2.4883507,
+    "cv": 0.0033793382968503867,
+    "noisy": false,
+    "samples": 15,
+    "rss_bytes": 9089024,
+    "metrics": []
+   },
+   "outcome_round_2": {
+    "state": "timed",
+    "median_ms": 2.0345545,
+    "p10_ms": 1.33853815,
+    "p90_ms": 2.0555809500000004,
+    "cv": 0.15955808019040726,
+    "noisy": true,
+    "samples": 15,
+    "rss_bytes": 9080832,
+    "metrics": []
+   },
+   "spread_between_rounds": 0.2178,
+   "noisy_between_rounds": true
+  },
+  {
+   "name": "go version",
+   "group": "floor",
+   "budget": null,
+   "outcome": {
+    "state": "timed",
+    "median_ms": 5.695161199999999,
+    "p10_ms": 5.609611500000001,
+    "p90_ms": 5.8328468,
+    "cv": 0.014841415083264227,
+    "noisy": false,
+    "samples": 15,
+    "rss_bytes": 16769024,
+    "metrics": []
+   },
+   "outcome_round_2": {
+    "state": "timed",
+    "median_ms": 4.662715,
+    "p10_ms": 4.561001,
+    "p90_ms": 4.7194021,
+    "cv": 0.013631762300370848,
+    "noisy": false,
+    "samples": 15,
+    "rss_bytes": 16642048,
+    "metrics": []
+   },
+   "spread_between_rounds": 0.2214,
+   "noisy_between_rounds": true
+  },
+  {
+   "name": "tsc --version",
+   "group": "floor",
+   "budget": null,
+   "outcome": {
+    "state": "timed",
+    "median_ms": 225.3960982,
+    "p10_ms": 222.6762354,
+    "p90_ms": 229.03867099999997,
+    "cv": 0.009724768995235143,
+    "noisy": false,
+    "samples": 15,
+    "rss_bytes": 88879104,
+    "metrics": []
+   },
+   "outcome_round_2": {
+    "state": "timed",
+    "median_ms": 223.76341279999997,
+    "p10_ms": 222.62169699999998,
+    "p90_ms": 229.01641679999997,
+    "cv": 0.010326213445618928,
+    "noisy": false,
+    "samples": 15,
+    "rss_bytes": 88977408,
+    "metrics": []
+   },
+   "spread_between_rounds": 0.0073,
+   "noisy_between_rounds": false
+  },
+  {
+   "name": "rustup --version",
+   "group": "floor",
+   "budget": null,
+   "outcome": {
+    "state": "timed",
+    "median_ms": 18.0453514,
+    "p10_ms": 11.360389699999999,
+    "p90_ms": 23.1061546,
+    "cv": 0.26540252006309234,
+    "noisy": true,
+    "samples": 15,
+    "rss_bytes": 44404736,
+    "metrics": []
+   },
+   "outcome_round_2": {
+    "state": "timed",
+    "median_ms": 15.427669899999998,
+    "p10_ms": 11.2355139,
+    "p90_ms": 17.9206996,
+    "cv": 0.15173698631567384,
+    "noisy": true,
+    "samples": 15,
+    "rss_bytes": 42225664,
+    "metrics": []
+   },
+   "spread_between_rounds": 0.1697,
+   "noisy_between_rounds": true
+  },
+  {
+   "name": "rustc --version, through rustup's proxy",
+   "group": "floor",
+   "budget": null,
+   "outcome": {
+    "state": "timed",
+    "median_ms": 10.2790517,
+    "p10_ms": 10.170781199999999,
+    "p90_ms": 10.8988006,
+    "cv": 0.04071827907887639,
+    "noisy": false,
+    "samples": 15,
+    "rss_bytes": 44417024,
+    "metrics": []
+   },
+   "outcome_round_2": {
+    "state": "timed",
+    "median_ms": 10.467347499999999,
+    "p10_ms": 10.2829218,
+    "p90_ms": 11.7657143,
+    "cv": 0.09272523542275234,
+    "noisy": true,
+    "samples": 15,
+    "rss_bytes": 42274816,
+    "metrics": []
+   },
+   "spread_between_rounds": 0.0183,
+   "noisy_between_rounds": false
+  },
+  {
+   "name": "rustc --version, the toolchain's binary",
+   "group": "floor",
+   "budget": null,
+   "outcome": {
+    "state": "timed",
+    "median_ms": 6.7071931000000005,
+    "p10_ms": 6.575206999999999,
+    "p90_ms": 6.8819284,
+    "cv": 0.016798951955838328,
+    "noisy": false,
+    "samples": 15,
+    "rss_bytes": 42311680,
+    "metrics": []
+   },
+   "outcome_round_2": {
+    "state": "timed",
+    "median_ms": 6.7848462,
+    "p10_ms": 6.5709611,
+    "p90_ms": 6.873092,
+    "cv": 0.014638532938296693,
+    "noisy": false,
+    "samples": 15,
+    "rss_bytes": 42307584,
+    "metrics": []
+   },
+   "spread_between_rounds": 0.0116,
+   "noisy_between_rounds": false
+  },
+  {
+   "name": "cig run hello",
+   "group": "cig",
+   "budget": null,
+   "outcome": {
+    "state": "timed",
+    "median_ms": 6.9819289000000015,
+    "p10_ms": 4.58031405,
+    "p90_ms": 7.0536547,
+    "cv": 0.18925250292106147,
+    "noisy": true,
+    "samples": 15,
+    "rss_bytes": 14864384,
+    "metrics": []
+   },
+   "outcome_round_2": {
+    "state": "timed",
+    "median_ms": 6.9916962499999995,
+    "p10_ms": 2.74113015,
+    "p90_ms": 7.03089785,
+    "cv": 0.35538991236999545,
+    "noisy": true,
+    "samples": 15,
+    "rss_bytes": 14860288,
+    "metrics": []
+   },
+   "spread_between_rounds": 0.0014,
+   "noisy_between_rounds": false
+  },
+  {
+   "name": "cig --version",
+   "group": "cig",
+   "budget": null,
+   "outcome": {
+    "state": "timed",
+    "median_ms": 5.1627241999999995,
+    "p10_ms": 5.00112745,
+    "p90_ms": 5.18572345,
+    "cv": 0.021491407111021866,
+    "noisy": false,
+    "samples": 15,
+    "rss_bytes": 12222464,
+    "metrics": []
+   },
+   "outcome_round_2": {
+    "state": "timed",
+    "median_ms": 4.0471278,
+    "p10_ms": 2.2633094999999996,
+    "p90_ms": 5.1689457,
+    "cv": 0.2969698974561956,
+    "noisy": true,
+    "samples": 15,
+    "rss_bytes": 12222464,
+    "metrics": []
+   },
+   "spread_between_rounds": 0.2757,
+   "noisy_between_rounds": true
+  },
+  {
+   "name": "cig check, a 39-line file",
+   "group": "cig",
+   "budget": null,
+   "outcome": {
+    "state": "timed",
+    "median_ms": 6.0596742500000005,
+    "p10_ms": 6.023908950000001,
+    "p90_ms": 6.0788026,
+    "cv": 0.0036470633180602846,
+    "noisy": false,
+    "samples": 15,
+    "rss_bytes": 13529088,
+    "metrics": []
+   },
+   "outcome_round_2": {
+    "state": "timed",
+    "median_ms": 6.06439965,
+    "p10_ms": 6.04485655,
+    "p90_ms": 6.07777305,
+    "cv": 0.0027907765451913643,
+    "noisy": false,
+    "samples": 15,
+    "rss_bytes": 13582336,
+    "metrics": []
+   },
+   "spread_between_rounds": 0.0008,
+   "noisy_between_rounds": false
+  },
+  {
+   "name": "true, cold page cache",
+   "group": "cold",
+   "budget": null,
+   "outcome": {
+    "state": "timed",
+    "median_ms": 12.601346,
+    "p10_ms": 10.731155,
+    "p90_ms": 13.924608,
+    "cv": 0.09701035569385878,
+    "noisy": true,
+    "samples": 15,
+    "rss_bytes": 9093120,
+    "metrics": []
+   },
+   "outcome_round_2": {
+    "state": "timed",
+    "median_ms": 13.094975,
+    "p10_ms": 11.480943,
+    "p90_ms": 14.125931,
+    "cv": 0.1892438700565018,
+    "noisy": true,
+    "samples": 15,
+    "rss_bytes": 9080832,
+    "metrics": []
+   },
+   "spread_between_rounds": 0.0392,
+   "noisy_between_rounds": false
+  },
+  {
+   "name": "python3 -c pass, cold page cache",
+   "group": "cold",
+   "budget": null,
+   "outcome": {
+    "state": "timed",
+    "median_ms": 93.10661300000001,
+    "p10_ms": 71.84352200000001,
+    "p90_ms": 96.747191,
+    "cv": 0.10586105207778156,
+    "noisy": true,
+    "samples": 15,
+    "rss_bytes": 9531392,
+    "metrics": []
+   },
+   "outcome_round_2": {
+    "state": "timed",
+    "median_ms": 92.536248,
+    "p10_ms": 53.145728000000005,
+    "p90_ms": 97.313734,
+    "cv": 0.18591230074035556,
+    "noisy": true,
+    "samples": 15,
+    "rss_bytes": 9539584,
+    "metrics": []
+   },
+   "spread_between_rounds": 0.0062,
+   "noisy_between_rounds": false
+  },
+  {
+   "name": "cig run hello, cold page cache",
+   "group": "cold",
+   "budget": null,
+   "outcome": {
+    "state": "timed",
+    "median_ms": 41.666506,
+    "p10_ms": 28.768721,
+    "p90_ms": 44.536505,
+    "cv": 0.16554002204520013,
+    "noisy": true,
+    "samples": 15,
+    "rss_bytes": 14770176,
+    "metrics": []
+   },
+   "outcome_round_2": {
+    "state": "timed",
+    "median_ms": 39.747179,
+    "p10_ms": 30.929105,
+    "p90_ms": 42.793856,
+    "cv": 0.10572323477509986,
+    "noisy": true,
+    "samples": 15,
+    "rss_bytes": 14770176,
+    "metrics": []
+   },
+   "spread_between_rounds": 0.0483,
+   "noisy_between_rounds": false
+  },
+  {
+   "name": "compiled hello, cold page cache",
+   "group": "cold",
+   "budget": null,
+   "outcome": {
+    "state": "timed",
+    "median_ms": 37.504838,
+    "p10_ms": 28.408277,
+    "p90_ms": 51.669984,
+    "cv": 0.20975081391857697,
+    "noisy": true,
+    "samples": 15,
+    "rss_bytes": 13864960,
+    "metrics": []
+   },
+   "outcome_round_2": {
+    "state": "timed",
+    "median_ms": 41.243003,
+    "p10_ms": 27.475299000000003,
+    "p90_ms": 49.380476,
+    "cv": 0.20281282373585427,
+    "noisy": true,
+    "samples": 15,
+    "rss_bytes": 13938688,
+    "metrics": []
+   },
+   "spread_between_rounds": 0.0997,
+   "noisy_between_rounds": true
+  },
+  {
+   "name": "cigo --version, cold page cache",
+   "group": "cold",
+   "budget": null,
+   "outcome": {
+    "state": "timed",
+    "median_ms": 190.24026899999998,
+    "p10_ms": 135.96048299999998,
+    "p90_ms": 202.871827,
+    "cv": 0.15244552794937766,
+    "noisy": true,
+    "samples": 15,
+    "rss_bytes": 59666432,
+    "metrics": []
+   },
+   "outcome_round_2": {
+    "state": "timed",
+    "median_ms": 195.366818,
+    "p10_ms": 144.81460900000002,
+    "p90_ms": 205.463036,
+    "cv": 0.15491789094110534,
+    "noisy": true,
+    "samples": 15,
+    "rss_bytes": 59666432,
+    "metrics": []
+   },
+   "spread_between_rounds": 0.0269,
+   "noisy_between_rounds": false
+  }
+ ],
+ "peak_rss": [
+  {
+   "name": "true",
+   "runs": 5,
+   "median_bytes": 1286144,
+   "max_bytes": 1339392,
+   "how": "ru_maxrss from wait4, forked from a small C parent (harness maxrss.c), five runs",
+   "median_bytes_round_2": 1294336
+  },
+  {
+   "name": "bash -c :",
+   "runs": 5,
+   "median_bytes": 3493888,
+   "max_bytes": 3575808,
+   "how": "ru_maxrss from wait4, forked from a small C parent (harness maxrss.c), five runs",
+   "median_bytes_round_2": 3477504
+  },
+  {
+   "name": "python3 -c pass",
+   "runs": 5,
+   "median_bytes": 9707520,
+   "max_bytes": 9842688,
+   "how": "ru_maxrss from wait4, forked from a small C parent (harness maxrss.c), five runs",
+   "median_bytes_round_2": 9588736
+  },
+  {
+   "name": "node -e 0",
+   "runs": 5,
+   "median_bytes": 53993472,
+   "max_bytes": 54124544,
+   "how": "ru_maxrss from wait4, forked from a small C parent (harness maxrss.c), five runs",
+   "median_bytes_round_2": 53993472
+  },
+  {
+   "name": "cig run hello.cig",
+   "runs": 5,
+   "median_bytes": 14856192,
+   "max_bytes": 14856192,
+   "how": "ru_maxrss from wait4, forked from a small C parent (harness maxrss.c), five runs",
+   "median_bytes_round_2": 14856192
+  },
+  {
+   "name": "cig check orchestrate.cig",
+   "runs": 5,
+   "median_bytes": 57700352,
+   "max_bytes": 57700352,
+   "how": "ru_maxrss from wait4, forked from a small C parent (harness maxrss.c), five runs",
+   "median_bytes_round_2": 57704448
+  },
+  {
+   "name": "cig check, a 39-line file",
+   "runs": 5,
+   "median_bytes": 13524992,
+   "max_bytes": 13524992,
+   "how": "ru_maxrss from wait4, forked from a small C parent (harness maxrss.c), five runs",
+   "median_bytes_round_2": 13524992
+  }
+ ],
+ "instructions": [
+  {
+   "name": "true",
+   "tool": "perf stat -e instructions:u",
+   "runs": 5,
+   "median": 146246,
+   "min": 146245,
+   "max": 146248,
+   "exit": [
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "median_round_2": 146248,
+   "spread_between_rounds": 1e-05
+  },
+  {
+   "name": "cig check orchestrate.cig (cigo 1.19.0's, 20659 lines)",
+   "tool": "perf stat -e instructions:u",
+   "runs": 5,
+   "median": 229270630,
+   "min": 229259090,
+   "max": 229335308,
+   "exit": [
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "median_round_2": 229281718,
+   "spread_between_rounds": 5e-05
+  },
+  {
+   "name": "cig run hello.cig",
+   "tool": "perf stat -e instructions:u",
+   "runs": 5,
+   "median": 2098424,
+   "min": 2098371,
+   "max": 2098496,
+   "exit": [
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "median_round_2": 2098228,
+   "spread_between_rounds": 9e-05
+  },
+  {
+   "name": "cig check, a 39-line file",
+   "tool": "perf stat -e instructions:u",
+   "runs": 5,
+   "median": 1982025,
+   "min": 1981973,
+   "max": 1982302,
+   "exit": [
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "median_round_2": 1981990,
+   "spread_between_rounds": 2e-05
+  }
+ ],
+ "start_up_profile": {
+  "command": "perf stat -r 20 -e task-clock,page-faults,instructions:u (one round; perf's own overhead is in the elapsed time)",
+  "rows": [
+   {
+    "command": "true",
+    "task_clock_ms": 0.84,
+    "page_faults": 51,
+    "instructions": 146246,
+    "elapsed_ms": 1.178
+   },
+   {
+    "command": "cig run hello.cig",
+    "task_clock_ms": 9.98,
+    "page_faults": 212,
+    "instructions": 2417112,
+    "elapsed_ms": 17.102
+   },
+   {
+    "command": "cig run startup-0.cig",
+    "task_clock_ms": 10.74,
+    "page_faults": 211,
+    "instructions": 2708486,
+    "elapsed_ms": 18.191
+   },
+   {
+    "command": "hello-bin",
+    "task_clock_ms": 8.58,
+    "page_faults": 137,
+    "instructions": 1339892,
+    "elapsed_ms": 15.272
+   },
+   {
+    "command": "hello-go",
+    "task_clock_ms": 1.33,
+    "page_faults": 105,
+    "instructions": 420572,
+    "elapsed_ms": 1.561
+   },
+   {
+    "command": "python3 -c pass",
+    "task_clock_ms": 17.0,
+    "page_faults": 888,
+    "instructions": 43944939,
+    "elapsed_ms": 17.675
+   },
+   {
+    "command": "cigo --version",
+    "task_clock_ms": 66.89,
+    "page_faults": 1122,
+    "instructions": 338892500,
+    "elapsed_ms": 75.624
+   },
+   {
+    "transparent_hugepage": "[always] madvise never"
+   }
+  ]
+ },
+ "family": {
+  "command": "cig bench --family, every product's main-tree manifest, each product's released binary swapped in with --with",
+  "exit": 0,
+  "result": {
+   "format": 1,
+   "family": true,
+   "cig_version": "1.21.0",
+   "conditions": {
+    "cpu": "Intel(R) Core(TM) i5-8265U CPU @ 1.60GHz",
+    "cores": 8,
+    "os": "linux",
+    "kernel": "7.2.11+parrot7.1-amd64",
+    "governor": "powersave"
+   },
+   "swapped": {
+    "cig": {
+     "value": "<path>/cig",
+     "binary": "<path>/cig"
+    },
+    "cigar": {
+     "value": "<path>/cigar",
+     "binary": "<path>/cigar"
+    },
+    "cigcompile": {
+     "value": "<path>/cigcompile",
+     "binary": "<path>/cigcompile"
+    },
+    "ciginstaller": {
+     "value": "<path>/ciginstaller",
+     "binary": "<path>/ciginstaller"
+    },
+    "cigo": {
+     "value": "<path>/cigo",
+     "binary": "<path>/cigo"
+    }
+   },
+   "products": [
+    {
+     "product": "cig",
+     "version": "cig 1.21.0",
+     "binary": "<path>/cig",
+     "manifest": "CigScript/bench/bench.toml",
+     "cases": [
+      {
+       "name": "hello",
+       "group": "start-up",
+       "budget": "5 ms",
+       "outcome": {
+        "state": "timed",
+        "median_ms": 2.8139883,
+        "p10_ms": 2.2478718,
+        "p90_ms": 2.8152996999999997,
+        "cv": 0.08964067162433122,
+        "noisy": true,
+        "samples": 5,
+        "rss_bytes": 16015360,
+        "metrics": []
+       }
+      },
+      {
+       "name": "startup-0",
+       "group": "start-up",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 2.8046415000000002,
+        "p10_ms": 2.7963525000000002,
+        "p90_ms": 2.8981144,
+        "cv": 0.0134863882395478,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 16015360,
+        "metrics": []
+       }
+      },
+      {
+       "name": "startup-1",
+       "group": "start-up",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 7.182497499999999,
+        "p10_ms": 3.09389455,
+        "p90_ms": 7.203249850000001,
+        "cv": 0.2903946531577357,
+        "noisy": true,
+        "samples": 5,
+        "rss_bytes": 16015360,
+        "metrics": []
+       }
+      },
+      {
+       "name": "startup-10",
+       "group": "start-up",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 6.71624135,
+        "p10_ms": 6.649237650000001,
+        "p90_ms": 7.38877525,
+        "cv": 0.04602304363996963,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 16015360,
+        "metrics": []
+       }
+      },
+      {
+       "name": "burn one write",
+       "group": "start-up",
+       "budget": "7 ms",
+       "outcome": {
+        "state": "timed",
+        "median_ms": 7.08563,
+        "p10_ms": 6.981471,
+        "p90_ms": 7.107541,
+        "cv": 0.006475031042408487,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 16015360,
+        "metrics": []
+       }
+      },
+      {
+       "name": "closures",
+       "group": "compute",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 45.544686,
+        "p10_ms": 45.368029,
+        "p90_ms": 45.60639,
+        "cv": 0.0018749076531503154,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 16015360,
+        "metrics": []
+       }
+      },
+      {
+       "name": "csv",
+       "group": "compute",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 48.732535,
+        "p10_ms": 48.126952,
+        "p90_ms": 50.613051,
+        "cv": 0.01754569657238713,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 34787328,
+        "metrics": []
+       }
+      },
+      {
+       "name": "deltablue",
+       "group": "compute",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 6.922859,
+        "p10_ms": 6.9004840000000005,
+        "p90_ms": 7.1518500000000005,
+        "cv": 0.015067727346115537,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 16015360,
+        "metrics": []
+       }
+      },
+      {
+       "name": "dispatch",
+       "group": "compute",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 68.92448900000001,
+        "p10_ms": 68.672071,
+        "p90_ms": 69.085977,
+        "cv": 0.00201841571835238,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 16015360,
+        "metrics": []
+       }
+      },
+      {
+       "name": "fannkuch",
+       "group": "compute",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 295.630839,
+        "p10_ms": 294.72631,
+        "p90_ms": 320.819388,
+        "cv": 0.033774787257144286,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 16015360,
+        "metrics": []
+       }
+      },
+      {
+       "name": "fib",
+       "group": "compute",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 50.321956,
+        "p10_ms": 50.233248,
+        "p90_ms": 50.450788,
+        "cv": 0.0014034900730112252,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 16015360,
+        "metrics": []
+       }
+      },
+      {
+       "name": "json-deep",
+       "group": "compute",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 4.487421,
+        "p10_ms": 4.451721,
+        "p90_ms": 4.734777,
+        "cv": 0.023485362373618195,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 16015360,
+        "metrics": []
+       }
+      },
+      {
+       "name": "json",
+       "group": "compute",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 69.63214099999999,
+        "p10_ms": 69.559515,
+        "p90_ms": 69.65655199999999,
+        "cv": 0.00047175590823082505,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 69259264,
+        "metrics": []
+       }
+      },
+      {
+       "name": "lists",
+       "group": "compute",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 31.058183,
+        "p10_ms": 30.959944999999998,
+        "p90_ms": 31.342145000000002,
+        "cv": 0.0041581205392391095,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 25214976,
+        "metrics": []
+       }
+      },
+      {
+       "name": "loop",
+       "group": "compute",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 57.234687,
+        "p10_ms": 57.166286,
+        "p90_ms": 57.412,
+        "cv": 0.0015004400410881626,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 16015360,
+        "metrics": []
+       }
+      },
+      {
+       "name": "mandel",
+       "group": "compute",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 358.738222,
+        "p10_ms": 330.75704299999995,
+        "p90_ms": 384.40313599999996,
+        "cv": 0.05655354162332638,
+        "noisy": true,
+        "samples": 5,
+        "rss_bytes": 16015360,
+        "metrics": []
+       }
+      },
+      {
+       "name": "maps",
+       "group": "compute",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 52.489883,
+        "p10_ms": 52.10208,
+        "p90_ms": 53.784716,
+        "cv": 0.0109428373023192,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 23117824,
+        "metrics": []
+       }
+      },
+      {
+       "name": "nbody",
+       "group": "compute",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 503.37611599999997,
+        "p10_ms": 499.937603,
+        "p90_ms": 505.62564899999995,
+        "cv": 0.0037988864375888116,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 16015360,
+        "metrics": []
+       }
+      },
+      {
+       "name": "regex-ish",
+       "group": "compute",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 56.555403,
+        "p10_ms": 56.496010999999996,
+        "p90_ms": 56.613487,
+        "cv": 0.0006660957127939584,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 29409280,
+        "metrics": []
+       }
+      },
+      {
+       "name": "richards",
+       "group": "compute",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 21.696648999999997,
+        "p10_ms": 21.562483,
+        "p90_ms": 21.81148,
+        "cv": 0.004242864307080421,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 16015360,
+        "metrics": []
+       }
+      },
+      {
+       "name": "sieve",
+       "group": "compute",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 197.32996699999998,
+        "p10_ms": 196.899779,
+        "p90_ms": 200.18470599999998,
+        "cv": 0.005924245728511788,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 50384896,
+        "metrics": []
+       }
+      },
+      {
+       "name": "spectral",
+       "group": "compute",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 212.36703200000002,
+        "p10_ms": 212.180486,
+        "p90_ms": 218.46216199999998,
+        "cv": 0.01192910040097358,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 16015360,
+        "metrics": []
+       }
+      },
+      {
+       "name": "strbuild",
+       "group": "compute",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 8.032200999999999,
+        "p10_ms": 8.00721,
+        "p90_ms": 8.053826,
+        "cv": 0.0019608640683647653,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 16015360,
+        "metrics": []
+       }
+      },
+      {
+       "name": "strings",
+       "group": "compute",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 32.913129999999995,
+        "p10_ms": 32.91069,
+        "p90_ms": 32.957995,
+        "cv": 0.0006086268888944791,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 18923520,
+        "metrics": []
+       }
+      },
+      {
+       "name": "trees",
+       "group": "compute",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 384.59616600000004,
+        "p10_ms": 378.502703,
+        "p90_ms": 395.910474,
+        "cv": 0.01468903910559204,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 16015360,
+        "metrics": []
+       }
+      },
+      {
+       "name": "words",
+       "group": "compute",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 49.675404,
+        "p10_ms": 48.387193,
+        "p90_ms": 49.821833000000005,
+        "cv": 0.011729495326722246,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 27312128,
+        "metrics": []
+       }
+      },
+      {
+       "name": "burn small tree",
+       "group": "kernel",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 7.396027999999999,
+        "p10_ms": 7.264209,
+        "p90_ms": 7.469418999999999,
+        "cv": 0.011463190164721831,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 16015360,
+        "metrics": [
+         {
+          "name": "tin-growth",
+          "unit": "bytes",
+          "value": 0.0,
+          "note": null
+         },
+         {
+          "name": "disk-per-byte",
+          "unit": "bytes per byte",
+          "value": 4.8,
+          "note": null
+         },
+         {
+          "name": "fsyncs-per-op",
+          "unit": "fsyncs per op",
+          "value": 1.099009900990099,
+          "note": null
+         }
+        ]
+       }
+      },
+      {
+       "name": "burn big tree",
+       "group": "kernel",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 179.87255199999998,
+        "p10_ms": 175.360395,
+        "p90_ms": 181.918634,
+        "cv": 0.0148975094757211,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 27574272,
+        "metrics": [
+         {
+          "name": "tin-growth",
+          "unit": "bytes",
+          "value": 0.0,
+          "note": null
+         },
+         {
+          "name": "disk-per-byte",
+          "unit": "bytes per byte",
+          "value": 1.0405,
+          "note": null
+         },
+         {
+          "name": "fsyncs-per-op",
+          "unit": "fsyncs per op",
+          "value": 1.00999000999001,
+          "note": null
+         }
+        ]
+       }
+      },
+      {
+       "name": "unburn small tree",
+       "group": "kernel",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 10.276406999999999,
+        "p10_ms": 10.084776999999999,
+        "p90_ms": 10.522965000000001,
+        "cv": 0.016244773748910667,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 19845120,
+        "metrics": [
+         {
+          "name": "tin-growth",
+          "unit": "bytes",
+          "value": 0.0,
+          "note": null
+         },
+         {
+          "name": "fsyncs-per-op",
+          "unit": "fsyncs per op",
+          "value": 0.0891089108910891,
+          "note": null
+         }
+        ]
+       }
+      },
+      {
+       "name": "unburn big tree",
+       "group": "kernel",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 254.30047099999996,
+        "p10_ms": 253.11376800000002,
+        "p90_ms": 255.25739800000002,
+        "cv": 0.0030134517361799567,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 26136576,
+        "metrics": [
+         {
+          "name": "tin-growth",
+          "unit": "bytes",
+          "value": 0.0,
+          "note": null
+         },
+         {
+          "name": "fsyncs-per-op",
+          "unit": "fsyncs per op",
+          "value": 0.008991008991008992,
+          "note": null
+         }
+        ]
+       }
+      },
+      {
+       "name": "overwrite big file",
+       "group": "kernel",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 577.674175,
+        "p10_ms": 569.538443,
+        "p90_ms": 608.417823,
+        "cv": 0.023730924035974765,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 120848384,
+        "metrics": [
+         {
+          "name": "tin-growth",
+          "unit": "bytes",
+          "value": 274432.0,
+          "note": null
+         },
+         {
+          "name": "disk-per-byte",
+          "unit": "bytes per byte",
+          "value": 0.008544921875,
+          "note": null
+         },
+         {
+          "name": "fsyncs-per-op",
+          "unit": "fsyncs per op",
+          "value": 15.0,
+          "note": null
+         },
+         {
+          "name": "file:$CIGSCRIPT_HOME/work/big.bin",
+          "unit": "bytes",
+          "value": 33554432.0,
+          "note": null
+         }
+        ]
+       }
+      },
+      {
+       "name": "restore big file",
+       "group": "kernel",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 685.411461,
+        "p10_ms": 682.398939,
+        "p90_ms": 701.309252,
+        "cv": 0.010245635763966495,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 55574528,
+        "metrics": [
+         {
+          "name": "tin-growth",
+          "unit": "bytes",
+          "value": 0.0,
+          "note": null
+         },
+         {
+          "name": "fsyncs-per-op",
+          "unit": "fsyncs per op",
+          "value": 138.0,
+          "note": null
+         },
+         {
+          "name": "file:$CIGSCRIPT_HOME/work/big.bin",
+          "unit": "bytes",
+          "value": 33554432.0,
+          "note": null
+         }
+        ]
+       }
+      },
+      {
+       "name": "hop, 2,000 files unchanged",
+       "group": "kernel",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 93.64753400000001,
+        "p10_ms": 91.50474799999999,
+        "p90_ms": 94.33380199999999,
+        "cv": 0.0110674105187989,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 56426496,
+        "metrics": [
+         {
+          "name": "tin-growth",
+          "unit": "bytes",
+          "value": 0.0,
+          "note": null
+         },
+         {
+          "name": "fsyncs-per-op",
+          "unit": "fsyncs per op",
+          "value": 12.0,
+          "note": null
+         }
+        ]
+       }
+      }
+     ]
+    },
+    {
+     "product": "cigo",
+     "version": null,
+     "binary": "<path>/cigo",
+     "manifest": "cig-orchestrator/bench/bench.toml",
+     "cases": [
+      {
+       "name": "version",
+       "group": "latency",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 69.340262,
+        "p10_ms": 67.61190400000001,
+        "p90_ms": 71.48296200000001,
+        "cv": 0.03140011943537678,
+        "noisy": false,
+        "samples": 9,
+        "rss_bytes": 59695104,
+        "metrics": []
+       }
+      },
+      {
+       "name": "help",
+       "group": "latency",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 68.0036444,
+        "p10_ms": 67.0389816,
+        "p90_ms": 68.49839419999999,
+        "cv": 0.00979604825988999,
+        "noisy": false,
+        "samples": 9,
+        "rss_bytes": 59695104,
+        "metrics": []
+       }
+      },
+      {
+       "name": "list, 52 tasks",
+       "group": "latency",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 72.396775,
+        "p10_ms": 71.3507956,
+        "p90_ms": 72.7669938,
+        "cv": 0.009271035088310247,
+        "noisy": false,
+        "samples": 9,
+        "rss_bytes": 59957248,
+        "metrics": []
+       }
+      },
+      {
+       "name": "audit, 52 tasks",
+       "group": "latency",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 126.60092599999999,
+        "p10_ms": 126.046784,
+        "p90_ms": 128.9134384,
+        "cv": 0.013771213448398552,
+        "noisy": false,
+        "samples": 9,
+        "rss_bytes": 67170304,
+        "metrics": []
+       }
+      },
+      {
+       "name": "audit, one task",
+       "group": "latency",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 83.0702448,
+        "p10_ms": 82.2160354,
+        "p90_ms": 83.3690358,
+        "cv": 0.006902996042995377,
+        "noisy": false,
+        "samples": 9,
+        "rss_bytes": 67112960,
+        "metrics": []
+       }
+      },
+      {
+       "name": "blacklist why",
+       "group": "latency",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 71.61759140000001,
+        "p10_ms": 70.6293484,
+        "p90_ms": 73.7031046,
+        "cv": 0.022472723559233118,
+        "noisy": false,
+        "samples": 9,
+        "rss_bytes": 60538880,
+        "metrics": []
+       }
+      },
+      {
+       "name": "run, a one-line task",
+       "group": "latency",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 90.684765,
+        "p10_ms": 90.108638,
+        "p90_ms": 90.94860200000001,
+        "cv": 0.0104272307166394,
+        "noisy": false,
+        "samples": 9,
+        "rss_bytes": 69509120,
+        "metrics": []
+       }
+      },
+      {
+       "name": "hook, benign command",
+       "group": "hook",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 71.0482944,
+        "p10_ms": 70.10667000000001,
+        "p90_ms": 71.7449612,
+        "cv": 0.009699001517795364,
+        "noisy": false,
+        "samples": 9,
+        "rss_bytes": 60289024,
+        "metrics": []
+       }
+      },
+      {
+       "name": "hook, curl | sh",
+       "group": "hook",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 74.4536176,
+        "p10_ms": 74.1381806,
+        "p90_ms": 75.3365972,
+        "cv": 0.006981677009772317,
+        "noisy": false,
+        "samples": 9,
+        "rss_bytes": 61063168,
+        "metrics": []
+       }
+      },
+      {
+       "name": "hook, a long heredoc",
+       "group": "hook",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 178.82014900000001,
+        "p10_ms": 170.5765645,
+        "p90_ms": 184.451828,
+        "cv": 0.031480070866471956,
+        "noisy": false,
+        "samples": 9,
+        "rss_bytes": 60215296,
+        "metrics": []
+       }
+      },
+      {
+       "name": "hook, a 200-command script",
+       "group": "hook",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 380.729484,
+        "p10_ms": 373.896094,
+        "p90_ms": 432.337507,
+        "cv": 0.05899580125854857,
+        "noisy": true,
+        "samples": 9,
+        "rss_bytes": 60067840,
+        "metrics": []
+       }
+      },
+      {
+       "name": "guard line check, benign",
+       "group": "guard",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 71.166043,
+        "p10_ms": 70.0922484,
+        "p90_ms": 71.9535332,
+        "cv": 0.01318373485281911,
+        "noisy": false,
+        "samples": 9,
+        "rss_bytes": 60219392,
+        "metrics": []
+       }
+      },
+      {
+       "name": "guard line check, curl | sh",
+       "group": "guard",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 75.1111514,
+        "p10_ms": 74.188167,
+        "p90_ms": 76.21149360000001,
+        "cv": 0.020926049399212134,
+        "noisy": false,
+        "samples": 9,
+        "rss_bytes": 61063168,
+        "metrics": []
+       }
+      },
+      {
+       "name": "detection corpus score",
+       "group": "quality",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 416.106319,
+        "p10_ms": 414.911225,
+        "p90_ms": 416.51205200000004,
+        "cv": 0.006798473197969814,
+        "noisy": false,
+        "samples": 9,
+        "rss_bytes": 63029248,
+        "metrics": []
+       }
+      }
+     ]
+    },
+    {
+     "product": "cigcompile",
+     "version": "cigcompile 0.4.0 (makes programs for cig 1.21.0)",
+     "binary": "<path>/cigcompile",
+     "manifest": "cig-compile/bench/bench.toml",
+     "cases": [
+      {
+       "name": "build: hello",
+       "group": "build",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 92.240585,
+        "p10_ms": 92.028973,
+        "p90_ms": 92.660168,
+        "cv": 0.002338868586865861,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 54943744,
+        "metrics": []
+       }
+      },
+      {
+       "name": "build: the set",
+       "group": "build",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 2126.281175,
+        "p10_ms": 2111.8192219999996,
+        "p90_ms": 2172.692371,
+        "cv": 0.010461373272960012,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 55418880,
+        "metrics": []
+       }
+      },
+      {
+       "name": "build: nothing changed since the last build",
+       "group": "build",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 1.80416,
+        "p10_ms": 1.77618,
+        "p90_ms": 1.9575790000000002,
+        "cv": 0.036362593625057366,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 18276352,
+        "metrics": []
+       }
+      },
+      {
+       "name": "build: fib at -O0",
+       "group": "build",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 92.104782,
+        "p10_ms": 92.04660700000001,
+        "p90_ms": 94.722428,
+        "cv": 0.013123840550488961,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 55078912,
+        "metrics": []
+       }
+      },
+      {
+       "name": "build: fib at -O1",
+       "group": "build",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 92.139453,
+        "p10_ms": 92.020824,
+        "p90_ms": 94.173827,
+        "cv": 0.008849689184866276,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 55078912,
+        "metrics": []
+       }
+      },
+      {
+       "name": "build: fib at -O2",
+       "group": "build",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 92.097492,
+        "p10_ms": 91.881871,
+        "p90_ms": 93.77321099999999,
+        "cv": 0.007599276846115922,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 55078912,
+        "metrics": []
+       }
+      },
+      {
+       "name": "interpreted: closures",
+       "group": "programs",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 52.292085,
+        "p10_ms": 52.076021,
+        "p90_ms": 53.531818,
+        "cv": 0.012143090167795675,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 14729216,
+        "metrics": []
+       }
+      },
+      {
+       "name": "compiled: closures",
+       "group": "programs",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 57.746988,
+        "p10_ms": 56.591884,
+        "p90_ms": 58.28503,
+        "cv": 0.01236232312414186,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 14729216,
+        "metrics": []
+       }
+      },
+      {
+       "name": "interpreted: csv",
+       "group": "programs",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 56.161500000000004,
+        "p10_ms": 55.598265,
+        "p90_ms": 57.586800000000004,
+        "cv": 0.013909439865886828,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 34787328,
+        "metrics": []
+       }
+      },
+      {
+       "name": "compiled: csv",
+       "group": "programs",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 55.721835999999996,
+        "p10_ms": 54.442017,
+        "p90_ms": 56.046488,
+        "cv": 0.010463193059520965,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 39129088,
+        "metrics": []
+       }
+      },
+      {
+       "name": "interpreted: deltablue",
+       "group": "programs",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 11.600928,
+        "p10_ms": 11.517482000000001,
+        "p90_ms": 11.651309,
+        "cv": 0.0038943423500909205,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 14729216,
+        "metrics": []
+       }
+      },
+      {
+       "name": "compiled: deltablue",
+       "group": "programs",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 9.978354999999999,
+        "p10_ms": 9.961384,
+        "p90_ms": 10.387087999999999,
+        "cv": 0.016266246172988833,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 14696448,
+        "metrics": []
+       }
+      },
+      {
+       "name": "interpreted: dispatch",
+       "group": "programs",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 77.603796,
+        "p10_ms": 77.55093000000001,
+        "p90_ms": 79.774248,
+        "cv": 0.011115458176347489,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 14712832,
+        "metrics": []
+       }
+      },
+      {
+       "name": "compiled: dispatch",
+       "group": "programs",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 90.266285,
+        "p10_ms": 87.916827,
+        "p90_ms": 90.39001400000001,
+        "cv": 0.011118429998754458,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 14716928,
+        "metrics": []
+       }
+      },
+      {
+       "name": "interpreted: fannkuch",
+       "group": "programs",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 343.932963,
+        "p10_ms": 340.918856,
+        "p90_ms": 347.032871,
+        "cv": 0.005784674315747398,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 14729216,
+        "metrics": []
+       }
+      },
+      {
+       "name": "compiled: fannkuch",
+       "group": "programs",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 475.073492,
+        "p10_ms": 470.380747,
+        "p90_ms": 478.393562,
+        "cv": 0.005515360741212884,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 14692352,
+        "metrics": []
+       }
+      },
+      {
+       "name": "interpreted: fib",
+       "group": "programs",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 60.31214,
+        "p10_ms": 59.199177999999996,
+        "p90_ms": 60.921682999999994,
+        "cv": 0.009560757385735788,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 14712832,
+        "metrics": []
+       }
+      },
+      {
+       "name": "compiled: fib",
+       "group": "programs",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 63.128007,
+        "p10_ms": 63.030618999999994,
+        "p90_ms": 63.29981599999999,
+        "cv": 0.0014007574815531221,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 14708736,
+        "metrics": []
+       }
+      },
+      {
+       "name": "interpreted: json-deep",
+       "group": "programs",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 7.753579,
+        "p10_ms": 7.203007,
+        "p90_ms": 7.862449000000001,
+        "cv": 0.030906814253807705,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 14708736,
+        "metrics": []
+       }
+      },
+      {
+       "name": "compiled: json-deep",
+       "group": "programs",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 6.275368,
+        "p10_ms": 6.1930819999999995,
+        "p90_ms": 6.536823,
+        "cv": 0.020041607634816355,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 14692352,
+        "metrics": []
+       }
+      },
+      {
+       "name": "interpreted: json",
+       "group": "programs",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 75.692154,
+        "p10_ms": 75.294893,
+        "p90_ms": 77.148068,
+        "cv": 0.009426789703066025,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 69259264,
+        "metrics": []
+       }
+      },
+      {
+       "name": "compiled: json",
+       "group": "programs",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 75.34586999999999,
+        "p10_ms": 75.195061,
+        "p90_ms": 77.009741,
+        "cv": 0.009127198185164666,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 71352320,
+        "metrics": []
+       }
+      },
+      {
+       "name": "interpreted: lists",
+       "group": "programs",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 37.670847,
+        "p10_ms": 37.217218,
+        "p90_ms": 37.704247,
+        "cv": 0.005271309780289586,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 25214976,
+        "metrics": []
+       }
+      },
+      {
+       "name": "compiled: lists",
+       "group": "programs",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 38.322373,
+        "p10_ms": 38.110801,
+        "p90_ms": 38.434497,
+        "cv": 0.003422586883275434,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 27303936,
+        "metrics": []
+       }
+      },
+      {
+       "name": "interpreted: loop",
+       "group": "programs",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 66.98027300000001,
+        "p10_ms": 66.897049,
+        "p90_ms": 67.097754,
+        "cv": 0.0009950616633981138,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 14729216,
+        "metrics": []
+       }
+      },
+      {
+       "name": "compiled: loop",
+       "group": "programs",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 76.547155,
+        "p10_ms": 74.66793100000001,
+        "p90_ms": 76.631128,
+        "cv": 0.009949591263260888,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 14700544,
+        "metrics": []
+       }
+      },
+      {
+       "name": "interpreted: mandel",
+       "group": "programs",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 391.518981,
+        "p10_ms": 380.38609499999995,
+        "p90_ms": 410.70376699999997,
+        "cv": 0.02550120547432806,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 14725120,
+        "metrics": []
+       }
+      },
+      {
+       "name": "compiled: mandel",
+       "group": "programs",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 561.940324,
+        "p10_ms": 560.346516,
+        "p90_ms": 563.300028,
+        "cv": 0.001925213804709728,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 14692352,
+        "metrics": []
+       }
+      },
+      {
+       "name": "interpreted: maps",
+       "group": "programs",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 55.317243000000005,
+        "p10_ms": 55.088084,
+        "p90_ms": 56.180852,
+        "cv": 0.007031118683305285,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 23117824,
+        "metrics": []
+       }
+      },
+      {
+       "name": "compiled: maps",
+       "group": "programs",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 55.26029,
+        "p10_ms": 55.014977,
+        "p90_ms": 55.740396,
+        "cv": 0.0045996589647419785,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 25206784,
+        "metrics": []
+       }
+      },
+      {
+       "name": "interpreted: nbody",
+       "group": "programs",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 500.030266,
+        "p10_ms": 498.17233100000004,
+        "p90_ms": 501.141653,
+        "cv": 0.002074404639689917,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 14708736,
+        "metrics": []
+       }
+      },
+      {
+       "name": "compiled: nbody",
+       "group": "programs",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 681.2382660000001,
+        "p10_ms": 669.324649,
+        "p90_ms": 711.253712,
+        "cv": 0.02185727109496242,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 14696448,
+        "metrics": []
+       }
+      },
+      {
+       "name": "interpreted: regex-ish",
+       "group": "programs",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 59.158782,
+        "p10_ms": 58.754425999999995,
+        "p90_ms": 59.323769,
+        "cv": 0.0035538612978305148,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 29409280,
+        "metrics": []
+       }
+      },
+      {
+       "name": "compiled: regex-ish",
+       "group": "programs",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 57.946623,
+        "p10_ms": 57.659952,
+        "p90_ms": 58.609608,
+        "cv": 0.005711122741778561,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 31498240,
+        "metrics": []
+       }
+      },
+      {
+       "name": "interpreted: richards",
+       "group": "programs",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 24.314617000000002,
+        "p10_ms": 24.296299,
+        "p90_ms": 25.07827,
+        "cv": 0.012300561251746984,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 14725120,
+        "metrics": []
+       }
+      },
+      {
+       "name": "compiled: richards",
+       "group": "programs",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 27.138542,
+        "p10_ms": 27.089317,
+        "p90_ms": 27.369618,
+        "cv": 0.004189481286768482,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 14696448,
+        "metrics": []
+       }
+      },
+      {
+       "name": "interpreted: sieve",
+       "group": "programs",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 203.024967,
+        "p10_ms": 199.072564,
+        "p90_ms": 203.98075500000002,
+        "cv": 0.008693989482677675,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 50384896,
+        "metrics": []
+       }
+      },
+      {
+       "name": "compiled: sieve",
+       "group": "programs",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 235.165355,
+        "p10_ms": 230.844411,
+        "p90_ms": 236.003041,
+        "cv": 0.008110589739556123,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 37789696,
+        "metrics": []
+       }
+      },
+      {
+       "name": "interpreted: spectral",
+       "group": "programs",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 221.36486399999998,
+        "p10_ms": 221.149329,
+        "p90_ms": 221.55406399999998,
+        "cv": 0.0006027617944350001,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 14708736,
+        "metrics": []
+       }
+      },
+      {
+       "name": "compiled: spectral",
+       "group": "programs",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 280.25711199999995,
+        "p10_ms": 274.402209,
+        "p90_ms": 285.00044099999997,
+        "cv": 0.01408702853694773,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 14692352,
+        "metrics": []
+       }
+      },
+      {
+       "name": "interpreted: strbuild",
+       "group": "programs",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 11.977361,
+        "p10_ms": 11.943088,
+        "p90_ms": 12.156073,
+        "cv": 0.006722065979995696,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 14729216,
+        "metrics": []
+       }
+      },
+      {
+       "name": "compiled: strbuild",
+       "group": "programs",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 9.770427999999999,
+        "p10_ms": 9.614235,
+        "p90_ms": 9.913254,
+        "cv": 0.010318214753803656,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 14716928,
+        "metrics": []
+       }
+      },
+      {
+       "name": "interpreted: strings",
+       "group": "programs",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 35.77716,
+        "p10_ms": 35.565037000000004,
+        "p90_ms": 36.610876,
+        "cv": 0.013205620892763458,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 18923520,
+        "metrics": []
+       }
+      },
+      {
+       "name": "compiled: strings",
+       "group": "programs",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 33.045483,
+        "p10_ms": 32.94657,
+        "p90_ms": 33.105107000000004,
+        "cv": 0.0017015776004516078,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 23109632,
+        "metrics": []
+       }
+      },
+      {
+       "name": "interpreted: trees",
+       "group": "programs",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 335.944963,
+        "p10_ms": 334.602713,
+        "p90_ms": 337.44035,
+        "cv": 0.003067694274521457,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 14708736,
+        "metrics": []
+       }
+      },
+      {
+       "name": "compiled: trees",
+       "group": "programs",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 359.436099,
+        "p10_ms": 356.915042,
+        "p90_ms": 361.328099,
+        "cv": 0.004654284683717613,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 16867328,
+        "metrics": []
+       }
+      },
+      {
+       "name": "interpreted: words",
+       "group": "programs",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 47.246373,
+        "p10_ms": 47.115024,
+        "p90_ms": 47.400923999999996,
+        "cv": 0.0020999070228272052,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 27312128,
+        "metrics": []
+       }
+      },
+      {
+       "name": "compiled: words",
+       "group": "programs",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 48.862618,
+        "p10_ms": 48.786261999999994,
+        "p90_ms": 49.099398,
+        "cv": 0.0022258392193877474,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 29405184,
+        "metrics": []
+       }
+      },
+      {
+       "name": "compiled: hello, start-up",
+       "group": "start-up",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 1.4653440500000001,
+        "p10_ms": 1.45619385,
+        "p90_ms": 1.6160865000000002,
+        "cv": 0.040096018330037106,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 18276352,
+        "metrics": []
+       }
+      },
+      {
+       "name": "interpreted: hello, start-up",
+       "group": "start-up",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 5.87562145,
+        "p10_ms": 3.4717085500000002,
+        "p90_ms": 6.3152482,
+        "cv": 0.21366788750365984,
+        "noisy": true,
+        "samples": 5,
+        "rss_bytes": 14860288,
+        "metrics": []
+       }
+      },
+      {
+       "name": "size: hello",
+       "group": "size",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 86.52360200000001,
+        "p10_ms": 86.285606,
+        "p90_ms": 86.744005,
+        "cv": 0.002030081166930007,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 54947840,
+        "metrics": [
+         {
+          "name": "file:generated/size/hello",
+          "unit": "bytes",
+          "value": 15799534.0,
+          "note": null
+         }
+        ]
+       }
+      },
+      {
+       "name": "size: nbody",
+       "group": "size",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 87.225507,
+        "p10_ms": 86.932496,
+        "p90_ms": 87.584229,
+        "cv": 0.0031186153827948444,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 55218176,
+        "metrics": [
+         {
+          "name": "file:generated/size/nbody",
+          "unit": "bytes",
+          "value": 15801870.0,
+          "note": null
+         }
+        ]
+       }
+      },
+      {
+       "name": "artefacts: --sbom",
+       "group": "artefacts",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 180.35637400000002,
+        "p10_ms": 179.550812,
+        "p90_ms": 184.24023,
+        "cv": 0.009121805700069202,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 55349248,
+        "metrics": []
+       }
+      },
+      {
+       "name": "artefacts: --sign",
+       "group": "artefacts",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 152.195422,
+        "p10_ms": 150.83843299999998,
+        "p90_ms": 155.133532,
+        "cv": 0.009393419282881814,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 55480320,
+        "metrics": []
+       }
+      },
+      {
+       "name": "artefacts: --emit oci",
+       "group": "artefacts",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 425.415236,
+        "p10_ms": 422.071595,
+        "p90_ms": 448.028548,
+        "cv": 0.022189002338174904,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 71131136,
+        "metrics": []
+       }
+      },
+      {
+       "name": "artefacts: --emit deb",
+       "group": "artefacts",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 1724.28252,
+        "p10_ms": 1698.082073,
+        "p90_ms": 1731.2310659999998,
+        "cv": 0.006950684711528832,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 69812224,
+        "metrics": []
+       }
+      },
+      {
+       "name": "artefacts: verify",
+       "group": "artefacts",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 104.694542,
+        "p10_ms": 104.195313,
+        "p90_ms": 105.027849,
+        "cv": 0.0028848553095353014,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 37888000,
+        "metrics": []
+       }
+      },
+      {
+       "name": "artefacts: audit",
+       "group": "artefacts",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 4.4945330000000006,
+        "p10_ms": 4.3384030000000005,
+        "p90_ms": 4.612865,
+        "cv": 0.019487699696225113,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 21352448,
+        "metrics": []
+       }
+      },
+      {
+       "name": "pass: fold-consts alone",
+       "group": "passes",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 88.568255,
+        "p10_ms": 87.550457,
+        "p90_ms": 88.88557399999999,
+        "cv": 0.005097093955577719,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 26746880,
+        "metrics": []
+       }
+      },
+      {
+       "name": "pass: copy-prop alone",
+       "group": "passes",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 79.090707,
+        "p10_ms": 77.392433,
+        "p90_ms": 79.245366,
+        "cv": 0.00889630404020626,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 26746880,
+        "metrics": []
+       }
+      },
+      {
+       "name": "pass: sccp alone",
+       "group": "passes",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 87.84921399999999,
+        "p10_ms": 86.723241,
+        "p90_ms": 88.503753,
+        "cv": 0.008320398622585917,
+        "noisy": false,
+        "samples": 5,
+        "rss_bytes": 26746880,
+        "metrics": []
+       }
+      },
+      {
+       "name": "pass: dead-pure alone",
+       "group": "passes",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 89.851443,
+        "p10_ms": 89.189721,
+        "p90_ms": 102.591246,
+        "cv": 0.05587663915643622,
+        "noisy": true,
+        "samples": 5,
+        "rss_bytes": 26746880,
+        "metrics": []
+       }
+      }
+     ]
+    },
+    {
+     "product": "cigar",
+     "version": "cigar 0.1.0",
+     "binary": "<path>/cigar",
+     "manifest": "cigar-script/bench/bench.toml",
+     "cases": [
+      {
+       "name": "cigar check: 100 lines at mild",
+       "group": "check-100",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 1.3355354,
+        "p10_ms": 1.3187108,
+        "p90_ms": 1.3993302,
+        "cv": 0.027683239273464846,
+        "noisy": false,
+        "samples": 9,
+        "rss_bytes": 26746880,
+        "metrics": []
+       }
+      },
+      {
+       "name": "cigar check: 100 lines at medium",
+       "group": "check-100",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 4.670939000000001,
+        "p10_ms": 4.6537372,
+        "p90_ms": 4.6893861999999995,
+        "cv": 0.0030402499475922448,
+        "noisy": false,
+        "samples": 9,
+        "rss_bytes": 26746880,
+        "metrics": []
+       }
+      },
+      {
+       "name": "cigar check: 100 lines at full",
+       "group": "check-100",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 4.7125124,
+        "p10_ms": 4.6923316,
+        "p90_ms": 4.7506474,
+        "cv": 0.006480630502234625,
+        "noisy": false,
+        "samples": 9,
+        "rss_bytes": 26746880,
+        "metrics": []
+       }
+      },
+      {
+       "name": "cigar check: 1,000 lines at mild",
+       "group": "check-1k",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 4.188464,
+        "p10_ms": 4.1857796,
+        "p90_ms": 4.2314688,
+        "cv": 0.005567049634434432,
+        "noisy": false,
+        "samples": 9,
+        "rss_bytes": 26746880,
+        "metrics": []
+       }
+      },
+      {
+       "name": "cigar check: 1,000 lines at medium",
+       "group": "check-1k",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 9.879645400000001,
+        "p10_ms": 9.8317724,
+        "p90_ms": 9.9403728,
+        "cv": 0.005861804276829539,
+        "noisy": false,
+        "samples": 9,
+        "rss_bytes": 26746880,
+        "metrics": []
+       }
+      },
+      {
+       "name": "cigar check: 1,000 lines at full",
+       "group": "check-1k",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 10.0681634,
+        "p10_ms": 10.0447256,
+        "p90_ms": 10.2089624,
+        "cv": 0.007184042789267887,
+        "noisy": false,
+        "samples": 9,
+        "rss_bytes": 26746880,
+        "metrics": []
+       }
+      },
+      {
+       "name": "cigar check: 10,000 lines at mild",
+       "group": "check-10k",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 30.729971,
+        "p10_ms": 29.871114000000002,
+        "p90_ms": 30.923436,
+        "cv": 0.016196308902902204,
+        "noisy": false,
+        "samples": 9,
+        "rss_bytes": 26746880,
+        "metrics": []
+       }
+      },
+      {
+       "name": "cigar check: 10,000 lines at medium",
+       "group": "check-10k",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 63.536078999999994,
+        "p10_ms": 63.157242000000004,
+        "p90_ms": 63.83836599999999,
+        "cv": 0.007276706588132989,
+        "noisy": false,
+        "samples": 9,
+        "rss_bytes": 26746880,
+        "metrics": []
+       }
+      },
+      {
+       "name": "cigar check: 10,000 lines at full",
+       "group": "check-10k",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 66.43726099999999,
+        "p10_ms": 66.231297,
+        "p90_ms": 66.597476,
+        "cv": 0.0062312162357125965,
+        "noisy": false,
+        "samples": 9,
+        "rss_bytes": 26746880,
+        "metrics": []
+       }
+      },
+      {
+       "name": "cigar check: 100,000 lines at mild",
+       "group": "check-100k",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 297.60149,
+        "p10_ms": 290.17039500000004,
+        "p90_ms": 304.905533,
+        "cv": 0.019441632379730036,
+        "noisy": false,
+        "samples": 9,
+        "rss_bytes": 102793216,
+        "metrics": []
+       }
+      },
+      {
+       "name": "cigar check: 100,000 lines at medium",
+       "group": "check-100k",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 571.903083,
+        "p10_ms": 558.757912,
+        "p90_ms": 577.028633,
+        "cv": 0.024445700895138856,
+        "noisy": false,
+        "samples": 9,
+        "rss_bytes": 168554496,
+        "metrics": []
+       }
+      },
+      {
+       "name": "cigar check: 100,000 lines at full",
+       "group": "check-100k",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 596.771948,
+        "p10_ms": 585.469799,
+        "p90_ms": 652.157612,
+        "cv": 0.046297561778933974,
+        "noisy": false,
+        "samples": 9,
+        "rss_bytes": 168058880,
+        "metrics": []
+       }
+      },
+      {
+       "name": "cigar check: 1,000 lines of generics-heavy at medium",
+       "group": "inference",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 27.2487508,
+        "p10_ms": 27.1634866,
+        "p90_ms": 29.6365412,
+        "cv": 0.03802592480095458,
+        "noisy": false,
+        "samples": 9,
+        "rss_bytes": 26763264,
+        "metrics": []
+       }
+      },
+      {
+       "name": "cigar check: 1,000 lines of generics-heavy at full",
+       "group": "inference",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 27.980005800000004,
+        "p10_ms": 27.790866,
+        "p90_ms": 28.053907400000003,
+        "cv": 0.005834106175528403,
+        "noisy": false,
+        "samples": 9,
+        "rss_bytes": 26763264,
+        "metrics": []
+       }
+      },
+      {
+       "name": "cigar check: 10,000 lines of generics-heavy at medium",
+       "group": "inference",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 302.818103,
+        "p10_ms": 291.638422,
+        "p90_ms": 304.49235600000003,
+        "cv": 0.021653682387351523,
+        "noisy": false,
+        "samples": 9,
+        "rss_bytes": 100982784,
+        "metrics": []
+       }
+      },
+      {
+       "name": "cigar check: 10,000 lines of generics-heavy at full",
+       "group": "inference",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 325.2164,
+        "p10_ms": 311.240458,
+        "p90_ms": 329.13670499999995,
+        "cv": 0.02851313017251239,
+        "noisy": false,
+        "samples": 9,
+        "rss_bytes": 99106816,
+        "metrics": []
+       }
+      },
+      {
+       "name": "cigar check: 1,000 lines of exhaustive `match` at medium",
+       "group": "exhaustiveness",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 102.1564374,
+        "p10_ms": 101.52310920000001,
+        "p90_ms": 103.6554576,
+        "cv": 0.014289556065608347,
+        "noisy": false,
+        "samples": 9,
+        "rss_bytes": 38014976,
+        "metrics": []
+       }
+      },
+      {
+       "name": "cigar check: 1,000 lines of exhaustive `match` at full",
+       "group": "exhaustiveness",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 114.08781200000001,
+        "p10_ms": 104.213766,
+        "p90_ms": 115.36925119999998,
+        "cv": 0.03899663097189849,
+        "noisy": false,
+        "samples": 9,
+        "rss_bytes": 38117376,
+        "metrics": []
+       }
+      },
+      {
+       "name": "cigar check: 10,000 lines of exhaustive `match` at medium",
+       "group": "exhaustiveness",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 3910.4244550000003,
+        "p10_ms": 3901.3906779999998,
+        "p90_ms": 3956.360853,
+        "cv": 0.006431826061694489,
+        "noisy": false,
+        "samples": 9,
+        "rss_bytes": 309182464,
+        "metrics": []
+       }
+      },
+      {
+       "name": "cigar check: 10,000 lines of exhaustive `match` at full",
+       "group": "exhaustiveness",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 3920.682554,
+        "p10_ms": 3900.5188909999997,
+        "p90_ms": 3985.455047,
+        "cv": 0.010440300966218246,
+        "noisy": false,
+        "samples": 9,
+        "rss_bytes": 309436416,
+        "metrics": []
+       }
+      },
+      {
+       "name": "cig run: closures",
+       "group": "superset",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 52.165487000000006,
+        "p10_ms": 50.858847999999995,
+        "p90_ms": 53.597776,
+        "cv": 0.023014250123977665,
+        "noisy": false,
+        "samples": 9,
+        "rss_bytes": 21663744,
+        "metrics": []
+       }
+      },
+      {
+       "name": "cigar run: closures",
+       "group": "superset",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 125.50514400000002,
+        "p10_ms": 125.323126,
+        "p90_ms": 125.94962000000001,
+        "cv": 0.008605497960213811,
+        "noisy": false,
+        "samples": 9,
+        "rss_bytes": 33148928,
+        "metrics": []
+       }
+      },
+      {
+       "name": "cig run: csv",
+       "group": "superset",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 106.84879,
+        "p10_ms": 105.734329,
+        "p90_ms": 109.502745,
+        "cv": 0.01624177470373898,
+        "noisy": false,
+        "samples": 9,
+        "rss_bytes": 40824832,
+        "metrics": []
+       }
+      },
+      {
+       "name": "cigar run: csv",
+       "group": "superset",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 159.63397400000002,
+        "p10_ms": 159.246164,
+        "p90_ms": 176.769692,
+        "cv": 0.044965035431670394,
+        "noisy": false,
+        "samples": 9,
+        "rss_bytes": 33161216,
+        "metrics": []
+       }
+      },
+      {
+       "name": "cig run: deltablue",
+       "group": "superset",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 13.974719,
+        "p10_ms": 12.751115,
+        "p90_ms": 14.036563000000001,
+        "cv": 0.06216716076929389,
+        "noisy": true,
+        "samples": 9,
+        "rss_bytes": 14725120,
+        "metrics": []
+       }
+      },
+      {
+       "name": "cigar run: deltablue",
+       "group": "superset",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 32.759620000000005,
+        "p10_ms": 30.080254,
+        "p90_ms": 32.860898,
+        "cv": 0.056071839526763416,
+        "noisy": true,
+        "samples": 9,
+        "rss_bytes": 33157120,
+        "metrics": []
+       }
+      },
+      {
+       "name": "cig run: dispatch",
+       "group": "superset",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 72.83990999999999,
+        "p10_ms": 71.544478,
+        "p90_ms": 76.352503,
+        "cv": 0.03043540321688095,
+        "noisy": false,
+        "samples": 9,
+        "rss_bytes": 14708736,
+        "metrics": []
+       }
+      },
+      {
+       "name": "cigar run: dispatch",
+       "group": "superset",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 186.8464,
+        "p10_ms": 183.814894,
+        "p90_ms": 187.53329399999998,
+        "cv": 0.008796514212460556,
+        "noisy": false,
+        "samples": 9,
+        "rss_bytes": 33243136,
+        "metrics": []
+       }
+      },
+      {
+       "name": "cig run: fannkuch",
+       "group": "superset",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 345.89851999999996,
+        "p10_ms": 342.15282,
+        "p90_ms": 346.664354,
+        "cv": 0.00782148831476306,
+        "noisy": false,
+        "samples": 9,
+        "rss_bytes": 14729216,
+        "metrics": []
+       }
+      },
+      {
+       "name": "cigar run: fannkuch",
+       "group": "superset",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 680.2029689999999,
+        "p10_ms": 677.6474139999999,
+        "p90_ms": 691.4851950000001,
+        "cv": 0.016886913452837632,
+        "noisy": false,
+        "samples": 9,
+        "rss_bytes": 33185792,
+        "metrics": []
+       }
+      },
+      {
+       "name": "cig run: fib",
+       "group": "superset",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 59.101348,
+        "p10_ms": 58.929068,
+        "p90_ms": 59.251919,
+        "cv": 0.002116283615935571,
+        "noisy": false,
+        "samples": 9,
+        "rss_bytes": 14712832,
+        "metrics": []
+       }
+      },
+      {
+       "name": "cigar run: fib",
+       "group": "superset",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 158.063279,
+        "p10_ms": 157.026645,
+        "p90_ms": 159.117922,
+        "cv": 0.006007850726822861,
+        "noisy": false,
+        "samples": 9,
+        "rss_bytes": 33144832,
+        "metrics": []
+       }
+      },
+      {
+       "name": "cig run: json-deep",
+       "group": "superset",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 7.219587000000001,
+        "p10_ms": 7.143463,
+        "p90_ms": 7.4924170000000005,
+        "cv": 0.01955768487249953,
+        "noisy": false,
+        "samples": 9,
+        "rss_bytes": 14708736,
+        "metrics": []
+       }
+      },
+      {
+       "name": "cigar run: json-deep",
+       "group": "superset",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 20.527483,
+        "p10_ms": 20.092087000000003,
+        "p90_ms": 20.689453,
+        "cv": 0.04007685997197692,
+        "noisy": false,
+        "samples": 9,
+        "rss_bytes": 33161216,
+        "metrics": []
+       }
+      },
+      {
+       "name": "cig run: json",
+       "group": "superset",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 75.378171,
+        "p10_ms": 73.782633,
+        "p90_ms": 77.23302699999999,
+        "cv": 0.019754899545245657,
+        "noisy": false,
+        "samples": 9,
+        "rss_bytes": 69259264,
+        "metrics": []
+       }
+      },
+      {
+       "name": "cigar run: json",
+       "group": "superset",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 170.74024,
+        "p10_ms": 167.485217,
+        "p90_ms": 171.32994200000002,
+        "cv": 0.0113917848939235,
+        "noisy": false,
+        "samples": 9,
+        "rss_bytes": 53440512,
+        "metrics": []
+       }
+      },
+      {
+       "name": "cig run: lists",
+       "group": "superset",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 39.703285,
+        "p10_ms": 39.408358,
+        "p90_ms": 40.778835,
+        "cv": 0.01450467302711421,
+        "noisy": false,
+        "samples": 9,
+        "rss_bytes": 25214976,
+        "metrics": []
+       }
+      },
+      {
+       "name": "cigar run: lists",
+       "group": "superset",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 93.112535,
+        "p10_ms": 92.21281400000001,
+        "p90_ms": 94.845793,
+        "cv": 0.011592816999712806,
+        "noisy": false,
+        "samples": 9,
+        "rss_bytes": 33230848,
+        "metrics": []
+       }
+      },
+      {
+       "name": "cig run: loop",
+       "group": "superset",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 66.911453,
+        "p10_ms": 66.77018899999999,
+        "p90_ms": 67.019281,
+        "cv": 0.0016144483084406225,
+        "noisy": false,
+        "samples": 9,
+        "rss_bytes": 14733312,
+        "metrics": []
+       }
+      },
+      {
+       "name": "cigar run: loop",
+       "group": "superset",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 175.309928,
+        "p10_ms": 175.06381,
+        "p90_ms": 175.378494,
+        "cv": 0.0017103185915414252,
+        "noisy": false,
+        "samples": 9,
+        "rss_bytes": 33140736,
+        "metrics": []
+       }
+      },
+      {
+       "name": "cig run: mandel",
+       "group": "superset",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 387.277174,
+        "p10_ms": 382.968837,
+        "p90_ms": 390.07883300000003,
+        "cv": 0.00793818970866403,
+        "noisy": false,
+        "samples": 9,
+        "rss_bytes": 14725120,
+        "metrics": []
+       }
+      },
+      {
+       "name": "cigar run: mandel",
+       "group": "superset",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 714.351535,
+        "p10_ms": 712.304795,
+        "p90_ms": 729.857737,
+        "cv": 0.021741405423349253,
+        "noisy": false,
+        "samples": 9,
+        "rss_bytes": 33206272,
+        "metrics": []
+       }
+      },
+      {
+       "name": "cig run: maps",
+       "group": "superset",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 55.23758,
+        "p10_ms": 54.937906,
+        "p90_ms": 55.453989,
+        "cv": 0.0036380848347173787,
+        "noisy": false,
+        "samples": 9,
+        "rss_bytes": 23117824,
+        "metrics": []
+       }
+      },
+      {
+       "name": "cigar run: maps",
+       "group": "superset",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 112.99102599999999,
+        "p10_ms": 111.331319,
+        "p90_ms": 114.500294,
+        "cv": 0.013811101754610476,
+        "noisy": false,
+        "samples": 9,
+        "rss_bytes": 33153024,
+        "metrics": []
+       }
+      },
+      {
+       "name": "cig run: nbody",
+       "group": "superset",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 509.54433200000005,
+        "p10_ms": 505.58065500000004,
+        "p90_ms": 519.651106,
+        "cv": 0.017857994128541145,
+        "noisy": false,
+        "samples": 9,
+        "rss_bytes": 14708736,
+        "metrics": []
+       }
+      },
+      {
+       "name": "cigar run: nbody",
+       "group": "superset",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 1114.137694,
+        "p10_ms": 1110.567915,
+        "p90_ms": 1125.136626,
+        "cv": 0.008931505647903092,
+        "noisy": false,
+        "samples": 9,
+        "rss_bytes": 33185792,
+        "metrics": []
+       }
+      },
+      {
+       "name": "cig run: regex-ish",
+       "group": "superset",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 59.151965000000004,
+        "p10_ms": 59.022796,
+        "p90_ms": 59.301666000000004,
+        "cv": 0.0027716384009870312,
+        "noisy": false,
+        "samples": 9,
+        "rss_bytes": 29409280,
+        "metrics": []
+       }
+      },
+      {
+       "name": "cigar run: regex-ish",
+       "group": "superset",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 118.480868,
+        "p10_ms": 116.860942,
+        "p90_ms": 119.822226,
+        "cv": 0.010805938363298373,
+        "noisy": false,
+        "samples": 9,
+        "rss_bytes": 33157120,
+        "metrics": []
+       }
+      },
+      {
+       "name": "cig run: richards",
+       "group": "superset",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 24.153551,
+        "p10_ms": 23.635204,
+        "p90_ms": 24.36539,
+        "cv": 0.012496311394952666,
+        "noisy": false,
+        "samples": 9,
+        "rss_bytes": 14729216,
+        "metrics": []
+       }
+      },
+      {
+       "name": "cigar run: richards",
+       "group": "superset",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 56.134878,
+        "p10_ms": 55.998117,
+        "p90_ms": 56.320363,
+        "cv": 0.0033686827382672,
+        "noisy": false,
+        "samples": 9,
+        "rss_bytes": 33161216,
+        "metrics": []
+       }
+      },
+      {
+       "name": "cig run: sieve",
+       "group": "superset",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 203.00421699999998,
+        "p10_ms": 199.11958099999998,
+        "p90_ms": 203.34274399999998,
+        "cv": 0.010566493119868368,
+        "noisy": false,
+        "samples": 9,
+        "rss_bytes": 50384896,
+        "metrics": []
+       }
+      },
+      {
+       "name": "cigar run: sieve",
+       "group": "superset",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 462.259439,
+        "p10_ms": 460.409982,
+        "p90_ms": 489.94564,
+        "cv": 0.027991692695945508,
+        "noisy": false,
+        "samples": 9,
+        "rss_bytes": 33198080,
+        "metrics": []
+       }
+      },
+      {
+       "name": "cig run: spectral",
+       "group": "superset",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 221.504974,
+        "p10_ms": 221.421764,
+        "p90_ms": 221.577945,
+        "cv": 0.003975359966651994,
+        "noisy": false,
+        "samples": 9,
+        "rss_bytes": 14712832,
+        "metrics": []
+       }
+      },
+      {
+       "name": "cigar run: spectral",
+       "group": "superset",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 494.220131,
+        "p10_ms": 492.352805,
+        "p90_ms": 498.111321,
+        "cv": 0.007177128154836704,
+        "noisy": false,
+        "samples": 9,
+        "rss_bytes": 33157120,
+        "metrics": []
+       }
+      },
+      {
+       "name": "cig run: strbuild",
+       "group": "superset",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 10.923487000000002,
+        "p10_ms": 10.832706,
+        "p90_ms": 11.179281,
+        "cv": 0.013652250225554427,
+        "noisy": false,
+        "samples": 9,
+        "rss_bytes": 14725120,
+        "metrics": []
+       }
+      },
+      {
+       "name": "cigar run: strbuild",
+       "group": "superset",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 56.973603,
+        "p10_ms": 55.966848999999996,
+        "p90_ms": 59.255028,
+        "cv": 0.02740745689541155,
+        "noisy": false,
+        "samples": 9,
+        "rss_bytes": 33198080,
+        "metrics": []
+       }
+      },
+      {
+       "name": "cig run: strings",
+       "group": "superset",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 37.520762999999995,
+        "p10_ms": 37.466553,
+        "p90_ms": 38.692334,
+        "cv": 0.014783708942881394,
+        "noisy": false,
+        "samples": 9,
+        "rss_bytes": 18923520,
+        "metrics": []
+       }
+      },
+      {
+       "name": "cigar run: strings",
+       "group": "superset",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 78.324507,
+        "p10_ms": 76.680417,
+        "p90_ms": 78.857517,
+        "cv": 0.011415117912642105,
+        "noisy": false,
+        "samples": 9,
+        "rss_bytes": 33181696,
+        "metrics": []
+       }
+      },
+      {
+       "name": "cig run: trees",
+       "group": "superset",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 381.79650999999996,
+        "p10_ms": 380.772494,
+        "p90_ms": 384.72770499999996,
+        "cv": 0.0067519761934213135,
+        "noisy": false,
+        "samples": 9,
+        "rss_bytes": 14712832,
+        "metrics": []
+       }
+      },
+      {
+       "name": "cigar run: trees",
+       "group": "superset",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 841.206498,
+        "p10_ms": 838.333498,
+        "p90_ms": 861.977121,
+        "cv": 0.011813174071132396,
+        "noisy": false,
+        "samples": 9,
+        "rss_bytes": 33161216,
+        "metrics": []
+       }
+      },
+      {
+       "name": "cig run: words",
+       "group": "superset",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 52.206262,
+        "p10_ms": 52.095698000000006,
+        "p90_ms": 52.282762000000005,
+        "cv": 0.0016061688826469857,
+        "noisy": false,
+        "samples": 9,
+        "rss_bytes": 27312128,
+        "metrics": []
+       }
+      },
+      {
+       "name": "cigar run: words",
+       "group": "superset",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 99.41983,
+        "p10_ms": 98.424741,
+        "p90_ms": 100.054451,
+        "cv": 0.009557997449970195,
+        "noisy": false,
+        "samples": 9,
+        "rss_bytes": 33161216,
+        "metrics": []
+       }
+      },
+      {
+       "name": "cigar check: CigScript examples, as mild",
+       "group": "check-corpus",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 34.787638599999994,
+        "p10_ms": 34.1045492,
+        "p90_ms": 35.0550166,
+        "cv": 0.011591006093900602,
+        "noisy": false,
+        "samples": 9,
+        "rss_bytes": 11177984,
+        "metrics": []
+       }
+      },
+      {
+       "name": "cig check: CigScript examples, for comparison",
+       "group": "check-corpus",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 51.620349399999995,
+        "p10_ms": 46.1778494,
+        "p90_ms": 51.777917200000005,
+        "cv": 0.21504895998851734,
+        "noisy": true,
+        "samples": 9,
+        "rss_bytes": 13529088,
+        "metrics": []
+       }
+      },
+      {
+       "name": "memory: binary trees, the CigarScript runtime today",
+       "group": "memory-trees",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 760.5331429999999,
+        "p10_ms": 751.6912113999999,
+        "p90_ms": 843.4036056000001,
+        "cv": 0.05389146693743859,
+        "noisy": true,
+        "samples": 9,
+        "rss_bytes": 34127872,
+        "metrics": []
+       }
+      },
+      {
+       "name": "memory: n-body, the CigarScript runtime today",
+       "group": "memory-nbody",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 969.5054186,
+        "p10_ms": 959.2913398000001,
+        "p90_ms": 1084.6503334,
+        "cv": 0.06077245065841249,
+        "noisy": true,
+        "samples": 9,
+        "rss_bytes": 34185216,
+        "metrics": []
+       }
+      },
+      {
+       "name": "memory: lists: sort, filter, map, the CigarScript runtime today",
+       "group": "memory-lists",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 83.8329114,
+        "p10_ms": 83.7139618,
+        "p90_ms": 84.5347988,
+        "cv": 0.010673894933074368,
+        "noisy": false,
+        "samples": 9,
+        "rss_bytes": 34123776,
+        "metrics": []
+       }
+      }
+     ]
+    },
+    {
+     "product": "ciginstaller",
+     "version": "ciginstaller 0.1.0",
+     "binary": "<path>/ciginstaller",
+     "manifest": "cig-installer/bench/bench.toml",
+     "cases": [
+      {
+       "name": "version",
+       "group": "start-up",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 1.1595096,
+        "p10_ms": 1.0854199,
+        "p90_ms": 1.1758264999999999,
+        "cv": 0.03927849271352713,
+        "noisy": false,
+        "samples": 9,
+        "rss_bytes": 26763264,
+        "metrics": []
+       }
+      },
+      {
+       "name": "status, nothing installed",
+       "group": "start-up",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 1.5381011,
+        "p10_ms": 1.5313586000000001,
+        "p90_ms": 1.5515719000000001,
+        "cv": 0.009047315348311477,
+        "noisy": false,
+        "samples": 9,
+        "rss_bytes": 26763264,
+        "metrics": []
+       }
+      },
+      {
+       "name": "list, nothing installed",
+       "group": "start-up",
+       "budget": null,
+       "outcome": {
+        "state": "timed",
+        "median_ms": 1.5083218999999999,
+        "p10_ms": 1.4954832,
+        "p90_ms": 1.5113864,
+        "cv": 0.006085189470560749,
+        "noisy": false,
+        "samples": 9,
+        "rss_bytes": 26763264,
+        "metrics": []
+       }
+      }
+     ]
+    }
+   ]
+  }
+ }
+}
