@@ -67,12 +67,15 @@ impl Sandbox {
         self.place(&b.name, &program::append2(&runtime, b).unwrap())
     }
 
-    /// `bytes` as an executable named `name` (a new file each time: macOS
-    /// keeps a binary's code-signing state by file).
+    /// `bytes` as an executable named `name`. Always a new file, never
+    /// one written over: macOS keeps a binary's code-signing state by
+    /// file, and a program rewritten in place after it has run is killed
+    /// when it starts.
     fn place(&self, name: &str, bytes: &[u8]) -> PathBuf {
         let file = format!("{name}{}", std::env::consts::EXE_SUFFIX);
         let out = self.path().join("bin").join(file);
         fs::create_dir_all(out.parent().unwrap()).unwrap();
+        let _ = fs::remove_file(&out);
         fs::write(&out, bytes).unwrap();
         #[cfg(unix)]
         {
@@ -1120,7 +1123,13 @@ impl Sandbox {
     /// Every run recorded, by id.
     fn runs(&self) -> Vec<String> {
         let out = self.cig(&["runs", "--json"]);
-        let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_default();
+        let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+            panic!(
+                "cig runs --json: {e}\n{}\n{}",
+                text(&out.stdout),
+                text(&out.stderr)
+            )
+        });
         let mut ids: Vec<String> = v
             .as_array()
             .cloned()
@@ -1141,7 +1150,13 @@ impl Sandbox {
             .into_iter()
             .filter(|id| !before.contains(id))
             .collect();
-        assert_eq!(new.len(), 1, "one run: {new:?}\n{}", text(&out.stderr));
+        assert_eq!(
+            new.len(),
+            1,
+            "one run: {new:?}; the program ended with {}\n{}",
+            out.status,
+            text(&out.stderr)
+        );
         (out, new.pop().unwrap())
     }
 
@@ -1799,7 +1814,7 @@ fn a_rootless_pack_in_a_program_writes_where_no_pack_writes() {
         .burn_op(2, "fs.write_text", 2)
         .op(Op::BURN_LEAVE, 0, 0, 0);
     m.ret_null(0);
-    let b = s.compile_own_b("r", "r.cig", &m.module("r.cig", 5));
+    let b = s.compile_own_b("rb", "r.cig", &m.module("r.cig", 5));
     let (out, id_b) = s.prog_run(&b, &[]);
     assert!(out.status.success(), "{}", text(&out.stderr));
     assert_eq!(s.read("free.txt").as_deref(), Some("x"));
