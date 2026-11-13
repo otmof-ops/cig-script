@@ -47,41 +47,45 @@ one warm-up and five samples a side, interleaved, alone on the machine). A ratio
 faster of the two. The steps are cumulative and are the commits of this round, in order: 1 to 4 are the boxed
 error, the loop per frame with a one-add step charge and a one-copy call, the fast path for the hot instructions,
 and the counter (which changes nothing when it is off); 5 is comparisons in the fast path; 6 the field caches;
-7 calls and returns staying in the loop; 8 an index's positions from trailing `nop`s.
+7 calls and returns staying in the loop; 8 an index's positions from trailing `nop`s; 9 the fast path in a
+function of its own, off the stack of a re-entered call.
 
-| program | before | steps 1 to 4 | 5 | 6 | 7 | 8 | tree-walker ms | VM ms before | VM ms after |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| closures | 0.35x | 0.70x | 0.68x | 0.67x | 0.62x | 0.63x | 33.13 | 93.09 | 52.35 |
-| csv | 0.65x | 0.86x | 0.87x | 0.89x | 0.88x | 0.88x | 30.63 | 47.24 | 34.98 |
-| deltablue | 0.13x | 0.41x | 0.61x | 0.60x | 0.56x | 0.57x | 3.86 | 30.70 | 6.80 |
-| dispatch | 0.19x | 0.47x | 0.59x | 0.59x | 0.57x | 0.57x | 53.96 | 283.97 | 95.38 |
-| fannkuch | 0.14x | 0.35x | 0.49x | 0.47x | 0.44x | 0.46x | 308.49 | 1870.45 | 671.99 |
-| fib | 0.32x | 0.77x | 0.78x | 0.76x | 0.75x | 0.71x | 43.60 | 121.22 | 61.15 |
-| json | 0.83x | 0.96x | 0.95x | 0.95x | 0.95x | 0.93x | 69.48 | 83.25 | 75.00 |
-| json-deep | 0.60x | 0.92x | 0.93x | 0.92x | 0.93x | 0.90x | 2.45 | 3.98 | 2.72 |
-| lists | 0.42x | 0.74x | 0.72x | 0.72x | 0.71x | 0.70x | 30.21 | 58.61 | 42.99 |
-| loop | 0.32x | 1.40x | 1.41x | 1.37x | 1.38x | 1.37x | 52.94 | 138.71 | 38.75 |
-| mandel | 0.31x | 1.18x | 1.32x | 1.29x | 1.38x | 1.15x | 342.82 | 997.45 | 298.55 |
-| maps | 0.38x | 0.61x | 0.65x | 0.68x | 0.66x | 0.65x | 37.85 | 90.28 | 58.61 |
-| nbody | 0.40x | 0.94x | 1.03x | 1.62x | 1.52x | 1.56x | 479.00 | 1008.80 | 307.65 |
-| regex-ish | 0.52x | 0.74x | 0.74x | 0.75x | 0.75x | 0.76x | 43.80 | 64.95 | 57.99 |
-| richards | 0.13x | 0.25x | 0.36x | 0.40x | 0.38x | 0.40x | 17.57 | 124.85 | 44.10 |
-| sieve | 0.25x | 0.65x | 0.81x | 0.79x | 0.75x | 0.78x | 184.58 | 636.83 | 238.06 |
-| spectral | 0.23x | 0.57x | 0.72x | 0.69x | 0.64x | 0.65x | 184.26 | 713.81 | 282.66 |
-| strbuild | 0.83x | 1.14x | 1.13x | 1.12x | 1.11x | 1.11x | 5.14 | 5.38 | 4.62 |
-| strings | 0.56x | 0.74x | 0.78x | 0.77x | 0.78x | 0.77x | 24.45 | 39.09 | 31.59 |
-| trees | 0.21x | 0.41x | 0.53x | 0.52x | 0.49x | 0.48x | 335.18 | 1512.95 | 698.11 |
-| words | 0.35x | 0.60x | 0.63x | 0.68x | 0.65x | 0.64x | 35.05 | 120.91 | 54.89 |
-| **median of all 25** | **0.38x** | **0.74x** | **0.73x** | **0.76x** | **0.75x** | **0.76x** | | | |
-| geometric mean of all 25 | 0.37x | 0.69x | 0.76x | 0.78x | 0.76x | 0.75x | | | |
+| program | before | steps 1 to 4 | 5 | 6 | 7 | 8 | 9 | tree-walker ms | VM ms before | VM ms after |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| closures | 0.35x | 0.70x | 0.68x | 0.67x | 0.62x | 0.63x | 0.67x | 34.51 | 93.09 | 51.79 |
+| csv | 0.65x | 0.86x | 0.87x | 0.89x | 0.88x | 0.88x | 0.86x | 30.87 | 47.24 | 35.75 |
+| deltablue | 0.13x | 0.41x | 0.61x | 0.60x | 0.56x | 0.57x | 0.52x | 3.78 | 30.70 | 7.25 |
+| dispatch | 0.19x | 0.47x | 0.59x | 0.59x | 0.57x | 0.57x | 0.54x | 54.54 | 283.97 | 101.71 |
+| fannkuch | 0.14x | 0.35x | 0.49x | 0.47x | 0.44x | 0.46x | 0.44x | 297.74 | 1870.45 | 677.25 |
+| fib | 0.32x | 0.77x | 0.78x | 0.76x | 0.75x | 0.71x | 0.73x | 48.25 | 121.22 | 66.46 |
+| json | 0.83x | 0.96x | 0.95x | 0.95x | 0.95x | 0.93x | 0.92x | 70.83 | 83.25 | 76.96 |
+| json-deep | 0.60x | 0.92x | 0.93x | 0.92x | 0.93x | 0.90x | 0.91x | 2.55 | 3.98 | 2.82 |
+| lists | 0.42x | 0.74x | 0.72x | 0.72x | 0.71x | 0.70x | 0.69x | 26.57 | 58.61 | 38.74 |
+| loop | 0.32x | 1.40x | 1.41x | 1.37x | 1.38x | 1.37x | 1.40x | 51.88 | 138.71 | 37.17 |
+| mandel | 0.31x | 1.18x | 1.32x | 1.29x | 1.38x | 1.15x | 1.32x | 351.46 | 997.45 | 265.49 |
+| maps | 0.38x | 0.61x | 0.65x | 0.68x | 0.66x | 0.65x | 0.63x | 39.05 | 90.28 | 62.17 |
+| nbody | 0.40x | 0.94x | 1.03x | 1.62x | 1.52x | 1.56x | 1.58x | 478.11 | 1008.80 | 302.14 |
+| regex-ish | 0.52x | 0.74x | 0.74x | 0.75x | 0.75x | 0.76x | 0.72x | 39.80 | 64.95 | 55.43 |
+| richards | 0.13x | 0.25x | 0.36x | 0.40x | 0.38x | 0.40x | 0.37x | 17.35 | 124.85 | 47.07 |
+| sieve | 0.25x | 0.65x | 0.81x | 0.79x | 0.75x | 0.78x | 0.75x | 187.10 | 636.83 | 249.62 |
+| spectral | 0.23x | 0.57x | 0.72x | 0.69x | 0.64x | 0.65x | 0.63x | 188.03 | 713.81 | 300.00 |
+| strbuild | 0.83x | 1.14x | 1.13x | 1.12x | 1.11x | 1.11x | 1.19x | 5.78 | 5.38 | 4.87 |
+| strings | 0.56x | 0.74x | 0.78x | 0.77x | 0.78x | 0.77x | 0.75x | 24.39 | 39.09 | 32.61 |
+| trees | 0.21x | 0.41x | 0.53x | 0.52x | 0.49x | 0.48x | 0.49x | 362.05 | 1512.95 | 745.32 |
+| words | 0.35x | 0.60x | 0.63x | 0.68x | 0.65x | 0.64x | 0.64x | 41.95 | 120.91 | 66.02 |
+| **median of all 25** | **0.38x** | **0.74x** | **0.73x** | **0.76x** | **0.75x** | **0.76x** | **0.69x** | | | |
+| geometric mean of all 25 | 0.37x | 0.69x | 0.76x | 0.78x | 0.76x | 0.75x | 0.73x | | | |
 
 The four start-up programs (`hello`, `startup-0`, `startup-1`, `startup-10`) run for microseconds in process and
 are in the median and the mean but not in the rows. Times moved by 5 to 16% between sessions on this machine in
-both engines alike, so a step is judged by the instructions the processor ran, which do not move: every step
-lowered them on the programs it touches, and step 6 raised them by 4 to 8% on programs that read no field (the
-fast path grew), which is recorded as a cost to recover. The gate this work answers to is three times the
-tree-walker at the median (cig-compile#31): it is not met. What the profiles say is in the way next is written
-in #230.
+both engines alike, and the median by about 0.03 between two runs of one tree, so a step is judged by the
+instructions the processor ran, which do not move. Every step lowered them on the programs it touches, with two
+costs recorded to recover: step 6 raised them by 4 to 8% on programs that read no field (the fast path grew), and
+step 9, which is there so that a builtin calling back into the VM costs less stack than the tree-walker's (3,776
+bytes a level in a release build against 4,912; 5,392 before it), lowered them by 6% where whole loops stay on the
+fast path and raised them by 1 to 6% on programs that call a lot. The gate this work answers to is three times
+the tree-walker at the median (cig-compile#31): it is not met. What the profiles say is in the way next is
+written in #230.
 
 ## What they show
 
