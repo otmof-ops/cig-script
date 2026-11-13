@@ -20,6 +20,12 @@ project follows semantic versioning.
   under a record that saved its head; the fast path no longer takes a
   journal it cannot read for one with no chain.
 
+- **`cig bench suite.toml` runs a manifest named without a folder.** The
+  manifest's folder came out as the empty path, which became every case's
+  working directory, and each case stopped with "could not start". It is
+  the working directory now. Test:
+  `bench_a_manifest_named_without_a_folder_runs`.
+
 - **Small before-states are packed, and the tin compresses what it
   keeps** (#147). A native op's before-state under 16 KiB is a record in
   a pack (`tin/packs/<id[..2]>/<id>`, one file per cig process, records

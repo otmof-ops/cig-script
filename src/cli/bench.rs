@@ -189,8 +189,11 @@ pub fn bench(ctx: &Ctx, o: Opts) -> i32 {
             return exit::USAGE;
         }
     };
+    // A manifest named without a folder has the empty path for a parent,
+    // which is not a directory a case can start in: it is the working one.
     let manifest_dir = path
         .parent()
+        .filter(|p| !p.as_os_str().is_empty())
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
     let defaults = Defaults {

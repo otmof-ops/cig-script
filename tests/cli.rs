@@ -15142,6 +15142,39 @@ fn bench_matching_case_reports_numbers() {
     assert!(!line.contains("- "), "{out}");
 }
 
+/// A manifest named without a folder (`cig bench suite.toml`) runs from
+/// the working directory. Its folder came out as the empty path, which
+/// became every case's working directory, and each case stopped with
+/// "could not start".
+#[test]
+fn bench_a_manifest_named_without_a_folder_runs() {
+    let sb = Sandbox::new();
+    sb.write("hello.cig", "exhale \"hello\"\n");
+    sb.write("hello.out", "hello\n");
+    sb.write(
+        "suite.toml",
+        &format!(
+            r#"
+[bench]
+product = "cig"
+[defaults]
+samples = 2
+per = 1
+warmup = 1
+[[case]]
+name = "says_hello"
+group = "start-up"
+run = ['{cig}', "run", "hello.cig"]
+expect = {{ exit = 0, stdout = "hello.out" }}
+"#,
+            cig = cig_bin().display()
+        ),
+    );
+    let out = sb.run_ok(&["bench", "suite.toml"]);
+    let line = out.lines().find(|l| l.contains("says_hello")).unwrap();
+    assert!(!line.contains("WRONG") && !line.contains("- "), "{out}");
+}
+
 #[test]
 fn wrong_output_gets_no_time_and_fails() {
     let sb = Sandbox::new();
