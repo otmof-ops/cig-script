@@ -1,0 +1,24 @@
+the_vm_against_;<cigscript::vm::Machine>::run_frame_code 164070123
+the_vm_against_;<cigscript::vm::Machine>::run_frame_code;deref<core::option::Option<cig_bytecode::instr::DecodedInstr>, alloc::alloc::Global>;as_slice<core::option::Option<cig_bytecode::instr::DecodedInstr>, alloc::alloc::Global>;as_ptr<core::option::Option<cig_bytecode::instr::DecodedInstr>, alloc::alloc::Global>;ptr<core::option::Option<cig_bytecode::instr::DecodedInstr>, alloc::alloc::Global>;ptr<alloc::alloc::Global, core::option::Option<cig_bytecode::instr::DecodedInstr>>;non_null<alloc::alloc::Global, core::option::Option<cig_bytecode::instr::DecodedInstr>> 67885619
+the_vm_against_;<cigscript::vm::Machine>::run_frame_code;fast 202812742
+the_vm_against_;<cigscript::vm::Machine>::run_frame_code;fast;clone 40411258
+the_vm_against_;<cigscript::vm::Machine>::run_frame_code;fast;deref<cigscript::value::Value, alloc::alloc::Global>;as_slice<cigscript::value::Value, alloc::alloc::Global> 28192301
+the_vm_against_;<cigscript::vm::Machine>::run_frame_code;fast;get<cigscript::value::Value, usize>;get<cigscript::value::Value> 69827858
+the_vm_against_;<cigscript::vm::Machine>::run_frame_code;fast;op_of 58276289
+the_vm_against_;<cigscript::vm::Machine>::run_frame_code;fast;saturating_add 6985320
+the_vm_against_;<cigscript::vm::Machine>::run_frame_code;fast;set_nest 20941906
+the_vm_against_;<cigscript::vm::Machine>::run_frame_code;fast;set_nest;last_mut<cigscript::vm::Frame> 27910675
+the_vm_against_;<cigscript::vm::Machine>::run_frame_code;fast;{closure#0};saturating_add 69832060
+the_vm_against_;<cigscript::vm::Machine>::run_frame_code;get<core::option::Option<cig_bytecode::instr::DecodedInstr>, usize>;get<core::option::Option<cig_bytecode::instr::DecodedInstr>> 6984678
+the_vm_against_;[unknown];<cigscript::vm::Machine>::run_frame_code;fast 13968971
+the_vm_against_;[unknown];<cigscript::vm::Machine>::run_frame_code;fast;fast_compare;fast_binary 76760499
+the_vm_against_;[unknown];cigcompile::cir::verify::trace;get<cigcompile::cir::ir::ValueId, cigcompile::cir::ir::Const, std::hash::random::RandomState, alloc::alloc::Global, cigcompile::cir::ir::ValueId>;get<cigcompile::cir::ir::ValueId, cigcompile::cir::ir::Const, std::hash::random::RandomState, alloc::alloc::Global, cigcompile::cir::ir::ValueId>;get<(cigcompile::cir::ir::ValueId, cigcompile::cir::ir::Const), alloc::alloc::Global, hashbrown::map::equivalent_key::{closure_env#0}<cigcompile::cir::ir::ValueId, cigcompile::cir::ir::ValueId, cigcompile::cir::ir::Const>>;find<(cigcompile::cir::ir::ValueId, cigcompile::cir::ir::Const), alloc::alloc::Global, hashbrown::map::equivalent_key::{closure_env#0}<cigcompile::cir::ir::ValueId, cigcompile::cir::ir::ValueId, cigcompile::cir::ir::Const>>;find_inner;full 1002004
+the_vm_against_;cigscript::vm::run_frame;exec;<cigscript::vm::Machine>::run_frame_code;fast 617977038
+the_vm_against_;cigscript::vm::run_frame;exec;<cigscript::vm::Machine>::run_frame_code;fast;clone 20949118
+the_vm_against_;cigscript::vm::run_frame;exec;<cigscript::vm::Machine>::run_frame_code;fast;fast_compare;fast_binary 27930161
+the_vm_against_;cigscript::vm::run_frame;exec;<cigscript::vm::Machine>::run_frame_code;fast;fast_compare;fast_binary;checked_mul;unlikely 13967727
+the_vm_against_;cigscript::vm::run_frame;exec;<cigscript::vm::Machine>::run_frame_code;fast;fast_compare;fast_binary;wrapping_rem;overflowing_rem 160514687
+the_vm_against_;cigscript::vm::run_frame;exec;<cigscript::vm::Machine>::run_frame_code;fast;get_mut<cigscript::value::Value, usize>;get_mut<cigscript::value::Value> 20951257
+the_vm_against_;cigscript::vm::run_frame;exec;<cigscript::vm::Machine>::run_frame_code;fast;{closure#0};saturating_add 34893018
+the_vm_against_;core::ptr::drop_glue::<cigscript::value::Value> 167454683
+vm_speed-b999dc;vm_speed::main;test::test_main_static;test::test_main_inner::<test::test_main_static::{closure#0}>;test::console::run_tests_console;test::run_tests::<test::console::run_tests_console::{closure#2}>;test::console::run_tests_console::{closure#2};test::console::on_test_event;<std::io::stdio::Stdout as core::io::write::Write>::flush 1002004
