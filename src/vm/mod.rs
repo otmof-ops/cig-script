@@ -934,12 +934,12 @@ impl Machine<'_> {
             Op::ADD | Op::SUB | Op::MUL | Op::DIV | Op::MOD | Op::EQ | Op::LT | Op::LE => {
                 let l = self.stack.get(r(d.b_u))?;
                 let rv = self.stack.get(r(d.c))?;
-                fast_binary(op_of(d.op), l, rv)?
+                fast_compare(op_of(d.op), l, rv)?
             }
             Op::ADDK | Op::SUBK | Op::MULK | Op::DIVK | Op::MODK | Op::EQK | Op::LTK | Op::LEK => {
                 let l = self.stack.get(r(d.b_u))?;
                 let k = proto.consts.get(d.c as usize)?;
-                fast_binary(op_of(d.op), l, k)?
+                fast_compare(op_of(d.op), l, k)?
             }
             Op::NOT => Value::Bool(!self.stack.get(r(d.b_u))?.truthy()),
             Op::EQJ | Op::NEJ | Op::LTJ | Op::LEJ => {
@@ -951,7 +951,7 @@ impl Machine<'_> {
                 };
                 let l = self.stack.get(r(d.a))?;
                 let rv = self.stack.get(r(d.b_u))?;
-                let Value::Bool(t) = fast_binary(op, l, rv)? else {
+                let Value::Bool(t) = fast_compare(op, l, rv)? else {
                     return None;
                 };
                 return if t { fast_jump(pc, d.c_s) } else { Some(next) };
@@ -2234,4 +2234,21 @@ fn operate(op: BinOp, l: Value, r: Value, span: Span) -> Result<Value, Fault> {
 #[inline(always)]
 fn fast_jump(pc: usize, offset: i32) -> Option<usize> {
     usize::try_from((pc as i64) + 1 + i64::from(offset)).ok()
+}
+
+/// [`fast_binary`], and the comparisons `binary` gives for other operands
+/// without an error: `==` and `!=` of any two values (`equals`, as
+/// `binary` computes them) and `<`, `<=` of two strings.
+#[inline(always)]
+fn fast_compare(op: BinOp, l: &Value, r: &Value) -> Option<Value> {
+    if let Some(v) = fast_binary(op, l, r) {
+        return Some(v);
+    }
+    match (op, l, r) {
+        (BinOp::Eq, _, _) => Some(Value::Bool(l.equals(r))),
+        (BinOp::Ne, _, _) => Some(Value::Bool(!l.equals(r))),
+        (BinOp::Lt, Value::Str(a), Value::Str(b)) => Some(Value::Bool(a < b)),
+        (BinOp::Le, Value::Str(a), Value::Str(b)) => Some(Value::Bool(a <= b)),
+        _ => None,
+    }
 }
