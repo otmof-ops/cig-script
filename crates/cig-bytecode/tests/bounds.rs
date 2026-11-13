@@ -7,8 +7,8 @@
 //! every register-naming opcode.
 
 use cig_bytecode::{
-    parse_module, verify_module, BurnRegion, Constant, FuncKind, Function, Instr, Module, Op,
-    RegionLabel, UpvalDesc, UpvalKind, VerifyError, MAGIC, MAX_FUNCTION_DEPTH, MAX_REG_COUNT,
+    parse_module, serialize_module, verify_module, BurnRegion, Constant, FuncKind, Function, Instr,
+    Module, Op, RegionLabel, UpvalDesc, UpvalKind, VerifyError, MAX_FUNCTION_DEPTH, MAX_REG_COUNT,
     RESERVED_U32,
 };
 
@@ -228,19 +228,22 @@ fn a_frame_larger_than_the_register_operand_is_refused() {
 
 #[test]
 fn a_module_nested_past_the_limit_is_refused_and_does_not_overflow() {
-    // Build the bytes directly: the header, then a wrapper function
-    // that nests `MAX_FUNCTION_DEPTH + 10` children deep. Each
-    // function on the wire is the minimal function record followed
-    // by its children count.
+    // A chain of `MAX_FUNCTION_DEPTH + 10` lambdas, one inside the
+    // other, serialized (the writer does not recurse) and parsed: the
+    // directory's parents give each function's depth.
     let over = MAX_FUNCTION_DEPTH + 10;
-    let payload = build_deep_module(over);
-    let mut bytes = Vec::new();
-    bytes.extend_from_slice(&MAGIC);
-    bytes.extend_from_slice(&1u16.to_le_bytes()); // version
-    bytes.extend_from_slice(&0u16.to_le_bytes()); // flags
-    let hash = blake3::hash(&payload);
-    bytes.extend_from_slice(hash.as_bytes());
-    bytes.extend_from_slice(&payload);
+    let mut bottom = Function::empty_main();
+    bottom.kind = FuncKind::Lambda;
+    for _ in 0..over {
+        let mut parent = Function::empty_main();
+        parent.kind = FuncKind::Lambda;
+        parent.children.push(bottom);
+        bottom = parent;
+    }
+    let bytes = serialize_module(&Module {
+        source_name: String::new(),
+        main: bottom,
+    });
 
     let err = parse_module(&bytes).unwrap_err();
     assert!(
@@ -271,63 +274,6 @@ fn a_module_nested_past_the_limit_is_refused_and_does_not_overflow() {
         verify_module(&m).unwrap_err(),
         VerifyError::NestedTooDeep { .. }
     ));
-}
-
-/// Emit `source_name` + nested functions to `depth` levels under the
-/// top-level function. Every function has a trivial body `LOADNULL
-/// R0; RET R0` with no constants, upvalues, handlers, lines, regions,
-/// or region rows. Each parent carries exactly one child.
-fn build_deep_module(depth: u32) -> Vec<u8> {
-    let mut p = Vec::new();
-    // source_name = ""
-    p.extend_from_slice(&0u32.to_le_bytes());
-    // Serialize the root function and recursively write a chain of
-    // one-child-per-function records.
-    write_chain_function(&mut p, depth);
-    p
-}
-
-fn write_chain_function(p: &mut Vec<u8>, remaining_children: u32) {
-    // name: "" (u32 0)
-    p.extend_from_slice(&0u32.to_le_bytes());
-    // kind: 0 (Main) — the parser accepts any valid kind in a child
-    // too, the verifier is stricter but this test stops before the
-    // verifier runs.
-    p.push(0);
-    // reg_count: 1
-    p.extend_from_slice(&1u32.to_le_bytes());
-    // arity: 0
-    p.extend_from_slice(&0u16.to_le_bytes());
-    // requires_burn: 0
-    p.push(0);
-    // upvalues: 0
-    p.extend_from_slice(&0u16.to_le_bytes());
-    // constants: 0, regions: 0
-    p.extend_from_slice(&0u32.to_le_bytes());
-    p.extend_from_slice(&0u32.to_le_bytes());
-    // handlers: 0
-    p.extend_from_slice(&0u32.to_le_bytes());
-    // instrs: 2 words (LOADNULL R0 / RET R0)
-    p.extend_from_slice(&2u32.to_le_bytes());
-    let loadnull = Op::LOADNULL as u32;
-    let ret = Op::RET as u32;
-    p.extend_from_slice(&loadnull.to_le_bytes());
-    p.extend_from_slice(&ret.to_le_bytes());
-    // span_base: (0, 1, 1)
-    p.extend_from_slice(&0u32.to_le_bytes());
-    p.extend_from_slice(&1u32.to_le_bytes());
-    p.extend_from_slice(&1u32.to_le_bytes());
-    // lines: 0
-    p.extend_from_slice(&0u32.to_le_bytes());
-    // region_rows: 0
-    p.extend_from_slice(&0u32.to_le_bytes());
-    // children: 0 or 1.
-    if remaining_children == 0 {
-        p.extend_from_slice(&0u32.to_le_bytes());
-    } else {
-        p.extend_from_slice(&1u32.to_le_bytes());
-        write_chain_function(p, remaining_children - 1);
-    }
 }
 
 /// `RESERVED_U32` is still an exported sentinel and shows up in

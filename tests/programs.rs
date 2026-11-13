@@ -1107,7 +1107,7 @@ impl Sandbox {
         b.stage = Stage::B;
         b.sections.push(Section {
             id: "bytecode".to_string(),
-            version: 1,
+            version: bc::FORMAT_VERSION,
             encoding: Encoding::Stored,
             required: true,
             bytes,
@@ -1738,7 +1738,7 @@ impl Sandbox {
         b.stage = Stage::B;
         b.sections.push(Section {
             id: "bytecode".to_string(),
-            version: 1,
+            version: bc::FORMAT_VERSION,
             encoding: Encoding::Stored,
             required: true,
             bytes: bc::serialize_module(m),

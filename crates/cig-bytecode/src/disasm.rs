@@ -29,6 +29,49 @@ pub fn disassemble_module(m: &Module) -> String {
     out
 }
 
+/// The layout of a module's bytes (layout 2, `docs/BYTECODE.md`): where
+/// each region lies and, for each function in directory order (its
+/// `fn<i>`), its parent, its body's offset and length, and its line rows'
+/// bytes. The bytes are parsed first, so only a module that reads is
+/// described.
+pub fn describe_layout(bytes: &[u8]) -> Result<String, crate::ParseError> {
+    crate::parse_module(bytes)?;
+    // Parsed: every offset below lies inside `bytes`.
+    let w =
+        |at: usize| u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]]);
+    let n = w(40) as usize;
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "; layout {}: {} bytes; header 40, head 32, directory {} ({} functions), bodies {}, string pool {}, line region {}",
+        crate::FORMAT_VERSION,
+        bytes.len(),
+        n * crate::serialize::ENTRY_LEN,
+        n,
+        w(56) - w(52),
+        w(60),
+        w(68),
+    );
+    for i in 0..n {
+        let e = crate::serialize::DIRECTORY_AT + i * crate::serialize::ENTRY_LEN;
+        let parent = match w(e + 8) {
+            crate::RESERVED_U32 => "-".to_string(),
+            p => format!("fn{p}"),
+        };
+        let _ = writeln!(
+            out,
+            "fn{i}: parent {parent}, body {:#x} +{}, {} words, {} children, line rows +{} ({} bytes)",
+            w(e + 20),
+            w(e + 24),
+            w(e + 28),
+            w(e + 52),
+            w(e + 56),
+            w(e + 60),
+        );
+    }
+    Ok(out)
+}
+
 fn disasm_function(out: &mut String, f: &Function, depth: usize, counter: &mut u32) {
     let idx = *counter;
     *counter += 1;

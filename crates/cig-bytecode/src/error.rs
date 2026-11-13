@@ -84,6 +84,47 @@ pub enum ParseError {
         /// The byte offset where the trailing data starts.
         offset: usize,
     },
+    /// An offset or a length is not where the layout puts it: a region of
+    /// the head, a function's body or its line rows. Layout 2 has one
+    /// place for every part, so the parser checks each against it.
+    BadOffset {
+        /// Which offset or length.
+        at: &'static str,
+        /// The function whose directory entry holds it, or
+        /// [`crate::RESERVED_U32`] for the head.
+        function: u32,
+        /// The value the file holds.
+        found: u64,
+        /// The value the layout gives.
+        expected: u64,
+    },
+    /// A byte the layout reserves (padding, or a reserved field) is not
+    /// zero.
+    BadPadding {
+        /// Which padding.
+        at: &'static str,
+        /// Its offset in the module.
+        offset: usize,
+    },
+    /// A line row's varint is longer than five bytes, not in its shortest
+    /// form, or decodes to a value outside `u32`.
+    BadVarint {
+        /// The function whose line rows hold it.
+        function: u32,
+        /// Its offset in the module.
+        offset: usize,
+    },
+    /// The directory does not describe a tree in pre-order: a parent that
+    /// is not an earlier function on the path to the function before, or a
+    /// child list that is not exactly the functions naming this one as
+    /// their parent, in order.
+    BadTree {
+        /// The function whose entry is wrong.
+        function: u32,
+        /// Which rule: `parent`, `pre-order`, `child`, `child order`,
+        /// `child count`.
+        at: &'static str,
+    },
     /// The nesting of child functions exceeded this reader's maximum
     /// depth. Catches a denial-of-service through recursion.
     TooDeep {
@@ -138,6 +179,35 @@ impl fmt::Display for ParseError {
                     "bytecode has trailing bytes after the last section (offset {offset})"
                 )
             }
+            ParseError::BadOffset {
+                at,
+                function,
+                found,
+                expected,
+            } => {
+                if *function == crate::RESERVED_U32 {
+                    write!(
+                        f,
+                        "bytecode `{at}` is {found}, and the layout puts it at {expected}"
+                    )
+                } else {
+                    write!(
+                        f,
+                        "bytecode `{at}` of fn{function} is {found}, and the layout puts it at {expected}"
+                    )
+                }
+            }
+            ParseError::BadPadding { at, offset } => {
+                write!(f, "bytecode {at} at offset {offset} is not zero")
+            }
+            ParseError::BadVarint { function, offset } => write!(
+                f,
+                "bytecode line rows of fn{function} hold a bad varint at offset {offset}"
+            ),
+            ParseError::BadTree { function, at } => write!(
+                f,
+                "bytecode directory is not a tree in pre-order: `{at}` of fn{function}"
+            ),
             ParseError::TooDeep { depth, max } => {
                 write!(
                     f,

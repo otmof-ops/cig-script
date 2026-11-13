@@ -5,6 +5,29 @@ project follows semantic versioning.
 
 ## Unreleased
 
+- **The bytecode module's layout 2: a directory of functions, read in
+  place** (cig-compile#31, cig-compile#71; `docs/BYTECODE.md`, "File
+  layout"). `FORMAT_VERSION` is 2. A module is now a head, a directory with
+  one 80-byte entry per function in pre-order (its parent, its children,
+  its counts, where its body and line rows are), the bodies with
+  fixed-width tables and 4-aligned code words that are read where they
+  lie, one string pool for every name and string constant, and the line
+  rows in a trailing region as delta-coded varints that a start does not
+  need. On cigo's module this takes 2,683,051 bytes to 1,587,575 (from
+  2.9 to 1.7 times the script's size; the line rows from 1,578,456 bytes
+  to 416,618), and parsing it takes about two thirds of the time. The
+  parser checks every offset, length, count, padding byte and the tree
+  against the one place the layout gives it, each refused by name
+  (`BadOffset`, `BadPadding`, `BadVarint`, `BadTree`, and the earlier
+  kinds), and builds the module without recursion; the parsed module
+  keeps its shape, so the verifier and the VM are unchanged. A version 1
+  module is refused (no release carried it). The format is not final
+  until a release carries it. `disasm::describe_layout` prints a
+  module's regions and directory. New tests in
+  `crates/cig-bytecode/tests/layout.rs` (damage to the directory, the
+  tree, the pool, the line region and the padding, each refused by the
+  hash and, rehashed, by name; random and mutated bytes never panic).
+
 - **The bytecode VM is about twice as fast as it was** (cig-compile#31 step 9,
   #230's steps 1 to 6 in part). Over the 25 programs of `bench/compute`, run in
   process against the tree-walker, the median moved from 0.37 to about 0.7 times

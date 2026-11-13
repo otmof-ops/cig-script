@@ -4,14 +4,16 @@
 //! The in-memory representation of a bytecode module.
 //!
 //! The byte-level layout of a module on disk is in
-//! `docs/BYTECODE.md`. The structs here mirror that layout one-to-one.
+//! `docs/BYTECODE.md` (layout 2: a directory of functions in pre-order,
+//! their bodies, one string pool and the line region). The structs here
+//! hold what that layout holds, as a tree: a function's children are
+//! nested in it, in the order of its children table.
 //!
 //! Each function is **self-contained**: its own constant pool, its own
 //! list of child functions (a `CLOSURE A, Bx` names a child by its
 //! index in the parent), its own burn-region table, its own line table
-//! relative to its [`SpanBase`]. The function's bytes do not depend on
-//! what sits around it in the module, so the per-function build cache
-//! stays warm across edits to a sibling.
+//! relative to its [`SpanBase`]. No operand index crosses a function, so
+//! a function's code and tables do not change when a sibling is edited.
 
 use crate::instr::Instr;
 
@@ -21,7 +23,7 @@ pub const MAGIC: [u8; 4] = *b"CIGB";
 /// The current format version. See `docs/BYTECODE.md` for the rule: a
 /// later reader opens an earlier module, an earlier reader refuses a
 /// later one.
-pub const FORMAT_VERSION: u16 = 1;
+pub const FORMAT_VERSION: u16 = 2;
 
 /// A sentinel value used where an optional `u32` is absent.
 pub const RESERVED_U32: u32 = u32::MAX;
