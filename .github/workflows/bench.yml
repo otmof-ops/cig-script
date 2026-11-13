@@ -279,6 +279,12 @@ jobs:
                          | { key: .name, value: { group: .group, median_ms: .outcome.median_ms,
                              p10_ms: .outcome.p10_ms, p90_ms: .outcome.p90_ms, cv: .outcome.cv,
                              rss_bytes: .outcome.rss_bytes } } ] | from_entries ) }' bench-run.json > bench-line.json
+          # A run that timed no case (the product was not built, so nothing
+          # could start) has nothing to compare: it writes no line either.
+          if [ "$(jq '.cases | length' bench-line.json)" = 0 ]; then
+            echo "cig bench timed no case (exit ${status}); no history line is written"
+            exit 0
+          fi
           echo "PRODUCT=$product" >> "$GITHUB_ENV"
           # One file per series (the nightly matrix: ext4, btrfs, xfs, apfs, ntfs).
           echo "HISTORY_FILE=${product}${SERIES:+.$SERIES}.jsonl" >> "$GITHUB_ENV"
@@ -325,4 +331,4 @@ jobs:
         if: steps.mode.outputs.mode == 'nightly'
         run: |
           [ "${status:-0}" = 0 ] || { echo "cig bench exited ${status}"; exit 1; }
-          [ -n "${PRODUCT:-}" ] || { echo "cig bench gave no result, so nothing was recorded"; exit 1; }
+          [ -n "${PRODUCT:-}" ] || { echo "cig bench gave no result or timed no case, so nothing was recorded"; exit 1; }
