@@ -5,9 +5,22 @@ project follows semantic versioning.
 
 ## Unreleased
 
+- **A stage `b` start checks its bytecode once, by the module's own
+  hash** (cig-compile#31; cig-compile's decision 0004, section 5). The run no longer
+  hashes the whole `bytecode` section with the table's sha256 before
+  `parse_module` hashes the same bytes with BLAKE3: on a 2.7 MB module
+  that second hash was the largest single cost of a start. The module's
+  header flags must now be zero (`bytecode header flags ... are not
+  zero`, `E1050`); they were the only bytes of the section nothing
+  checked. `CIG_VALIDATE=1` and `cigcompile verify` still check the
+  table's sha256. New tests:
+  `a_stage_b_start_checks_its_bytecode_by_the_modules_own_hash`,
+  `every_changed_byte_of_a_module_is_refused_by_the_parser`,
+  `a_header_flag_is_refused`.
+
 - **A stage `b` program runs its bytecode on the VM** (cig-compile#31,
   step 4 of cig-compile's decision 0004). Its run reads the `bytecode`
-  section (sha256 against the table), parses, verifies and loads the
+  section, parses (the module's own BLAKE3), verifies and loads the
   module, and runs it through the same run as `cig run`: kernel, record,
   journal, plan, rollback, step budget, arguments, output and exit codes.
   A body, module, verifier or loader failure is `E1050` with the rule and

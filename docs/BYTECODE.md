@@ -20,14 +20,19 @@ little-endian.
 |--------|------|-------|-------|
 | 0 | 4 | magic | ASCII `CIGB` |
 | 4 | 2 | format version | `1` in this revision |
-| 6 | 2 | flags | reserved; `0` in this revision |
+| 6 | 2 | flags | none defined; `0` in this revision |
 | 8 | 32 | integrity hash | BLAKE3-256 of the payload |
 
 A file whose magic is not `CIGB` is refused as not a bytecode module
 (`ParseError::BadMagic`). A file whose version is higher than the
-reader's is refused (`ParseError::BadVersion`). A file whose integrity
-hash does not match the hash of its payload is refused
-(`ParseError::BadIntegrity`).
+reader's is refused (`ParseError::BadVersion`). A file whose flags are
+not zero is refused (`ParseError::BadFlags`): no flag is defined, so a
+set one is never ignored. A file whose integrity hash does not match
+the hash of its payload is refused (`ParseError::BadIntegrity`).
+Together these leave no byte of a module unchecked: the magic, the
+version and the flags are compared, and the hash covers itself and
+every byte after the header. A program's start relies on this and
+checks its `bytecode` section by this hash alone (`docs/PROGRAMS.md`).
 
 ### Payload
 

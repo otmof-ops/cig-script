@@ -131,3 +131,36 @@ fn a_bumped_format_version_is_refused() {
         "got {err:?}"
     );
 }
+
+/// No byte of a module goes unchecked by `parse_module`: the magic, the
+/// version and the flags are compared, the stored hash and every byte after
+/// the header are covered by the BLAKE3. A start relies on this to check a
+/// program's `bytecode` section without hashing it a second time.
+#[test]
+fn every_changed_byte_of_a_module_is_refused_by_the_parser() {
+    let bytes = sample_bytes();
+    for i in 0..bytes.len() {
+        for bit in 0..8 {
+            let mut copy = bytes.clone();
+            copy[i] ^= 1 << bit;
+            let err = parse_module(&copy).expect_err("a changed byte must not parse");
+            let want = match i {
+                0..=3 => matches!(err, cig_bytecode::ParseError::BadMagic),
+                4..=5 => matches!(err, cig_bytecode::ParseError::BadVersion { .. }),
+                6..=7 => matches!(err, cig_bytecode::ParseError::BadFlags { .. }),
+                _ => matches!(err, cig_bytecode::ParseError::BadIntegrity),
+            };
+            assert!(want, "byte {i} bit {bit}: {err:?}");
+        }
+    }
+}
+
+#[test]
+fn a_header_flag_is_refused() {
+    let mut bytes = sample_bytes();
+    bytes[7] = 0x80;
+    assert_eq!(
+        parse_module(&bytes).unwrap_err(),
+        cig_bytecode::ParseError::BadFlags { flags: 0x8000 }
+    );
+}

@@ -1236,14 +1236,15 @@ fn a_program_with_damaged_bytecode_is_e1050() {
         assert!(s.runs().is_empty(), "{rule}: it began a run");
     };
 
-    // A changed byte in the body: the table's sha256.
+    // A changed byte in the body: the module's own BLAKE3 (a start does not
+    // hash the body with the table's sha256).
     let exe = s.compile_b("changed", "w.cig", good.clone());
     let mut bytes = fs::read(&exe).unwrap();
     bytes[body_at(&exe, "bytecode") + 50] ^= 0x01;
-    let exe = s.place("changed", &bytes);
+    let exe = s.place("changed-body", &bytes);
     refused(
         &exe,
-        "section `bytecode`'s bytes do not match the sha256 in the section table",
+        "the program's bytecode does not read: bytecode integrity hash does not match",
     );
 
     // A module that does not parse: its own BLAKE3, and its magic.
@@ -1287,6 +1288,121 @@ fn a_program_with_damaged_bytecode_is_e1050() {
     // `--help` names the flag.
     let help = text(&s.prog(&exe, &["--help"]).stdout);
     assert!(help.contains("--interp"), "{help}");
+}
+
+/// Where table entry `id` starts in the program `bytes`, and where the
+/// table starts: the table sits directly before the 56-byte trailer.
+fn entry_at(bytes: &[u8], id: &str) -> (usize, usize) {
+    let t = bytes.len() - 56;
+    let count = u16::from_le_bytes(bytes[t + 20..t + 22].try_into().unwrap()) as usize;
+    let table = t - 64 * count;
+    let entry = (table..t)
+        .step_by(64)
+        .find(|e| bytes[*e..][..8].starts_with(id.as_bytes()))
+        .unwrap();
+    (entry, table)
+}
+
+/// Table entry `id`'s sha256 in the program `bytes` (whose payload starts
+/// at `start`) changed, and the head's sha256 recomputed over the record and
+/// the table, so only the table's own sha256 of the body is wrong.
+fn wrong_table_sha256(bytes: &mut [u8], start: usize, id: &str) {
+    use sha2::Digest as _;
+    let t = bytes.len() - 56;
+    let record_len = u32::from_le_bytes(bytes[t + 16..t + 20].try_into().unwrap()) as usize;
+    let (entry, table) = entry_at(bytes, id);
+    bytes[entry + 40] ^= 0x01;
+    let mut h = sha2::Sha256::new();
+    h.update(&bytes[start..start + record_len]);
+    h.update(&bytes[table..t]);
+    let head: [u8; 32] = h.finalize().into();
+    bytes[t + 24..t + 56].copy_from_slice(&head);
+}
+
+/// A stage `b` start checks its `bytecode` body by the module's own header
+/// and BLAKE3, not by the table's sha256 (decision 0004, section 5): a
+/// changed byte anywhere in the body or its table entry is still `E1050`
+/// before the first instruction, and `CIG_VALIDATE=1` still checks the
+/// table's sha256.
+#[test]
+fn a_stage_b_start_checks_its_bytecode_by_the_modules_own_hash() {
+    let s = Sandbox::new();
+    s.write("w.cig", BURN_SCRIPT);
+    let good_module = bc::serialize_module(&burn_module());
+    let exe = s.compile_b("good", "w.cig", good_module.clone());
+    let good = fs::read(&exe).unwrap();
+    let at = body_at(&exe, "bytecode");
+    let start = {
+        let mut f = fs::File::open(&exe).unwrap();
+        program::read(&mut f).unwrap().unwrap().start as usize
+    };
+    let refused = |exe: &Path, what: &str, rule: &str| {
+        let out = s.prog(exe, &[]);
+        let err = text(&out.stderr);
+        assert_eq!(out.status.code(), Some(3), "{what}: {err}");
+        assert!(err.contains("E1050") && err.contains(rule), "{what}: {err}");
+        assert_eq!(text(&out.stdout), "", "{what}: it ran");
+        assert!(!s.exists("w.txt"), "{what}: it burned");
+        assert!(s.runs().is_empty(), "{what}: it began a run");
+    };
+    let read = "the program's bytecode does not read: ";
+    let last = good_module.len() - 1;
+    for (n, (what, offset, rule)) in [
+        ("magic", 0, "bytecode magic is not `CIGB`"),
+        ("version", 4, "bytecode format version"),
+        ("flags", 6, "bytecode header flags 0x0001 are not zero"),
+        ("stored hash", 8, "bytecode integrity hash does not match"),
+        (
+            "first payload byte",
+            40,
+            "bytecode integrity hash does not match",
+        ),
+        ("last byte", last, "bytecode integrity hash does not match"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut bytes = good.clone();
+        bytes[at + offset] ^= 0x01;
+        let exe = s.place(&format!("damaged-{n}"), &bytes);
+        refused(&exe, what, &format!("{read}{rule}"));
+    }
+
+    // A table entry's sha256: the head's sha256 covers the table.
+    let mut bytes = good.clone();
+    let entry = entry_at(&bytes, "bytecode").0;
+    bytes[entry + 40] ^= 0x01;
+    let exe = s.place("damaged-entry", &bytes);
+    refused(
+        &exe,
+        "table entry",
+        "the record and the section table do not match the sha256 in the trailer",
+    );
+
+    // The table's sha256 wrong and the head resealed over it: a start runs
+    // (the body is whole, and its own hash says so) ...
+    let mut bytes = good.clone();
+    wrong_table_sha256(&mut bytes, start, "bytecode");
+    let exe = s.place("wrong-table-sha256", &bytes);
+    let out = s.prog(&exe, &[]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert_eq!(text(&out.stdout), "done\n");
+    fs::remove_file(s.path().join("w.txt")).unwrap();
+    // ... and CIG_VALIDATE=1 still refuses it by the table's sha256.
+    let before = s.runs();
+    let out = output(s.command(&exe).env(program::VALIDATE_ENV, "1")).unwrap();
+    let err = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(3), "{err}");
+    assert!(
+        err.contains("E1050")
+            && err.contains(
+                "section `bytecode`'s bytes do not match the sha256 in the section table"
+            ),
+        "{err}"
+    );
+    assert_eq!(text(&out.stdout), "");
+    assert!(!s.exists("w.txt"));
+    assert_eq!(s.runs(), before, "CIG_VALIDATE=1: it began a run");
 }
 
 #[test]

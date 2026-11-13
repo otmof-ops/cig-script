@@ -994,6 +994,34 @@ impl Loaded {
 
     /// The stored bytes of section `id`, checked against the table's sha256.
     pub fn stored<F: Read + Seek>(&self, f: &mut F, id: &str) -> Result<Vec<u8>, String> {
+        self.read_stored(f, id, true)
+    }
+
+    /// Section `bytecode`'s body as a start reads it: read and decoded to
+    /// its decoded length, **without** the table's sha256. The module
+    /// carries its own BLAKE3 over every byte after its header, and
+    /// `parse_module` checks it with the header's magic, version and flags
+    /// before anything reads the module (cig-compile's decision 0004, section 5: a start
+    /// never hashes a large body with sha256). The table entry itself (where
+    /// the body lies, its length, its encoding) is covered by the head's
+    /// sha256, checked when the program was opened. `CIG_VALIDATE=1`
+    /// ([`Loaded::validate`]) and `cigcompile verify` still check the
+    /// table's sha256 of this section, as of every other.
+    pub fn bytecode<F: Read + Seek>(&self, f: &mut F) -> Result<Vec<u8>, String> {
+        let stored = self.read_stored(f, "bytecode", false)?;
+        let e = self.entry("bytecode").expect("read_stored found it");
+        match e.encoding() {
+            Some(Encoding::Deflate) => inflate(&stored, u64::from(e.decoded_len), "bytecode"),
+            _ => Ok(stored),
+        }
+    }
+
+    fn read_stored<F: Read + Seek>(
+        &self,
+        f: &mut F,
+        id: &str,
+        sha256: bool,
+    ) -> Result<Vec<u8>, String> {
         let Inner::Two(t) = &self.inner else {
             return Err(format!("a format 1 program has no section `{id}`"));
         };
@@ -1005,7 +1033,7 @@ impl Loaded {
         };
         // Checked: the body lies inside the payload, at most 64 MiB.
         let stored = read_at(f, self.start + e.offset, e.length)?;
-        if Sha256::digest(&stored)[..] != e.sha256 {
+        if sha256 && Sha256::digest(&stored)[..] != e.sha256 {
             return Err(format!(
                 "section `{id}`'s bytes do not match the sha256 in the section table"
             ));
@@ -1133,6 +1161,12 @@ impl Opened {
     /// Section `id`'s body ([`Loaded::body`]).
     pub fn body(&self, id: &str) -> Result<Vec<u8>, String> {
         self.program.body(&mut &self.file, id)
+    }
+
+    /// Section `bytecode`'s body, without the table's sha256
+    /// ([`Loaded::bytecode`]): its module's own hash covers it.
+    pub fn bytecode(&self) -> Result<Vec<u8>, String> {
+        self.program.bytecode(&mut &self.file)
     }
 }
 

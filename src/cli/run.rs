@@ -357,15 +357,19 @@ pub fn run_program(
     run_script(ctx, args, chain, script, Some(program.loaded()))
 }
 
-/// A stage `b` program's module: section `bytecode` read and checked
-/// against the table's sha256, then `parse_module` (its magic, version and
-/// BLAKE3), `verify_module` and `vm::load` (builtins, prelude names,
-/// burn-op kinds). The error names the rule, and `fn<i>+<pc>` where the
-/// verifier or the loader gives one, as `docs/BYTECODE.md` words it.
+/// A stage `b` program's module: section `bytecode` read (not hashed with
+/// the table's sha256: cig-compile's decision 0004, section 5), then
+/// `parse_module` (its
+/// magic, version, flags and the BLAKE3 over every byte after its header),
+/// `verify_module` and `vm::load` (builtins, prelude names, burn-op kinds).
+/// The head's sha256 covers the table entry that says where the body lies;
+/// the module's header and its BLAKE3 cover every byte of the body. The
+/// error names the rule, and `fn<i>+<pc>` where the verifier or the loader
+/// gives one, as `docs/BYTECODE.md` words it.
 fn load_bytecode(
     program: &crate::program::Opened,
 ) -> Result<std::rc::Rc<crate::vm::Program>, String> {
-    let body = program.body("bytecode")?;
+    let body = program.bytecode()?;
     let module = cig_bytecode::parse_module(&body)
         .map_err(|e| format!("the program's bytecode does not read: {e}"))?;
     let verified =
