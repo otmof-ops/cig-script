@@ -30,7 +30,13 @@ pub fn parse_module(bytes: &[u8]) -> Result<Module, ParseError> {
             supported: FORMAT_VERSION,
         });
     }
-    let _flags = r.read_u16("flags")?;
+    // No flag is defined: a module with any bit set is not this revision.
+    // With the magic, the version and the BLAKE3 over the payload, this
+    // check leaves no byte of the module unchecked.
+    let flags = r.read_u16("flags")?;
+    if flags != 0 {
+        return Err(ParseError::BadFlags { flags });
+    }
     let hash_bytes = r.take(32, "integrity hash")?;
     let mut claimed_hash = [0u8; 32];
     claimed_hash.copy_from_slice(hash_bytes);

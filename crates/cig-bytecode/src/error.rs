@@ -30,6 +30,12 @@ pub enum ParseError {
         /// The highest version this parser understands.
         supported: u16,
     },
+    /// The header's flags are not zero. This revision defines no flag, so
+    /// a module with one set is refused, not read with the flag ignored.
+    BadFlags {
+        /// The flags the header holds.
+        flags: u16,
+    },
     /// The BLAKE3 hash in the header does not match the hash of the
     /// payload: the file was cut short, edited, or had bytes appended.
     BadIntegrity,
@@ -98,6 +104,10 @@ impl fmt::Display for ParseError {
             ParseError::BadVersion { found, supported } => write!(
                 f,
                 "bytecode format version {found} is not supported (highest known: {supported})"
+            ),
+            ParseError::BadFlags { flags } => write!(
+                f,
+                "bytecode header flags {flags:#06x} are not zero (this revision defines none)"
             ),
             ParseError::BadIntegrity => f.write_str("bytecode integrity hash does not match"),
             ParseError::BadTag { at, value } => {
