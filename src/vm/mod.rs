@@ -155,6 +155,10 @@ pub struct Program {
 /// One function of a loaded module.
 struct Proto {
     name: String,
+    /// No register of a frame of it ever carries a cell: it has no
+    /// `cellnew`, the only instruction that gives a register one. Its
+    /// registers are read and written without looking at `cells`.
+    plain: bool,
     lambda: bool,
     reg_count: usize,
     arity: usize,
@@ -354,8 +358,10 @@ fn flatten(f: &BcFunction, out: &mut Vec<Proto>, known: &Known<'_>) -> Result<us
             *slot = Some(d);
         }
     }
+    let plain = !code.iter().flatten().any(|d| d.op == Op::CELLNEW);
     let proto = Proto {
         name: f.name.clone(),
+        plain,
         lambda: f.kind == FuncKind::Lambda,
         reg_count: f.reg_count as usize,
         arity: f.arity as usize,
@@ -778,8 +784,8 @@ impl Machine<'_> {
     /// pc is kept current after each one, which is where an error raised
     /// by the next is offered to the tries.
     fn run_frame_code(&mut self, program: &Rc<Program>) -> Result<Option<Value>, Fault> {
-        let (fi, mut pc, base) = match self.frames.last() {
-            Some(f) => (f.func, f.pc, f.base),
+        let (fi, mut pc, base, upvals) = match self.frames.last() {
+            Some(f) => (f.func, f.pc, f.base, Rc::clone(&f.upvals)),
             None => return Err(broken("an empty call stack", Span::default()).into()),
         };
         let proto = program
@@ -787,10 +793,22 @@ impl Machine<'_> {
             .get(fi)
             .ok_or_else(|| broken("no such function", Span::default()))?;
         loop {
-            let span = proto.spans.get(pc).copied().unwrap_or_default();
             let Some(Some(d)) = proto.code.get(pc) else {
+                let span = proto.spans.get(pc).copied().unwrap_or_default();
                 return Err(broken("a pc that starts no instruction", span).into());
             };
+            if proto.plain {
+                if let Some(next) = self.fast(proto, d, base, &upvals) {
+                    pc = next;
+                    continue;
+                }
+            }
+            // The general path: the frame's pc is where an error from this
+            // instruction is offered to the tries.
+            if let Some(f) = self.frames.last_mut() {
+                f.pc = pc;
+            }
+            let span = proto.spans.get(pc).copied().unwrap_or_default();
             match self.step(program, proto, d, base, span)? {
                 Flow::Next(next) => {
                     pc = next;
@@ -802,6 +820,143 @@ impl Machine<'_> {
                 Flow::Switched => return Ok(None),
             }
         }
+    }
+
+    /// The common cases of the hot instructions in a frame whose registers
+    /// carry no cell: the next pc when `d` ran here, `None` when it did not
+    /// and changed nothing, so the general path runs it from the start and
+    /// raises its error, if any, with the tree-walker's code and position.
+    #[inline(always)]
+    fn fast(
+        &mut self,
+        proto: &Proto,
+        d: &DecodedInstr,
+        base: usize,
+        upvals: &[Cell],
+    ) -> Option<usize> {
+        let pc = d.pc as usize;
+        let next = pc + d.width as usize;
+        let r = |x: u32| base.saturating_add(x as usize);
+        let v = match d.op {
+            Op::NOP => return Some(next),
+            Op::MOV => self.stack.get(r(d.b_u))?.clone(),
+            Op::LOADK => proto.consts.get(d.b_u as usize)?.clone(),
+            Op::LOADNULL => Value::Null,
+            Op::LOADBOOL => Value::Bool(d.b_u != 0),
+            Op::LOADINT => Value::Int(i64::from(d.b_s)),
+            Op::ADD | Op::SUB | Op::MUL | Op::DIV | Op::MOD | Op::EQ | Op::LT | Op::LE => {
+                let l = self.stack.get(r(d.b_u))?;
+                let rv = self.stack.get(r(d.c))?;
+                fast_binary(op_of(d.op), l, rv)?
+            }
+            Op::ADDK | Op::SUBK | Op::MULK | Op::DIVK | Op::MODK | Op::EQK | Op::LTK | Op::LEK => {
+                let l = self.stack.get(r(d.b_u))?;
+                let k = proto.consts.get(d.c as usize)?;
+                fast_binary(op_of(d.op), l, k)?
+            }
+            Op::NOT => Value::Bool(!self.stack.get(r(d.b_u))?.truthy()),
+            Op::EQJ | Op::NEJ | Op::LTJ | Op::LEJ => {
+                let op = match d.op {
+                    Op::EQJ => BinOp::Eq,
+                    Op::NEJ => BinOp::Ne,
+                    Op::LTJ => BinOp::Lt,
+                    _ => BinOp::Le,
+                };
+                let l = self.stack.get(r(d.a))?;
+                let rv = self.stack.get(r(d.b_u))?;
+                let Value::Bool(t) = fast_binary(op, l, rv)? else {
+                    return None;
+                };
+                return if t { fast_jump(pc, d.c_s) } else { Some(next) };
+            }
+            Op::JMP | Op::LOOP => return fast_jump(pc, d.b_s),
+            Op::TEST | Op::TESTN => {
+                let truthy = self.stack.get(r(d.a))?.truthy();
+                return if truthy == (d.op == Op::TEST) {
+                    fast_jump(pc, d.b_s)
+                } else {
+                    Some(next)
+                };
+            }
+            Op::STEPS => {
+                let n = u64::from(d.b_u);
+                let i = &*self.interp;
+                if i.max_steps != 0 && i.steps.saturating_add(n) > i.max_steps {
+                    return None;
+                }
+                self.set_nest(d.a);
+                self.interp.steps += n;
+                return Some(next);
+            }
+            Op::FORLOOP => {
+                let (Value::Int(cur), Value::Int(limit), Value::Int(step)) = (
+                    self.stack.get(r(d.a))?,
+                    self.stack.get(r(d.a + 1))?,
+                    self.stack.get(r(d.a + 2))?,
+                ) else {
+                    return None;
+                };
+                let (cur, limit, step) = (*cur, *limit, *step);
+                let target = fast_jump(pc, d.b_s)?;
+                if self.stack.len() <= r(d.a + 3) {
+                    return None;
+                }
+                let more =
+                    cur.checked_add(step)
+                        .filter(|n| if step > 0 { *n < limit } else { *n > limit });
+                return match more {
+                    Some(n) => {
+                        *self.stack.get_mut(r(d.a))? = Value::Int(n);
+                        *self.stack.get_mut(r(d.a + 3))? = Value::Int(n);
+                        Some(target)
+                    }
+                    None => Some(next),
+                };
+            }
+            Op::GETUP | Op::CELLGET => upvals.get(d.b_u as usize)?.try_borrow().ok()?.clone(),
+            Op::GETINDEX => {
+                let obj = self.stack.get(r(d.b_u))?;
+                let idx = self.stack.get(r(d.c))?;
+                match (obj, idx) {
+                    (Value::List(list), Value::Int(i)) => {
+                        let at = usize::try_from(*i).ok()?;
+                        list.try_borrow().ok()?.get(at)?.clone()
+                    }
+                    (Value::Map(map), Value::Str(key)) => {
+                        map.try_borrow().ok()?.get(&**key)?.clone()
+                    }
+                    _ => return None,
+                }
+            }
+            Op::GETFIELD => {
+                let Value::Map(map) = self.stack.get(r(d.b_u))? else {
+                    return None;
+                };
+                let Value::Str(name) = proto.consts.get(d.c as usize)? else {
+                    return None;
+                };
+                let v = map.try_borrow().ok()?.get(&**name)?.clone();
+                v
+            }
+            Op::SETINDEX => {
+                let (Value::List(list), Value::Int(i)) =
+                    (self.stack.get(r(d.a))?, self.stack.get(r(d.b_u))?)
+                else {
+                    return None;
+                };
+                let at = usize::try_from(*i).ok()?;
+                let v = self.stack.get(r(d.c))?.clone();
+                let mut list = list.try_borrow_mut().ok()?;
+                let slot = list.get_mut(at)?;
+                let old = std::mem::replace(slot, v);
+                drop(list);
+                drop(old);
+                return Some(next);
+            }
+            _ => return None,
+        };
+        *self.stack.get_mut(r(d.a))? = v;
+        Some(next)
     }
 
     /// Run one instruction. The groups are functions of their own, so the
@@ -1985,4 +2140,11 @@ fn operate(op: BinOp, l: Value, r: Value, span: Span) -> Result<Value, Fault> {
         Some(v) => Ok(v),
         None => binary(op, l, r, span).map_err(Into::into),
     }
+}
+
+/// A jump's target in the fast path: `None` (the general path raises the
+/// error) before the first instruction.
+#[inline(always)]
+fn fast_jump(pc: usize, offset: i32) -> Option<usize> {
+    usize::try_from((pc as i64) + 1 + i64::from(offset)).ok()
 }
