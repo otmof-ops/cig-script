@@ -92,6 +92,40 @@ impl Report {
     }
 }
 
+/// Where a `pack { }` may not be.
+#[derive(Clone, Copy)]
+pub(crate) enum PackPlace {
+    /// After another statement.
+    NotFirst,
+    /// Inside a block.
+    InBlock,
+    /// A script's second.
+    Second,
+}
+
+/// E753 for a `pack { }` in `place`: the checker's error, and the VM's for
+/// a `pack` instruction a module runs there.
+pub(crate) fn pack_misplaced(place: PackPlace, span: Span) -> Diagnostic {
+    let (message, hint) = match place {
+        PackPlace::NotFirst => (
+            "pack { } must be the first statement of the script",
+            "move it above everything else; the scope is declared before anything can burn",
+        ),
+        PackPlace::InBlock => (
+            "pack { } cannot be declared inside a block",
+            "declare it once, at the top of the script",
+        ),
+        PackPlace::Second => (
+            "a second pack { }; a script declares one scope",
+            "merge the roots into the first pack { }",
+        ),
+    };
+    Diagnostic::new(Kind::Check, message)
+        .code("E753")
+        .at(span)
+        .with_hint(hint)
+}
+
 /// Check a whole program. `extra_globals` are names the host will provide
 /// (for the REPL, everything already defined).
 pub fn check(program: &Program, extra_globals: &[String]) -> Report {
@@ -99,15 +133,7 @@ pub fn check(program: &Program, extra_globals: &[String]) -> Report {
     for (i, stmt) in program.body.iter().enumerate() {
         if let Stmt::Pack(p) = stmt {
             if i != 0 {
-                c.error_code(
-                    "E753",
-                    "pack { } must be the first statement of the script",
-                    p.span,
-                )
-                .hint = Some(
-                    "move it above everything else; the scope is declared before anything can burn"
-                        .to_string(),
-                );
+                c.errors.push(pack_misplaced(PackPlace::NotFirst, p.span));
             }
         }
     }
@@ -657,15 +683,9 @@ impl<'a> Checker<'a> {
             Stmt::Pack(p) => {
                 // Two scopes are the top level: the prelude and the script's own.
                 if self.scopes.len() + self.elided > 2 {
-                    self.error_code("E753", "pack { } cannot be declared inside a block", p.span)
-                        .hint = Some("declare it once, at the top of the script".to_string());
+                    self.errors.push(pack_misplaced(PackPlace::InBlock, p.span));
                 } else if self.pack_seen {
-                    self.error_code(
-                        "E753",
-                        "a second pack { }; a script declares one scope",
-                        p.span,
-                    )
-                    .hint = Some("merge the roots into the first pack { }".to_string());
+                    self.errors.push(pack_misplaced(PackPlace::Second, p.span));
                 }
                 self.pack_seen = true;
                 for r in &p.roots {
