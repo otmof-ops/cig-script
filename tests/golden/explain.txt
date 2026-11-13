@@ -151,6 +151,7 @@ E750-E769  folds and packs: refusals when automation is composed
   E762  a parcel could not be written or imported burn
   E763  the box could not be made, or its layer not applied burn
   E764  the ledger's chain is broken, so nothing is appended burn
+  E765  the seal key file is not a key     burn
 
 E770-E799  the box for untrusted code: its network, the watch, kept layers, the kill switch
   E771  a host outside the allow list      burn
@@ -2662,6 +2663,28 @@ E764 the ledger's chain is broken, so nothing is appended  (burn, fold family, s
      remedy: `cig runs --verify` names the line; keep a copy of the ledger, then cut the torn last line away
 
   arises in: run, unburn, runs  ·  related: E760, E709  ·  tags: kernel
+
+======== E765 ========
+E765 the seal key file is not a key  (burn, fold family, since 1.22.0)
+
+  kind of no: can't see any ciggies bro  (yours: you're pointed at the wrong place; wrong address: a path, a name, a directory not on PATH; ENOENT)
+
+  The tin's key file (seal.key in the keys folder, or the file CIG_SEAL_KEY_FILE names) is there, and what it holds is not a key: a key is 64 hex digits, with a newline after them or not. The file is empty, holds another number of characters, holds a character that is not a hex digit, or is not text. Nothing is signed, sealed, opened or verified under it, and cig makes no new key in its place: a new key opens nothing the old one sealed and verifies nothing the old one signed. The message names the file and what is wrong with its shape (its length, the place of the first character that is not a hex digit), never what it holds. cig runs --verify reports it and exits non-zero; it said ok before 1.22.0.
+
+  what to type next: cig tin key import puts back a key exported with cig tin key export; or copy the key file back from a copy you trust, then cig runs --verify
+
+  known causes, ranked; doctor checks them in this order
+  1. the key file was overwritten or emptied, by hand or by a tool that wrote to the wrong path
+     probe: path-exists (stat of the path named in the message)
+     remedy: copy the key back from a copy you trust, or cig tin key import; leave the file as it is until then, since a new key opens nothing the old one sealed
+  2. the key file was cut short by a full disk or a crash while it was being written
+     probe: path-exists (stat of the path named in the message)
+     remedy: put back the key from a copy (cig tin key export makes one); if there is none, the sealed objects and the history's signatures cannot be read again
+  3. CIG_SEAL_KEY_FILE names a file that is not a key file
+     probe: env-var (an environment variable that changes the limit involved)
+     remedy: point CIG_SEAL_KEY_FILE at the key file, or unset it to use seal.key in the keys folder
+
+  arises in: run, unburn, runs  ·  related: E764, E721, E708  ·  tags: kernel
 
 ======== E800 ========
 E800 usage error  (usage, usage family, since 1.0.0)

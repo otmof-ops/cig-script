@@ -62,6 +62,12 @@ pub fn runs(
         print_table(ctx, &rows, total);
         return exit::OK;
     }
+    if verify {
+        // Verifying never makes a key: a missing one is said to be
+        // missing. Set before anything is read, since the first call for
+        // the key in a process is the one that would make it.
+        crate::burn::seal::make_no_new_key();
+    }
     let all = match runs::list() {
         Ok(r) => r,
         Err(e) => {
@@ -267,17 +273,27 @@ fn print_table(ctx: &Ctx, all: &[RunRecord], total: Option<usize>) {
 /// is caught, a record rewritten after the fact is caught, and a stale
 /// cached view is caught. No full journal is opened by the fast path.
 ///
-/// A missing, empty or unreadable ledger, with runs that recorded heads,
-/// is a problem (not a silent `ok`): the ledger is what names a journal
-/// whose record was made to agree with it. The fast path then falls
-/// back to a deep walk, so the chains are still checked by their own
-/// `prev` links, and exits non-zero.
+/// A missing or empty ledger, with runs that recorded heads, is a problem
+/// (not a silent `ok`): the ledger is what names a journal whose record
+/// was made to agree with it. A ledger that is there and cannot be read
+/// (its key missing or not a key, the file not private) is a problem
+/// whatever the runs recorded, said with its cause (#215). Either way the
+/// fast path then falls back to a deep walk, so the chains are still
+/// checked by their own `prev` links, and exits non-zero. A signed chain
+/// the walk cannot check for want of the key is counted and said once,
+/// never passed. Verifying never makes a key: a missing one is said to be
+/// missing.
 ///
 /// With `--deep` the chain of each journal is also walked (slower; the
 /// path the `<id> --verify` call takes, for every run).
 fn verify_all(ctx: &Ctx, all: &[RunRecord], deep: bool) -> i32 {
     let ledger_presence = crate::burn::ledger::presence();
-    let ledger = crate::burn::ledger::load().ok();
+    // A load error is not "no ledger" (#215): it said `ok` for a key file
+    // holding `garbage`. Kept with its cause, and said below.
+    let (ledger, ledger_error) = match crate::burn::ledger::load() {
+        Ok(l) => (Some(l), None),
+        Err(e) => (None, Some(code_at_end(&e))),
+    };
     // Each run's last record and whether the ledger let it go, found in
     // one pass, so the check costs the ledger's length and not runs ×
     // ledger at ten thousand runs.
@@ -323,6 +339,14 @@ fn verify_all(ctx: &Ctx, all: &[RunRecord], deep: bool) -> i32 {
         ));
     }
     let mut forced_deep = deep;
+    if let Some(e) = &ledger_error {
+        problems.push(format!("the ledger was not checked: {e}"));
+        forced_deep = true;
+    }
+    // Signed journals the walk could not check for want of the key, and
+    // why the key cannot be had: said once below, not once per run.
+    let mut unchecked_chains = 0usize;
+    let mut key_cause: Option<String> = None;
     if any_head && ledger_gone {
         let where_ = crate::burn::ledger::path();
         problems.push(format!(
@@ -333,6 +357,19 @@ fn verify_all(ctx: &Ctx, all: &[RunRecord], deep: bool) -> i32 {
     }
     for r in all {
         checked += 1;
+        // A record that could not be read has no head or version to judge
+        // by; on either path it would have passed for one with nothing to
+        // check.
+        if r.status == "damaged" {
+            problems.push(format!(
+                "{}: {}",
+                r.id,
+                r.error
+                    .as_deref()
+                    .unwrap_or("the run's record cannot be read")
+            ));
+            continue;
+        }
         if forced_deep {
             // Walk the journal and compare it with the record, as the
             // `<id> --verify` path does. Reads the journal: slow at ten
@@ -343,12 +380,31 @@ fn verify_all(ctx: &Ctx, all: &[RunRecord], deep: bool) -> i32 {
                 continue;
             };
             let v = verify_run(r, &j);
-            if !v.ok {
-                problems.push(format!(
-                    "{}: {}",
-                    r.id,
-                    v.verdict.unwrap_or_else(|| "not verified".to_string())
-                ));
+            if v.chain.unverified {
+                unchecked_chains += 1;
+                if key_cause.is_none() {
+                    key_cause = v.key_error.clone();
+                }
+            }
+            // A run whose only fault is a chain left unchecked for want of
+            // the key (counted, and said once after the walk), or a ledger
+            // that was not read (the ledger's line above names why), gets
+            // no line of its own.
+            let only_unchecked = v.code.is_none()
+                && v.head_ok
+                && v.problems.is_empty()
+                && (v.chain.unverified || (v.chain_ok && ledger_error.is_some()));
+            if !v.ok && !only_unchecked {
+                let why = v.verdict.clone().unwrap_or_else(|| {
+                    if !v.chain_ok {
+                        v.chain_text.clone()
+                    } else if !v.head_ok {
+                        v.head_text.clone()
+                    } else {
+                        v.ledger_text.clone()
+                    }
+                });
+                problems.push(format!("{}: {why}", r.id));
             }
             continue;
         }
@@ -358,9 +414,16 @@ fn verify_all(ctx: &Ctx, all: &[RunRecord], deep: bool) -> i32 {
         // a journal cut short.
         let ledger_line = last_rec.get(r.id.as_str()).copied();
         let ledger_head = ledger_line.map(|line| line.head.clone());
-        let tail = crate::burn::journal::tail_head(&r.dir())
-            .ok()
-            .unwrap_or(crate::burn::journal::TailHead::NoChain);
+        // A journal that is there and cannot be read is a problem, not a
+        // journal with no chain: as one, a record and ledger that agree
+        // passed it as `ok`.
+        let tail = match crate::burn::journal::tail_head(&r.dir()) {
+            Ok(t) => t,
+            Err(e) => {
+                problems.push(format!("{}: the journal cannot be read: {e}", r.id));
+                continue;
+            }
+        };
         let tail_h: Option<&str> = match &tail {
             crate::burn::journal::TailHead::Head(h) => Some(h.as_str()),
             // These do not give a head to compare with on the fast
@@ -453,9 +516,22 @@ fn verify_all(ctx: &Ctx, all: &[RunRecord], deep: bool) -> i32 {
             }
         }
     }
+    if unchecked_chains > 0 {
+        // The ledger's line, when there is one, already says why.
+        let why = match (&ledger_error, &key_cause) {
+            (None, Some(e)) => format!(" ({})", code_at_end(e)),
+            _ => String::new(),
+        };
+        problems.push(format!(
+            "{unchecked_chains} signed journal{} not checked: a signed chain needs the tin's key, which cannot be had here{why}; the files each one names were checked by their hashes",
+            if unchecked_chains == 1 { " was" } else { "s were" }
+        ));
+    }
     let summary_tail = if forced_deep {
         if deep {
             "chains walked"
+        } else if ledger_error.is_some() {
+            "journals walked, since the ledger was not checked"
         } else {
             "chains walked, since the ledger is gone"
         }
@@ -469,7 +545,7 @@ fn verify_all(ctx: &Ctx, all: &[RunRecord], deep: bool) -> i32 {
                 "checked": checked,
                 "deep": forced_deep,
                 "problems": problems,
-                "ledger": {"broken_at": ledger_broken_at},
+                "ledger": {"broken_at": ledger_broken_at, "error": ledger_error},
                 "ok": problems.is_empty(),
             })
         );
@@ -497,6 +573,33 @@ fn verify_all(ctx: &Ctx, all: &[RunRecord], deep: bool) -> i32 {
     } else {
         exit::SCRIPT_ERROR
     }
+}
+
+/// A reason as `seal` and `ledger` give it, with a code inside it
+/// (`E765 burn: `) moved to the end as `[E765]`, the way a verify line
+/// carries its code.
+fn code_at_end(cause: &str) -> String {
+    for (i, _) in cause.match_indices(" burn: ") {
+        let Some(start) = i.checked_sub(4) else {
+            continue;
+        };
+        let Some(code) = cause.get(start..i) else {
+            continue;
+        };
+        let is_code = code.starts_with('E') && code[1..].bytes().all(|b| b.is_ascii_digit());
+        let at_word = start == 0 || !cause.as_bytes()[start - 1].is_ascii_alphanumeric();
+        if is_code && at_word {
+            return format!("{}{} [{code}]", &cause[..start], &cause[i + 7..]);
+        }
+    }
+    cause.to_string()
+}
+
+/// The code a reason starts with (`E765 burn: ...`), and the rest of it.
+fn leading_code(cause: &str) -> Option<(&str, &str)> {
+    let code = cause.get(..4)?;
+    let rest = cause.get(4..)?.strip_prefix(" burn: ")?;
+    (code.starts_with('E') && code[1..].bytes().all(|b| b.is_ascii_digit())).then_some((code, rest))
 }
 
 /// Does this version write ledger lines? The ledger was added in 1.17.0:
@@ -537,9 +640,30 @@ fn show(ctx: &Ctx, id: &str, all: &[RunRecord], verify: bool) -> i32 {
     };
     let loaded = Journal::load(&rec.dir());
     // A journal that is there but cannot be read is not a pass: --verify
-    // said nothing and exited 0 for one.
+    // said nothing and exited 0 for one. Nor is one that is gone from
+    // under a record that saved its chain's head.
     if verify {
+        if rec.status == "damaged" {
+            eprintln!(
+                "{} {}",
+                ctx.red("error:"),
+                rec.error
+                    .as_deref()
+                    .unwrap_or("the run's record cannot be read")
+            );
+            eprintln!("  = hint: the record was edited or damaged after the run; cig unburn {} restores from the journal", rec.id);
+            return exit::SCRIPT_ERROR;
+        }
         if let Err(e) = &loaded {
+            if !crate::burn::pack::journal_exists(&rec.dir()) && rec.journal_head.is_some() {
+                eprintln!(
+                    "{} the journal of {} is gone, but its record has a chain head for it",
+                    ctx.red("error[E760 burn]:"),
+                    rec.id
+                );
+                eprintln!("  = explain: cig explain E760");
+                return exit::SCRIPT_ERROR;
+            }
             if crate::burn::pack::journal_exists(&rec.dir()) {
                 eprintln!(
                     "{} the journal of {} cannot be read: {e}",
@@ -731,6 +855,20 @@ fn show(ctx: &Ctx, id: &str, all: &[RunRecord], verify: bool) -> i32 {
                 outln!("    {} {p}", ctx.red("problem"));
             }
         }
+        // The key that could not be had, with its code when it has one.
+        if let Some(e) = &v.key_error {
+            match leading_code(e) {
+                Some((code, rest)) => {
+                    eprintln!("{} {rest}", ctx.red(&format!("error[{code} burn]:")));
+                    eprintln!("  = explain: cig explain {code}");
+                }
+                None => eprintln!(
+                    "{} the chain of {} cannot be checked: the tin's key cannot be had ({e})",
+                    ctx.red("error:"),
+                    rec.id
+                ),
+            }
+        }
         // What unburn would say, with its code: --verify is the strictest
         // view, and it agrees with unburn on every refusal.
         if let (Some(code), Some(verdict)) = (&v.code, &v.verdict) {
@@ -766,6 +904,9 @@ struct Verified {
     code: Option<String>,
     /// That refusal's message, as unburn gives it.
     verdict: Option<String>,
+    /// Why the tin's key could not be had, when the chain went unchecked
+    /// for want of it.
+    key_error: Option<String>,
 }
 
 /// Walk the journal's chain, compare its head with the record, and check
@@ -830,6 +971,10 @@ fn ledger_disagrees(rec: &RunRecord, journal: &Journal) -> Option<String> {
     ledger_check(rec, journal).0
 }
 
+/// How `ledger_check` starts its text when the ledger could not be read:
+/// no verdict on the run for unburn, and not a pass for `--verify` (#215).
+const LEDGER_UNREAD: &str = "not checked: the ledger cannot be read here";
+
 /// The ledger's view of this run's journal: `Some(reason)` when it was cut
 /// short or swapped for an older copy (E709), and what `--verify` says.
 fn ledger_check(rec: &RunRecord, journal: &Journal) -> (Option<String>, String) {
@@ -862,11 +1007,9 @@ fn ledger_check(rec: &RunRecord, journal: &Journal) -> (Option<String>, String) 
             "not consulted: the journal already disagrees with its own record (above)".to_string(),
         );
     }
-    let Ok(ledger) = crate::burn::ledger::load() else {
-        return (
-            None,
-            "not checked: the ledger cannot be read here".to_string(),
-        );
+    let ledger = match crate::burn::ledger::load() {
+        Ok(l) => l,
+        Err(e) => return (None, format!("{LEDGER_UNREAD} ({})", code_at_end(&e))),
     };
     if ledger.broken_at.is_some() {
         return (
@@ -971,9 +1114,10 @@ fn verify_run(rec: &RunRecord, journal: &Journal) -> Verified {
             "signed by another key (another machine's, or one since replaced): not checked here; cig unburn --accept-unsigned restores from it by its hashes".to_string(),
         )
     } else if chain.unverified {
+        // Not a pass (#215): the chain was not checked at all.
         (
-            true,
-            "not checked: the journal is signed and the tin's key is not available here; its files are checked by their hashes".to_string(),
+            false,
+            "not checked: the journal is signed and the tin's key cannot be had here (below); its files are checked by their hashes".to_string(),
         )
     } else if let Some(b) = &chain.broken_at {
         (false, format!("BROKEN at line {}: {}", b.line, b.reason))
@@ -1033,7 +1177,7 @@ fn verify_run(rec: &RunRecord, journal: &Journal) -> Verified {
         ),
     };
     let (ledger_says, ledger_text) = ledger_check(rec, journal);
-    let ledger_ok = ledger_says.is_none();
+    let ledger_ok = ledger_says.is_none() && !ledger_text.starts_with(LEDGER_UNREAD);
     let ledger_text = ledger_says.clone().unwrap_or(ledger_text);
     let problems = journal.verify();
     // The verdict, in unburn's order and with its words.
@@ -1069,6 +1213,11 @@ fn verify_run(rec: &RunRecord, journal: &Journal) -> Verified {
         (None, None)
     };
     let ok = code.is_none() && chain_ok && head_ok && ledger_ok;
+    let key_error = if chain.unverified {
+        crate::burn::seal::key().err()
+    } else {
+        None
+    };
     Verified {
         chain,
         chain_ok,
@@ -1083,6 +1232,7 @@ fn verify_run(rec: &RunRecord, journal: &Journal) -> Verified {
         ok,
         code: code.map(str::to_string),
         verdict,
+        key_error,
     }
 }
 

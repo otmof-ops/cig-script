@@ -129,15 +129,18 @@ impl Loaded {
 /// the keeper swapped but the resign is still to run). The stashes are
 /// honoured only when they prove the primary (SEC-004 H2).
 fn candidate_keys() -> Vec<super::seal::Key> {
-    let mut keys = Vec::new();
-    let Ok((master, _)) = super::seal::key() else {
-        return keys;
-    };
-    keys.push(super::seal::derive(&master, super::seal::LABEL_LEDGER_MAC));
+    candidate_keys_or_why().unwrap_or_default()
+}
+
+/// The candidate subkeys, or why the key could not be had (missing, not a
+/// key, not private, the keyring silent), for the callers that must say so.
+fn candidate_keys_or_why() -> Result<Vec<super::seal::Key>, String> {
+    let (master, _) = super::seal::key()?;
+    let mut keys = vec![super::seal::derive(&master, super::seal::LABEL_LEDGER_MAC)];
     for sk in super::seal::secondary_keys(&master) {
         keys.push(super::seal::derive(&sk, super::seal::LABEL_LEDGER_MAC));
     }
-    keys
+    Ok(keys)
 }
 
 fn mac_hex(key: &super::seal::Key, prev: &str, body: &[u8]) -> String {
@@ -199,14 +202,11 @@ pub fn load() -> Result<Loaded, String> {
 
 /// Verify a ledger's text (the file on disk, or a copy of it that came in
 /// a tin parcel) against the tin's keys, as `load` does for the file in
-/// place. The key unavailable is an error: nothing can be verified without it.
+/// place. The key unavailable is an error, with the reason `seal::key`
+/// gives (missing, not a key, not private): nothing can be verified
+/// without it.
 pub fn verify_text(text: &str) -> Result<Loaded, String> {
-    let keys = candidate_keys();
-    if keys.is_empty() {
-        return Err(
-            "the tin's key is not available; the ledger cannot be verified without it".to_string(),
-        );
-    }
+    let keys = candidate_keys_or_why().map_err(|e| format!("the tin's key cannot be had: {e}"))?;
     let mut best: Option<Loaded> = None;
     for k in &keys {
         let mut out = Loaded {
