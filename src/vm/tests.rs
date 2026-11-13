@@ -5108,3 +5108,31 @@ fn an_unlit_burn_runs_in_a_one_register_frame() {
     f.region_rows = lexical_rows(&f.instrs);
     assert_eq!(ok(&module(f)), "null");
 }
+
+/// `CIG_VM_STATS` is read only by a `bench-stats` build: a default build
+/// writes nothing for it.
+#[cfg(not(feature = "bench-stats"))]
+#[test]
+fn vm_stats_need_the_bench_stats_build() {
+    #[derive(Clone, Default)]
+    struct Kept(Rc<RefCell<Vec<u8>>>);
+    impl std::io::Write for Kept {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.borrow_mut().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    std::env::set_var("CIG_VM_STATS", "1");
+    let err = Kept::default();
+    let mut i = interp();
+    i.err = Box::new(err.clone());
+    let m = module(main_fn(1, vec![Instr::asbx(Op::LOADINT, 0, 7), ret(0)]));
+    run_script(&mut i, &program(&m)).expect("runs");
+    assert!(
+        err.0.borrow().is_empty(),
+        "a default build ignores CIG_VM_STATS"
+    );
+}

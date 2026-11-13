@@ -94,6 +94,84 @@ use std::rc::Rc;
 #[cfg(test)]
 mod tests;
 
+/// `CIG_VM_STATS=1`: instructions executed and time by opcode, written to
+/// the run's error stream when a script ends. Built only with the
+/// `bench-stats` feature, which a release never has: without it the VM does
+/// not read the variable at all.
+#[cfg(feature = "bench-stats")]
+mod stats {
+    use super::{Interp, Op};
+    use std::cell::RefCell;
+    use std::time::Instant;
+
+    struct Table {
+        count: Vec<u64>,
+        nanos: Vec<u128>,
+    }
+
+    thread_local! {
+        static TABLE: RefCell<Option<Table>> = const { RefCell::new(None) };
+    }
+
+    fn on() -> bool {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ON.get_or_init(|| std::env::var("CIG_VM_STATS").is_ok_and(|v| v == "1"))
+    }
+
+    /// The start of one instruction, when the counter is on.
+    #[inline(always)]
+    pub(super) fn start(op: Op) -> Option<(u8, Instant)> {
+        on().then(|| (op.as_byte(), Instant::now()))
+    }
+
+    /// The end of the instruction `start` began.
+    #[inline(always)]
+    pub(super) fn stop(timer: Option<(u8, Instant)>) {
+        let Some((op, t0)) = timer else { return };
+        let ns = t0.elapsed().as_nanos();
+        TABLE.with(|t| {
+            let mut t = t.borrow_mut();
+            let t = t.get_or_insert_with(|| Table {
+                count: vec![0; 256],
+                nanos: vec![0; 256],
+            });
+            if let (Some(c), Some(n)) = (t.count.get_mut(op as usize), t.nanos.get_mut(op as usize))
+            {
+                *c += 1;
+                *n += ns;
+            }
+        });
+    }
+
+    /// Write the table to the run's error stream and start a new one.
+    pub(super) fn report(interp: &mut Interp) {
+        use std::io::Write as _;
+        let Some(t) = TABLE.with(|t| t.borrow_mut().take()) else {
+            return;
+        };
+        let total: u64 = t.count.iter().sum();
+        let mut rows: Vec<(u8, u64, u128)> = (0..=255u8)
+            .filter_map(|b| {
+                let c = t.count.get(b as usize).copied().unwrap_or(0);
+                (c > 0).then(|| (b, c, t.nanos.get(b as usize).copied().unwrap_or(0)))
+            })
+            .collect();
+        rows.sort_by_key(|r| std::cmp::Reverse(r.2));
+        let mut out = format!("vm stats: {total} instructions\n");
+        out.push_str("  opcode       executed        share   total ms   ns/op\n");
+        for (b, c, ns) in rows {
+            let name = Op::from_byte(b).map_or("?", Op::mnemonic);
+            out.push_str(&format!(
+                "  {name:<10} {c:>12} {:>11.1}% {:>10.2} {:>7.1}\n",
+                c as f64 * 100.0 / total.max(1) as f64,
+                ns as f64 / 1e6,
+                ns as f64 / c as f64
+            ));
+        }
+        let _ = interp.err.write_all(out.as_bytes());
+    }
+}
+
 /// The burn-op kinds a `burn.op` may name, by index. The VM refuses a
 /// module whose `burn.op` names a kind past the end, or a callee that is
 /// not a builtin of that kind ([`burn_op_kind`]), with E1050. Kinds are
@@ -449,6 +527,8 @@ pub fn run(interp: &mut Interp, program: &Rc<Program>) -> Result<Value, Diagnost
 pub fn run_script(interp: &mut Interp, program: &Rc<Program>) -> Result<(), Diagnostic> {
     use std::io::Write as _;
     let result = run(interp, program);
+    #[cfg(feature = "bench-stats")]
+    stats::report(interp);
     interp.out.flush().ok();
     match result {
         Ok(Value::Map(names)) => {
@@ -797,8 +877,12 @@ impl Machine<'_> {
                 let span = proto.spans.get(pc).copied().unwrap_or_default();
                 return Err(broken("a pc that starts no instruction", span).into());
             };
+            #[cfg(feature = "bench-stats")]
+            let timer = stats::start(d.op);
             if proto.plain {
                 if let Some(next) = self.fast(proto, d, base, &upvals) {
+                    #[cfg(feature = "bench-stats")]
+                    stats::stop(timer);
                     pc = next;
                     continue;
                 }
@@ -809,7 +893,10 @@ impl Machine<'_> {
                 f.pc = pc;
             }
             let span = proto.spans.get(pc).copied().unwrap_or_default();
-            match self.step(program, proto, d, base, span)? {
+            let flow = self.step(program, proto, d, base, span);
+            #[cfg(feature = "bench-stats")]
+            stats::stop(timer);
+            match flow? {
                 Flow::Next(next) => {
                     pc = next;
                     if let Some(f) = self.frames.last_mut() {
