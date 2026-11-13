@@ -1158,7 +1158,10 @@ impl Sandbox {
             }
         }
         // A snapshot is kept in the tin under a name of its own each run.
-        let tin = regex::Regex::new(r#""[^"]*/tin/packs/[^"]*""#).unwrap();
+        // The path's separators are the platform's; in JSON a backslash
+        // is written twice.
+        let tin =
+            regex::Regex::new(r#""[^"]*(?:/|\\\\)tin(?:/|\\\\)packs(?:/|\\\\)[^"]*""#).unwrap();
         let journal = tin
             .replace_all(&journal.to_string(), "\"<snapshot>\"")
             .to_string();
