@@ -429,6 +429,33 @@ pub fn run(interp: &mut Interp, program: &Rc<Program>) -> Result<Value, Diagnost
     run_function(interp, program, 0, Vec::new())
 }
 
+/// Run a loaded module as a script, as [`Interp::run_program`] runs a
+/// syntax tree: the run's output flushed, and an `exit()` a normal end.
+///
+/// The top level's names: a `chain` statement of the top level is declared
+/// in the interpreter's globals when it runs (`chain.make` with C = 1), and
+/// the top level ends by returning a map of every name it declares, which
+/// is declared there too (names already there keep their value). After
+/// the run the globals hold what the tree-walker's hold, so `--light`
+/// answers the same at either stage. A top level that returns anything
+/// else declares nothing.
+pub fn run_script(interp: &mut Interp, program: &Rc<Program>) -> Result<(), Diagnostic> {
+    use std::io::Write as _;
+    let result = run(interp, program);
+    interp.out.flush().ok();
+    match result {
+        Ok(Value::Map(names)) => {
+            for (name, value) in names.borrow().iter() {
+                interp.globals.declare(name, value.clone(), false);
+            }
+            Ok(())
+        }
+        Ok(_) => Ok(()),
+        Err(_) if interp.exit_requested.is_some() => Ok(()),
+        Err(d) => Err(d),
+    }
+}
+
 /// Run one function of a loaded module with `args` as its parameters.
 pub(crate) fn run_function(
     interp: &mut Interp,
@@ -1683,7 +1710,30 @@ impl Machine<'_> {
                     };
                     steps.push(chain_step(chain, n, label, value, s)?);
                 }
-                self.set(base, d.a, make_chain(chain, steps), span)?;
+                let made = make_chain(chain, steps);
+                // C = 1: a `chain` statement of the script's top level,
+                // declared in the interpreter's globals as the
+                // tree-walker declares it, so `--light` finds it there.
+                match d.c {
+                    0 => {}
+                    1 if matches!(self.frames.as_slice(), [f] if f.func == 0) => {
+                        if !self.interp.globals.declare(chain, made.clone(), false) {
+                            return Err(crate::diagnostics::check(format!(
+                                "`{chain}` is already declared in this scope"
+                            ))
+                            .code("E306")
+                            .at(span));
+                        }
+                    }
+                    _ => {
+                        return Err(misuse(
+                            d.op,
+                            "marks a top-level chain outside the top level",
+                            span,
+                        ))
+                    }
+                }
+                self.set(base, d.a, made, span)?;
             }
 
             _ => return Err(broken("an instruction sent to the wrong group", span)),

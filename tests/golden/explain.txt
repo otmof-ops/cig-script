@@ -3653,9 +3653,12 @@ E1050 a damaged program  (usage, build family, since 1.15.0)
   5. the section table does not read (format 2): an id that is not lower-case ASCII or is repeated or out of order, a body outside the space between the record and the table, overlapping another, off its 16-byte alignment or with padding that is not zero, an encoding or flag bit this cig does not know, or a size over 64 MiB
      probe: none; a suggestion, not a finding
      remedy: compile it again with the cigcompile for this cig
-  6. the program needs a section this cig does not read, or the section its stage runs is missing; a stage `b` program (bytecode) is refused by a cig that does not run stage `b` yet
+  6. the program needs a section this cig does not read, or the section its stage runs is missing
      probe: none; a suggestion, not a finding
      remedy: compile it again with the cigcompile for this cig
+  7. a stage `b` program's module does not read (its magic, format version or BLAKE3 hash), or this cig's VM refuses it at load: a builtin, a prelude name or a burn-op kind this cig does not have (`unknown-builtin`, `unknown-prelude-name`, `unknown-burn-op` at `fn<i>+<pc>`). Nothing runs: the program's script is run only with --interp
+     probe: none; a suggestion, not a finding
+     remedy: compile it again with the cigcompile for this cig; --interp runs its script on the tree-walker meanwhile
 
   arises in: run  ·  related: E1051
 

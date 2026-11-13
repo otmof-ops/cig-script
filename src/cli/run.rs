@@ -81,6 +81,22 @@ pub fn read_source(ctx: &Ctx, file: &Path) -> Result<String, i32> {
 /// point: doctor's automatic diagnosis fires here, after the diagnostic,
 /// unless `--no-doctor` or `CIG_DOCTOR=0` switched it off.
 pub fn report(ctx: &Ctx, diag: &Diagnostic, file: Option<&str>, source: Option<&str>) {
+    report_inner(ctx, diag, file, source, None);
+}
+
+/// [`report`] without the quoted line, and a note that says why: a
+/// `note` field in JSON, a `= note:` line after the diagnostic otherwise.
+fn report_noted(ctx: &Ctx, diag: &Diagnostic, file: Option<&str>, note: &str) {
+    report_inner(ctx, diag, file, None, Some(note));
+}
+
+fn report_inner(
+    ctx: &Ctx,
+    diag: &Diagnostic,
+    file: Option<&str>,
+    source: Option<&str>,
+    note: Option<&str>,
+) {
     let diagnosis = if ctx.doctor {
         crate::doctor::diagnose(diag, &crate::doctor::Context::here(source))
     } else {
@@ -94,6 +110,9 @@ pub fn report(ctx: &Ctx, diag: &Diagnostic, file: Option<&str>, source: Option<&
         if let Some(dx) = &diagnosis {
             obj["diagnosis"] = serde_json::to_value(dx).unwrap_or_default();
         }
+        if let Some(n) = note {
+            obj["note"] = serde_json::Value::String(n.to_string());
+        }
         outln!("{}", serde_json::to_string(&obj).unwrap_or_default());
         return;
     }
@@ -101,6 +120,9 @@ pub fn report(ctx: &Ctx, diag: &Diagnostic, file: Option<&str>, source: Option<&
         eprintln!("{}", ctx.red(NO_CIGARETTES));
     }
     eprint!("{}", diag.render(file, source));
+    if let Some(n) = note {
+        eprintln!("  = note: {n}");
+    }
     if let Some(dx) = &diagnosis {
         eprint!("{}", super::doctor::render_diagnosis(ctx, dx));
     }
@@ -270,24 +292,85 @@ pub fn run(ctx: &Ctx, args: super::RunArgs, chain: Option<String>) -> i32 {
     run_source(ctx, args, chain, source, None)
 }
 
+/// Which engine a compiled program's run uses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Engine {
+    /// The script, from the program's `source` section (format 1's
+    /// record), on the tree-walker: stage `a`, or `--interp`.
+    Source,
+    /// The module, from the program's `bytecode` section, on the VM:
+    /// stage `b` without `--interp`.
+    Bytecode,
+}
+
+/// What a run runs: a script's text, or a stage `b` program's loaded
+/// module with the program it came from, for the text a diagnostic
+/// quotes and `--light`'s list of chains.
+enum Script<'a> {
+    Text(String),
+    Module {
+        module: std::rc::Rc<crate::vm::Program>,
+        program: &'a crate::program::Opened,
+    },
+}
+
+impl Script<'_> {
+    /// The script's text. A stage `b` program reads its `source` section
+    /// the first time this is asked for, and checks it against its table
+    /// and its record.
+    fn text(&self) -> Result<&str, String> {
+        match self {
+            Script::Text(s) => Ok(s),
+            Script::Module { program, .. } => program.source(),
+        }
+    }
+}
+
 /// A compiled program's run (see [`crate::program`]): the script from the
 /// program's own binary, `args.file` the path it was compiled from, so an
 /// error points where `cig run` would. The same run in everything else;
-/// no pin (the program is its cig), and its record names the program. The
-/// script is read here, through [`crate::program::Opened::source`]: a
-/// format 2 program's `source` section, checked against its table and its
-/// record, or a damaged program (E1050).
+/// no pin (the program is its cig), and its record names the program.
+///
+/// [`Engine::Source`] reads the script through
+/// [`crate::program::Opened::source`]: a format 2 program's `source`
+/// section, checked against its table and its record, or a damaged program
+/// (E1050). [`Engine::Bytecode`] reads the `bytecode` section and loads it
+/// ([`load_bytecode`]); any failure there is E1050 and nothing runs: the
+/// script is never run in its place.
 pub fn run_program(
     ctx: &Ctx,
     args: super::RunArgs,
     program: &crate::program::Opened,
     chain: Option<String>,
+    engine: Engine,
 ) -> i32 {
-    let source = match program.source() {
-        Ok(s) => s.to_string(),
-        Err(e) => return super::compiled::damaged(ctx, &e),
+    let script = match engine {
+        Engine::Source => match program.source() {
+            Ok(s) => Script::Text(s.to_string()),
+            Err(e) => return super::compiled::damaged(ctx, &e),
+        },
+        Engine::Bytecode => match load_bytecode(program) {
+            Ok(module) => Script::Module { module, program },
+            Err(e) => return super::compiled::damaged(ctx, &e),
+        },
     };
-    run_source(ctx, args, chain, source, Some(program.loaded()))
+    run_script(ctx, args, chain, script, Some(program.loaded()))
+}
+
+/// A stage `b` program's module: section `bytecode` read and checked
+/// against the table's sha256, then `parse_module` (its magic, version and
+/// BLAKE3), `verify_module` and `vm::load` (builtins, prelude names,
+/// burn-op kinds). The error names the rule, and `fn<i>+<pc>` where the
+/// verifier or the loader gives one, as `docs/BYTECODE.md` words it.
+fn load_bytecode(
+    program: &crate::program::Opened,
+) -> Result<std::rc::Rc<crate::vm::Program>, String> {
+    let body = program.body("bytecode")?;
+    let module = cig_bytecode::parse_module(&body)
+        .map_err(|e| format!("the program's bytecode does not read: {e}"))?;
+    let verified =
+        cig_bytecode::verify_module(&module).map_err(|e| crate::vm::refusal(&e).message)?;
+    crate::vm::load(verified).map_err(|d| d.message)
 }
 
 fn run_source(
@@ -295,6 +378,16 @@ fn run_source(
     args: super::RunArgs,
     chain: Option<String>,
     source: String,
+    compiled: Option<&crate::program::Loaded>,
+) -> i32 {
+    run_script(ctx, args, chain, Script::Text(source), compiled)
+}
+
+fn run_script(
+    ctx: &Ctx,
+    args: super::RunArgs,
+    chain: Option<String>,
+    script: Script<'_>,
     compiled: Option<&crate::program::Loaded>,
 ) -> i32 {
     let dry_run = args.dry_run;
@@ -309,7 +402,7 @@ fn run_source(
             return exit::USAGE;
         }
     };
-    let code = run_source_inner(ctx, args, chain, source, compiled, &t);
+    let code = run_source_inner(ctx, args, chain, &script, compiled, &t);
     // The retention settings, once the run is recorded (#105); then the
     // disk budget (#149), which is off by default.
     let retain_t = t.start();
@@ -322,34 +415,56 @@ fn run_source(
     code
 }
 
+/// What the run's engine runs: the syntax tree on the tree-walker, or a
+/// loaded module on the VM.
+enum Ready {
+    Tree(Program),
+    Module(std::rc::Rc<crate::vm::Program>),
+}
+
 fn run_source_inner(
     ctx: &Ctx,
     args: super::RunArgs,
     chain: Option<String>,
-    source: String,
+    script: &Script<'_>,
     compiled: Option<&crate::program::Loaded>,
     t: &crate::timings::Timings,
 ) -> i32 {
     let name = args.file.to_string_lossy().to_string();
-    let lower_t = t.start();
-    let parsed = parse(&source);
-    t.end("lower", lower_t);
-    let program = match parsed {
-        Ok(p) => p,
-        Err(d) => {
-            report(ctx, &d, Some(&name), Some(&source));
-            return exit::SYNTAX_ERROR;
+    // The tree-walker's script is parsed here; a stage `b` program's
+    // module was read and loaded before the run began, and its text is
+    // read only when something needs it (a diagnostic's quoted line,
+    // `--light`'s list of chains).
+    let (ready, source) = match script {
+        Script::Text(source) => {
+            let lower_t = t.start();
+            let parsed = parse(source);
+            t.end("lower", lower_t);
+            match parsed {
+                Ok(p) => (Ready::Tree(p), Some(source.as_str())),
+                Err(d) => {
+                    report(ctx, &d, Some(&name), Some(source));
+                    return exit::SYNTAX_ERROR;
+                }
+            }
         }
+        Script::Module { module, .. } => (Ready::Module(module.clone()), None),
     };
-    let pin = match compiled {
-        Some(_) => None,
-        None => pin::pin_for(&args.file, &source).ok().flatten(),
+    let tree = match &ready {
+        Ready::Tree(p) => Some((p, source.unwrap_or_default())),
+        Ready::Module(_) => None,
     };
-    if !args.no_check {
+    let pin = match (compiled, tree) {
+        (None, Some((_, source))) => pin::pin_for(&args.file, source).ok().flatten(),
+        _ => None,
+    };
+    // A program was checked when it was compiled (`no_check`); a module
+    // has no tree to check.
+    if let (false, Some((program, source))) = (args.no_check, tree) {
         let check_t = t.start();
-        let mut rep = check::check(&program, &[]);
+        let mut rep = check::check(program, &[]);
         rep.warnings
-            .extend(pin_warnings(&program, pin.as_ref(), &name));
+            .extend(pin_warnings(program, pin.as_ref(), &name));
         t.end("check", check_t);
         if !rep.ok() {
             if ctx.json {
@@ -357,7 +472,7 @@ fn run_source_inner(
                     report(ctx, e, Some(&name), None);
                 }
             } else {
-                report_all(ctx, &rep.errors, &name, &source);
+                report_all(ctx, &rep.errors, &name, source);
             }
             return exit::SYNTAX_ERROR;
         }
@@ -366,7 +481,7 @@ fn run_source_inner(
                 eprint!(
                     "{}",
                     ctx.yellow(
-                        &w.render(Some(&name), Some(&source))
+                        &w.render(Some(&name), Some(source))
                             .replacen("error[", "warning[", 1)
                     )
                 );
@@ -399,18 +514,23 @@ fn run_source_inner(
         Config::load().get("trial")
     };
     let mut trial_note = None;
-    let last_good =
-        if compiled.is_none() && !args.dry_run && !pin::dispatched() && trial_mode != "never" {
+    let last_good = match tree {
+        Some((program, source))
+            if compiled.is_none()
+                && !args.dry_run
+                && !pin::dispatched()
+                && trial_mode != "never" =>
+        {
             let (handed, note, last) =
-                trial_before_run(ctx, &args, &source, &program, &name, &trial_mode);
+                trial_before_run(ctx, &args, source, program, &name, &trial_mode);
             if let Some(code) = handed {
                 return code;
             }
             trial_note = note;
             last
-        } else {
-            None
-        };
+        }
+        _ => None,
+    };
 
     let mode = if args.dry_run {
         Mode::DryRun
@@ -437,11 +557,14 @@ fn run_source_inner(
     }
     let mut record = RunRecord::begin(
         &args.file,
-        &source,
+        source.unwrap_or_default(),
         &args.args,
         if args.dry_run { "dry-run" } else { "run" },
     );
     if let Some(p) = compiled {
+        // The script's sha256 as the program's record gives it, at either
+        // stage: `cig runs` and `--unburn` see one program.
+        record.script_sha256 = p.sha256().to_string();
         record.script = p.name().to_string();
         let mut v = p.summary();
         v["binary"] = serde_json::json!(std::env::current_exe()
@@ -486,10 +609,21 @@ fn run_source_inner(
 
     t.end("begin", begin_t);
     let run_t = t.start();
-    let mut result = interp.run_program(&program);
+    let mut result = match &ready {
+        Ready::Tree(program) => interp.run_program(program),
+        Ready::Module(module) => crate::vm::run_script(&mut interp, module),
+    };
     if result.is_ok() {
         if let Some(chain_name) = &chain {
-            result = light_named_chain(&mut interp, chain_name, &program);
+            result = light_named_chain(&mut interp, chain_name, || match &ready {
+                Ready::Tree(program) => Ok(super::chains::declared(program)),
+                Ready::Module(_) => {
+                    let text = script.text()?;
+                    parse(text)
+                        .map(|p| super::chains::declared(&p))
+                        .map_err(|d| format!("its script does not parse: {}", d.message))
+                }
+            });
         }
     }
     let _ = interp.out.flush();
@@ -507,7 +641,20 @@ fn run_source_inner(
     };
     let mut rolled_back = None;
     if let Err(d) = &result {
-        report(ctx, d, Some(&name), Some(&source));
+        // The quoted line comes from the script's text; a stage `b`
+        // program whose `source` section does not match still reports its
+        // own error, without the line, and says why.
+        match script.text() {
+            Ok(text) => report(ctx, d, Some(&name), Some(text)),
+            Err(e) => report_noted(
+                ctx,
+                d,
+                Some(&name),
+                &format!(
+                    "the line is not shown: this program's source section is damaged (E1050): {e}"
+                ),
+            ),
+        }
         if !args.dry_run && !args.no_rollback && !interp.kernel.journal().is_empty() {
             // Compensations run in place, newest first, in this interpreter
             // with an ephemeral kernel standing in for the real one.
@@ -964,15 +1111,13 @@ fn print_plan_with_pack(
 }
 
 /// After the script has run, find the named chain in its globals and light it.
+/// `declared` lists the script's top-level chains for the hint when the
+/// name is not one; it is asked for only then.
 fn light_named_chain(
     interp: &mut Interp,
     name: &str,
-    program: &crate::syntax::ast::Program,
+    declared: impl FnOnce() -> Result<Vec<super::chains::ChainInfo>, String>,
 ) -> Result<(), Diagnostic> {
-    let declared: Vec<String> = super::chains::declared(program)
-        .into_iter()
-        .map(|c| c.name)
-        .collect();
     let value = match interp.globals.get(name) {
         Some(v @ crate::value::Value::Chain(_)) => v,
         Some(other) => {
@@ -987,11 +1132,16 @@ fn light_named_chain(
                 format!("no chain named `{name}` in this script"),
             )
             .code("E804");
-            if declared.is_empty() {
-                d = d.with_hint("declare one with: chain name { step, step }");
-            } else {
-                d = d.with_hint(format!("chains here: {}", declared.join(", ")));
-            }
+            d = match declared() {
+                Ok(c) if c.is_empty() => d.with_hint("declare one with: chain name { step, step }"),
+                Ok(c) => d.with_hint(format!(
+                    "chains here: {}",
+                    c.into_iter().map(|c| c.name).collect::<Vec<_>>().join(", ")
+                )),
+                Err(e) => d.with_hint(format!(
+                    "its chains cannot be listed: this program's source section is damaged (E1050): {e}"
+                )),
+            };
             return Err(d);
         }
     };

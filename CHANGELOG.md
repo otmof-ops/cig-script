@@ -5,6 +5,32 @@ project follows semantic versioning.
 
 ## Unreleased
 
+- **A stage `b` program runs its bytecode on the VM** (cig-compile#31,
+  step 4 of cig-compile's decision 0004). Its run reads the `bytecode`
+  section (sha256 against the table), parses, verifies and loads the
+  module, and runs it through the same run as `cig run`: kernel, record,
+  journal, plan, rollback, step budget, arguments, output and exit codes.
+  A body, module, verifier or loader failure is `E1050` with the rule and
+  `fn<i>+<pc>`, and nothing runs: the script is never run in its place.
+  `--interp` runs the program's script on the tree-walker instead (no
+  change on a stage `a` program). The `source` section is read only when
+  used: `--interp`, `--chains`, `--light`'s list of chains, and an error
+  that quotes its line; a damaged one leaves that error without its line
+  and with a note (`E1050`), exit code unchanged. The run's record takes
+  the script's sha256 from the program's record, so `cig runs` and
+  `--unburn` see one program at either stage. `--light` answers as the
+  tree-walker does: `chain.make` with C = 1 declares a top-level chain in
+  the globals, and a top level that returns a map of its names declares
+  them there (`docs/BYTECODE.md`). New tests:
+  `a_program_with_damaged_bytecode_is_e1050`,
+  `interp_fallback_gives_the_same_bytes`,
+  `a_stage_b_burn_journals_plans_and_unburns_as_stage_a`,
+  `a_stage_b_pack_runs_where_the_tree_walker_runs_it`,
+  `max_steps_stops_a_stage_b_program_where_it_stops_the_tree_walker`,
+  `a_stage_b_error_quotes_its_line_from_the_source_section`,
+  `light_and_chains_answer_the_same_at_stage_b`,
+  `the_top_level_declares_its_names_in_the_globals`.
+
 - **Programs move to payload format 2: a record, a table of hashed
   sections, and a start that hashes only the head** (cig-compile#31,
   cig-compile#71, cig-compile#8, cig-compile#40; cig-compile's decision
@@ -26,8 +52,7 @@ project follows semantic versioning.
   and `--chains` read `source`. `--cig-program` lists the new record keys
   and the section table, as text and with `--json`; a format 1 program
   prints what it did. `CIG_VALIDATE=1` checks every section before a
-  start. A stage `b` program is refused (`E1050`) until this cig runs
-  bytecode. Format 1 programs read and run as before, and `append` still
+  start. Format 1 programs read and run as before, and `append` still
   writes them for one release. `E1050` names the section and table
   causes; `E1010` is registered for cigcompile (a script that cannot be
   a stage `b` program). New tests: `archive_tamper_refused`,

@@ -26,6 +26,7 @@ struct Opts {
     unburn_since: Option<String>,
     unburn_to: Option<String>,
     chains: bool,
+    interp: bool,
     info: bool,
     help: bool,
     args: Vec<String>,
@@ -53,6 +54,7 @@ fn parse(argv: &[String]) -> Result<Opts, (String, String)> {
             "--no-doctor" => o.no_doctor = true,
             "--cig-program" => o.info = true,
             "--chains" => o.chains = true,
+            "--interp" => o.interp = true,
             "--help" | "-h" => o.help = true,
             "--max-steps" | "--unburn" | "--explain" | "--light" | "--seal-key-fd"
             | "--unburn-last" | "--unburn-since" | "--unburn-to" => {
@@ -154,6 +156,7 @@ run flags (before the program's own arguments):
   --no-doctor        no automatic diagnosis on errors (also CIG_DOCTOR=0)
   --light <chain>    run the program, then light the chain it declares (cig light)
   --chains           list the chains the program declares (cig chains)
+  --interp           run the program's script on the interpreter, not its bytecode
   --unburn <run>     put a past run of this program back (cig unburn)
   --unburn-last N    put back this program's newest N runs, newest first
   --unburn-since AGE put back its runs started within AGE (90s, 30m, 2h, 3d, 1w)
@@ -283,12 +286,6 @@ pub fn main(p: Opened) -> i32 {
         }
         return super::runs::unburn(&ctx, id, o.dry_run, false, false);
     }
-    if p.stage() == Stage::B {
-        return damaged(
-            &ctx,
-            "it is a stage `b` program (bytecode), and this cig does not run stage `b` programs yet",
-        );
-    }
     let args = RunArgs {
         file: PathBuf::from(p.file()),
         dry_run: o.dry_run,
@@ -304,7 +301,14 @@ pub fn main(p: Opened) -> i32 {
         stats: None,
         args: o.args,
     };
-    let code = run::run_program(&ctx, args, &p, o.light);
+    // A stage `b` program runs its bytecode on the VM, or its script on
+    // the tree-walker when `--interp` asks; never one for the other.
+    let engine = if p.stage() == Stage::B && !o.interp {
+        run::Engine::Bytecode
+    } else {
+        run::Engine::Source
+    };
+    let code = run::run_program(&ctx, args, &p, o.light, engine);
     crate::ashtray::spawn_flush(&crate::config::Config::load());
     code
 }
@@ -454,9 +458,13 @@ mod tests {
     fn the_cig_words_a_program_keeps() {
         let o = parse(&words(&["--explain", "E1050"])).unwrap();
         assert_eq!(o.explain.as_deref(), Some("E1050"));
-        let o = parse(&words(&["--light=build", "--chains"])).unwrap();
+        let o = parse(&words(&["--light=build", "--chains", "--interp"])).unwrap();
         assert_eq!(o.light.as_deref(), Some("build"));
-        assert!(o.chains);
+        assert!(o.chains && o.interp);
+        assert!(
+            parse(&words(&["--interp=1"])).is_err(),
+            "--interp takes no value"
+        );
         assert!(
             parse(&words(&["--color=always"])).is_err(),
             "only the run's own flags take ="

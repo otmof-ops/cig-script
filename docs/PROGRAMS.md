@@ -2,7 +2,7 @@
 
 <!-- SPDX-License-Identifier: CC-BY-4.0 -->
 
-A **program** is a CigScript script appended to the `cig` of the same version. It is one executable that runs its script and takes no command. This is stage A of cigcompile: nothing is translated, and the script runs through the same run as `cig run`, with the same kernel, journal, plan and rollback.
+A **program** is a CigScript script appended to the `cig` of the same version. It is one executable that runs its script and takes no command. A stage `a` program runs its script's text on the tree-walker; a stage `b` program runs the bytecode cigcompile lowered it to, on the VM. Either runs through the same run as `cig run`, with the same kernel, journal, plan and rollback.
 
 ## How one is made
 
@@ -40,7 +40,13 @@ The same inputs give the same bytes.
 
 **The rules.** Each is refused with `E1050` and a message that names it: the trailer's magic, its flags, the payload's length (at most 64 MiB, and inside the file), the record's length, the section count, the record and table fitting the payload, the head sha256, a record that starts with `{"format":`, reads and holds format 2; ids that are well formed, not repeated, and in the order `source`, `bytecode`, `tree`, `snap`, `sbom`, then any other id by its bytes; each body between the record and the table, after the one before it, at a file offset that is a multiple of 16; padding between the record, the bodies and the table that is zero and shorter than 16 bytes; an encoding of `0` or `1` and no flag bit but bit 0; a decoded length of at most 64 MiB, equal to the stored length for encoding `0`; a required section this cig does not know; and a stage whose section is missing (`source` for `a`, `bytecode` for `b`).
 
-**How it starts.** A start reads the trailer, the record and the table and checks the head sha256: a constant amount, whatever the script's size. It then refuses raised rights (`E1054`), answers cig's internal calls, refuses another cig's program (`E1051`), and checks the table's rules. `--help`, `--explain` and `--cig-program` answer there and read no body. A run and `--chains` read the `source` body, check its sha256 against the table and its text's sha256 against the record, and run it as `cig run` would. A body that does not match its table, or inflates past its decoded length, is refused with `E1050` when it is used. This cig does not run stage `b` programs yet: one is refused with `E1050` when it would run.
+**How it starts.** A start reads the trailer, the record and the table and checks the head sha256: a constant amount, whatever the script's size. It then refuses raised rights (`E1054`), answers cig's internal calls, refuses another cig's program (`E1051`), and checks the table's rules. `--help`, `--explain` and `--cig-program` answer there and read no body. A run and `--chains` read the `source` body, check its sha256 against the table and its text's sha256 against the record, and run it as `cig run` would. A body that does not match its table, or inflates past its decoded length, is refused with `E1050` when it is used.
+
+**A stage `b` program** runs its bytecode on the VM. Its run reads the `bytecode` body and checks its sha256 against the table, then reads the module (`parse_module`: its magic, version and BLAKE3), verifies it and loads it (builtins, prelude names, burn-op kinds), and runs it through the same run as `cig run`: the same kernel, run record, journal, plan, rollback, `--no-rollback`, `--max-steps`, arguments, output and exit codes. Only the engine differs. Any failure before it runs is `E1050` with the rule and, from the verifier or the loader, where it failed (`the program's bytecode does not verify: <rule> at fn<i>+<pc>`, as `docs/BYTECODE.md` words it); nothing runs, no run is recorded, and the script is never run in its place. The run's record carries the script's sha256 from the program's record, so `cig runs` and `--unburn` see one program at either stage.
+
+`--interp` runs a stage `b` program's script on the tree-walker instead: it reads the `source` body, checks it, and runs it as a stage `a` program runs. On a stage `a` program it changes nothing. The source runs only when asked for: a damaged bytecode is never a reason to run it.
+
+The `source` body of a stage `b` program is read only when something uses it, and checked the first time: `--interp`, `--chains`, `--light` when the name is not a chain the program declared (for the list of chains in the hint), and an error that quotes its line. When an error is reported and the `source` body does not match, the program's own error is still reported, with its position and without the quoted line, followed by `= note: the line is not shown: this program's source section is damaged (E1050): ...` (`note` in `--json`); the exit code is the program's error's.
 
 **`CIG_VALIDATE=1`** makes a start read, hash and decode every section before the program runs, so a damaged body anywhere is refused at once, `--help` included.
 
@@ -80,6 +86,7 @@ Leading flags are the run's. The first word that is not a flag, or everything af
 | `--no-doctor` | no automatic diagnosis on errors |
 | `--light <chain>` | runs the program, then lights a chain it declares |
 | `--chains` | lists the chains the program declares |
+| `--interp` | runs a stage `b` program's script on the tree-walker instead of its bytecode; changes nothing on a stage `a` program |
 | `--unburn <run>` | puts back a past run of this program |
 | `--unburn-last N`, `--unburn-since AGE`, `--unburn-to <run>` | puts back a stretch of this program's own runs, newest first, as `cig unburn --last`, `--since` and `--to` do for any: one plan, then run by run, stopping at the first refusal (`cig unburn --continue` carries on) |
 | `--seal-key-fd N` | reads the tin's key from open descriptor `N` (Unix): the key in no file and no environment variable |

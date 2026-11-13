@@ -3624,9 +3624,13 @@ why = "the section table does not read (format 2): an id that is not lower-case 
 probe = "none"
 remedy = "compile it again with the cigcompile for this cig"
 [[code.cause]]
-why = "the program needs a section this cig does not read, or the section its stage runs is missing; a stage `b` program (bytecode) is refused by a cig that does not run stage `b` yet"
+why = "the program needs a section this cig does not read, or the section its stage runs is missing"
 probe = "none"
 remedy = "compile it again with the cigcompile for this cig"
+[[code.cause]]
+why = "a stage `b` program's module does not read (its magic, format version or BLAKE3 hash), or this cig's VM refuses it at load: a builtin, a prelude name or a burn-op kind this cig does not have (`unknown-builtin`, `unknown-prelude-name`, `unknown-burn-op` at `fn<i>+<pc>`). Nothing runs: the program's script is run only with --interp"
+probe = "none"
+remedy = "compile it again with the cigcompile for this cig; --interp runs its script on the tree-walker meanwhile"
 
 [[code]]
 code = "E1051"
