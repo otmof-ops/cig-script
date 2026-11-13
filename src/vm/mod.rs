@@ -871,14 +871,7 @@ impl Machine<'_> {
     /// pc is kept current after each one, which is where an error raised
     /// by the next is offered to the tries.
     fn run_frame_code(&mut self, program: &Rc<Program>) -> Result<Option<Value>, Fault> {
-        let (fi, mut pc, base, upvals) = match self.frames.last() {
-            Some(f) => (f.func, f.pc, f.base, Rc::clone(&f.upvals)),
-            None => return Err(broken("an empty call stack", Span::default()).into()),
-        };
-        let proto = program
-            .funcs
-            .get(fi)
-            .ok_or_else(|| broken("no such function", Span::default()))?;
+        let (mut pc, mut base, mut upvals, mut proto) = self.top(program)?;
         loop {
             let Some(Some(d)) = proto.code.get(pc) else {
                 let span = proto.spans.get(pc).copied().unwrap_or_default();
@@ -910,10 +903,34 @@ impl Machine<'_> {
                         f.pc = next;
                     }
                 }
-                Flow::Return(v) => return self.ret(v, span),
-                Flow::Switched => return Ok(None),
+                // A call or a return: the loop goes on in the frame on top
+                // now, without going back through `exec`.
+                Flow::Return(v) => {
+                    if let Some(v) = self.ret(v, span)? {
+                        return Ok(Some(v));
+                    }
+                    (pc, base, upvals, proto) = self.top(program)?;
+                }
+                Flow::Switched => (pc, base, upvals, proto) = self.top(program)?,
             }
         }
+    }
+
+    /// The frame on top: its pc, its base, its upvalues and its function.
+    #[allow(clippy::type_complexity)]
+    fn top<'p>(
+        &self,
+        program: &'p Program,
+    ) -> Result<(usize, usize, Rc<[Cell]>, &'p Proto), Fault> {
+        let (fi, pc, base, upvals) = match self.frames.last() {
+            Some(f) => (f.func, f.pc, f.base, Rc::clone(&f.upvals)),
+            None => return Err(broken("an empty call stack", Span::default()).into()),
+        };
+        let proto = program
+            .funcs
+            .get(fi)
+            .ok_or_else(|| broken("no such function", Span::default()))?;
+        Ok((pc, base, upvals, proto))
     }
 
     /// The common cases of the hot instructions in a frame whose registers
