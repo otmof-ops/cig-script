@@ -9,7 +9,7 @@
 //! the width column.
 
 use crate::instr::{walk, DecodedInstr};
-use crate::module::{Constant, Function, Module};
+use crate::module::{Constant, Function, Module, RegionLabel};
 use crate::opcode::{Fmt, OperandKind};
 use core::fmt::Write as _;
 
@@ -86,11 +86,16 @@ fn disasm_instr(out: &mut String, f: &Function, d: &DecodedInstr, depth: usize) 
         width_mark,
         d.op.mnemonic()
     );
+    // A mnemonic as wide as its column (`burn.enter`, `chain.make`)
+    // still takes a space before its operands.
+    let wide_mnemonic = d.op.mnemonic().len() >= 10;
     let mut first = true;
     let mut push = |line: &mut String, s: String| {
         if !s.is_empty() {
             if !first {
                 line.push_str(", ");
+            } else if wide_mnemonic {
+                line.push(' ');
             }
             line.push_str(&s);
             first = false;
@@ -150,7 +155,16 @@ fn format_operand(
         OperandKind::Func => format!("Fn{v}"),
         OperandKind::Upvalue => format!("U{v}"),
         OperandKind::Handler => format!("H{v}"),
-        OperandKind::Region => format!("Rg{v}"),
+        OperandKind::Region => {
+            let region = usize::try_from(v).ok().and_then(|i| f.regions.get(i));
+            match region.map(|r| r.label) {
+                Some(RegionLabel::Const(k)) => {
+                    format!("Rg{v} (label {})", pretty_const(f, i64::from(k)))
+                }
+                Some(RegionLabel::Reg(r)) => format!("Rg{v} (label R{r})"),
+                _ => format!("Rg{v}"),
+            }
+        }
         OperandKind::Builtin => format!("B{v}"),
         OperandKind::Jump => {
             let target = (d.pc as i64) + 1 + v;

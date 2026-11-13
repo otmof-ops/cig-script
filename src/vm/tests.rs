@@ -8,8 +8,8 @@ use crate::burn::{Kernel, Mode};
 use crate::diagnostics::Kind;
 use crate::syntax::ast::Stmt;
 use cig_bytecode::{
-    verify_module, wide_prefix, BurnRegion, HandlerEntry, Instr, Module, RegionRow, UpvalDesc,
-    UpvalKind, RESERVED_U32,
+    verify_module, wide_prefix, BurnRegion, HandlerEntry, Instr, Module, RegionLabel, RegionRow,
+    UpvalDesc, UpvalKind, RESERVED_U32,
 };
 use indexmap::IndexMap;
 
@@ -1398,7 +1398,12 @@ fn random_fn(rng: &mut Rng, depth: u32, arity: u16, parent: Option<(u32, usize)>
     for _ in 0..rng.below(4) {
         f.regions.push(BurnRegion {
             class: rng.below(2) as u8,
-            label: if rng.below(2) == 0 { RESERVED_U32 } else { 1 },
+            // No label, `K1` ("a"), or a register (sometimes past the frame).
+            label: match rng.below(3) {
+                0 => RegionLabel::None,
+                1 => RegionLabel::Const(1),
+                _ => RegionLabel::Reg(rng.below(u64::from(f.reg_count) + 1) as u32),
+            },
         });
     }
     for _ in 0..rng.below(5) {
@@ -1426,6 +1431,7 @@ fn random_fn(rng: &mut Rng, depth: u32, arity: u16, parent: Option<(u32, usize)>
         .collect();
     let mut code: Vec<Instr> = Vec::new();
     let mut loop_heads: Vec<usize> = Vec::new();
+    let mut burn_rows: Vec<RegionRow> = Vec::new();
     if !f.upvalues.is_empty() && rng.below(3) == 0 {
         // Every upvalue instruction once, on operands that verify.
         let u = rng.below(f.upvalues.len() as u64) as u8;
@@ -1465,10 +1471,31 @@ fn random_fn(rng: &mut Rng, depth: u32, arity: u16, parent: Option<(u32, usize)>
             Op::LOADINT => code.push(Instr::asbx(op, reg(rng), rng.next() as i16)),
             Op::LOADK | Op::CLOSURE => code.push(Instr::abx(op, reg(rng), rng.below(4) as u16)),
             Op::BURN_ENTER => {
-                // Mostly a region that is there, with its own class.
+                // A burn as a lowering writes it, with its row: mostly a
+                // region that is there, with its own class; sometimes a `nop`
+                // that positions the label, an op, and a way out by a jump
+                // (`burn.leave` then `jmp` past the burn's end).
                 let r = rng.below(f.regions.len() as u64 + 1) as usize;
                 let class = f.regions.get(r).map_or(0, |g| g.class);
+                let start = code.len() as u32;
                 code.push(Instr::abx(op, class, r as u16));
+                if rng.below(2) == 0 {
+                    code.push(abc(Op::NOP, 0, 0, 0));
+                }
+                if rng.below(2) == 0 {
+                    code.push(abc(Op::BURN_OP, reg(rng), 4, 1 << 4));
+                }
+                if rng.below(2) == 0 {
+                    code.push(Instr::asbx(Op::TEST, reg(rng), 2));
+                    code.push(abc(Op::BURN_LEAVE, 0, 0, 0));
+                    code.push(Instr::asbx(Op::JMP, 0, 1));
+                }
+                code.push(abc(Op::BURN_LEAVE, 0, 0, 0));
+                burn_rows.push(RegionRow {
+                    pc_start: start,
+                    pc_end: code.len() as u32,
+                    region: r as u32,
+                });
             }
             Op::BURN_OP => {
                 let callee = 4 + rng.below(2) as u8;
@@ -1548,10 +1575,12 @@ fn random_fn(rng: &mut Rng, depth: u32, arity: u16, parent: Option<(u32, usize)>
         for _ in 0..rng.below(3) {
             let start = pick(rng, 0);
             let end = pick(rng, start + 1).max(start + 1);
-            let region = if rng.below(4) == 0 {
-                RESERVED_U32
-            } else {
+            // A random row that names a region rarely fits the burn rules;
+            // most are the sentinel, outside every burn.
+            let region = if rng.below(8) == 0 {
                 rng.below(f.regions.len() as u64) as u32
+            } else {
+                RESERVED_U32
             };
             f.region_rows.push(RegionRow {
                 pc_start: start,
@@ -1560,6 +1589,7 @@ fn random_fn(rng: &mut Rng, depth: u32, arity: u16, parent: Option<(u32, usize)>
             });
         }
     }
+    f.region_rows.extend(burn_rows);
     f.lines = (0..code.len() as u32)
         .map(|pc| LineEntry {
             pc,
@@ -1595,6 +1625,7 @@ fn a_verified_module_never_panics() {
     let mut ran = 0;
     let mut tried = 0;
     let mut seen = std::collections::HashSet::new();
+    let mut shapes = [0u32; 2];
     // At least 2,000 modules, and on until every built instruction has been
     // in one that verified.
     while (ran < 2_000 || !BUILT.iter().all(|op| seen.contains(op))) && tried < 400_000 {
@@ -1604,6 +1635,7 @@ fn a_verified_module_never_panics() {
             continue;
         };
         ops_in(&m.main, &mut seen);
+        burn_shapes(&m.main, &mut shapes);
         let budget = 1 + rng.below(60);
         let handlers = has_handlers(&m.main);
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1638,6 +1670,41 @@ fn a_verified_module_never_panics() {
     assert!(ran >= 2_000, "only {ran} of {tried} verified");
     for op in BUILT {
         assert!(seen.contains(&op), "no verified module ran `{op}`");
+    }
+    let [labels, jumps] = shapes;
+    assert!(
+        labels > 0,
+        "no verified module entered a burn with a register label"
+    );
+    assert!(jumps > 0, "no verified module left a burn by a jump");
+}
+
+/// Count, in `f` and its children, each `burn.enter` of a region labeled by
+/// a register (`shapes[0]`) and each `burn.leave` then `jmp` inside a burn
+/// row (`shapes[1]`).
+fn burn_shapes(f: &BcFunction, shapes: &mut [u32; 2]) {
+    let code: Vec<_> = cig_bytecode::instr::walk(&f.instrs)
+        .filter_map(|d| d.ok())
+        .collect();
+    for (i, d) in code.iter().enumerate() {
+        let labeled = f
+            .regions
+            .get(d.b_u as usize)
+            .is_some_and(|r| matches!(r.label, RegionLabel::Reg(_)));
+        if d.op == Op::BURN_ENTER && labeled {
+            shapes[0] += 1;
+        }
+        let in_row = f
+            .region_rows
+            .iter()
+            .any(|r| r.region != RESERVED_U32 && r.pc_start <= d.pc && d.pc < r.pc_end);
+        let then_jmp = code.get(i + 1).is_some_and(|n| n.op == Op::JMP);
+        if d.op == Op::BURN_LEAVE && then_jmp && in_row {
+            shapes[1] += 1;
+        }
+    }
+    for c in &f.children {
+        burn_shapes(c, shapes);
     }
 }
 
@@ -2875,6 +2942,7 @@ impl Asm {
             line: 1,
             col: 1,
         };
+        f.region_rows = lexical_rows(&code);
         f.instrs = code;
         let mut lines = self.lines.clone();
         lines.sort_by_key(|r| r.pc);
@@ -2894,6 +2962,29 @@ impl Asm {
             .collect();
         f
     }
+}
+
+/// The burn rows of `code` whose burns are written in order: each
+/// `burn.enter` to the `burn.leave` that closes it, by nesting.
+fn lexical_rows(code: &[Instr]) -> Vec<RegionRow> {
+    let mut open = Vec::new();
+    let mut rows = Vec::new();
+    for d in cig_bytecode::instr::walk(code).filter_map(|d| d.ok()) {
+        match d.op {
+            Op::BURN_ENTER => open.push((d.pc, d.b_u)),
+            Op::BURN_LEAVE => {
+                if let Some((start, region)) = open.pop() {
+                    rows.push(RegionRow {
+                        pc_start: start,
+                        pc_end: d.pc + d.width,
+                        region,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+    rows
 }
 
 /// The span of the first `needle` in `src` (the n-th with `nth`), as the
@@ -3744,9 +3835,9 @@ impl Asm {
 /// Finish `a` as the top level taking the `paths` as `R(0..)`, with
 /// `regions` (class, label).
 fn burn_main(a: &mut Asm, paths: u16, regs: u32, regions: &[(u8, Option<&str>)]) -> Module {
-    let labels: Vec<u32> = regions
+    let labels: Vec<RegionLabel> = regions
         .iter()
-        .map(|(_, l)| l.map_or(RESERVED_U32, |l| u32::from(a.s(l))))
+        .map(|(_, l)| l.map_or(RegionLabel::None, |l| RegionLabel::Const(u32::from(a.s(l)))))
         .collect();
     let mut f = a.finish("", 0, regs);
     f.arity = paths;
@@ -4116,7 +4207,10 @@ fn burn_programs() -> Vec<(&'static str, Module, Vec<&'static str>, &'static str
         .jump(Op::LOOP, 0, "top");
     c.op(Op::LOADNULL, 1, 0, 0).i(ret(1));
     let mut child = c.finish("f", 1, 6);
-    child.regions = vec![BurnRegion { class: 0, label: r }];
+    child.regions = vec![BurnRegion {
+        class: 0,
+        label: RegionLabel::None,
+    }];
     let mut a = Asm::default();
     a.children.push(child);
     a.i(Instr::abx(Op::CLOSURE, 1, 0)).op(Op::MOV, 2, 0, 0);
@@ -4284,12 +4378,25 @@ fn a_burn_op_outside_a_burn_is_the_interpreters_error() {
     let p0 = dir.path().join("a.txt").to_string_lossy().into_owned();
     let (_, w) = walker_run(src, &[("p0", Value::str(&p0))]);
     let w = w.expect("the tree-walker refuses it");
-    // Lexically in a burn, but the jump goes around its `burn.enter`.
+    // A jump around the `burn.enter` into its burn: the verifier refuses it.
     let mut a = Asm::default();
     a.jump(Op::JMP, 0, "op").burn_enter(0, 0);
     a.label("op").write(1, 0, "fs.write_text", "a").burn_leave();
     a.op(Op::LOADNULL, 1, 0, 0).i(ret(1));
     let m = burn_main(&mut a, 1, 4, &[(0, None)]);
+    let e = verify_module(&m).expect_err("refused");
+    assert_eq!(e.to_string(), "burn-unbalanced at fn0+0");
+    // Inside the burn's row, after its `burn.leave`: the rows allow it, the
+    // VM refuses the op at run time with the tree-walker's error.
+    let mut a = Asm::default();
+    a.burn_enter(0, 0).burn_leave();
+    a.write(1, 0, "fs.write_text", "a").i(ret(1));
+    let mut m = burn_main(&mut a, 1, 4, &[(0, None)]);
+    m.main.region_rows = vec![RegionRow {
+        pc_start: 0,
+        pc_end: m.main.instrs.len() as u32,
+        region: 0,
+    }];
     let (_, v) = vm_run(&m, vec![Value::str(&p0)]);
     let v = v.err().expect("refused");
     assert_eq!(said(&v), said(&w));
@@ -4299,12 +4406,15 @@ fn a_burn_op_outside_a_burn_is_the_interpreters_error() {
     // `burn.leave` with no burn open, and `comp.leave` with no
     // compensation: a module the lowering wrote wrong.
     let mut a = Asm::default();
-    a.jump(Op::JMP, 0, "leave").burn_enter(0, 0);
-    a.label("leave")
-        .burn_leave()
-        .op(Op::LOADNULL, 0, 0, 0)
-        .i(ret(0));
-    let (_, v) = vm_run(&burn_main(&mut a, 0, 1, &[(0, None)]), vec![]);
+    a.burn_enter(0, 0).burn_leave().op(Op::LOADNULL, 0, 0, 0);
+    a.burn_leave().i(ret(0));
+    let mut m = burn_main(&mut a, 0, 1, &[(0, None)]);
+    m.main.region_rows = vec![RegionRow {
+        pc_start: 0,
+        pc_end: 5,
+        region: 0,
+    }];
+    let (_, v) = vm_run(&m, vec![]);
     let v = v.err().expect("refused");
     assert_eq!(v.kind, Kind::Internal);
     assert_eq!(v.message, "`burn.leave` found no open burn in its frame");
@@ -4511,7 +4621,7 @@ fn chains_run_through_the_kernels_runner() {
     one.upvalues = vec![captures(UpvalKind::ParentLocal, 0)];
     one.regions = vec![BurnRegion {
         class: 0,
-        label: RESERVED_U32,
+        label: RegionLabel::None,
     }];
     let mut c2 = Asm::default();
     c2.op(Op::EXHALE, 0, 1, 0)
@@ -4637,7 +4747,9 @@ fn burn_operands_the_verifier_leaves_are_checked_at_load() {
     f.requires_burn = true;
     f.constants = vec![Constant::Str("len".into())];
     assert!(refused_with(f).ends_with("unknown-burn-op at fn0+0"));
-    // A burn.enter whose class is not its region's.
+    // A burn.enter whose class is not its region's, and a comp.enter whose
+    // source is not a string or whose state register is past the frame:
+    // the verifier's now, in the same words.
     let mut f = main_fn(
         2,
         vec![
@@ -4648,20 +4760,25 @@ fn burn_operands_the_verifier_leaves_are_checked_at_load() {
     );
     f.regions = vec![BurnRegion {
         class: 0,
-        label: RESERVED_U32,
+        label: RegionLabel::None,
     }];
-    assert!(refused_with(f).ends_with("burn-class-mismatch at fn0+0"));
-    // A comp.enter whose source is not a string, or whose state register
-    // is past the frame.
+    f.region_rows = lexical_rows(&f.instrs);
+    let e = verify_module(&module(f)).expect_err("refused");
+    assert!(refusal(&e)
+        .message
+        .ends_with("burn-class-mismatch at fn0+0"));
     for code in [abc(Op::COMP_ENTER, 0, 1, 0), abc(Op::COMP_ENTER, 9, 0, 0)] {
         let mut f = main_fn(2, vec![code, ret(0)]);
         f.constants = vec![Constant::Str("s".into()), Constant::Int(1)];
-        assert!(refused_with(f).ends_with("comp-operands at fn0+0"));
+        assert!(verify_module(&module(f)).is_err());
     }
     // A region label that is not a string constant.
     let mut f = main_fn(1, vec![ret(0)]);
     f.constants = vec![Constant::Int(1)];
-    f.regions = vec![BurnRegion { class: 0, label: 0 }];
+    f.regions = vec![BurnRegion {
+        class: 0,
+        label: RegionLabel::Const(0),
+    }];
     assert!(refused_with(f).ends_with("region-label at fn0+0"));
 }
 
@@ -4738,4 +4855,256 @@ fn the_top_level_declares_its_names_in_the_globals() {
     let mut i = interp();
     run_script(&mut i, &program(&module(a.finish("", 0, 2)))).expect("an exit");
     assert_eq!(i.exit_requested, Some(4));
+}
+
+// ----- computed labels and burns left by jumps -----------------------------------------------
+
+/// The `nth` `needle` in `src`, `len` bytes of it from `skip`.
+fn span_in(src: &str, needle: &str, nth: usize, skip: usize, len: usize) -> Span {
+    let s = span_nth(src, needle, nth);
+    Span::new(
+        s.start + skip,
+        s.start + skip + len,
+        s.line,
+        s.col + skip as u32,
+    )
+}
+
+/// `burn_main`, with region `g`'s label the register `r`.
+fn with_label_reg(mut m: Module, g: usize, r: u32) -> Module {
+    m.main.regions[g].label = RegionLabel::Reg(r);
+    m
+}
+
+/// The compensations `left` journaled: their labels.
+fn compensation_labels(left: &Left) -> Vec<serde_json::Value> {
+    left.journal
+        .iter()
+        .filter_map(|e| e.get("compensation"))
+        .map(|c| c["label"].clone())
+        .collect()
+}
+
+/// The plan's compensations, from a dry run of `m` on the VM.
+fn planned_compensations(m: &Module, names: &[&str]) -> Vec<String> {
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let paths: Vec<String> = names
+        .iter()
+        .map(|n| dir.path().join(n).to_string_lossy().into_owned())
+        .collect();
+    let p = program(m);
+    let left = burn_run(&paths, Mode::DryRun, |i| {
+        let args = paths.iter().map(Value::str).collect();
+        run_function(i, &p, 0, args).err()
+    });
+    left.plan
+        .into_iter()
+        .filter(|p| p.contains("compensate"))
+        .collect()
+}
+
+#[test]
+fn a_computed_label_agrees_with_the_interpreter() {
+    let src = "stick name = \"deploy\"\nburn (s, name) {\n  s.path = p0\n  fs.write_text(p0, \"a\")\n} unburn {\n  fs.rm(s.path)\n}\nexhale \"done\"\n";
+    let b = burns_of(src);
+    let mut a = Asm::default();
+    a.loadk(1, Constant::Str("deploy".into()))
+        .op(Op::NEWMAP, 2, 0, 0);
+    a.at(b[0].0).burn_enter(0, 0);
+    a.at(span_in(src, "name)", 0, 0, 4)).op(Op::NOP, 0, 0, 0);
+    a.at(on_line(b[0].1)).comp_enter(2, &b[0].2, "s");
+    let k = a.s("path") as u8;
+    a.op(Op::SETFIELD, 2, k, 0)
+        .write(3, 0, "fs.write_text", "a");
+    a.comp_leave().burn_leave().exhale_str(3, "done");
+    a.op(Op::LOADNULL, 3, 0, 0).i(ret(3));
+    let m = with_label_reg(burn_main(&mut a, 1, 6, &[(0, None)]), 0, 1);
+    let left = burn_agree(src, &m, &["a.txt"]);
+    assert_eq!(left.out, "done\n");
+    assert_eq!(compensation_labels(&left), vec!["deploy"]);
+    let plan = planned_compensations(&m, &["a.txt"]);
+    assert_eq!(plan.len(), 1, "{plan:?}");
+    assert!(plan[0].contains("deploy"), "{plan:?}");
+}
+
+#[test]
+fn a_label_that_is_not_a_string_is_the_interpreters_error() {
+    let src = "stick n = 5\nburn (s, n) {\n  fs.write_text(p0, \"a\")\n}\n";
+    let b = burns_of(src);
+    let build = |nop: bool| {
+        let mut a = Asm::default();
+        a.i(Instr::asbx(Op::LOADINT, 1, 5)).op(Op::NEWMAP, 2, 0, 0);
+        a.at(b[0].0).burn_enter(0, 0);
+        if nop {
+            a.at(span_in(src, "n)", 0, 0, 1)).op(Op::NOP, 0, 0, 0);
+        }
+        a.write(3, 0, "fs.write_text", "a").burn_leave();
+        a.op(Op::LOADNULL, 3, 0, 0).i(ret(3));
+        with_label_reg(burn_main(&mut a, 1, 6, &[(0, None)]), 0, 1)
+    };
+    // With the `nop`: code, message, hint and position are the tree-walker's.
+    let left = burn_agree(src, &build(true), &["a.txt"]);
+    assert!(
+        left.ending.contains("a burn's label is a string, got int"),
+        "{}",
+        left.ending
+    );
+    assert_eq!(left.files, vec![None]);
+    assert!(left.journal.is_empty() && left.plan.is_empty());
+    // Without it: the same error, at `burn.enter`'s own row.
+    let (_, v) = vm_run(&build(false), vec![Value::str("unused")]);
+    let v = v.err().expect("refused");
+    let (_, w) = walker_run(src, &[("p0", Value::str("unused"))]);
+    assert_eq!(said(&v), said(&w.expect("refused")));
+    assert_eq!(v.span, Some(b[0].0));
+}
+
+#[test]
+fn a_label_is_read_before_the_state_map_is_made() {
+    // The label `s` is the `s` outside the burn, not its state map.
+    let src = "stick s = \"outer\"\nburn (s, s) {\n  s.path = p0\n  fs.write_text(p0, \"a\")\n} unburn {\n  fs.rm(s.path)\n}\n";
+    let b = burns_of(src);
+    let mut a = Asm::default();
+    a.loadk(1, Constant::Str("outer".into()))
+        .op(Op::NEWMAP, 2, 0, 0);
+    a.at(b[0].0).burn_enter(0, 0);
+    a.at(span_in(src, "s)", 0, 0, 1)).op(Op::NOP, 0, 0, 0);
+    a.at(on_line(b[0].1)).comp_enter(2, &b[0].2, "s");
+    let k = a.s("path") as u8;
+    a.op(Op::SETFIELD, 2, k, 0)
+        .write(3, 0, "fs.write_text", "a");
+    a.comp_leave().burn_leave();
+    a.op(Op::LOADNULL, 3, 0, 0).i(ret(3));
+    let m = with_label_reg(burn_main(&mut a, 1, 6, &[(0, None)]), 0, 1);
+    let left = burn_agree(src, &m, &["a.txt"]);
+    assert_eq!(compensation_labels(&left), vec!["outer"]);
+}
+
+#[test]
+fn one_burn_entered_twice_takes_each_turns_label() {
+    let src = "stick names = [\"a\", \"b\"]\nroll i = 0\nwhile i < 2 {\n  burn (s, names[i]) {\n    s.path = p0\n    fs.append_text(p0, names[i])\n  } unburn {\n    fs.rm(s.path)\n  }\n  i = i + 1\n}\n";
+    let b = burns_of(src);
+    let mut a = Asm::default();
+    a.op(Op::NEWLIST, 1, 2, 0)
+        .loadk(8, Constant::Str("a".into()))
+        .op(Op::APPENDLIST, 1, 8, 0);
+    a.loadk(8, Constant::Str("b".into()))
+        .op(Op::APPENDLIST, 1, 8, 0);
+    a.i(Instr::asbx(Op::LOADINT, 2, 0)).i(steps(1, 0));
+    a.label("top")
+        .i(Instr::asbx(Op::LOADINT, 8, 2))
+        .op(Op::LT, 8, 2, 8);
+    a.jump(Op::TESTN, 8, "out").i(steps(1, 1));
+    a.op(Op::GETINDEX, 3, 1, 2).op(Op::NEWMAP, 4, 0, 0);
+    a.at(b[0].0).burn_enter(0, 0);
+    a.at(span_in(src, "names[i])", 0, 0, 8))
+        .op(Op::NOP, 0, 0, 0);
+    a.at(on_line(b[0].1)).comp_enter(4, &b[0].2, "s");
+    let k = a.s("path") as u8;
+    a.op(Op::SETFIELD, 4, k, 0)
+        .op(Op::MOV, 6, 0, 0)
+        .op(Op::GETINDEX, 7, 1, 2)
+        .burn_op(5, "fs.append_text", 2);
+    a.comp_leave().burn_leave().addk(2, 2, 1);
+    a.jump(Op::LOOP, 0, "top");
+    a.label("out").i(steps(0, 0));
+    a.op(Op::LOADNULL, 8, 0, 0).i(ret(8));
+    let m = with_label_reg(burn_main(&mut a, 1, 9, &[(0, None)]), 0, 3);
+    let left = burn_agree(src, &m, &["a.txt"]);
+    assert_eq!(left.files, vec![Some("ab".to_string())]);
+    assert_eq!(compensation_labels(&left), vec!["a", "b"]);
+    let plan = planned_compensations(&m, &["a.txt"]);
+    assert_eq!(plan.len(), 2, "{plan:?}");
+    assert!(
+        plan[0].contains("\"a\"") && plan[1].contains("\"b\""),
+        "{plan:?}"
+    );
+}
+
+#[test]
+fn a_burn_left_by_a_jump_runs_with_nothing_after_the_jump() {
+    // `break` mid-body: comp.leave, burn.leave, the jump; no burn.enter after.
+    let src = "roll i = 0\nwhile i < 3 {\n  i = i + 1\n  burn (s) {\n    s.path = p0\n    fs.append_text(p0, \"x\")\n    if i == 2 {\n      break\n    }\n  } unburn {\n    fs.rm(s.path)\n  }\n}\nexhale \"end\"\n";
+    let b = burns_of(src);
+    let mut a = Asm::default();
+    a.i(Instr::asbx(Op::LOADINT, 1, 0)).i(steps(1, 0));
+    a.label("top")
+        .i(Instr::asbx(Op::LOADINT, 2, 3))
+        .op(Op::LT, 3, 1, 2);
+    a.jump(Op::TESTN, 3, "out").i(steps(1, 1)).addk(1, 1, 1);
+    a.op(Op::NEWMAP, 2, 0, 0).at(b[0].0).burn_enter(0, 0);
+    a.at(on_line(b[0].1)).comp_enter(2, &b[0].2, "s");
+    let k = a.s("path") as u8;
+    a.op(Op::SETFIELD, 2, k, 0)
+        .write(3, 0, "fs.append_text", "x");
+    a.eqk(3, 1, 2).jump(Op::TESTN, 3, "skip");
+    a.comp_leave().burn_leave().jump(Op::JMP, 0, "out");
+    a.label("skip").comp_leave().burn_leave();
+    a.jump(Op::LOOP, 0, "top");
+    a.label("out").i(steps(0, 0)).exhale_str(3, "end");
+    a.op(Op::LOADNULL, 3, 0, 0).i(ret(3));
+    let mut m = burn_main(&mut a, 1, 6, &[(0, None)]);
+    // One row, from burn.enter to the body's own burn.leave.
+    let enter = m
+        .main
+        .instrs
+        .iter()
+        .position(|i| i.op() == Some(Op::BURN_ENTER))
+        .expect("a burn.enter") as u32;
+    let end = m
+        .main
+        .instrs
+        .iter()
+        .rposition(|i| i.op() == Some(Op::BURN_LEAVE))
+        .expect("a burn.leave") as u32;
+    m.main.region_rows = vec![RegionRow {
+        pc_start: enter,
+        pc_end: end + 1,
+        region: 0,
+    }];
+    let left = burn_agree(src, &m, &["a.txt"]);
+    assert_eq!(left.out, "end\n");
+    assert_eq!(left.files, vec![Some("xx".to_string())]);
+    assert_eq!(compensation_labels(&left).len(), 2);
+
+    // A body that ends in `break`: its row ends at the jump, no burn.leave
+    // after it.
+    let src = "while true {\n  burn (s) {\n    s.path = p0\n    fs.append_text(p0, \"x\")\n    break\n  } unburn {\n    fs.rm(s.path)\n  }\n}\nexhale \"end\"\n";
+    let b = burns_of(src);
+    let mut a = Asm::default();
+    a.i(steps(1, 0)).i(steps(1, 1));
+    a.op(Op::NEWMAP, 2, 0, 0).at(b[0].0).burn_enter(0, 0);
+    a.at(on_line(b[0].1)).comp_enter(2, &b[0].2, "s");
+    let k = a.s("path") as u8;
+    a.op(Op::SETFIELD, 2, k, 0)
+        .write(3, 0, "fs.append_text", "x");
+    a.comp_leave().burn_leave().jump(Op::JMP, 0, "out");
+    a.label("out").i(steps(0, 0)).exhale_str(3, "end");
+    a.op(Op::LOADNULL, 3, 0, 0).i(ret(3));
+    let mut m = burn_main(&mut a, 1, 6, &[(0, None)]);
+    let rows = &mut m.main.region_rows;
+    assert_eq!(rows.len(), 1);
+    rows[0].pc_end += 1; // take in the jump
+    let left = burn_agree(src, &m, &["a.txt"]);
+    assert_eq!(left.out, "end\n");
+    assert_eq!(compensation_labels(&left).len(), 1);
+}
+
+#[test]
+fn an_unlit_burn_runs_in_a_one_register_frame() {
+    let mut f = main_fn(
+        1,
+        vec![
+            Instr::abx(Op::BURN_ENTER, 1, 0),
+            abc(Op::BURN_LEAVE, 0, 0, 0),
+            abc(Op::LOADNULL, 0, 0, 0),
+            ret(0),
+        ],
+    );
+    f.regions = vec![BurnRegion {
+        class: 1,
+        label: RegionLabel::None,
+    }];
+    f.region_rows = lexical_rows(&f.instrs);
+    assert_eq!(ok(&module(f)), "null");
 }

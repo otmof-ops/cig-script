@@ -481,7 +481,7 @@ fn info_for(op: Op) -> OpInfo {
         BURN_ENTER => abx(BurnClass, Region),
         BURN_OP => abc(RegRange, StrConst, BurnOpPacked),
         BURN_LEAVE => abc(None, None, None),
-        COMP_ENTER => abc(None, None, None),
+        COMP_ENTER => abc(Reg, StrConst, StrConst),
         COMP_LEAVE => abc(None, None, None),
 
         PACK => abc(RegRange, RegRangeCount, None),

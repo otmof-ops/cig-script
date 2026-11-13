@@ -76,8 +76,8 @@
 use crate::diagnostics::{internal, usage, Diagnostic};
 use crate::interp::ops::{binary, fast_binary, negate, range_fits};
 use crate::interp::{
-    arity_mismatch, chain_step, error_value, exhale_part, make_chain, map_key, outside_burn,
-    pack_root, set_field, set_index, Interp,
+    arity_mismatch, burn_label, chain_step, error_value, exhale_part, make_chain, map_key,
+    outside_burn, pack_root, set_field, set_index, Interp,
 };
 use crate::syntax::ast::BinOp;
 use crate::syntax::span::Span;
@@ -85,7 +85,7 @@ use crate::value::{Builtin, FnBody, Function, Value};
 use cig_bytecode::instr::walk;
 use cig_bytecode::{
     Constant, DecodedInstr, FuncKind, Function as BcFunction, HandlerEntry, LineEntry, Op,
-    SpanBase, UpvalDesc, UpvalKind, Verified, VerifyError, RESERVED_U32,
+    RegionLabel, SpanBase, UpvalDesc, UpvalKind, Verified, VerifyError, RESERVED_U32,
 };
 use indexmap::IndexMap;
 use std::cell::RefCell;
@@ -181,7 +181,16 @@ struct Proto {
 /// One burn region of a function.
 struct Region {
     unlit: bool,
-    label: Option<String>,
+    label: Label,
+}
+
+/// Where a burn region's label comes from.
+enum Label {
+    None,
+    /// A string constant, read at load.
+    Text(String),
+    /// A register, read when `burn.enter` runs.
+    Reg(u32),
 }
 
 /// A variable a closure shares with the function that made it.
@@ -285,11 +294,12 @@ fn flatten(f: &BcFunction, out: &mut Vec<Proto>, known: &Known<'_>) -> Result<us
     let mut regions = Vec::with_capacity(f.regions.len());
     for r in &f.regions {
         let label = match r.label {
-            RESERVED_U32 => None,
-            k => match f.constants.get(k as usize) {
-                Some(Constant::Str(s)) => Some(s.clone()),
+            RegionLabel::None => Label::None,
+            RegionLabel::Const(k) => match f.constants.get(k as usize) {
+                Some(Constant::Str(s)) => Label::Text(s.clone()),
                 _ => return Err(refused("region-label", index, 0)),
             },
+            RegionLabel::Reg(r) => Label::Reg(r),
         };
         regions.push(Region {
             unlit: r.class == 1,
@@ -330,21 +340,6 @@ fn flatten(f: &BcFunction, out: &mut Vec<Proto>, known: &Known<'_>) -> Result<us
                 };
                 if let Some(slot) = effects.get_mut(d.b_u as usize) {
                     *slot = Some(callee);
-                }
-            }
-            Op::BURN_ENTER => {
-                let same = f
-                    .regions
-                    .get(d.b_u as usize)
-                    .is_some_and(|r| u32::from(r.class) == d.a);
-                if !same {
-                    return Err(refused("burn-class-mismatch", index, d.pc));
-                }
-            }
-            Op::COMP_ENTER => {
-                let string = |i: u32| matches!(f.constants.get(i as usize), Some(Constant::Str(_)));
-                if d.a >= f.reg_count || !string(d.b_u) || !string(d.c) {
-                    return Err(refused("comp-operands", index, d.pc));
                 }
             }
             _ => {}
@@ -1591,7 +1586,17 @@ impl Machine<'_> {
                     .get(d.b_u as usize)
                     .ok_or_else(|| broken("a region past the table", span))?;
                 let unlit = region.unlit;
-                let label = region.label.clone();
+                // A computed label is read when the burn is entered, before
+                // it opens; its error takes the row of a `nop` right after.
+                let label = match &region.label {
+                    Label::None => None,
+                    Label::Text(s) => Some(s.clone()),
+                    Label::Reg(r) => {
+                        let v = self.get(base, *r, span)?;
+                        let at = part_spans(proto, next, 1, span);
+                        Some(burn_label(&v, at.first().copied().unwrap_or(span))?)
+                    }
+                };
                 let frame = self
                     .frames
                     .last_mut()

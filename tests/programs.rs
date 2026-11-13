@@ -9,7 +9,7 @@
 
 use cigscript::cig_bytecode::{
     self as bc, BurnRegion, Constant, FuncKind, Function as BcFunction, Instr, LineEntry, Module,
-    Op, SpanBase, RESERVED_U32,
+    Op, RegionLabel, RegionRow, SpanBase,
 };
 use cigscript::program::{self, Build, Encoding, Program, Section, Stage};
 use std::fs;
@@ -1016,7 +1016,7 @@ impl Asm {
     fn burn_enter(&mut self) -> &mut Self {
         self.regions.push(BurnRegion {
             class: 0,
-            label: RESERVED_U32,
+            label: RegionLabel::None,
         });
         let r = (self.regions.len() - 1) as u16;
         self.i(Instr::abx(Op::BURN_ENTER, 0, r))
@@ -1046,6 +1046,7 @@ impl Asm {
         lines.sort_by_key(|r| r.pc);
         f.lines = lines;
         f.regions = std::mem::take(&mut self.regions);
+        f.region_rows = burn_rows(&f.instrs);
         f.children = std::mem::take(&mut self.children);
         f
     }
@@ -1056,6 +1057,29 @@ impl Asm {
             main: self.function("", FuncKind::Main, regs),
         }
     }
+}
+
+/// Each burn's row, as a lowering writes it: from its `burn.enter` to the
+/// pc after the `burn.leave` that closes it.
+fn burn_rows(code: &[Instr]) -> Vec<RegionRow> {
+    let mut open = Vec::new();
+    let mut rows = Vec::new();
+    for d in cigscript::cig_bytecode::instr::walk(code).filter_map(|d| d.ok()) {
+        match d.op {
+            Op::BURN_ENTER => open.push((d.pc, d.b_u)),
+            Op::BURN_LEAVE => {
+                if let Some((pc_start, region)) = open.pop() {
+                    rows.push(RegionRow {
+                        pc_start,
+                        pc_end: d.pc + d.width,
+                        region,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+    rows
 }
 
 /// Where `needle` starts in `src`: its byte offset, line and column.

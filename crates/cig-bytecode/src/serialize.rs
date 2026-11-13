@@ -86,7 +86,8 @@ fn write_regions(p: &mut Vec<u8>, rs: &[crate::module::BurnRegion]) {
     write_u32(p, rs.len().min(u32::MAX as usize) as u32);
     for r in rs {
         write_u8(p, r.class);
-        write_u32(p, r.label);
+        write_u8(p, r.label.tag());
+        write_u32(p, r.label.index());
     }
 }
 

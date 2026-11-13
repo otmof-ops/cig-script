@@ -5,8 +5,8 @@
 
 use cig_bytecode::{
     parse_module, serialize_module, verify_module, wide_prefix, BurnRegion, Constant, FuncKind,
-    Function, HandlerEntry, Instr, LineEntry, Module, Op, RegionRow, SpanBase, UpvalDesc,
-    UpvalKind, RESERVED_U32,
+    Function, HandlerEntry, Instr, LineEntry, Module, Op, RegionLabel, RegionRow, SpanBase,
+    UpvalDesc, UpvalKind, RESERVED_U32,
 };
 
 fn example_main(seed: u64) -> Function {
@@ -16,7 +16,10 @@ fn example_main(seed: u64) -> Function {
     f.constants.push(Constant::Float(2.5 + (seed as f64)));
     f.constants.push(Constant::Str(format!("hello-{seed}")));
     f.constants.push(Constant::Str("write".to_string()));
-    f.regions.push(BurnRegion { class: 0, label: 3 });
+    f.regions.push(BurnRegion {
+        class: 0,
+        label: RegionLabel::Const(3),
+    });
     f.reg_count = 4;
     f.instrs = vec![
         Instr::abx(Op::LOADK, 0, 0),
@@ -52,8 +55,8 @@ fn example_main(seed: u64) -> Function {
         col: 1,
     });
     f.region_rows.push(RegionRow {
-        pc_start: 2,
-        pc_end: 3,
+        pc_start: 1,
+        pc_end: 4,
         region: 0,
     });
     // One child: a lambda with its own constants and reg frame.

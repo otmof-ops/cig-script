@@ -11,7 +11,7 @@
 
 use cig_bytecode::{
     parse_module, serialize_module, verify_module, BurnRegion, Constant, Function, Instr, Module,
-    Op, RESERVED_U32,
+    Op, RegionLabel, RegionRow,
 };
 
 fn sample_bytes() -> Vec<u8> {
@@ -19,7 +19,12 @@ fn sample_bytes() -> Vec<u8> {
     m.main.constants.push(Constant::Str("write".to_string()));
     m.main.regions.push(BurnRegion {
         class: 0,
-        label: RESERVED_U32,
+        label: RegionLabel::None,
+    });
+    m.main.region_rows.push(RegionRow {
+        pc_start: 0,
+        pc_end: 3,
+        region: 0,
     });
     m.main.reg_count = 4;
     m.main.instrs = vec![
