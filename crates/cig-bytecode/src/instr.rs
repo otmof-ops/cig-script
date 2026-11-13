@@ -365,6 +365,13 @@ impl FirstWordPcs {
         self.starts.last().copied()
     }
 
+    /// The last first-word pc before `pc`: the instruction that ends at
+    /// `pc` when `pc` is a boundary.
+    pub fn last_before(&self, pc: u32) -> Option<u32> {
+        let i = self.starts.partition_point(|&s| s < pc);
+        i.checked_sub(1).and_then(|i| self.starts.get(i).copied())
+    }
+
     /// Iterate first-word pcs in order.
     pub fn iter(&self) -> impl Iterator<Item = u32> + '_ {
         self.starts.iter().copied()

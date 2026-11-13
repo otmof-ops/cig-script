@@ -169,15 +169,58 @@ pub struct HandlerEntry {
 }
 
 /// A burn region declared on a function: its class
-/// (`Normal` or `Unlit`) and an optional label (a string-constant
-/// index into the function's own constant pool, else [`RESERVED_U32`]).
+/// (`Normal` or `Unlit`) and its label.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BurnRegion {
     /// Burn class: 0 = normal, 1 = unlit.
     pub class: u8,
-    /// Label constant index into the function's own pool, or
-    /// [`RESERVED_U32`] for none.
-    pub label: u32,
+    /// Where the burn's label comes from.
+    pub label: RegionLabel,
+}
+
+/// Where a burn region's label comes from: none, a string constant of
+/// the function's own pool, or a register `burn.enter` reads when it
+/// runs (a label the program computes, `burn (s, name) { }`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RegionLabel {
+    /// The burn has no label.
+    None,
+    /// The label is the string constant at this index.
+    Const(u32),
+    /// The label is the value of this register when `burn.enter` runs.
+    Reg(u32),
+}
+
+impl RegionLabel {
+    /// Byte tag used on the wire: 0 none, 1 constant, 2 register.
+    pub fn tag(self) -> u8 {
+        match self {
+            RegionLabel::None => 0,
+            RegionLabel::Const(_) => 1,
+            RegionLabel::Reg(_) => 2,
+        }
+    }
+
+    /// The `u32` written after the tag: the constant index or the
+    /// register, or [`RESERVED_U32`] for none.
+    pub fn index(self) -> u32 {
+        match self {
+            RegionLabel::None => RESERVED_U32,
+            RegionLabel::Const(i) | RegionLabel::Reg(i) => i,
+        }
+    }
+
+    /// The reverse of [`RegionLabel::tag`] and [`RegionLabel::index`].
+    /// `None` for an unknown tag, or a label of none whose index is not
+    /// [`RESERVED_U32`] (each label has one encoding).
+    pub fn from_wire(tag: u8, index: u32) -> Option<RegionLabel> {
+        Some(match tag {
+            0 if index == RESERVED_U32 => RegionLabel::None,
+            1 => RegionLabel::Const(index),
+            2 => RegionLabel::Reg(index),
+            _ => return None,
+        })
+    }
 }
 
 /// A function's kind: the module's top level, a named pull, or a lambda.

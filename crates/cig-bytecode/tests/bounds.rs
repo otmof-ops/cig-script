@@ -8,7 +8,8 @@
 
 use cig_bytecode::{
     parse_module, verify_module, BurnRegion, Constant, FuncKind, Function, Instr, Module, Op,
-    UpvalDesc, UpvalKind, VerifyError, MAGIC, MAX_FUNCTION_DEPTH, MAX_REG_COUNT, RESERVED_U32,
+    RegionLabel, UpvalDesc, UpvalKind, VerifyError, MAGIC, MAX_FUNCTION_DEPTH, MAX_REG_COUNT,
+    RESERVED_U32,
 };
 
 fn tiny_main() -> Module {
@@ -336,6 +337,6 @@ fn reserved_sentinel_stays_exported() {
     assert_eq!(RESERVED_U32, u32::MAX);
     let _ = BurnRegion {
         class: 0,
-        label: RESERVED_U32,
+        label: RegionLabel::None,
     };
 }

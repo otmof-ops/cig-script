@@ -15,7 +15,8 @@
 use crate::error::VerifyError;
 use crate::instr::{decode, first_word_pcs, DecodeError, DecodedInstr, FirstWordPcs};
 use crate::module::{
-    Constant, Function, Module, UpvalKind, MAX_FUNCTION_DEPTH, MAX_REG_COUNT, RESERVED_U32,
+    Constant, Function, Module, RegionLabel, RegionRow, UpvalKind, MAX_FUNCTION_DEPTH,
+    MAX_REG_COUNT, RESERVED_U32,
 };
 use crate::opcode::{Fmt, Op, OperandKind};
 
@@ -110,6 +111,7 @@ fn verify_function(
     verify_regions(func, f, &pcs)?;
     verify_line_table(func, f, &pcs)?;
     verify_instructions(func, f, &pcs)?;
+    verify_burn_rows(func, f, &pcs)?;
     verify_termination(func, f, &pcs)?;
     verify_charged_cycles(func, f, &pcs)?;
 
@@ -285,7 +287,6 @@ fn verify_instructions(func: u32, f: &Function, pcs: &FirstWordPcs) -> Result<()
     let n_const = f.constants.len() as u32;
     let n_func = f.children.len() as u32;
     let n_regions = f.regions.len() as u32;
-    let mut burn_depth: i32 = 0;
 
     for d in crate::instr::walk(&f.instrs) {
         let d = match d {
@@ -313,38 +314,24 @@ fn verify_instructions(func: u32, f: &Function, pcs: &FirstWordPcs) -> Result<()
 
         verify_reg_ranges(func, &d, f)?;
 
-        match d.op {
-            Op::BURN_ENTER => burn_depth += 1,
-            Op::BURN_LEAVE => {
-                if burn_depth == 0 {
-                    return Err(VerifyError::BurnUnbalanced {
-                        func,
-                        pc: d.pc,
-                        why: "leave-without-enter",
-                    });
+        if d.op == Op::BURN_ENTER {
+            // The operand checks above put `Bx` inside the region table.
+            if let Some(region) = f.regions.get(d.b_u as usize) {
+                if u32::from(region.class) != d.a {
+                    return Err(VerifyError::BurnClassMismatch { func, pc: d.pc });
                 }
-                burn_depth -= 1;
-            }
-            Op::BURN_OP => {
-                let inside_lexical = burn_depth > 0;
-                let inside_region_row = f
-                    .region_rows
-                    .iter()
-                    .any(|r| r.pc_start <= d.pc && d.pc < r.pc_end && r.region != RESERVED_U32);
-                if !(inside_lexical || inside_region_row || f.requires_burn) {
-                    return Err(VerifyError::BurnOpOutsideRegion { func, pc: d.pc });
+                if let RegionLabel::Reg(r) = region.label {
+                    if r >= f.reg_count {
+                        return Err(VerifyError::RegisterOutOfRange {
+                            func,
+                            pc: d.pc,
+                            reg: r,
+                            max: f.reg_count,
+                        });
+                    }
                 }
             }
-            _ => {}
         }
-    }
-
-    if burn_depth != 0 {
-        return Err(VerifyError::BurnUnbalanced {
-            func,
-            pc: pcs.len(),
-            why: "enter-without-leave",
-        });
     }
 
     Ok(())
@@ -421,18 +408,9 @@ fn check_scalar(
         | OperandKind::Arity
         | OperandKind::RegRange
         | OperandKind::RegRangeCount
-        | OperandKind::BurnOpPacked => Ok(()),
-        OperandKind::BurnClass => {
-            if raw > 1 {
-                return Err(VerifyError::RegisterOutOfRange {
-                    func,
-                    pc: d.pc,
-                    reg: raw,
-                    max: 2,
-                });
-            }
-            Ok(())
-        }
+        | OperandKind::BurnOpPacked
+        // `burn.enter`'s class is checked against its region's class.
+        | OperandKind::BurnClass => Ok(()),
         OperandKind::Reg => {
             if raw >= f.reg_count {
                 return Err(VerifyError::RegisterOutOfRange {
@@ -646,6 +624,187 @@ fn verify_reg_ranges(func: u32, d: &DecodedInstr, f: &Function) -> Result<(), Ve
                 count: role.count,
                 max: f.reg_count,
             });
+        }
+    }
+    Ok(())
+}
+
+// ---- burn rows -------------------------------------------------------
+
+/// The burn rules. A **burn row** is a region row that names a region (not
+/// the sentinel): the pcs of one burn, from its `burn.enter` to the pc
+/// after its last instruction. The rules are on the rows, so a burn left
+/// by a jump (`comp.leave`, `burn.leave`, then the jump) needs nothing
+/// after the jump, and a body that ends in a terminator needs no
+/// `burn.leave` after it:
+///
+/// - `rows-interleave`: burn rows nest (two rows are disjoint or one holds
+///   the other) and no two start at the same pc;
+/// - `row-without-enter`: a row starts with a `burn.enter` of its region;
+/// - `row-falls-out`: a row's last instruction is a `burn.leave` or does
+///   not fall through (`ret`, `tailcall`, `throw`, `jmp`, `loop`);
+/// - `enter-outside-row`: a `burn.enter` lies inside a row of its region
+///   (at its start, or anywhere in it: a re-entry no run reaches);
+/// - `leave-outside-row`: a run of `burn.leave`s, with only `comp.leave`
+///   between them, is no longer than the number of rows around its first;
+/// - `jump-into-row`: a jump operand, or a handler's `handler_pc` or
+///   `finally_pc`, lands inside a row only at its start, or from inside it
+///   (the jump's pc, the handler's whole range);
+/// - `burn-op-outside-region`: a `burn.op` lies inside a row, or the
+///   function is `requires_burn`.
+///
+/// These refuse a malformed module early; the VM's burn stack at run time
+/// stays the guarantee. Linear in the function's size, after a sort of
+/// the rows.
+fn verify_burn_rows(func: u32, f: &Function, pcs: &FirstWordPcs) -> Result<(), VerifyError> {
+    let n = f.instrs.len();
+    let unbalanced = |pc: u32, why: &'static str| VerifyError::BurnUnbalanced { func, pc, why };
+    let mut code: Vec<Option<DecodedInstr>> = vec![None; n];
+    for pc in pcs.iter() {
+        if let (Ok(d), Some(slot)) = (decode(&f.instrs, pc), code.get_mut(pc as usize)) {
+            *slot = Some(d);
+        }
+    }
+    let at = |pc: u32| code.get(pc as usize).copied().flatten();
+
+    // The rows, outer first; each one's parent, the row around it.
+    let mut rows: Vec<RegionRow> = f
+        .region_rows
+        .iter()
+        .copied()
+        .filter(|r| r.region != RESERVED_U32)
+        .collect();
+    rows.sort_by_key(|r| (r.pc_start, core::cmp::Reverse(r.pc_end)));
+    let mut parent: Vec<Option<usize>> = vec![None; rows.len()];
+    let mut open: Vec<usize> = Vec::new();
+    for (i, r) in rows.iter().enumerate() {
+        if i > 0 && rows[i - 1].pc_start == r.pc_start {
+            return Err(unbalanced(r.pc_start, "rows-interleave"));
+        }
+        while open.last().is_some_and(|&o| rows[o].pc_end <= r.pc_start) {
+            open.pop();
+        }
+        if open.last().is_some_and(|&o| rows[o].pc_end < r.pc_end) {
+            return Err(unbalanced(r.pc_start, "rows-interleave"));
+        }
+        parent[i] = open.last().copied();
+        open.push(i);
+    }
+
+    for r in &rows {
+        if !at(r.pc_start).is_some_and(|d| d.op == Op::BURN_ENTER && d.b_u == r.region) {
+            return Err(unbalanced(r.pc_start, "row-without-enter"));
+        }
+        let last = pcs.last_before(r.pc_end).and_then(at);
+        let closed = last.is_some_and(|d| {
+            matches!(
+                d.op,
+                Op::BURN_LEAVE | Op::RET | Op::TAILCALL | Op::THROW | Op::JMP | Op::LOOP
+            )
+        });
+        if !closed {
+            let pc = last.map_or(r.pc_start, |d| d.pc);
+            return Err(unbalanced(pc, "row-falls-out"));
+        }
+    }
+
+    // Each pc's innermost row, and how many rows hold it.
+    let mut inner: Vec<Option<usize>> = vec![None; n];
+    let mut depth: Vec<u32> = vec![0; n];
+    open.clear();
+    let mut next = 0usize;
+    for pc in 0..n {
+        let p = pc as u32;
+        while open.last().is_some_and(|&o| rows[o].pc_end <= p) {
+            open.pop();
+        }
+        if rows.get(next).is_some_and(|r| r.pc_start == p) {
+            open.push(next);
+            next += 1;
+        }
+        inner[pc] = open.last().copied();
+        depth[pc] = open.len() as u32;
+    }
+
+    // Each region's pcs, as sorted disjoint spans: the union of its rows.
+    let mut spans: Vec<Vec<(u32, u32)>> = vec![Vec::new(); f.regions.len()];
+    for r in &rows {
+        if let Some(s) = spans.get_mut(r.region as usize) {
+            match s.last_mut() {
+                Some(last) if r.pc_start < last.1 => last.1 = last.1.max(r.pc_end),
+                _ => s.push((r.pc_start, r.pc_end)),
+            }
+        }
+    }
+    let in_region = |region: u32, pc: u32| {
+        spans.get(region as usize).is_some_and(|s| {
+            let i = s.partition_point(|&(start, _)| start <= pc);
+            i > 0 && s.get(i - 1).is_some_and(|&(_, end)| pc < end)
+        })
+    };
+
+    // The row a landing at `t` must come from inside: the innermost row
+    // holding `t`, or the one around it when `t` is that row's start.
+    let entered = |t: u32| -> Option<usize> {
+        let r = inner.get(t as usize).copied().flatten()?;
+        if rows[r].pc_start == t {
+            parent[r]
+        } else {
+            Some(r)
+        }
+    };
+
+    let mut leaves = 0u32;
+    let mut room = 0u32;
+    for pc in pcs.iter() {
+        let Some(d) = at(pc) else { continue };
+        let here = depth.get(pc as usize).copied().unwrap_or(0);
+        match d.op {
+            Op::BURN_ENTER if !in_region(d.b_u, pc) => {
+                return Err(unbalanced(pc, "enter-outside-row"));
+            }
+            Op::BURN_LEAVE => {
+                if leaves == 0 {
+                    room = here;
+                }
+                leaves += 1;
+                if leaves > room {
+                    return Err(unbalanced(pc, "leave-outside-row"));
+                }
+            }
+            Op::BURN_OP if here == 0 && !f.requires_burn => {
+                return Err(VerifyError::BurnOpOutsideRegion { func, pc });
+            }
+            _ => {}
+        }
+        if !matches!(d.op, Op::BURN_LEAVE | Op::COMP_LEAVE) {
+            leaves = 0;
+        }
+        let info = d.op.info();
+        let targets = [
+            (info.b == OperandKind::Jump).then(|| i64::from(pc) + 1 + i64::from(d.b_s)),
+            (info.c == OperandKind::Jump).then(|| i64::from(pc) + 1 + i64::from(d.c_s)),
+        ];
+        for t in targets.into_iter().flatten() {
+            let Ok(t) = u32::try_from(t) else { continue };
+            if let Some(r) = entered(t) {
+                if !(rows[r].pc_start <= pc && pc < rows[r].pc_end) {
+                    return Err(unbalanced(pc, "jump-into-row"));
+                }
+            }
+        }
+    }
+
+    for h in &f.handlers {
+        for t in [h.handler_pc, h.finally_pc] {
+            if t == RESERVED_U32 {
+                continue;
+            }
+            if let Some(r) = entered(t) {
+                if !(rows[r].pc_start <= h.pc_start && h.pc_end <= rows[r].pc_end) {
+                    return Err(unbalanced(t, "jump-into-row"));
+                }
+            }
         }
     }
     Ok(())
@@ -872,7 +1031,12 @@ mod tests {
         m.main.constants.push(Constant::Str("write".to_string()));
         m.main.regions.push(BurnRegion {
             class: 0,
-            label: RESERVED_U32,
+            label: RegionLabel::None,
+        });
+        m.main.region_rows.push(RegionRow {
+            pc_start: 0,
+            pc_end: 3,
+            region: 0,
         });
         m.main.reg_count = 4;
         m.main.instrs = vec![

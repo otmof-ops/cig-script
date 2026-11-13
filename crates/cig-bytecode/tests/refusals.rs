@@ -6,7 +6,7 @@
 
 use cig_bytecode::{
     verify_module, wide_prefix, BurnRegion, Constant, FuncKind, Function, HandlerEntry, Instr,
-    LineEntry, Module, Op, RegionRow, SpanBase, VerifyError, RESERVED_U32,
+    LineEntry, Module, Op, RegionLabel, RegionRow, SpanBase, VerifyError, RESERVED_U32,
 };
 
 fn base() -> Module {
@@ -14,7 +14,7 @@ fn base() -> Module {
     m.main.constants.push(Constant::Str("write".to_string()));
     m.main.regions.push(BurnRegion {
         class: 0,
-        label: RESERVED_U32,
+        label: RegionLabel::None,
     });
     m.main.reg_count = 8;
     m.main.instrs = vec![
@@ -43,8 +43,13 @@ fn the_bytecode_verifier_refuses_a_burn_op_outside_its_region() {
 }
 
 #[test]
-fn a_burn_op_inside_a_lexical_region_passes() {
+fn a_burn_op_inside_its_burn_row_passes() {
     let mut m = base();
+    m.main.region_rows = vec![RegionRow {
+        pc_start: 0,
+        pc_end: 3,
+        region: 0,
+    }];
     m.main.instrs = vec![
         Instr::abx(Op::BURN_ENTER, 0, 0),
         Instr::abc(Op::BURN_OP, 1, 0, 0x10),
@@ -56,7 +61,7 @@ fn a_burn_op_inside_a_lexical_region_passes() {
 }
 
 #[test]
-fn a_burn_op_inside_a_region_row_passes_when_function_lacks_lexical_wrap() {
+fn a_burn_op_in_a_row_that_no_burn_enter_opens_is_refused() {
     let mut m = base();
     m.main.region_rows = vec![RegionRow {
         pc_start: 0,
@@ -68,7 +73,14 @@ fn a_burn_op_inside_a_region_row_passes_when_function_lacks_lexical_wrap() {
         Instr::abc(Op::LOADNULL, 0, 0, 0),
         Instr::abc(Op::RET, 0, 0, 0),
     ];
-    verify_module(&m).expect("burn.op inside a region row should verify");
+    assert!(matches!(
+        verify_module(&m).unwrap_err(),
+        VerifyError::BurnUnbalanced {
+            why: "row-without-enter",
+            pc: 0,
+            ..
+        }
+    ));
 }
 
 #[test]
@@ -364,7 +376,10 @@ fn burn_enter_without_leave_is_refused() {
     ];
     assert!(matches!(
         verify_module(&m).unwrap_err(),
-        VerifyError::BurnUnbalanced { .. }
+        VerifyError::BurnUnbalanced {
+            why: "enter-outside-row",
+            ..
+        }
     ));
 }
 
@@ -377,7 +392,10 @@ fn burn_leave_without_enter_is_refused() {
     ];
     assert!(matches!(
         verify_module(&m).unwrap_err(),
-        VerifyError::BurnUnbalanced { .. }
+        VerifyError::BurnUnbalanced {
+            why: "leave-outside-row",
+            ..
+        }
     ));
 }
 

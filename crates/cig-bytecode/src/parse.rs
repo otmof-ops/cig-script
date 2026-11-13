@@ -9,8 +9,8 @@
 use crate::error::ParseError;
 use crate::instr::Instr;
 use crate::module::{
-    BurnRegion, Constant, FuncKind, Function, HandlerEntry, LineEntry, Module, RegionRow, SpanBase,
-    UpvalDesc, UpvalKind, FORMAT_VERSION, MAGIC, MAX_FUNCTION_DEPTH,
+    BurnRegion, Constant, FuncKind, Function, HandlerEntry, LineEntry, Module, RegionLabel,
+    RegionRow, SpanBase, UpvalDesc, UpvalKind, FORMAT_VERSION, MAGIC, MAX_FUNCTION_DEPTH,
 };
 
 /// Parse a module from bytes. Returns the module, or the first
@@ -130,7 +130,7 @@ impl<'a> Reader<'a> {
 fn min_entry_bytes(at: &'static str) -> usize {
     match at {
         "constants" => 1,
-        "regions" => 1 + 4,
+        "regions" => 1 + 1 + 4,
         "handlers" => 5 * 4,
         "lines" => 5 * 4,
         "region rows" => 3 * 4,
@@ -188,7 +188,14 @@ fn read_regions(r: &mut Reader<'_>) -> Result<Vec<BurnRegion>, ParseError> {
                 value: class as u32,
             });
         }
-        let label = r.read_u32("region label")?;
+        let tag = r.read_u8("region label kind")?;
+        let index = r.read_u32("region label")?;
+        let Some(label) = RegionLabel::from_wire(tag, index) else {
+            return Err(ParseError::BadTag {
+                at: "region label kind",
+                value: tag as u32,
+            });
+        };
         out.push(BurnRegion { class, label });
     }
     Ok(out)
