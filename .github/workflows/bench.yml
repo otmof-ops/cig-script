@@ -262,6 +262,14 @@ jobs:
           status=0
           cig --json bench "$MANIFEST" --gate "$GATE" > bench-run.json || status=$?
           echo "status=$status" >> "$GITHUB_ENV"
+          # A run that gave no result (a usage error, a cig that does not
+          # read this manifest) writes no history line: an empty line under
+          # an empty name was pushed for one. The last step fails the job.
+          product="$(jq -r '.product // empty' bench-run.json 2> /dev/null || true)"
+          if [ -z "$product" ]; then
+            echo "cig bench gave no result (exit ${status}); no history line is written"
+            exit 0
+          fi
           # One line per run: the format `cig bench history` reads.
           jq -c --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg commit "${{ github.sha }}" --arg fs "${FS_TYPE:-unknown}" --arg os "$RUNNER_OS" '
             { format: 1, at: $at, commit: $commit, product: .product, cig_version: .cig_version,
@@ -271,14 +279,13 @@ jobs:
                          | { key: .name, value: { group: .group, median_ms: .outcome.median_ms,
                              p10_ms: .outcome.p10_ms, p90_ms: .outcome.p90_ms, cv: .outcome.cv,
                              rss_bytes: .outcome.rss_bytes } } ] | from_entries ) }' bench-run.json > bench-line.json
-          product="$(jq -r .product bench-run.json)"
           echo "PRODUCT=$product" >> "$GITHUB_ENV"
           # One file per series (the nightly matrix: ext4, btrfs, xfs, apfs, ntfs).
           echo "HISTORY_FILE=${product}${SERIES:+.$SERIES}.jsonl" >> "$GITHUB_ENV"
           cat bench-line.json
 
       - name: Nightly, append to the history branch
-        if: steps.mode.outputs.mode == 'nightly'
+        if: steps.mode.outputs.mode == 'nightly' && env.PRODUCT != ''
         run: |
           set -eu
           git config user.name "github-actions[bot]"
@@ -318,3 +325,4 @@ jobs:
         if: steps.mode.outputs.mode == 'nightly'
         run: |
           [ "${status:-0}" = 0 ] || { echo "cig bench exited ${status}"; exit 1; }
+          [ -n "${PRODUCT:-}" ] || { echo "cig bench gave no result, so nothing was recorded"; exit 1; }
