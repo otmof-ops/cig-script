@@ -49,8 +49,18 @@
 //! frame list to print. `throw` is the interpreter's `cough`, and `loadg`
 //! reads a builtin, a module or `args` from the interpreter's own prelude.
 //!
-//! The instructions of later packages (burns, `pack`, chains) stop with one
-//! internal error that names the instruction; [`NOT_BUILT`] lists them.
+//! A burn opens and closes through the interpreter's one burn entry
+//! ([`Interp::burn_open`], [`Interp::compensate_open`],
+//! [`Interp::compensate_close`], [`Interp::burn_close`],
+//! [`Interp::record_compensation`]), the functions the tree-walker's
+//! `burn { }` calls; a `burn.op` calls its builtin through
+//! [`Interp::call_builtin`], so the kernel gets the op the builtin builds,
+//! through [`Interp::effect`], as in the tree-walker. Each frame keeps the
+//! burns it opened, innermost last; an error leaving a burn closes it (as
+//! the tree-walker's block does on its way out) before a try outside it
+//! sees the error. `pack` and `chain.make` check and build through the
+//! tree-walker's [`pack_root`], [`Interp::declare_pack`], [`chain_step`]
+//! and [`make_chain`].
 
 #![forbid(unsafe_code)]
 #![cfg_attr(
@@ -66,7 +76,8 @@
 use crate::diagnostics::{internal, usage, Diagnostic};
 use crate::interp::ops::{binary, fast_binary, negate, range_fits};
 use crate::interp::{
-    arity_mismatch, error_value, exhale_part, map_key, set_field, set_index, Interp,
+    arity_mismatch, chain_step, error_value, exhale_part, make_chain, map_key, outside_burn,
+    pack_root, set_field, set_index, Interp,
 };
 use crate::syntax::ast::BinOp;
 use crate::syntax::span::Span;
@@ -84,9 +95,10 @@ use std::rc::Rc;
 mod tests;
 
 /// The burn-op kinds a `burn.op` may name, by index. The VM refuses a
-/// module whose `burn.op` names a kind past the end (E1050). The burn
-/// instructions are built by a later package, which owns this table.
-pub const BURN_OP_KINDS: [&str; 9] = [
+/// module whose `burn.op` names a kind past the end, or a callee that is
+/// not a builtin of that kind ([`burn_op_kind`]), with E1050. Kinds are
+/// only ever appended.
+pub const BURN_OP_KINDS: [&str; 11] = [
     "write",
     "append",
     "delete",
@@ -96,19 +108,36 @@ pub const BURN_OP_KINDS: [&str; 9] = [
     "proc",
     "env_set",
     "env_unset",
+    "layer_apply",
+    "layer_discard",
 ];
 
-/// The instructions this VM does not run yet: each stops with an internal
-/// error that names it. A later package builds them, one at a time.
-pub const NOT_BUILT: [Op; 7] = [
-    Op::BURN_ENTER,
-    Op::BURN_OP,
-    Op::BURN_LEAVE,
-    Op::COMP_ENTER,
-    Op::COMP_LEAVE,
-    Op::PACK,
-    Op::CHAIN_MAKE,
-];
+/// The kind (an index into [`BURN_OP_KINDS`]) of the builtin `callee`
+/// when it changes the world, the kind a `burn.op` calling it carries.
+/// Every builtin whose effect needs a burn has one.
+pub fn burn_op_kind(callee: &str) -> Option<usize> {
+    let kind = match callee {
+        "fs.write_text" | "json.save" | "csv.write" => "write",
+        "fs.append_text" => "append",
+        "fs.rm" => "delete",
+        "fs.mv" => "move",
+        "fs.cp" => "copy",
+        "fs.mkdir" => "mkdir",
+        "proc.run" | "proc.text" | "proc.lines" | "proc.json" | "proc.csv" | "proc.kv"
+        | "proc.pipe" | "proc.shell" => "proc",
+        "env.set" => "env_set",
+        "env.unset" => "env_unset",
+        "proc.apply_layer" => "layer_apply",
+        "proc.discard_layer" => "layer_discard",
+        _ => return None,
+    };
+    BURN_OP_KINDS.iter().position(|k| *k == kind)
+}
+
+/// The instructions this VM does not run yet. Empty: every instruction of
+/// format version 1 runs. An opcode a later format adds stops with an
+/// internal error that names it until the VM runs it, and goes here.
+pub const NOT_BUILT: [Op; 0] = [];
 
 const RECOMPILE_HINT: &str =
     "compile it again (cigcompile build), or fetch it again from where it came from";
@@ -141,6 +170,18 @@ struct Proto {
     children: Vec<usize>,
     /// The function's try/catch/finally regions, as the module has them.
     handlers: Vec<HandlerEntry>,
+    /// A bare `burn.op` is allowed anywhere in it (the caller's burn).
+    requires_burn: bool,
+    /// The burn regions: unlit or not, and the label.
+    regions: Vec<Region>,
+    /// For each constant a `burn.op` names as its callee, the builtin.
+    effects: Vec<Option<&'static Builtin>>,
+}
+
+/// One burn region of a function.
+struct Region {
+    unlit: bool,
+    label: Option<String>,
 }
 
 /// A variable a closure shares with the function that made it.
@@ -240,6 +281,21 @@ struct Known<'a> {
 fn flatten(f: &BcFunction, out: &mut Vec<Proto>, known: &Known<'_>) -> Result<usize, Diagnostic> {
     let index = out.len();
     let mut code: Vec<Option<DecodedInstr>> = vec![None; f.instrs.len()];
+    let mut effects: Vec<Option<&'static Builtin>> = vec![None; f.constants.len()];
+    let mut regions = Vec::with_capacity(f.regions.len());
+    for r in &f.regions {
+        let label = match r.label {
+            RESERVED_U32 => None,
+            k => match f.constants.get(k as usize) {
+                Some(Constant::Str(s)) => Some(s.clone()),
+                _ => return Err(refused("region-label", index, 0)),
+            },
+        };
+        regions.push(Region {
+            unlit: r.class == 1,
+            label,
+        });
+    }
     for d in walk(&f.instrs) {
         let d = d.map_err(|e| {
             internal(format!(
@@ -261,8 +317,34 @@ fn flatten(f: &BcFunction, out: &mut Vec<Proto>, known: &Known<'_>) -> Result<us
             }
             Op::BURN_OP => {
                 let kind = if d.wide { d.c & 0xFF } else { d.c & 0x0F };
-                if kind as usize >= BURN_OP_KINDS.len() {
+                let callee = match f.constants.get(d.b_u as usize) {
+                    Some(Constant::Str(s)) => crate::stdlib::builtin_catalogue()
+                        .iter()
+                        .copied()
+                        .find(|b| b.name == s.as_str())
+                        .filter(|b| burn_op_kind(b.name) == Some(kind as usize)),
+                    _ => None,
+                };
+                let Some(callee) = callee else {
                     return Err(refused("unknown-burn-op", index, d.pc));
+                };
+                if let Some(slot) = effects.get_mut(d.b_u as usize) {
+                    *slot = Some(callee);
+                }
+            }
+            Op::BURN_ENTER => {
+                let same = f
+                    .regions
+                    .get(d.b_u as usize)
+                    .is_some_and(|r| u32::from(r.class) == d.a);
+                if !same {
+                    return Err(refused("burn-class-mismatch", index, d.pc));
+                }
+            }
+            Op::COMP_ENTER => {
+                let string = |i: u32| matches!(f.constants.get(i as usize), Some(Constant::Str(_)));
+                if d.a >= f.reg_count || !string(d.b_u) || !string(d.c) {
+                    return Err(refused("comp-operands", index, d.pc));
                 }
             }
             _ => {}
@@ -282,6 +364,9 @@ fn flatten(f: &BcFunction, out: &mut Vec<Proto>, known: &Known<'_>) -> Result<us
         consts: f.constants.iter().map(constant).collect(),
         children: Vec::new(),
         handlers: f.handlers.clone(),
+        requires_burn: f.requires_burn,
+        regions,
+        effects,
     };
     out.push(proto);
     let mut children = Vec::with_capacity(f.children.len());
@@ -419,6 +504,7 @@ fn run_frame(
         held_nest: 0,
         upvals,
         tries: Vec::new(),
+        burns: Vec::new(),
     });
     let result = m.exec(program);
     // Whatever stopped the run, the interpreter's depth and loop counters
@@ -458,6 +544,31 @@ struct Frame {
     upvals: Rc<[Cell]>,
     /// The tries open in this frame, innermost last.
     tries: Vec<Open>,
+    /// The burns open in this frame, innermost last.
+    burns: Vec<OpenBurn>,
+}
+
+/// A burn the frame has entered and not yet left.
+struct OpenBurn {
+    unlit: bool,
+    label: Option<String>,
+    /// `burn.enter`'s position: the burn statement's, where recording its
+    /// compensation fails.
+    span: Span,
+    comp: Option<Comp>,
+}
+
+/// The compensation of an open burn, from `comp.enter`.
+struct Comp {
+    /// Between `comp.enter` and `comp.leave`: the kernel covers its ops.
+    open: bool,
+    /// The journal mark `comp.leave` took.
+    mark: usize,
+    source: String,
+    state_name: Option<String>,
+    state: Option<Value>,
+    /// The `unburn` block's line: `comp.enter`'s position.
+    line: u32,
 }
 
 /// A try the frame has entered and not yet left.
@@ -468,6 +579,9 @@ struct Open {
     /// finally run at.
     nest: u32,
     stage: Stage,
+    /// The frame's open burns at `try.enter`: an error the try takes, and
+    /// a `try.leave`, close the burns opened since.
+    burns: usize,
     /// What the finally goes on to when it ends.
     pending: Pending,
     /// The cough payload the finally set aside, given back when it ends.
@@ -525,6 +639,14 @@ impl Machine<'_> {
     }
 
     fn release(&mut self, f: &Frame) {
+        // Burns still open here were left by an internal error: given back
+        // as an error leaves them, with nothing recorded.
+        for b in f.burns.iter().rev() {
+            if b.comp.as_ref().is_some_and(|c| c.open) {
+                self.interp.compensate_close();
+            }
+            self.interp.burn_close(b.unlit);
+        }
         let held = f.nest.saturating_add(f.held_nest);
         self.interp.loop_depth = self.interp.loop_depth.saturating_sub(held);
         for _ in 0..f.held_calls {
@@ -692,6 +814,13 @@ impl Machine<'_> {
             | Op::GETINDEX
             | Op::SETINDEX => self.data_op(proto, d, base, span),
             Op::TRY_ENTER | Op::TRY_LEAVE | Op::THROW => self.try_op(proto, d, base, span),
+            Op::BURN_ENTER
+            | Op::BURN_OP
+            | Op::BURN_LEAVE
+            | Op::COMP_ENTER
+            | Op::COMP_LEAVE
+            | Op::PACK
+            | Op::CHAIN_MAKE => self.burn_op(proto, d, base, span),
             _ => self.basic_op(program, proto, d, base, span),
         }
     }
@@ -1111,9 +1240,11 @@ impl Machine<'_> {
                         f.tries.truncate(at);
                     }
                     let nest = f.nest;
+                    let burns = f.burns.len();
                     f.tries.push(Open {
                         handler,
                         nest,
+                        burns,
                         stage: Stage::Body,
                         pending: Pending::Next(next),
                         payload: None,
@@ -1157,6 +1288,15 @@ impl Machine<'_> {
         let Some(open) = self.frames.last_mut().and_then(|f| f.tries.pop()) else {
             return Err(misuse(d.op, "found no open try in its frame", span));
         };
+        // Out of the burns opened inside the try first, as `break`,
+        // `continue` and `snuff` leave them in the tree-walker; their own
+        // error is raised inside the try.
+        if let Err(e) = self.close_burns(open.burns, true) {
+            if let Some(f) = self.frames.last_mut() {
+                f.tries.push(open);
+            }
+            return Err(e);
+        }
         if d.a != 0 {
             return Ok(Flow::Next(next));
         }
@@ -1208,7 +1348,7 @@ impl Machine<'_> {
                 return Err(e);
             };
             e = match self.offer(proto, pc, e)? {
-                Some(e) => e,
+                Some(e) => self.unwind_burns(0, e),
                 None => return Ok(()),
             };
             if entry {
@@ -1252,6 +1392,7 @@ impl Machine<'_> {
                 // was left without `try.leave`, and the try with it.
                 Stage::Body if !in_range => continue,
                 Stage::Body if catches && self.interp.exit_requested.is_none() => {
+                    let e = self.unwind_burns(open.burns, e);
                     let payload = self.interp.cough_payload.take();
                     if h.catch_reg != RESERVED_U32 {
                         self.put(base, h.catch_reg, error_value(&e, payload), span)?;
@@ -1269,6 +1410,7 @@ impl Machine<'_> {
                     return Ok(None);
                 }
                 Stage::Body | Stage::Catch if finally => {
+                    let e = self.unwind_burns(open.burns, e);
                     let to = self.enter_finally(open, h, Pending::Raise(e));
                     if let Some(f) = self.frames.last_mut() {
                         f.pc = to;
@@ -1320,6 +1462,7 @@ impl Machine<'_> {
             held_nest: 0,
             upvals: Rc::clone(&cf.upvals),
             tries: Vec::new(),
+            burns: Vec::new(),
         });
         Ok(())
     }
@@ -1343,6 +1486,8 @@ impl Machine<'_> {
         if args.len() != target.arity {
             return Err(arity_mismatch(f, args.len(), span));
         }
+        // The replaced function ends: its burns close as a `snuff` leaves them.
+        self.close_burns(0, true)?;
         self.interp.enter_call(span)?;
         let base = match self.frames.last_mut() {
             Some(frame) => {
@@ -1369,6 +1514,9 @@ impl Machine<'_> {
     /// Leave the current frame with `v`. `Some(v)` when it was the entry
     /// frame: the run is over.
     fn ret(&mut self, v: Value, span: Span) -> Result<Option<Value>, Diagnostic> {
+        // `snuff` out of a burn: each burn is left as completed first, and
+        // an error recording one is raised here, in the frame.
+        self.close_burns(0, true)?;
         let frame = self
             .frames
             .pop()
@@ -1400,6 +1548,224 @@ impl Machine<'_> {
 }
 
 impl Machine<'_> {
+    /// The burn instructions, `pack` and `chain.make`.
+    fn burn_op(
+        &mut self,
+        proto: &Proto,
+        d: &DecodedInstr,
+        base: usize,
+        span: Span,
+    ) -> Result<Flow, Diagnostic> {
+        let next = d.pc as usize + d.width as usize;
+        match d.op {
+            Op::BURN_ENTER => {
+                let region = proto
+                    .regions
+                    .get(d.b_u as usize)
+                    .ok_or_else(|| broken("a region past the table", span))?;
+                let unlit = region.unlit;
+                let label = region.label.clone();
+                let frame = self
+                    .frames
+                    .last_mut()
+                    .ok_or_else(|| broken("an empty call stack", span))?;
+                frame.burns.push(OpenBurn {
+                    unlit,
+                    label,
+                    span,
+                    comp: None,
+                });
+                self.interp.burn_open(unlit);
+            }
+            Op::COMP_ENTER => {
+                let source = name(proto, d.b_u, span)?.to_string();
+                let state_name =
+                    Some(name(proto, d.c, span)?.to_string()).filter(|n| !n.is_empty());
+                let state = match state_name {
+                    Some(_) => Some(self.get(base, d.a, span)?),
+                    None => None,
+                };
+                let burn = self
+                    .frames
+                    .last_mut()
+                    .and_then(|f| f.burns.last_mut())
+                    .ok_or_else(|| misuse(d.op, "found no open burn in its frame", span))?;
+                // An unlit burn changes nothing, so the tree-walker records
+                // no compensation for one.
+                if !burn.unlit {
+                    if burn.comp.is_some() {
+                        return Err(misuse(
+                            d.op,
+                            "found its burn's compensation entered already",
+                            span,
+                        ));
+                    }
+                    burn.comp = Some(Comp {
+                        open: true,
+                        mark: 0,
+                        source,
+                        state_name,
+                        state,
+                        line: span.line,
+                    });
+                    self.interp.compensate_open();
+                }
+            }
+            Op::COMP_LEAVE => {
+                let burn = self
+                    .frames
+                    .last_mut()
+                    .and_then(|f| f.burns.last_mut())
+                    .ok_or_else(|| misuse(d.op, "found no open burn in its frame", span))?;
+                if !burn.unlit {
+                    let comp = burn.comp.as_mut().filter(|c| c.open).ok_or_else(|| {
+                        misuse(d.op, "found no compensation entered in its burn", span)
+                    })?;
+                    comp.open = false;
+                    comp.mark = self.interp.compensate_close();
+                }
+            }
+            Op::BURN_LEAVE => {
+                let burn = self
+                    .frames
+                    .last_mut()
+                    .and_then(|f| f.burns.pop())
+                    .ok_or_else(|| misuse(d.op, "found no open burn in its frame", span))?;
+                self.close_burn(burn, true)?;
+            }
+            Op::BURN_OP => {
+                let n = if d.wide { d.c >> 8 } else { d.c >> 4 };
+                let b = proto
+                    .effects
+                    .get(d.b_u as usize)
+                    .copied()
+                    .flatten()
+                    .ok_or_else(|| broken("a burn.op callee that did not load", span))?;
+                let in_own_burn = self.frames.last().is_some_and(|f| !f.burns.is_empty());
+                if !in_own_burn && !proto.requires_burn {
+                    return Err(outside_burn(b.name, span));
+                }
+                let args = self.window(base, d.a + 1, n, span)?;
+                let v = self.interp.call_builtin(b, &args, span)?;
+                self.set(base, d.a, v, span)?;
+            }
+            Op::PACK => {
+                self.pack_place(span)?;
+                let values = self.window(base, d.a, d.b_u, span)?;
+                let at = part_spans(proto, next, values.len(), span);
+                let mut roots = Vec::with_capacity(values.len());
+                for (v, s) in values.iter().zip(at) {
+                    roots.push(pack_root(v, s)?);
+                }
+                self.interp.declare_pack(roots, span)?;
+            }
+            Op::CHAIN_MAKE => {
+                let window = self.window(base, d.a + 1, d.b_u, span)?;
+                let Some((Value::Str(chain), pairs)) = window.split_first() else {
+                    return Err(misuse(d.op, "found no chain name in its window", span));
+                };
+                if pairs.len() % 2 != 0 {
+                    return Err(misuse(d.op, "found a step without its label", span));
+                }
+                let at = part_spans(proto, next, pairs.len() / 2, span);
+                let mut steps = Vec::with_capacity(pairs.len() / 2);
+                for (n, (pair, s)) in pairs.chunks_exact(2).zip(at).enumerate() {
+                    let (label, value) = match pair {
+                        [Value::Str(l), v] => (Some(l.to_string()), v.clone()),
+                        [Value::Null, v] => (None, v.clone()),
+                        _ => {
+                            return Err(misuse(
+                                d.op,
+                                "found a step label that is not a string",
+                                span,
+                            ))
+                        }
+                    };
+                    steps.push(chain_step(chain, n, label, value, s)?);
+                }
+                self.set(base, d.a, make_chain(chain, steps), span)?;
+            }
+
+            _ => return Err(broken("an instruction sent to the wrong group", span)),
+        }
+        Ok(Flow::Next(next))
+    }
+
+    /// `pack` where the checker allows `pack { }`: at the top level, outside
+    /// every block, once, before anything burned. Otherwise the checker's
+    /// own E753.
+    fn pack_place(&self, span: Span) -> Result<(), Diagnostic> {
+        use crate::check::{pack_misplaced, PackPlace};
+        let top = matches!(self.frames.as_slice(), [f] if f.func == 0 && f.tries.is_empty());
+        let kernel = &self.interp.kernel;
+        if !top || self.interp.in_burn() {
+            return Err(pack_misplaced(PackPlace::InBlock, span));
+        }
+        if kernel.pack().is_some() {
+            return Err(pack_misplaced(PackPlace::Second, span));
+        }
+        if !kernel.journal().is_empty() || !kernel.planned.is_empty() {
+            return Err(pack_misplaced(PackPlace::NotFirst, span));
+        }
+        Ok(())
+    }
+
+    /// Close `b`, the current frame's innermost burn, as the tree-walker's
+    /// `burn { }` ends: the compensation's mark, the depths, then (when the
+    /// block `completed`) the compensation recorded.
+    fn close_burn(&mut self, b: OpenBurn, completed: bool) -> Result<(), Diagnostic> {
+        let mark = match &b.comp {
+            Some(c) if c.open => self.interp.compensate_close(),
+            Some(c) => c.mark,
+            None => 0,
+        };
+        self.interp.burn_close(b.unlit);
+        match b.comp {
+            Some(c) if completed => self.interp.record_compensation(
+                crate::burn::journal::Compensation {
+                    source: c.source,
+                    state_name: c.state_name,
+                    state: serde_json::Value::Null,
+                    line: c.line,
+                    label: b.label,
+                    command: None,
+                    cwd: None,
+                },
+                c.state.as_ref(),
+                mark,
+                b.span,
+            ),
+            _ => Ok(()),
+        }
+    }
+
+    /// Leave the current frame's burns down to `keep`, innermost first, as
+    /// completed blocks (`snuff`, `break`, `continue`, `try.leave`). The
+    /// first error stops it; the burns left open close as it unwinds.
+    fn close_burns(&mut self, keep: usize, completed: bool) -> Result<(), Diagnostic> {
+        loop {
+            let b = match self.frames.last_mut() {
+                Some(f) if f.burns.len() > keep => f.burns.pop(),
+                _ => None,
+            };
+            match b {
+                Some(b) => self.close_burn(b, completed)?,
+                None => return Ok(()),
+            }
+        }
+    }
+
+    /// An error leaves the current frame's burns down to `keep`, innermost
+    /// first: completed only when `exit()` was asked for. An error recording
+    /// a compensation replaces `e`, as it does in the tree-walker.
+    fn unwind_burns(&mut self, keep: usize, mut e: Diagnostic) -> Diagnostic {
+        let completed = self.interp.exit_requested.is_some();
+        while let Err(e2) = self.close_burns(keep, completed) {
+            e = e2;
+        }
+        e
+    }
+
     /// `R(r)` of a loop window, which holds an int when the lowering wrote
     /// the loop right.
     fn int_at(&self, base: usize, r: u32, op: Op, span: Span) -> Result<i64, Diagnostic> {
@@ -1448,6 +1814,24 @@ impl Machine<'_> {
         range_fits(0, i64::try_from(turns).unwrap_or(i64::MAX), span)?;
         Ok((start, u64::try_from(turns).unwrap_or(u64::MAX)))
     }
+}
+
+/// The positions of the `n` parts of the instruction ending at `next`
+/// (`pack`'s roots, `chain.make`'s steps): part `i` takes the line row of
+/// the `i`-th `nop` right after the instruction, when the run of `nop`s
+/// reaches it; else the instruction's own position.
+fn part_spans(proto: &Proto, next: usize, n: usize, span: Span) -> Vec<Span> {
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        let pc = next.saturating_add(i);
+        let nop = matches!(proto.code.get(pc), Some(Some(d)) if d.op == Op::NOP);
+        if !nop {
+            break;
+        }
+        out.push(proto.spans.get(pc).copied().unwrap_or(span));
+    }
+    out.resize(n, span);
+    out
 }
 
 /// The string constant `K[i]`: a field or method name (verified a string).

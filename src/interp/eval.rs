@@ -242,36 +242,13 @@ impl Interp {
                 for (n, expr) in decl.steps.iter().enumerate() {
                     let value = self.eval(expr, env)?;
                     let label = match &expr.kind {
-                        ExprKind::Ident(name) => name.clone(),
-                        ExprKind::Member { name, .. } => name.clone(),
-                        _ => crate::stdlib::chain_label(&value, n),
+                        ExprKind::Ident(name) => Some(name.clone()),
+                        ExprKind::Member { name, .. } => Some(name.clone()),
+                        _ => None,
                     };
-                    match value {
-                        Value::Func(_) | Value::Builtin(_) | Value::Chain(_) => {}
-                        other => {
-                            return Err(type_error(format!(
-                                "chain `{}`: step {} is a {}, not a function or chain",
-                                decl.name,
-                                n + 1,
-                                other.type_name()
-                            ))
-                            .at(expr.span)
-                            .with_hint(
-                                "make each step a stick holding a pack, a pull, or another chain",
-                            )
-                            .into())
-                        }
-                    }
-                    steps.push(crate::value::ChainStep {
-                        label,
-                        value,
-                        span: expr.span,
-                    });
+                    steps.push(chain_step(&decl.name, n, label, value, expr.span)?);
                 }
-                let chain = Value::Chain(Rc::new(crate::value::Chain {
-                    name: decl.name.clone(),
-                    steps,
-                }));
+                let chain = make_chain(&decl.name, steps);
                 if !env.declare(&decl.name, chain, false) {
                     return Err(crate::diagnostics::check(format!(
                         "`{}` is already declared in this scope",
@@ -382,27 +359,9 @@ impl Interp {
                 let mut roots = Vec::new();
                 for r in &decl.roots {
                     let v = self.eval(r, env)?;
-                    let Value::Str(text) = &v else {
-                        return Err(type_error(format!(
-                            "pack roots are paths (strings), got {}",
-                            v.type_name()
-                        ))
-                        .at(r.span)
-                        .into());
-                    };
-                    if text.trim().is_empty() {
-                        return Err(crate::diagnostics::burn("a pack root is empty")
-                            .code("E755")
-                            .at(r.span)
-                            .with_hint("name the directory the script may write in, pack { \"./build\" }; an empty root would mean the whole working directory")
-                            .into());
-                    }
-                    roots.push(crate::burn::normalize_root(text));
+                    roots.push(pack_root(&v, r.span)?);
                 }
-                let span = decl.span;
-                self.kernel
-                    .set_pack(roots)
-                    .map_err(|d| Signal::Error(d.or_at(span)))?;
+                self.declare_pack(roots, decl.span)?;
                 Ok(())
             }
             Stmt::Burn {
@@ -440,24 +399,19 @@ impl Interp {
                     scope.declare(name, m.clone(), false);
                     m
                 });
-                let compensating = unburn.is_some() && *class != BurnClass::Unlit;
-                self.burn_depth += 1;
-                if *class == BurnClass::Unlit {
-                    self.unlit_depth += 1;
-                }
+                let unlit = *class == BurnClass::Unlit;
+                let compensating = unburn.is_some() && !unlit;
+                self.burn_open(unlit);
                 if compensating {
-                    self.kernel.enter_compensating();
+                    self.compensate_open();
                 }
                 let result = self.exec_block_in(&body.stmts, &scope);
                 let mark = if compensating {
-                    self.kernel.leave_compensating()
+                    self.compensate_close()
                 } else {
                     0
                 };
-                self.burn_depth -= 1;
-                if *class == BurnClass::Unlit {
-                    self.unlit_depth -= 1;
-                }
+                self.burn_close(unlit);
                 // A block left by snuff, break, continue or exit() completed
                 // its effects, so its compensation is recorded before the
                 // signal goes on; only an error leaves them uncovered.
@@ -467,24 +421,20 @@ impl Interp {
                     Err(_) => true,
                 };
                 if compensating && completed {
-                    let state_json = match &state_value {
-                        Some(v) => crate::stdlib::json::from_value(v, *span)?,
-                        None => serde_json::Value::Null,
-                    };
-                    self.kernel
-                        .record_compensation(
-                            crate::burn::journal::Compensation {
-                                source: unburn_src.clone().unwrap_or_default(),
-                                state_name: state.clone(),
-                                state: state_json,
-                                line: unburn.as_ref().map(|b| b.span.line).unwrap_or(span.line),
-                                label: label_text,
-                                command: None,
-                                cwd: None,
-                            },
-                            mark,
-                        )
-                        .map_err(|d| d.or_at(*span))?;
+                    self.record_compensation(
+                        crate::burn::journal::Compensation {
+                            source: unburn_src.clone().unwrap_or_default(),
+                            state_name: state.clone(),
+                            state: serde_json::Value::Null,
+                            line: unburn.as_ref().map(|b| b.span.line).unwrap_or(span.line),
+                            label: label_text,
+                            command: None,
+                            cwd: None,
+                        },
+                        state_value.as_ref(),
+                        mark,
+                        *span,
+                    )?;
                 }
                 result?;
                 Ok(())
@@ -1092,6 +1042,61 @@ fn field_index(map: &IndexMap<String, Value>, name: &str, hint: &Cell<u32>) -> O
 #[inline]
 fn field<'m>(map: &'m IndexMap<String, Value>, name: &str, hint: &Cell<u32>) -> Option<&'m Value> {
     field_index(map, name, hint).map(|i| &map[i])
+}
+
+/// One root of `pack { }`, as the tree-walker and the VM's `pack` check it:
+/// a non-empty string (`E755`), normalized. Errors are at the root, `span`.
+pub(crate) fn pack_root(v: &Value, span: Span) -> Result<std::path::PathBuf, Diagnostic> {
+    let Value::Str(text) = v else {
+        return Err(type_error(format!(
+            "pack roots are paths (strings), got {}",
+            v.type_name()
+        ))
+        .at(span));
+    };
+    if text.trim().is_empty() {
+        return Err(crate::diagnostics::burn("a pack root is empty")
+            .code("E755")
+            .at(span)
+            .with_hint("name the directory the script may write in, pack { \"./build\" }; an empty root would mean the whole working directory"));
+    }
+    Ok(crate::burn::normalize_root(text))
+}
+
+/// Step `n` (from 0) of the chain `chain`, as the tree-walker and the VM's
+/// `chain.make` build it: a function or a chain, labeled `label` (the
+/// step's name in the source) or, without one, as the chain runner labels
+/// a value. Errors are at the step, `span`.
+pub(crate) fn chain_step(
+    chain: &str,
+    n: usize,
+    label: Option<String>,
+    value: Value,
+    span: Span,
+) -> Result<crate::value::ChainStep, Diagnostic> {
+    let label = label.unwrap_or_else(|| crate::stdlib::chain_label(&value, n));
+    match value {
+        Value::Func(_) | Value::Builtin(_) | Value::Chain(_) => {}
+        other => {
+            return Err(type_error(format!(
+                "chain `{}`: step {} is a {}, not a function or chain",
+                chain,
+                n + 1,
+                other.type_name()
+            ))
+            .at(span)
+            .with_hint("make each step a stick holding a pack, a pull, or another chain"))
+        }
+    }
+    Ok(crate::value::ChainStep { label, value, span })
+}
+
+/// The chain value `chain name { steps }` declares.
+pub(crate) fn make_chain(name: &str, steps: Vec<crate::value::ChainStep>) -> Value {
+    Value::Chain(Rc::new(crate::value::Chain {
+        name: name.to_string(),
+        steps,
+    }))
 }
 
 /// One value of an `exhale` line: a space before every value but the first,

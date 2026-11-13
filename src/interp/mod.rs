@@ -8,7 +8,9 @@ mod eval;
 pub(crate) mod ops;
 pub(crate) mod record;
 
-pub(crate) use eval::{arity_mismatch, exhale_part, map_key, set_field, set_index};
+pub(crate) use eval::{
+    arity_mismatch, chain_step, exhale_part, make_chain, map_key, pack_root, set_field, set_index,
+};
 pub use eval::{closest, error_value, normalize_index};
 
 use crate::burn::{Decision, Kernel, Op};
@@ -51,6 +53,17 @@ pub struct Interp {
     pub(crate) recs: Vec<record::RecFrame>,
     /// The script's own file, recorded by a pass that depends on its code.
     pub script_path: Option<std::path::PathBuf>,
+}
+
+/// E701: `name` changes the world outside every burn block. The
+/// interpreter's effects and the VM's `burn.op` raise it.
+pub(crate) fn outside_burn(name: &str, span: Span) -> Diagnostic {
+    burn_error(format!(
+        "{name} changes the world, so it must be inside a burn block"
+    ))
+    .code("E701")
+    .at(span)
+    .with_hint(format!("wrap it: burn {{ {name}(...) }}"))
 }
 
 /// The default step budget: `CIG_MAX_STEPS`, else ten million, which a
@@ -111,9 +124,9 @@ impl Interp {
                 false,
             );
         }
-        self.burn_depth += 1;
+        self.burn_open(false);
         let result = self.exec_block_in(&program.body, &scope);
-        self.burn_depth -= 1;
+        self.burn_close(false);
         self.out.flush().ok();
         match result {
             Ok(()) | Err(eval::Signal::Return(_)) => Ok(()),
@@ -173,6 +186,71 @@ impl Interp {
         self.prelude.force_declare("args", list, false);
     }
 
+    // ----- the burn's kernel entry ---------------------------------------------
+    //
+    // A burn block, in the tree-walker (`Stmt::Burn`) and in the VM
+    // (`burn.enter`, `comp.enter`, `comp.leave`, `burn.leave`), opens and
+    // closes through these functions and no others, in this order: open,
+    // [compensate_open], the body, [compensate_close], close, [record].
+
+    /// A burn block starts: effects are allowed from here, simulated in an
+    /// `unlit` one.
+    pub(crate) fn burn_open(&mut self, unlit: bool) {
+        self.burn_depth += 1;
+        if unlit {
+            self.unlit_depth += 1;
+        }
+    }
+
+    /// A burn block ends, however it was left.
+    pub(crate) fn burn_close(&mut self, unlit: bool) {
+        self.burn_depth = self.burn_depth.saturating_sub(1);
+        if unlit {
+            self.unlit_depth = self.unlit_depth.saturating_sub(1);
+        }
+    }
+
+    /// A `burn { } unburn { }` block's body starts: the kernel covers its
+    /// irreversible ops from here.
+    pub(crate) fn compensate_open(&mut self) {
+        self.kernel.enter_compensating();
+    }
+
+    /// The body ended: the journal mark where it began, for
+    /// [`Interp::record_compensation`].
+    pub(crate) fn compensate_close(&mut self) -> usize {
+        self.kernel.leave_compensating()
+    }
+
+    /// A compensated block completed (or was left by `snuff`, `break`,
+    /// `continue` or `exit()`): journal its compensation with the state map
+    /// as it is now. Errors are at the burn statement, `span`.
+    pub(crate) fn record_compensation(
+        &mut self,
+        mut comp: crate::burn::journal::Compensation,
+        state: Option<&Value>,
+        mark: usize,
+        span: Span,
+    ) -> Result<(), Diagnostic> {
+        comp.state = match state {
+            Some(v) => crate::stdlib::json::from_value(v, span)?,
+            None => serde_json::Value::Null,
+        };
+        self.kernel
+            .record_compensation(comp, mark)
+            .map_err(|d| d.or_at(span))
+    }
+
+    /// Declare the pack, as `pack { }` does: the roots, each already
+    /// checked by [`pack_root`], go to the kernel; its errors are at `span`.
+    pub(crate) fn declare_pack(
+        &mut self,
+        roots: Vec<std::path::PathBuf>,
+        span: Span,
+    ) -> Result<(), Diagnostic> {
+        self.kernel.set_pack(roots).map_err(|d| d.or_at(span))
+    }
+
     pub fn in_burn(&self) -> bool {
         self.burn_depth > 0
     }
@@ -206,12 +284,7 @@ impl Interp {
             .at(span));
         }
         if self.burn_depth == 0 {
-            return Err(burn_error(format!(
-                "{name} changes the world, so it must be inside a burn block"
-            ))
-            .code("E701")
-            .at(span)
-            .with_hint(format!("wrap it: burn {{ {name}(...) }}")));
+            return Err(outside_burn(name, span));
         }
         self.kernel
             .decide(op, self.unlit_depth > 0)
@@ -223,12 +296,7 @@ impl Interp {
     /// it runs for real (not in a dry run, not under `unlit`).
     pub(crate) fn burning(&self, name: &str, span: Span) -> Result<bool, Diagnostic> {
         if self.burn_depth == 0 {
-            return Err(burn_error(format!(
-                "{name} changes the world, so it must be inside a burn block"
-            ))
-            .code("E701")
-            .at(span)
-            .with_hint(format!("wrap it: burn {{ {name}(...) }}")));
+            return Err(outside_burn(name, span));
         }
         Ok(self.unlit_depth == 0 && self.kernel.mode != crate::burn::Mode::DryRun)
     }

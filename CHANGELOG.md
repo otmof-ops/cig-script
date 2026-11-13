@@ -78,6 +78,28 @@ project follows semantic versioning.
   checks. Nothing in the tree executes this bytecode yet; the format
   contract is `docs/BYTECODE.md`. The error registry's `E1050`
   entry gains a bytecode-verify cause.
+- **The bytecode VM runs burns, compensations, `pack` and chains**
+  (cig-compile#31, stage B). `burn.enter`, `burn.op`, `burn.leave`,
+  `comp.enter`, `comp.leave`, `pack` and `chain.make` run, so every
+  instruction of the format does (`vm::NOT_BUILT` is empty). A burn opens
+  and closes through the tree-walker's own burn entry, now functions
+  both engines call (`Interp::burn_open`, `compensate_open`,
+  `compensate_close`, `burn_close`, `record_compensation`); a `burn.op`
+  calls its builtin through the interpreter's builtin call, so the
+  kernel gets the same op, plan, dry run and journal line. An error
+  leaving a burn closes it before a try outside it sees the error, and
+  `try.leave`, `ret` and `exit()` close burns as the tree-walker's
+  `break`, `snuff` and `exit()` do. `pack` checks its roots and refuses
+  a misplaced `pack` with the checker's own `E753`s; `chain.make` builds
+  the chain `light` runs. Loading refuses a `burn.op` callee that is not
+  a builtin of its kind, a `burn.enter` class that is not its region's,
+  bad `comp.enter` operands and a region label that is not a string
+  (`E1050`). The burn-op kinds gain `layer_apply` and `layer_discard`.
+  Tests: `cargo test --lib vm::`, among them
+  `burns_agree_with_the_interpreter`, `burns_go_through_one_kernel_entry`,
+  `pack_is_once_and_before_any_burn`,
+  `chains_run_through_the_kernels_runner` and
+  `the_step_budget_stops_on_the_same_line_across_a_burn`.
 - **The bytecode VM runs `try`, `cough` and prelude values**
   (cig-compile#31, stage B). `try.enter`, `try.leave` and `throw` run
   `try`/`ashtray`/`finally` and `cough` by the tree-walker's rules: an
@@ -94,8 +116,7 @@ project follows semantic versioning.
   have with `E1050`. `try.leave` reads its `A` operand (nonzero: drop
   what the finally had pending), and the `uncharged-cycle` rule now
   sees that a charging `steps` inside a try's range can raise to its
-  catch. Only the burn instructions, `pack` and `chain.make` are left
-  to build. Tests: `cargo test --lib vm::` (among them
+  catch. Tests: `cargo test --lib vm::` (among them
   `try_catch_finally_agree_with_the_interpreter`,
   `the_step_budget_can_be_caught_and_comes_back`,
   `backtraces_match_the_interpreters` and

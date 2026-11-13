@@ -267,19 +267,19 @@ followed by `TESTN`, not a swapped operand pair.
 
 | op | fmt | effect |
 |----|-----|--------|
-| `burn.enter` class, Rg | ABx | enter region `Bx` (of this function's `regions`) with class `A` |
+| `burn.enter` class, Rg | ABx | enter region `Bx` (of this function's `regions`) with class `A` (the region's own class) |
 | `burn.op` A, K, packed | ABC | `R(A) = burn_op(callee=K[B], kind=low 4 of C, args=R(A+1..A+1+(C>>4)))` (unwidened); with `WIDE`, `C` is 16 bits, low 8 are the kind and high 8 are the arg count |
 | `burn.leave` | ABC | leave the current burn |
-| `comp.enter` | ABC | enter the current burn's compensation block |
-| `comp.leave` | ABC | leave the compensation block |
+| `comp.enter` A, B, C | ABC | the current burn has an `unburn { }`: `R(A)` is its state map, `K[B]` the compensation's source, `K[C]` the state's name (empty for none) |
+| `comp.leave` | ABC | the burn's body ends: the compensation stops covering its ops |
 
 ### The rest
 
 | op | fmt | effect |
 |----|-----|--------|
-| `pack` A, B | ABC | `pack(R(A..A+B))` (once, before any burn) |
+| `pack` A, B | ABC | `pack(R(A..A+B))` (once, before any burn); trailing `nop`s may give each root its position |
 | `exhale` A, B | ABC | `exhale(R(A..A+B))` |
-| `chain.make` A, B | ABC | `R(A) = chain(R(A+1..A+1+B))` |
+| `chain.make` A, B | ABC | `R(A) = chain(R(A+1..A+1+B))`: the name, then a label and a value per step; trailing `nop`s may give each step its position |
 | `steps` A, Bx | ABx | set the frame's loop nesting to `A`, then charge the step budget by `Bx` ticks ("How the VM reads it" says where a lowering puts one) |
 
 ## Jump semantics (one rule)
@@ -402,26 +402,38 @@ refuses the module (or the call) with the interpreter's own error.
   The VM checks the name against the interpreter's prelude (its global
   builtins, its modules, and `args`) when it loads a module, and
   refuses an unknown one with `E1050`.
-- **`burn.op`'s kind.** The low 4 bits (or low 8 with `WIDE`) of
-  `burn.op`'s packed `C` operand name a burn-op kind. The VM checks
-  it against the kernel's catalogue at load time.
+- **`burn.op`'s kind and callee.** The low 4 bits (or low 8 with
+  `WIDE`) of `burn.op`'s packed `C` operand name a burn-op kind, and
+  `K[B]` names the builtin. The VM checks at load time that `K[B]` is a
+  builtin of its catalogue whose kind is that kind (`vm::burn_op_kind`),
+  and refuses anything else with `E1050` (`unknown-burn-op`).
+- **`burn.enter`'s class** must be its region's class
+  (`burn-class-mismatch`), and a region's label, when it has one, must
+  be a string constant (`region-label`).
+- **`comp.enter`'s operands.** The format gives them no kind; the VM
+  checks at load that `A` is a register of the frame and that `K[B]` and
+  `K[C]` are string constants (`comp-operands`).
 - **`requires_burn`'s bargain.** A function marked `requires_burn`
   verifies a bare `BURN.OP` wherever it sits in that function's body.
-  In exchange, the VM refuses a call to such a function from outside
-  an open burn, with the interpreter's own error. The format does not
-  attempt to prove the call site through static means.
+  In exchange, its `burn.op` is refused at run time when no burn is open
+  anywhere on the stack, with the interpreter's own `E701` at the op,
+  exactly where and when the tree-walker raises it. The VM does not
+  refuse the call itself: a pull whose effect is conditional runs
+  outside a burn in the tree-walker as long as the effect is not taken,
+  and so it does on the VM. The format does not attempt to prove the
+  call site through static means.
 - **Burn state at run time.** The verifier's burn-balance check is
   **lexical**: it walks the instruction stream in order. A jump can
   enter or leave a burn's pc range, so lexical balance does not
   imply a burn is open at the moment `burn.op` runs. **The VM carries
   the burn stack at run time** and refuses:
-  - a `burn.leave` with no burn open;
-  - a `burn.op` in a function that is not `requires_burn` while no
-    burn is open.
+  - a `burn.leave` with no burn open in its frame (an internal error
+    that names the instruction: the tree-walker has no such state);
+  - a `burn.op` in a function that is not `requires_burn` while its
+    frame has no burn open: the interpreter's `E701`.
 
-  Both land on the interpreter's error, not on `E1050`. The
-  verifier's check is there to catch a malformed module early, not
-  to be the VM's guarantee.
+  Neither lands on `E1050`. The verifier's check is there to catch a
+  malformed module early, not to be the VM's guarantee.
 - **Frame-size and nesting ceilings.** The verifier refuses a
   `reg_count` greater than **65 536** (the widest register index is
   16 bits with a `WIDE` prefix), and refuses a module whose function
@@ -446,8 +458,8 @@ open. A lowering writes to them.
   `crate::instr::decode`, into a table by pc. A `callb` index past the
   builtin catalogue refuses the module with `E1050` (`unknown-builtin
   at fn<i>+<pc>`), and so do a `loadg` name the prelude does not have
-  (`unknown-prelude-name`) and a `burn.op` kind past the burn-op
-  catalogue (`unknown-burn-op`).
+  (`unknown-prelude-name`), a `burn.op` whose callee is not a builtin of
+  its kind (`unknown-burn-op`), and the burn rules below.
 - **The builtin catalogue** is `stdlib::builtin_catalogue()`: the
   global functions, then the functions of `fs`, `path`, `json`,
   `text`, `proc`, `time`, `hash`, `cig`, `pass`, `math`, `env`, `csv`
@@ -615,9 +627,70 @@ open. A lowering writes to them.
   passes, a finally that raises it again, a builtin's callback and a
   call into or out of the tree-walker. The tree-walker prints no frame
   list, only that position, so the VM adds none.
-- The burn, `pack` and chain instructions stop with an internal error
-  that names the instruction until the package that builds them lands
-  (`vm::NOT_BUILT` lists them).
+- **Burns.** A burn opens and closes through the interpreter's one burn
+  entry (`Interp::burn_open`, `compensate_open`, `compensate_close`,
+  `burn_close`, `record_compensation`), the functions the tree-walker's
+  `burn { }` calls, in its order. A lowering writes
+  `burn (s, "deploy") { body } unburn { comp }` as: `newmap R(s)`,
+  `burn.enter 0, Rg` (the region labeled `"deploy"`; its row is the burn
+  statement's position, where recording the compensation fails),
+  `comp.enter s, K[source], K["s"]` (its row is the `unburn` block's
+  position: its line is the one the journal records), the body,
+  `comp.leave`, `burn.leave`. `K[source]` is the text between the
+  `unburn` block's braces, as the parser slices it. A burn without
+  `unburn { }`, or an unlit one (`burn.enter 1, Rg`), has no `comp.*`;
+  in an unlit burn they do nothing, as the tree-walker records no
+  compensation for one. A burn's label is its region's constant: a
+  lowering whose label is not a string literal does not lower the burn
+  yet.
+
+  Each frame keeps the burns it opened, innermost last; an open try
+  keeps how many were open at its `try.enter`. Leaving a burn closes it:
+  the compensation stops covering, the depths go down, and, when the
+  block completed, its compensation is recorded with its state map as it
+  is then. `burn.leave` closes the innermost burn as completed, and so do
+  a `try.leave` (every burn opened inside the try, before its finally),
+  a `ret` and a tail call (every burn of the frame), as `snuff`, `break`
+  and `continue` leave them in the tree-walker. An error closes every
+  burn opened inside the try that takes it, before its catch or finally
+  runs, and every burn of a frame it leaves, innermost first: completed
+  only when `exit()` was asked for, as in the tree-walker. An error
+  recording a compensation replaces the one going on, at the burn's
+  position. A lowering writes `comp.leave` and `burn.leave` on every
+  other way out of a burn (a `jmp` out of it), and does not tail-call
+  inside one.
+- **`burn.op A, K, packed`** calls the builtin `K[B]` with
+  `R(A+1..A+1+n)` through the interpreter's own builtin call, so the
+  kernel gets the op the builtin builds (`Interp::effect`), with its plan,
+  dry run, journal line and errors; the result is `R(A)`. The kinds, by
+  index: `write` (`fs.write_text`, `json.save`, `csv.write`), `append`
+  (`fs.append_text`), `delete` (`fs.rm`), `move` (`fs.mv`), `copy`
+  (`fs.cp`), `mkdir` (`fs.mkdir`), `proc` (`proc.run`, `.text`,
+  `.lines`, `.json`, `.csv`, `.kv`, `.pipe`, `.shell`), `env_set`,
+  `env_unset`, `layer_apply` (`proc.apply_layer`) and `layer_discard`
+  (`proc.discard_layer`). Kinds are only appended.
+- **`pack A, B`** declares the pack from the roots `R(A..A+B)`, each
+  checked as `pack { }` checks it (a string, not empty: `E755`), then
+  the kernel's `set_pack` (its errors at the instruction). Root `i`'s
+  error takes the line row of the `i`-th `nop` right after `pack`, when
+  the run of `nop`s reaches it; else the instruction's own. The
+  checker's `E753`s hold at run time too, in its words: a `pack` outside
+  the top level or inside a burn or a try, a second `pack`, and a `pack`
+  after anything was journaled or planned. The roots are evaluated
+  before `pack` runs; the tree-walker checks each as soon as it is
+  evaluated, so a lowering whose later roots have effects keeps that in
+  mind.
+- **`chain.make A, B`** builds the chain `chain name { steps }` declares:
+  `R(A+1)` is its name (a string), then a pair per step, the step's label
+  (its name in the source for an identifier or a member, else null) and
+  the step's value, so `B = 1 + 2n`. Each step is checked and labeled as
+  the tree-walker does it; step `i`'s error takes the `i`-th trailing
+  `nop`'s row, as `pack`'s roots do. `light` and a stick used as a step
+  run on the interpreter's chain runner, which calls a compiled step
+  through `call_compiled`.
+- `vm::NOT_BUILT` is empty: every instruction of this format runs. An
+  opcode a later format adds stops with an internal error that names it
+  until the VM runs it.
 
 ## Versioning
 
@@ -651,7 +724,8 @@ The format version lives in the file's header. The rule is simple:
   counter);
 - inline-cache slots on `GETFIELD`/`SETFIELD`;
 - the builtin catalogue (bound of `callb`'s index) and the burn-op
-  catalogue (bound of `burn.op`'s kind);
+  catalogue (`vm::BURN_OP_KINDS`, the bound of `burn.op`'s kind, and
+  `vm::burn_op_kind`, the builtins of each kind);
 - the interpretation of `BURN.OP` kinds (`src/opcode.rs` enforces
   only the packed shape);
 - the exact semantics of `TAILCALL` (when it may replace a `CALL`).

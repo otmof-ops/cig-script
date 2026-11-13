@@ -8,15 +8,19 @@ use crate::burn::{Kernel, Mode};
 use crate::diagnostics::Kind;
 use crate::syntax::ast::Stmt;
 use cig_bytecode::{
-    verify_module, wide_prefix, BurnRegion, HandlerEntry, Instr, Module, UpvalDesc, UpvalKind,
-    RESERVED_U32,
+    verify_module, wide_prefix, BurnRegion, HandlerEntry, Instr, Module, RegionRow, UpvalDesc,
+    UpvalKind, RESERVED_U32,
 };
 use indexmap::IndexMap;
 
 // ----- builders --------------------------------------------------------------------
 
 fn interp() -> Interp {
-    let mut i = Interp::new(Kernel::ephemeral(Mode::Run));
+    interp_in(Mode::Run)
+}
+
+fn interp_in(mode: Mode) -> Interp {
+    let mut i = Interp::new(Kernel::ephemeral(mode));
     i.out = Box::new(std::io::sink());
     i.err = Box::new(std::io::sink());
     i.set_max_steps(0);
@@ -1221,7 +1225,7 @@ fn an_unverified_module_cannot_be_run() {
 // ----- what is left ---------------------------------------------------------------------
 
 /// The instructions the VM runs.
-const BUILT: [Op; 63] = [
+const BUILT: [Op; 70] = [
     Op::NOP,
     Op::MOV,
     Op::LOADK,
@@ -1285,98 +1289,27 @@ const BUILT: [Op; 63] = [
     Op::TRY_ENTER,
     Op::TRY_LEAVE,
     Op::THROW,
+    Op::BURN_ENTER,
+    Op::BURN_OP,
+    Op::BURN_LEAVE,
+    Op::COMP_ENTER,
+    Op::COMP_LEAVE,
+    Op::PACK,
+    Op::CHAIN_MAKE,
 ];
 
-/// A module whose first instruction is `op`, with operands that verify,
-/// and the function to enter.
-fn first_is(op: Op) -> (Module, usize) {
-    let mut f = main_fn(8, vec![]);
-    f.constants = vec![Constant::Str("x".into())];
-    let code = match op {
-        Op::COMP_ENTER | Op::COMP_LEAVE => vec![abc(op, 0, 0, 0), ret(0)],
-        Op::BURN_ENTER => {
-            f.regions = vec![BurnRegion {
-                class: 0,
-                label: RESERVED_U32,
-            }];
-            vec![Instr::abx(op, 0, 0), abc(Op::BURN_LEAVE, 0, 0, 0), ret(0)]
-        }
-        Op::BURN_LEAVE => {
-            // Lexically balanced; at run time the jump skips the enter.
-            f.regions = vec![BurnRegion {
-                class: 0,
-                label: RESERVED_U32,
-            }];
-            vec![
-                Instr::asbx(Op::JMP, 0, 1), // 0 -> 2
-                Instr::abx(Op::BURN_ENTER, 0, 0),
-                abc(op, 0, 0, 0),
-                ret(0),
-            ]
-        }
-        Op::BURN_OP => {
-            f.requires_burn = true;
-            vec![abc(op, 0, 0, 0x10), ret(0)]
-        }
-        Op::PACK | Op::CHAIN_MAKE => vec![abc(op, 0, 2, 0), ret(0)],
-        other => panic!("no module for {other}"),
-    };
-    let n = code.len() as u32;
-    f.instrs = code;
-    f.lines.retain(|l| l.pc < n);
-    if f.lines.is_empty() {
-        f.lines = (0..n)
-            .map(|pc| LineEntry {
-                pc,
-                span_off: pc * 10,
-                span_len: 3,
-                line_off: pc,
-                col: pc + 2,
-            })
-            .collect();
-    }
-    (module(f), 0)
-}
-
 #[test]
-fn instructions_not_built_yet_say_so() {
-    // Every opcode is built or on the list; nothing else.
+fn every_instruction_is_built() {
+    // NOT_BUILT stays, empty: it is a public entry point, and an opcode a
+    // later format adds goes on it until the VM runs it.
+    assert!(NOT_BUILT.is_empty());
     for byte in 0..=255u8 {
         let Some(op) = Op::from_byte(byte) else {
             continue;
         };
-        let listed = NOT_BUILT.contains(&op);
         let built = BUILT.contains(&op) || matches!(op, Op::CLOSURE | Op::STEPS | Op::WIDE);
-        assert!(
-            listed != built,
-            "{op} is {} built and listed",
-            if built { "both" } else { "neither" }
-        );
+        assert!(built, "{op} is not built");
     }
-    for op in NOT_BUILT {
-        let (m, entry) = first_is(op);
-        let r = run_function(&mut interp(), &program(&m), entry, Vec::new());
-        let e = r.err().unwrap_or_else(|| panic!("{op} ran"));
-        assert_eq!(e.kind, Kind::Internal, "{op}: {}", e.message);
-        assert_eq!(
-            e.message,
-            format!(
-                "the VM cannot run `{op}` yet: the package that builds it has not landed (cig-compile#31)"
-            )
-        );
-    }
-    assert_eq!(
-        NOT_BUILT,
-        [
-            Op::BURN_ENTER,
-            Op::BURN_OP,
-            Op::BURN_LEAVE,
-            Op::COMP_ENTER,
-            Op::COMP_LEAVE,
-            Op::PACK,
-            Op::CHAIN_MAKE,
-        ]
-    );
 }
 
 // ----- safety ----------------------------------------------------------------------------
@@ -1458,6 +1391,16 @@ fn random_fn(rng: &mut Rng, depth: u32, arity: u16, parent: Option<(u32, usize)>
     f.constants.push(Constant::Str("a".into()));
     f.constants.push(Constant::Str("math".into()));
     f.constants.push(Constant::Str("args".into()));
+    // `burn.op` callees, K4 and K5.
+    f.constants.push(Constant::Str("fs.write_text".into()));
+    f.constants.push(Constant::Str("fs.mkdir".into()));
+    f.requires_burn = rng.below(4) == 0;
+    for _ in 0..rng.below(4) {
+        f.regions.push(BurnRegion {
+            class: rng.below(2) as u8,
+            label: if rng.below(2) == 0 { RESERVED_U32 } else { 1 },
+        });
+    }
     for _ in 0..rng.below(5) {
         f.constants.push(match rng.below(4) {
             0 => Constant::Bool(rng.below(2) == 0),
@@ -1520,9 +1463,20 @@ fn random_fn(rng: &mut Rng, depth: u32, arity: u16, parent: Option<(u32, usize)>
                 code.push(abc(op, reg(rng), reg(rng), fwd(rng) as u8))
             }
             Op::LOADINT => code.push(Instr::asbx(op, reg(rng), rng.next() as i16)),
-            Op::LOADK | Op::CLOSURE | Op::BURN_ENTER => {
-                code.push(Instr::abx(op, reg(rng), rng.below(4) as u16))
+            Op::LOADK | Op::CLOSURE => code.push(Instr::abx(op, reg(rng), rng.below(4) as u16)),
+            Op::BURN_ENTER => {
+                // Mostly a region that is there, with its own class.
+                let r = rng.below(f.regions.len() as u64 + 1) as usize;
+                let class = f.regions.get(r).map_or(0, |g| g.class);
+                code.push(Instr::abx(op, class, r as u16));
             }
+            Op::BURN_OP => {
+                let callee = 4 + rng.below(2) as u8;
+                let kind = if callee == 4 { 0 } else { 5 };
+                let n = rng.below(3) as u8;
+                code.push(abc(op, reg(rng), callee, n << 4 | kind));
+            }
+            Op::COMP_ENTER => code.push(abc(op, reg(rng), rng.below(4) as u8, rng.below(4) as u8)),
             Op::TRY_ENTER => code.push(Instr::abx(op, 0, rng.below(n_handlers + 1) as u16)),
             Op::TRY_LEAVE => code.push(abc(op, rng.below(2) as u8, 0, 0)),
             Op::LOADG => code.push(Instr::abx(op, reg(rng), rng.below(5) as u16)),
@@ -1590,6 +1544,22 @@ fn random_fn(rng: &mut Rng, depth: u32, arity: u16, parent: Option<(u32, usize)>
             finally_pc,
         });
     }
+    if !f.regions.is_empty() {
+        for _ in 0..rng.below(3) {
+            let start = pick(rng, 0);
+            let end = pick(rng, start + 1).max(start + 1);
+            let region = if rng.below(4) == 0 {
+                RESERVED_U32
+            } else {
+                rng.below(f.regions.len() as u64) as u32
+            };
+            f.region_rows.push(RegionRow {
+                pc_start: start,
+                pc_end: end,
+                region,
+            });
+        }
+    }
     f.lines = (0..code.len() as u32)
         .map(|pc| LineEntry {
             pc,
@@ -1640,10 +1610,15 @@ fn a_verified_module_never_panics() {
             let Ok(p) = load(v) else {
                 return (0, 0);
             };
-            let mut i = interp();
+            // A dry run: a `burn.op` changes nothing on this machine.
+            let mut i = interp_in(Mode::DryRun);
             i.set_max_steps(budget);
             let _ = run(&mut i, &p);
-            (i.steps, i.loop_depth + i.call_depth_for_tests() as u32)
+            let burning = u32::from(i.in_burn()) + u32::from(i.in_unlit());
+            (
+                i.steps,
+                i.loop_depth + i.call_depth_for_tests() as u32 + burning,
+            )
         }));
         let (steps, held) = outcome.unwrap_or_else(|_| panic!("panicked on {m:?}"));
         // A handler can catch E515; the next charge raises it again, so a
@@ -3729,4 +3704,963 @@ fn a_reentered_call_costs_no_more_stack_than_the_interpreters() {
         (walker * 4000) >> 20
     );
     assert!(vm <= walker, "VM {vm} bytes a level, tree-walker {walker}");
+}
+
+// ----- burns, compensations, pack and chains -----------------------------------------------
+//
+// Every program here burns only through the kernel's file ops (`fs.*`), in a
+// fresh temporary directory: no process, no box. None of them hops.
+
+impl Asm {
+    fn burn_enter(&mut self, class: u8, region: u16) -> &mut Self {
+        self.i(Instr::abx(Op::BURN_ENTER, class, region))
+    }
+    fn burn_leave(&mut self) -> &mut Self {
+        self.op(Op::BURN_LEAVE, 0, 0, 0)
+    }
+    /// `R(a) = callee(R(a+1..a+1+n))` as a `burn.op` of the callee's kind.
+    fn burn_op(&mut self, a: u8, callee: &str, n: u8) -> &mut Self {
+        let k = self.s(callee) as u8;
+        let kind = burn_op_kind(callee).unwrap_or_else(|| panic!("{callee} is no burn op")) as u8;
+        self.op(Op::BURN_OP, a, k, n << 4 | kind)
+    }
+    fn comp_enter(&mut self, state: u8, source: &str, name: &str) -> &mut Self {
+        let b = self.s(source) as u8;
+        let c = self.s(name) as u8;
+        self.op(Op::COMP_ENTER, state, b, c)
+    }
+    fn comp_leave(&mut self) -> &mut Self {
+        self.op(Op::COMP_LEAVE, 0, 0, 0)
+    }
+    /// `R(a) = path(R(b))`-free write: `fs.write_text(R(p), text)` into
+    /// `R(a)`, its arguments in `R(a+1)`, `R(a+2)`.
+    fn write(&mut self, a: u8, p: u8, callee: &str, text: &str) -> &mut Self {
+        self.op(Op::MOV, a + 1, p, 0)
+            .loadk(a + 2, Constant::Str(text.to_string()))
+            .burn_op(a, callee, 2)
+    }
+}
+
+/// Finish `a` as the top level taking the `paths` as `R(0..)`, with
+/// `regions` (class, label).
+fn burn_main(a: &mut Asm, paths: u16, regs: u32, regions: &[(u8, Option<&str>)]) -> Module {
+    let labels: Vec<u32> = regions
+        .iter()
+        .map(|(_, l)| l.map_or(RESERVED_U32, |l| u32::from(a.s(l))))
+        .collect();
+    let mut f = a.finish("", 0, regs);
+    f.arity = paths;
+    f.regions = regions
+        .iter()
+        .zip(labels)
+        .map(|((class, _), label)| BurnRegion {
+            class: *class,
+            label,
+        })
+        .collect();
+    module(f)
+}
+
+/// Every burn statement of `stmts`, in source order: its span, and its
+/// `unburn` block's line and source when it has one.
+fn burns_in(stmts: &[Stmt], out: &mut Vec<(Span, Option<(u32, String)>)>) {
+    for s in stmts {
+        match s {
+            Stmt::Burn {
+                body,
+                unburn,
+                unburn_src,
+                span,
+                ..
+            } => {
+                let comp = unburn
+                    .as_ref()
+                    .map(|b| (b.span.line, unburn_src.clone().unwrap_or_default()));
+                out.push((*span, comp));
+                burns_in(&body.stmts, out);
+            }
+            Stmt::While { body, .. } | Stmt::For { body, .. } => burns_in(&body.stmts, out),
+            Stmt::Pull(f) => burns_in(&f.body.stmts, out),
+            Stmt::If {
+                branches,
+                otherwise,
+                ..
+            } => {
+                for (_, b) in branches {
+                    burns_in(&b.stmts, out);
+                }
+                if let Some(b) = otherwise {
+                    burns_in(&b.stmts, out);
+                }
+            }
+            Stmt::Try {
+                body,
+                handler,
+                finally,
+                ..
+            } => {
+                burns_in(&body.stmts, out);
+                for b in handler.iter().chain(finally.iter()) {
+                    burns_in(&b.stmts, out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The burns of `src`: (statement span, `unburn` line, `unburn` source).
+fn burns_of(src: &str) -> Vec<(Span, u32, String)> {
+    let ast = crate::syntax::parse(src).expect("parses");
+    let mut out = Vec::new();
+    burns_in(&ast.body, &mut out);
+    out.into_iter()
+        .map(|(s, c)| {
+            let (line, text) = c.unwrap_or((s.line, String::new()));
+            (s, line, text)
+        })
+        .collect()
+}
+
+/// A position on `line` alone: `comp.enter`'s row, whose line the journal
+/// records for the compensation.
+fn on_line(line: u32) -> Span {
+    Span::new(0, 0, line, 1)
+}
+
+/// What a run left, as the two engines are compared on it.
+#[derive(Debug, PartialEq)]
+struct Left {
+    out: String,
+    err: String,
+    ending: String,
+    files: Vec<Option<String>>,
+    /// The journal's entries, each without its time.
+    journal: Vec<serde_json::Value>,
+    plan: Vec<String>,
+    /// The run's rollback, as the run does it on a failure: what it did,
+    /// and the files after it.
+    rollback: Vec<(String, String)>,
+    rolled_back: Vec<Option<String>>,
+    still_burning: bool,
+}
+
+fn files_now(paths: &[String]) -> Vec<Option<String>> {
+    paths
+        .iter()
+        .map(|p| {
+            let p = std::path::Path::new(p);
+            if p.is_dir() {
+                Some("<dir>".to_string())
+            } else {
+                std::fs::read_to_string(p).ok()
+            }
+        })
+        .collect()
+}
+
+fn burn_run(
+    paths: &[String],
+    mode: Mode,
+    go: impl FnOnce(&mut Interp) -> Option<Diagnostic>,
+) -> Left {
+    for p in paths {
+        let p = std::path::Path::new(p);
+        let _ = std::fs::remove_dir_all(p);
+        let _ = std::fs::remove_file(p);
+    }
+    let (out, err) = (Buf::default(), Buf::default());
+    let mut i = interp_in(mode);
+    i.out = Box::new(out.clone());
+    i.err = Box::new(err.clone());
+    let r = go(&mut i);
+    let ending = ending(r, i.exit_requested);
+    let journal = i
+        .kernel
+        .journal()
+        .entries()
+        .iter()
+        .map(|e| {
+            let mut v = serde_json::to_value(e).expect("an entry is json");
+            if let Some(o) = v.as_object_mut() {
+                o.remove("at");
+            }
+            v
+        })
+        .collect();
+    let plan = i
+        .kernel
+        .planned
+        .iter()
+        .map(|p| serde_json::to_string(p).expect("a planned op is json"))
+        .collect();
+    let files = files_now(paths);
+    let report = i.kernel.rollback();
+    Left {
+        out: out.text(),
+        err: untimed(&err.text()),
+        ending,
+        files,
+        journal,
+        plan,
+        rollback: report.actions,
+        rolled_back: files_now(paths),
+        still_burning: i.in_burn() || i.in_unlit(),
+    }
+}
+
+/// Run `src` on the tree-walker and `m` on the VM, each with the files
+/// `names` in a fresh directory as `p0, p1, ..` (globals for the source,
+/// `R(0..)` for the module), once for real and once as a dry run; both
+/// must leave the same: output, ending, files, journal, plan, rollback.
+/// Returns the real run's.
+fn burn_agree(src: &str, m: &Module, names: &[&str]) -> Left {
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let paths: Vec<String> = names
+        .iter()
+        .map(|n| dir.path().join(n).to_string_lossy().into_owned())
+        .collect();
+    let globals: Vec<String> = (0..paths.len()).map(|i| format!("p{i}")).collect();
+    let ast = crate::syntax::parse(src).expect("parses");
+    let report = crate::check::check(&ast, &globals);
+    assert!(report.ok(), "{src}: {:?}", report.errors);
+    let p = program(m);
+    let mut real = None;
+    for mode in [Mode::Run, Mode::DryRun] {
+        let w = burn_run(&paths, mode, |i| {
+            for (g, p) in globals.iter().zip(&paths) {
+                i.globals.declare(g, Value::str(p), true);
+            }
+            i.run_program(&ast).err()
+        });
+        let v = burn_run(&paths, mode, |i| {
+            let args = paths.iter().map(Value::str).collect();
+            let r = run_function(i, &p, 0, args).err();
+            assert_eq!(i.loop_depth, 0, "{src}: the loop depth is given back");
+            assert_eq!(
+                i.call_depth_for_tests(),
+                0,
+                "{src}: the depth is given back"
+            );
+            r
+        });
+        assert_eq!(v, w, "{src}: {mode:?}");
+        assert!(!w.still_burning, "{src}: the tree-walker left a burn open");
+        if mode == Mode::Run {
+            real = Some(w);
+        }
+    }
+    real.expect("a real run")
+}
+
+/// The burn programs: CigScript, the same by hand in bytecode, the files
+/// they name, and what the real run prints.
+/// The span of the `n` in `.., n }`: the last root or step of `src`.
+fn last_n(src: &str) -> Span {
+    let s = span_of(src, ", n }");
+    Span::new(s.start + 2, s.start + 3, s.line, s.col + 2)
+}
+
+/// `text` without the times the chain runner prints, `(14 ms)`.
+fn untimed(text: &str) -> String {
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(at) = rest.find(" (") {
+        let (head, tail) = rest.split_at(at);
+        out.push_str(head);
+        let inner = &tail[2..];
+        match inner.find(" ms)") {
+            Some(end) if inner[..end].chars().all(|c| c.is_ascii_digit()) => {
+                rest = &inner[end + 4..];
+            }
+            _ => {
+                out.push_str(" (");
+                rest = inner;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+fn burn_programs() -> Vec<(&'static str, Module, Vec<&'static str>, &'static str)> {
+    let mut out = Vec::new();
+    let r = RESERVED_U32;
+
+    // A plain burn.
+    let src = "burn {\n  fs.write_text(p0, \"a\")\n}\nexhale \"done\"\n";
+    let b = burns_of(src);
+    let mut a = Asm::default();
+    a.at(b[0].0)
+        .burn_enter(0, 0)
+        .write(1, 0, "fs.write_text", "a");
+    a.burn_leave().exhale_str(1, "done");
+    a.op(Op::LOADNULL, 1, 0, 0).i(ret(1));
+    out.push((
+        src,
+        burn_main(&mut a, 1, 4, &[(0, None)]),
+        vec!["a.txt"],
+        "done\n",
+    ));
+
+    // Nested burns, each class: an unlit burn inside a burn.
+    let src = "burn {\n  fs.write_text(p0, \"a\")\n  burn unlit {\n    fs.write_text(p1, \"b\")\n  }\n  fs.append_text(p0, \"c\")\n}\n";
+    let b = burns_of(src);
+    let mut a = Asm::default();
+    a.at(b[0].0)
+        .burn_enter(0, 0)
+        .write(2, 0, "fs.write_text", "a");
+    a.at(b[1].0)
+        .burn_enter(1, 1)
+        .write(2, 1, "fs.write_text", "b");
+    a.burn_leave()
+        .write(2, 0, "fs.append_text", "c")
+        .burn_leave();
+    a.op(Op::LOADNULL, 2, 0, 0).i(ret(2));
+    out.push((
+        src,
+        burn_main(&mut a, 2, 5, &[(0, None), (1, None)]),
+        vec!["a.txt", "b.txt"],
+        "",
+    ));
+
+    // A compensation that is recorded: the block completes.
+    let src = "burn (s, \"deploy\") {\n  s.path = p0\n  fs.write_text(p0, \"a\")\n} unburn {\n  fs.rm(s.path)\n}\nexhale \"done\"\n";
+    let b = burns_of(src);
+    let mut a = Asm::default();
+    a.op(Op::NEWMAP, 1, 0, 0).at(b[0].0).burn_enter(0, 0);
+    a.at(on_line(b[0].1)).comp_enter(1, &b[0].2, "s");
+    let k = a.s("path") as u8;
+    a.op(Op::SETFIELD, 1, k, 0)
+        .write(2, 0, "fs.write_text", "a");
+    a.comp_leave().burn_leave().exhale_str(2, "done");
+    a.op(Op::LOADNULL, 2, 0, 0).i(ret(2));
+    out.push((
+        src,
+        burn_main(&mut a, 1, 5, &[(0, Some("deploy"))]),
+        vec!["a.txt"],
+        "done\n",
+    ));
+
+    // A compensation that is not: an error leaves the block, and the run.
+    let src = "burn (s) {\n  s.path = p0\n  fs.write_text(p0, \"a\")\n  cough \"boom\"\n} unburn {\n  fs.rm(s.path)\n}\nexhale \"no\"\n";
+    let b = burns_of(src);
+    let mut a = Asm::default();
+    a.op(Op::NEWMAP, 1, 0, 0).at(b[0].0).burn_enter(0, 0);
+    a.at(on_line(b[0].1)).comp_enter(1, &b[0].2, "s");
+    let k = a.s("path") as u8;
+    a.op(Op::SETFIELD, 1, k, 0)
+        .write(2, 0, "fs.write_text", "a");
+    a.loadk(2, Constant::Str("boom".into()))
+        .at(span_of(src, "cough \"boom\"\n"))
+        .op(Op::THROW, 2, 0, 0);
+    a.comp_leave().burn_leave().exhale_str(2, "no");
+    a.op(Op::LOADNULL, 2, 0, 0).i(ret(2));
+    out.push((
+        src,
+        burn_main(&mut a, 1, 5, &[(0, None)]),
+        vec!["a.txt"],
+        "",
+    ));
+
+    // An error in a burn inside a try: the burn is closed (nothing
+    // recorded), then the catch runs, then a burn after it.
+    let src = "try {\n  burn (s) {\n    s.path = p0\n    fs.write_text(p0, \"a\")\n    cough \"boom\"\n  } unburn {\n    fs.rm(s.path)\n  }\n} ashtray e {\n  exhale e.message\n}\nburn {\n  fs.write_text(p1, \"b\")\n}\n";
+    let b = burns_of(src);
+    let mut a = Asm::default();
+    a.try_enter(0).label("s").op(Op::NEWMAP, 2, 0, 0);
+    a.at(b[0].0).burn_enter(0, 0);
+    a.at(on_line(b[0].1)).comp_enter(2, &b[0].2, "s");
+    let k = a.s("path") as u8;
+    a.op(Op::SETFIELD, 2, k, 0)
+        .write(3, 0, "fs.write_text", "a");
+    a.loadk(3, Constant::Str("boom".into()))
+        .at(span_of(src, "cough \"boom\"\n"))
+        .op(Op::THROW, 3, 0, 0);
+    a.comp_leave().burn_leave().try_leave().label("e");
+    a.jump(Op::JMP, 0, "end");
+    a.label("catch")
+        .getfield(3, 6, "message")
+        .op(Op::EXHALE, 3, 1, 0);
+    a.try_leave().jump(Op::JMP, 0, "end");
+    a.label("end").at(b[1].0).burn_enter(0, 1);
+    a.write(3, 1, "fs.write_text", "b").burn_leave();
+    a.op(Op::LOADNULL, 3, 0, 0).i(ret(3));
+    a.handler("s", "e", "catch", 6, None);
+    out.push((
+        src,
+        burn_main(&mut a, 2, 7, &[(0, None), (0, None)]),
+        vec!["a.txt", "b.txt"],
+        "boom\n",
+    ));
+
+    // `snuff` out of a burn in a loop, in a pull: `ret` leaves the burn as
+    // completed, so its compensation is recorded.
+    let src = "pull f(p) {\n  roll i = 0\n  while true {\n    i = i + 1\n    burn (s) {\n      s.path = p\n      fs.append_text(p, \"x\")\n      if i == 2 {\n        snuff i\n      }\n    } unburn {\n      fs.rm(s.path)\n    }\n  }\n}\nexhale f(p0)\n";
+    let b = burns_of(src);
+    let mut c = Asm::default();
+    c.i(Instr::asbx(Op::LOADINT, 1, 0));
+    c.label("top")
+        .i(steps(1, 1))
+        .addk(1, 1, 1)
+        .op(Op::NEWMAP, 2, 0, 0);
+    c.at(b[0].0).burn_enter(0, 0);
+    c.at(on_line(b[0].1)).comp_enter(2, &b[0].2, "s");
+    let k = c.s("path") as u8;
+    c.op(Op::SETFIELD, 2, k, 0)
+        .write(3, 0, "fs.append_text", "x");
+    c.eqk(3, 1, 2).jump(Op::TESTN, 3, "skip").i(ret(1));
+    c.label("skip")
+        .comp_leave()
+        .burn_leave()
+        .jump(Op::LOOP, 0, "top");
+    c.op(Op::LOADNULL, 1, 0, 0).i(ret(1));
+    let mut child = c.finish("f", 1, 6);
+    child.regions = vec![BurnRegion { class: 0, label: r }];
+    let mut a = Asm::default();
+    a.children.push(child);
+    a.i(Instr::abx(Op::CLOSURE, 1, 0)).op(Op::MOV, 2, 0, 0);
+    a.op(Op::CALL, 1, 1, 0).op(Op::EXHALE, 1, 1, 0);
+    a.op(Op::LOADNULL, 1, 0, 0).i(ret(1));
+    out.push((src, burn_main(&mut a, 1, 3, &[]), vec!["a.txt"], "2\n"));
+
+    // `exit()` in a burn: the block is left as completed, its compensation
+    // recorded, and the run ends with the code.
+    let src = "burn (s) {\n  s.path = p0\n  fs.write_text(p0, \"a\")\n  exit(3)\n  exhale \"no\"\n} unburn {\n  fs.rm(s.path)\n}\n";
+    let b = burns_of(src);
+    let exit = catalogue_index("exit") as u8;
+    let mut a = Asm::default();
+    a.op(Op::NEWMAP, 1, 0, 0).at(b[0].0).burn_enter(0, 0);
+    a.at(on_line(b[0].1)).comp_enter(1, &b[0].2, "s");
+    let k = a.s("path") as u8;
+    a.op(Op::SETFIELD, 1, k, 0)
+        .write(2, 0, "fs.write_text", "a");
+    a.i(Instr::asbx(Op::LOADINT, 3, 3))
+        .at(span_of(src, "exit(3)"))
+        .op(Op::CALLB, 2, exit, 1);
+    a.exhale_str(2, "no").comp_leave().burn_leave();
+    a.op(Op::LOADNULL, 2, 0, 0).i(ret(2));
+    out.push((
+        src,
+        burn_main(&mut a, 1, 5, &[(0, None)]),
+        vec!["a.txt"],
+        "",
+    ));
+
+    // `break` out of a burn inside a try with a finally, in a loop: the
+    // `try.leave` crosses the burn and closes it as completed first.
+    let src = "roll i = 0\nwhile i < 3 {\n  i = i + 1\n  try {\n    burn (s) {\n      s.path = p0\n      fs.append_text(p0, \"x\")\n      if i == 2 {\n        break\n      }\n    } unburn {\n      fs.rm(s.path)\n    }\n  } finally {\n    exhale \"f\"\n  }\n}\nexhale \"end\"\n";
+    let b = burns_of(src);
+    let mut a = Asm::default();
+    a.i(Instr::asbx(Op::LOADINT, 1, 0)).i(steps(1, 0));
+    a.label("top")
+        .i(Instr::asbx(Op::LOADINT, 2, 3))
+        .op(Op::LT, 3, 1, 2);
+    a.jump(Op::TESTN, 3, "out").i(steps(1, 1)).addk(1, 1, 1);
+    a.try_enter(0).label("s").op(Op::NEWMAP, 2, 0, 0);
+    a.at(b[0].0).burn_enter(0, 0);
+    a.at(on_line(b[0].1)).comp_enter(2, &b[0].2, "s");
+    let k = a.s("path") as u8;
+    a.op(Op::SETFIELD, 2, k, 0)
+        .write(3, 0, "fs.append_text", "x");
+    a.eqk(3, 1, 2).jump(Op::TESTN, 3, "skip");
+    a.try_leave().jump(Op::JMP, 0, "out");
+    a.label("skip").comp_leave().burn_leave().try_leave();
+    a.label("e").jump(Op::JMP, 0, "cont");
+    a.label("fin").exhale_str(3, "f").try_leave();
+    a.label("cont").jump(Op::LOOP, 0, "top");
+    a.label("out").i(steps(0, 0)).exhale_str(3, "end");
+    a.op(Op::LOADNULL, 3, 0, 0).i(ret(3));
+    a.handler("s", "e", "fin", r, Some("fin"));
+    out.push((
+        src,
+        burn_main(&mut a, 1, 6, &[(0, None)]),
+        vec!["a.txt"],
+        "f\nf\nend\n",
+    ));
+    out
+}
+
+#[test]
+fn burns_agree_with_the_interpreter() {
+    for (src, m, names, want) in burn_programs() {
+        let left = burn_agree(src, &m, &names);
+        assert_eq!(left.out, want, "{src}");
+    }
+}
+
+#[test]
+fn a_compensation_is_journaled_as_the_interpreter_journals_it() {
+    let programs = burn_programs();
+    let (src, m, names, _) = &programs[2];
+    let left = burn_agree(src, m, names);
+    let comp = left
+        .journal
+        .iter()
+        .find_map(|e| e.get("compensation"))
+        .expect("a compensation was journaled");
+    assert_eq!(comp["label"], "deploy");
+    assert_eq!(comp["state_name"], "s");
+    assert_eq!(comp["line"], 4);
+    // The one that failed recorded none.
+    let (src, m, names, _) = &programs[3];
+    let left = burn_agree(src, m, names);
+    assert!(left.journal.iter().all(|e| e.get("compensation").is_none()));
+    assert!(left.ending.starts_with("E"), "{}", left.ending);
+}
+
+#[test]
+fn burns_go_through_one_kernel_entry() {
+    let vm = include_str!("mod.rs");
+    let interp_mod = include_str!("../interp/mod.rs");
+    let eval = include_str!("../interp/eval.rs");
+    // Whitespace aside: a call may break across lines.
+    let squash = |s: &str| s.split_whitespace().collect::<String>();
+    let (vm, eval) = (squash(vm), squash(eval));
+    let interp = format!("{}{eval}", squash(interp_mod));
+    // The kernel's entry points for a burn, pack and an op: each is called
+    // once, in the interpreter's one entry, and never by the VM.
+    for entry in [
+        "kernel.enter_compensating(",
+        "kernel.leave_compensating(",
+        "kernel.record_compensation(",
+        "kernel.set_pack(",
+        "kernel.decide(",
+        "burn_depth+=1",
+        "unlit_depth+=1",
+    ] {
+        assert_eq!(
+            interp.matches(entry).count(),
+            1,
+            "{entry} in the interpreter"
+        );
+        assert_eq!(vm.matches(entry).count(), 0, "{entry} in the VM");
+    }
+    // Both engines open and close a burn through that entry.
+    for (caller, text) in [("the tree-walker", &eval), ("the VM", &vm)] {
+        for entry in [
+            ".burn_open(",
+            ".burn_close(",
+            ".compensate_open(",
+            ".compensate_close(",
+            ".record_compensation(",
+            ".declare_pack(",
+            "pack_root(",
+            "chain_step(",
+            "make_chain(",
+        ] {
+            assert!(text.contains(entry), "{caller} does not call {entry}");
+        }
+    }
+    // A `burn.op` is its builtin, called as any builtin call is.
+    assert!(vm.contains("self.interp.call_builtin(b,&args,span)"));
+}
+
+#[test]
+fn every_effect_in_the_stdlib_has_a_burn_op_kind() {
+    let mut missing = Vec::new();
+    for b in crate::stdlib::builtin_catalogue() {
+        let kind = burn_op_kind(b.name);
+        if b.effect.needs_burn() != kind.is_some() {
+            missing.push(b.name);
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "effects without a kind, or kinds without an effect: {missing:?}"
+    );
+    for (i, k) in BURN_OP_KINDS.iter().enumerate() {
+        let used = crate::stdlib::builtin_catalogue()
+            .iter()
+            .any(|b| burn_op_kind(b.name) == Some(i));
+        assert!(used, "no builtin is a {k}");
+    }
+}
+
+#[test]
+fn a_burn_op_outside_a_burn_is_the_interpreters_error() {
+    let src = "fs.write_text(p0, \"a\")\n";
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let p0 = dir.path().join("a.txt").to_string_lossy().into_owned();
+    let (_, w) = walker_run(src, &[("p0", Value::str(&p0))]);
+    let w = w.expect("the tree-walker refuses it");
+    // Lexically in a burn, but the jump goes around its `burn.enter`.
+    let mut a = Asm::default();
+    a.jump(Op::JMP, 0, "op").burn_enter(0, 0);
+    a.label("op").write(1, 0, "fs.write_text", "a").burn_leave();
+    a.op(Op::LOADNULL, 1, 0, 0).i(ret(1));
+    let m = burn_main(&mut a, 1, 4, &[(0, None)]);
+    let (_, v) = vm_run(&m, vec![Value::str(&p0)]);
+    let v = v.err().expect("refused");
+    assert_eq!(said(&v), said(&w));
+    assert_eq!(v.code, "E701");
+    assert!(!std::path::Path::new(&p0).exists());
+
+    // `burn.leave` with no burn open, and `comp.leave` with no
+    // compensation: a module the lowering wrote wrong.
+    let mut a = Asm::default();
+    a.jump(Op::JMP, 0, "leave").burn_enter(0, 0);
+    a.label("leave")
+        .burn_leave()
+        .op(Op::LOADNULL, 0, 0, 0)
+        .i(ret(0));
+    let (_, v) = vm_run(&burn_main(&mut a, 0, 1, &[(0, None)]), vec![]);
+    let v = v.err().expect("refused");
+    assert_eq!(v.kind, Kind::Internal);
+    assert_eq!(v.message, "`burn.leave` found no open burn in its frame");
+    let mut a = Asm::default();
+    a.burn_enter(0, 0).comp_leave().burn_leave();
+    a.op(Op::LOADNULL, 0, 0, 0).i(ret(0));
+    let (_, v) = vm_run(&burn_main(&mut a, 0, 1, &[(0, None)]), vec![]);
+    assert_eq!(
+        v.err().expect("refused").message,
+        "`comp.leave` found no compensation entered in its burn"
+    );
+}
+
+/// `pull w(p, go) { exhale "in"; if go { fs.write_text(p, "a") }; snuff 1 }`
+/// marked `requires_burn`, as the lowering marks a pull with an effect.
+fn requires_burn_pull(src: &str) -> BcFunction {
+    let mut c = Asm::default();
+    c.exhale_str(2, "in").jump(Op::TESTN, 1, "skip");
+    c.at(span_of(src, "fs.write_text(p, \"a\")"))
+        .write(2, 0, "fs.write_text", "a");
+    c.label("skip").i(Instr::asbx(Op::LOADINT, 2, 1)).i(ret(2));
+    let mut f = c.finish("w", 2, 5);
+    f.requires_burn = true;
+    f
+}
+
+#[test]
+fn a_requires_burn_function_called_outside_a_burn_is_refused() {
+    // Refused as the tree-walker refuses it: E701 at the op, after what the
+    // pull did before it. A call whose effect is not taken runs, as it does
+    // in the tree-walker.
+    for go in [true, false] {
+        let src: &'static str = Box::leak(
+            format!(
+                "pull w(p, go) {{\n  exhale \"in\"\n  if go {{\n    fs.write_text(p, \"a\")\n  }}\n  snuff 1\n}}\nexhale w(p0, {go})\nburn {{\n  exhale w(p0, {go})\n}}\n"
+            )
+            .into_boxed_str(),
+        );
+        let b = burns_of(src);
+        let mut a = Asm::default();
+        a.children.push(requires_burn_pull(src));
+        a.i(Instr::abx(Op::CLOSURE, 1, 0)).op(Op::MOV, 2, 0, 0);
+        a.op(Op::LOADBOOL, 3, u8::from(go), 0);
+        a.at(span_of(src, "w(p0"));
+        a.op(Op::CALL, 1, 2, 0).op(Op::EXHALE, 1, 1, 0);
+        a.at(b[0].0)
+            .burn_enter(0, 0)
+            .i(Instr::abx(Op::CLOSURE, 1, 0));
+        a.op(Op::MOV, 2, 0, 0).op(Op::LOADBOOL, 3, u8::from(go), 0);
+        a.op(Op::CALL, 1, 2, 0).op(Op::EXHALE, 1, 1, 0).burn_leave();
+        a.op(Op::LOADNULL, 1, 0, 0).i(ret(1));
+        let m = burn_main(&mut a, 1, 4, &[(0, None)]);
+        let left = burn_agree(src, &m, &["a.txt"]);
+        if go {
+            assert_eq!(left.out, "in\n");
+            assert!(left.ending.starts_with("E701"), "{}", left.ending);
+        } else {
+            assert_eq!(left.out, "in\n1\nin\n1\n");
+            assert_eq!(left.ending, "ok");
+        }
+    }
+}
+
+#[test]
+fn pack_is_once_and_before_any_burn() {
+    // A pack, then a write outside it: E751, as in the tree-walker.
+    let src = "pack { p0 }\nburn {\n  fs.write_text(p1, \"a\")\n}\n";
+    let b = burns_of(src);
+    let mut a = Asm::default();
+    a.at(span_of(src, "pack { p0 }\n"))
+        .op(Op::PACK, 0, 1, 0)
+        .at(span_of(src, "p0"))
+        .op(Op::NOP, 0, 0, 0);
+    a.at(b[0].0).burn_enter(0, 0);
+    a.at(span_of(src, "fs.write_text(p1, \"a\")"))
+        .write(2, 1, "fs.write_text", "a")
+        .burn_leave();
+    a.op(Op::LOADNULL, 2, 0, 0).i(ret(2));
+    let left = burn_agree(
+        src,
+        &burn_main(&mut a, 2, 5, &[(0, None)]),
+        &["in", "out.txt"],
+    );
+    assert!(left.ending.starts_with("E751"), "{}", left.ending);
+
+    // A root that is not a string: the error is at that root, from the
+    // `nop` row after `pack` that names it.
+    let src = "stick n = 5\npack { p0, n }\n";
+    let mut a = Asm::default();
+    a.i(Instr::asbx(Op::LOADINT, 2, 5)).op(Op::MOV, 1, 0, 0);
+    a.at(span_of(src, "pack { p0, n }\n")).op(Op::PACK, 1, 2, 0);
+    a.at(span_of(src, "p0")).op(Op::NOP, 0, 0, 0);
+    a.at(last_n(src)).op(Op::NOP, 0, 0, 0);
+    a.op(Op::LOADNULL, 1, 0, 0).i(ret(1));
+    let m = burn_main(&mut a, 1, 3, &[]);
+    // The checker refuses this script (pack is not first), so the two
+    // engines are compared on the error alone.
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let p0 = dir.path().join("in").to_string_lossy().into_owned();
+    let (_, w) = walker_run(src, &[("p0", Value::str(&p0))]);
+    let (_, v) = vm_run(&m, vec![Value::str(&p0)]);
+    let (w, v) = (w.expect("refused"), v.err().expect("refused"));
+    assert_eq!(ending(Some(v), None), ending(Some(w), None));
+
+    // An empty root: E755 at it.
+    let src = "pack { \"\" }\n";
+    let mut a = Asm::default();
+    a.loadk(1, Constant::Str(String::new()))
+        .at(span_of(src, "pack { \"\" }\n"))
+        .op(Op::PACK, 1, 1, 0);
+    a.at(span_of(src, "\"\"")).op(Op::NOP, 0, 0, 0);
+    a.op(Op::LOADNULL, 1, 0, 0).i(ret(1));
+    let (_, w) = walker_run(src, &[]);
+    let (_, v) = vm_run(&burn_main(&mut a, 0, 2, &[]), vec![]);
+    let (w, v) = (w.expect("refused"), v.err().expect("refused"));
+    assert_eq!(v.code, "E755");
+    assert_eq!(ending(Some(v), None), ending(Some(w), None));
+
+    // Once, and first: the checker's E753s, raised by the VM where the
+    // module runs a `pack` the checker would refuse.
+    let check = |src: &str| -> Diagnostic {
+        let ast = crate::syntax::parse(src).expect("parses");
+        let report = crate::check::check(&ast, &["p0".to_string()]);
+        report
+            .errors
+            .into_iter()
+            .next()
+            .expect("the checker refuses it")
+    };
+    let pack_at = |a: &mut Asm, src: &str, nth: usize| {
+        a.at(span_nth(src, "pack { p0 }", nth))
+            .op(Op::PACK, 0, 1, 0);
+    };
+    // A second pack.
+    let src = "pack { p0 }\npack { p0 }\n";
+    let mut a = Asm::default();
+    pack_at(&mut a, src, 0);
+    pack_at(&mut a, src, 1);
+    a.op(Op::LOADNULL, 1, 0, 0).i(ret(1));
+    let (_, v) = vm_run(&burn_main(&mut a, 1, 2, &[]), vec![Value::str(&p0)]);
+    let v = v.err().expect("refused");
+    assert_eq!(
+        said(&v),
+        said(&crate::check::pack_misplaced(
+            crate::check::PackPlace::Second,
+            Span::default()
+        ))
+    );
+    assert_eq!(v.code, check(src).code);
+    // A pack after a burn.
+    let src = "burn {\n  fs.mkdir(p0)\n}\npack { p0 }\n";
+    let mut a = Asm::default();
+    a.burn_enter(0, 0)
+        .op(Op::MOV, 2, 0, 0)
+        .burn_op(1, "fs.mkdir", 1)
+        .burn_leave();
+    pack_at(&mut a, src, 0);
+    a.op(Op::LOADNULL, 1, 0, 0).i(ret(1));
+    let mut i = interp_in(Mode::DryRun);
+    let v = run_function(
+        &mut i,
+        &program(&burn_main(&mut a, 1, 3, &[(0, None)])),
+        0,
+        vec![Value::str(&p0)],
+    )
+    .err()
+    .expect("refused");
+    assert_eq!(said(&v), said(&check(src)));
+    // A pack inside a burn, and inside a pull: inside a block.
+    let src = "burn {\n  pack { p0 }\n}\n";
+    let mut a = Asm::default();
+    a.burn_enter(0, 0);
+    pack_at(&mut a, src, 0);
+    a.burn_leave().op(Op::LOADNULL, 1, 0, 0).i(ret(1));
+    let (_, v) = vm_run(
+        &burn_main(&mut a, 1, 2, &[(0, None)]),
+        vec![Value::str(&p0)],
+    );
+    assert_eq!(said(&v.err().expect("refused")), said(&check(src)));
+    let src = "pull f(p0) {\n  pack { p0 }\n}\nf(p0)\n";
+    let mut c = Asm::default();
+    pack_at(&mut c, src, 0);
+    c.op(Op::LOADNULL, 1, 0, 0).i(ret(1));
+    let mut a = Asm::default();
+    a.children.push(c.finish("f", 1, 2));
+    a.i(Instr::abx(Op::CLOSURE, 1, 0))
+        .op(Op::MOV, 2, 0, 0)
+        .op(Op::CALL, 1, 1, 0);
+    a.op(Op::LOADNULL, 1, 0, 0).i(ret(1));
+    let (_, v) = vm_run(&burn_main(&mut a, 1, 3, &[]), vec![Value::str(&p0)]);
+    assert_eq!(said(&v.err().expect("refused")), said(&check(src)));
+}
+
+#[test]
+fn chains_run_through_the_kernels_runner() {
+    let src = "pull one() {\n  burn {\n    fs.write_text(p0, \"1\")\n  }\n  snuff \"one\"\n}\npull two(x) {\n  exhale x\n}\nchain go { one, two }\nlight(go)\nexhale \"done\"\n";
+    let b = burns_of(src);
+    // one: captures p0 from the top level's R(0).
+    let mut c1 = Asm::default();
+    c1.op(Op::GETUP, 0, 0, 0).at(b[0].0).burn_enter(0, 0);
+    c1.write(1, 0, "fs.write_text", "1").burn_leave();
+    c1.loadk(1, Constant::Str("one".into())).i(ret(1));
+    let mut one = c1.finish("one", 0, 4);
+    one.upvalues = vec![captures(UpvalKind::ParentLocal, 0)];
+    one.regions = vec![BurnRegion {
+        class: 0,
+        label: RESERVED_U32,
+    }];
+    let mut c2 = Asm::default();
+    c2.op(Op::EXHALE, 0, 1, 0)
+        .op(Op::LOADNULL, 1, 0, 0)
+        .i(ret(1));
+    let two = c2.finish("two", 1, 2);
+    let light = catalogue_index("light") as u8;
+    let mut a = Asm::default();
+    a.children.push(one);
+    a.children.push(two);
+    // R(1) = chain(name, "one", one, "two", two)
+    a.loadk(2, Constant::Str("go".into()));
+    a.loadk(3, Constant::Str("one".into()))
+        .i(Instr::abx(Op::CLOSURE, 4, 0));
+    a.loadk(5, Constant::Str("two".into()))
+        .i(Instr::abx(Op::CLOSURE, 6, 1));
+    a.op(Op::CHAIN_MAKE, 1, 5, 0);
+    a.op(Op::MOV, 8, 1, 0).at(span_of(src, "light(go)"));
+    a.op(Op::CALLB, 7, light, 1).exhale_str(7, "done");
+    a.op(Op::LOADNULL, 7, 0, 0).i(ret(7));
+    let left = burn_agree(src, &burn_main(&mut a, 1, 9, &[]), &["a.txt"]);
+    assert_eq!(left.out, "one\ndone\n");
+    assert_eq!(left.files, vec![Some("1".to_string())]);
+
+    // A step that is not a function: the tree-walker's error, at the step,
+    // from the `nop` row after `chain.make` that names it.
+    let src = "stick n = 5\nchain bad { light, n }\n";
+    let mut a2 = Asm::default();
+    let kl = a2.s("light");
+    a2.loadk(2, Constant::Str("bad".into()))
+        .op(Op::LOADNULL, 3, 0, 0);
+    a2.i(Instr::abx(Op::LOADG, 4, kl)).op(Op::LOADNULL, 5, 0, 0);
+    a2.i(Instr::asbx(Op::LOADINT, 6, 5));
+    a2.at(span_of(src, "chain bad")).op(Op::CHAIN_MAKE, 1, 5, 0);
+    a2.at(span_of(src, "light")).op(Op::NOP, 0, 0, 0);
+    a2.at(last_n(src)).op(Op::NOP, 0, 0, 0);
+    a2.op(Op::LOADNULL, 1, 0, 0).i(ret(1));
+    let m = burn_main(&mut a2, 0, 7, &[]);
+    let (_, w) = walker_run(src, &[]);
+    let (_, v) = vm_run(&m, vec![]);
+    let (w, v) = (w.expect("refused"), v.err().expect("refused"));
+    assert_eq!(ending(Some(v), None), ending(Some(w), None));
+}
+
+#[test]
+fn the_step_budget_stops_on_the_same_line_across_a_burn() {
+    // A dry run: every budget runs the program again, and nothing is
+    // written on any of them.
+    let src = "roll i = 0\nwhile i < 2 {\n  i = i + 1\n  burn {\n    fs.write_text(\"a.txt\", \"a\")\n    exhale i\n  }\n}\nexhale \"y\"\n";
+    let ast = crate::syntax::parse(src).expect("parses");
+    let wh = ast.body[1].span();
+    let Stmt::While { body, .. } = &ast.body[1] else {
+        panic!("a while")
+    };
+    let assign = body.stmts[0].span();
+    let burn = body.stmts[1].span();
+    let Stmt::Burn { body: bb, .. } = &body.stmts[1] else {
+        panic!("a burn")
+    };
+    let (write, show) = (bb.stmts[0].span(), bb.stmts[1].span());
+    let tail = ast.body[2].span();
+    let mut a = Asm::default();
+    a.at(ast.body[0].span())
+        .i(steps(0, 1))
+        .i(Instr::asbx(Op::LOADINT, 0, 0));
+    a.at(wh).i(steps(0, 1)).i(steps(1, 0));
+    a.label("top")
+        .i(Instr::asbx(Op::LOADINT, 1, 2))
+        .op(Op::LT, 2, 0, 1);
+    a.jump(Op::TESTN, 2, "out").i(steps(1, 1));
+    a.at(assign).i(steps(1, 1)).addk(0, 0, 1);
+    a.at(burn).i(steps(1, 1)).burn_enter(0, 0);
+    a.at(write)
+        .i(steps(1, 1))
+        .loadk(2, Constant::Str("a.txt".into()));
+    a.loadk(3, Constant::Str("a".into()))
+        .burn_op(1, "fs.write_text", 2);
+    a.at(show)
+        .i(steps(1, 1))
+        .op(Op::EXHALE, 0, 1, 0)
+        .burn_leave();
+    a.jump(Op::LOOP, 0, "top");
+    a.label("out").i(steps(0, 0));
+    a.at(tail).i(steps(0, 1)).exhale_str(1, "y");
+    a.op(Op::LOADNULL, 1, 0, 0).i(ret(1));
+    let m = burn_main(&mut a, 0, 4, &[(0, None)]);
+    let stop = |budget: u64, vm: bool| {
+        let mut i = interp_in(Mode::DryRun);
+        i.set_max_steps(budget);
+        let r = if vm {
+            let r = run(&mut i, &program(&m)).err();
+            assert_eq!(i.loop_depth, 0);
+            r
+        } else {
+            i.run_program(&ast).err()
+        };
+        assert!(!i.in_burn(), "a burn left open at budget {budget}");
+        let plan: Vec<String> = i.kernel.planned.iter().map(|p| p.summary.clone()).collect();
+        (ending(r, None), i.steps, plan)
+    };
+    let (done, total, _) = stop(0, false);
+    assert_eq!(done, "ok");
+    assert_eq!(stop(0, true).1, total);
+    assert_eq!(total, 13);
+    for budget in 1..=total + 1 {
+        assert_eq!(stop(budget, true), stop(budget, false), "budget {budget}");
+    }
+}
+
+#[test]
+fn burn_operands_the_verifier_leaves_are_checked_at_load() {
+    let refused_with = |f: BcFunction| -> String {
+        let m = module(f);
+        let v = verify_module(&m).expect("verifies");
+        load(v).err().expect("refused").message
+    };
+    // A burn.op whose callee is not a builtin of its kind.
+    let mut f = main_fn(4, vec![abc(Op::BURN_OP, 0, 0, 0x10), ret(0)]);
+    f.requires_burn = true;
+    f.constants = vec![Constant::Str("fs.mkdir".into())];
+    assert!(refused_with(f).ends_with("unknown-burn-op at fn0+0"));
+    let mut f = main_fn(4, vec![abc(Op::BURN_OP, 0, 0, 0x10), ret(0)]);
+    f.requires_burn = true;
+    f.constants = vec![Constant::Str("len".into())];
+    assert!(refused_with(f).ends_with("unknown-burn-op at fn0+0"));
+    // A burn.enter whose class is not its region's.
+    let mut f = main_fn(
+        2,
+        vec![
+            Instr::abx(Op::BURN_ENTER, 1, 0),
+            abc(Op::BURN_LEAVE, 0, 0, 0),
+            ret(0),
+        ],
+    );
+    f.regions = vec![BurnRegion {
+        class: 0,
+        label: RESERVED_U32,
+    }];
+    assert!(refused_with(f).ends_with("burn-class-mismatch at fn0+0"));
+    // A comp.enter whose source is not a string, or whose state register
+    // is past the frame.
+    for code in [abc(Op::COMP_ENTER, 0, 1, 0), abc(Op::COMP_ENTER, 9, 0, 0)] {
+        let mut f = main_fn(2, vec![code, ret(0)]);
+        f.constants = vec![Constant::Str("s".into()), Constant::Int(1)];
+        assert!(refused_with(f).ends_with("comp-operands at fn0+0"));
+    }
+    // A region label that is not a string constant.
+    let mut f = main_fn(1, vec![ret(0)]);
+    f.constants = vec![Constant::Int(1)];
+    f.regions = vec![BurnRegion { class: 0, label: 0 }];
+    assert!(refused_with(f).ends_with("region-label at fn0+0"));
 }
