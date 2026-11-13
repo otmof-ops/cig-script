@@ -5,6 +5,21 @@ project follows semantic versioning.
 
 ## Unreleased
 
+- **`cig runs --verify` no longer says `ok` for a key or ledger it could
+  not read** (#215). A load error was taken for "no ledger": a key file
+  holding `garbage` gave `ok: 5 runs` and exit 0. It is now a problem
+  with its cause, each journal is walked instead (a signed chain that
+  cannot be checked without the key is counted and said, never passed),
+  and the exit is non-zero. A key file that is there and is not a key has its own code,
+  `E765`, naming the file and what is wrong with it (empty, its length,
+  the first character that is not a hex digit), never what it holds; a
+  missing key is said to be missing and verifying makes no new one; a
+  well-formed other key stays `E764`. `cig runs <id> --verify` no longer
+  passes a chain it could not check for want of the key, a ledger it
+  could not read, a record that does not read, or a journal gone from
+  under a record that saved its head; the fast path no longer takes a
+  journal it cannot read for one with no chain.
+
 - **Small before-states are packed, and the tin compresses what it
   keeps** (#147). A native op's before-state under 16 KiB is a record in
   a pack (`tin/packs/<id[..2]>/<id>`, one file per cig process, records

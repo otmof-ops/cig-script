@@ -14725,6 +14725,179 @@ fn verify_all_with_an_empty_ledger_is_not_ok() {
     );
 }
 
+/// Three runs, then the key file is changed under them; `cig runs
+/// --verify` on the fast path, `--deep`, `--json` and `<id> --verify` each
+/// answer. Returns what each said (stdout and stderr together), and the
+/// key file's path.
+#[cfg(unix)]
+fn verify_after_a_key_change(change: fn(&Path)) -> (Sandbox, Vec<(String, Output)>, PathBuf) {
+    let sb = Sandbox::new();
+    for k in 1..=3 {
+        sb.write(
+            &format!("s{k}.cig"),
+            &format!("burn {{\n  fs.write_text(\"f{k}.txt\", \"{k}\")\n}}\n"),
+        );
+        sb.run_ok(&["run", &format!("s{k}.cig")]);
+    }
+    sb.run_ok(&["runs", "--verify"]);
+    let id = sb.runs()[0]["id"].as_str().unwrap().to_string();
+    let key = sb.path().join(".cigscript-keys").join("seal.key");
+    assert!(key.exists(), "the runs made a key file");
+    change(&key);
+    let mut said = Vec::new();
+    for args in [
+        &["runs", "--verify"][..],
+        &["runs", "--verify", "--deep"][..],
+        &["--json", "runs", "--verify"][..],
+        &["runs", &id, "--verify"][..],
+    ] {
+        said.push((args.join(" "), sb.cig(args)));
+    }
+    (sb, said, key)
+}
+
+#[cfg(unix)]
+fn text_of(out: &Output) -> String {
+    String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr)
+}
+
+/// Every answer is non-zero, never `ok:`, and carries `phrase`; the JSON
+/// form says `ok: false`, and whether the fast path fell back to the deep
+/// walk. Returns the fast path's text.
+#[cfg(unix)]
+fn assert_verify_refuses(said: &[(String, Output)], phrase: &str, deep: bool) -> String {
+    for (args, out) in said {
+        let text = text_of(out);
+        assert!(!out.status.success(), "cig {args}: exit 0\n{text}");
+        assert!(!text.contains("ok:"), "cig {args}: said ok\n{text}");
+        assert!(text.contains(phrase), "cig {args}: no `{phrase}`\n{text}");
+        if args.starts_with("--json") {
+            let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+            assert_eq!(v["ok"], false, "{v}");
+            assert_eq!(v["deep"], deep, "the deep walk: {v}");
+        }
+    }
+    text_of(&said[0].1)
+}
+
+/// #215, the issue's reproduction: a key file holding `garbage` is not a
+/// key, and `--verify` says so (E765, with the file and what is wrong
+/// with it, never its contents) and exits non-zero. It said `ok: 3 runs`.
+#[cfg(unix)]
+#[test]
+fn verify_refuses_a_key_it_cannot_read() {
+    let (_sb, said, key) = verify_after_a_key_change(|k| fs::write(k, "garbage").unwrap());
+    let text = assert_verify_refuses(&said, "E765", true);
+    assert!(
+        text.contains("seal.key") && text.contains("character 1 is not a hex digit"),
+        "{text}"
+    );
+    // The walk claims no chain it could not check: without the key a
+    // signed chain is counted as not checked, once, not passed.
+    assert!(
+        text.contains("3 signed journals were not checked"),
+        "{text}"
+    );
+    for (args, out) in &said {
+        assert!(
+            !text_of(out).contains("garbage"),
+            "cig {args}: the key's contents were shown"
+        );
+    }
+    assert_eq!(
+        fs::read_to_string(&key).unwrap(),
+        "garbage",
+        "the key file was left as it is"
+    );
+}
+
+/// #215: an empty key file is E765 too, and says it is empty.
+#[cfg(unix)]
+#[test]
+fn verify_refuses_an_empty_key() {
+    let (_sb, said, key) = verify_after_a_key_change(|k| fs::write(k, "").unwrap());
+    let text = assert_verify_refuses(&said, "E765", true);
+    assert!(
+        text.contains("seal.key") && text.contains("is empty"),
+        "{text}"
+    );
+    assert_eq!(
+        fs::read_to_string(&key).unwrap(),
+        "",
+        "the key file was left as it is"
+    );
+}
+
+/// #215: a key file that is gone is named as gone, and verifying makes no
+/// new key in its place (a new key turned this into a broken ledger).
+#[cfg(unix)]
+#[test]
+fn verify_refuses_a_missing_key_and_makes_none() {
+    let (_sb, said, key) = verify_after_a_key_change(|k| fs::remove_file(k).unwrap());
+    let text = assert_verify_refuses(&said, "is not there", true);
+    assert!(
+        text.contains("seal.key") && !text.contains("E764"),
+        "{text}"
+    );
+    assert!(!key.exists(), "verifying made a new key");
+}
+
+/// #215: a well-formed key that is not the one the history was written
+/// under is the ledger's broken chain (E764), as before.
+#[cfg(unix)]
+#[test]
+fn verify_names_a_different_key_as_a_broken_ledger() {
+    let (_sb, said, _key) =
+        verify_after_a_key_change(|k| fs::write(k, format!("{}\n", "22".repeat(32))).unwrap());
+    // `<id> --verify` judges the run's journal (E708, another key); the
+    // whole-history check names the ledger.
+    let text = assert_verify_refuses(&said[..3], "E764", false);
+    assert!(
+        text.contains("broken at line 1") && !text.contains("E765"),
+        "{text}"
+    );
+    assert!(!said[3].1.status.success(), "{}", text_of(&said[3].1));
+}
+
+/// #215: the four key failures each say something of their own, and an
+/// untouched history still says `ok:` and exits 0.
+#[cfg(unix)]
+#[test]
+fn verify_tells_the_key_failures_apart_and_passes_an_untouched_history() {
+    let phrases = [
+        "character 1 is not a hex digit",
+        "is empty",
+        "is not there",
+        "broken at line 1",
+    ];
+    let changes: [fn(&Path); 4] = [
+        |k| fs::write(k, "garbage").unwrap(),
+        |k| fs::write(k, "").unwrap(),
+        |k| fs::remove_file(k).unwrap(),
+        |k| fs::write(k, format!("{}\n", "22".repeat(32))).unwrap(),
+    ];
+    for (i, change) in changes.into_iter().enumerate() {
+        let (_sb, said, _key) = verify_after_a_key_change(change);
+        let text = text_of(&said[0].1);
+        for (j, phrase) in phrases.iter().enumerate() {
+            assert_eq!(
+                text.contains(phrase),
+                i == j,
+                "case {i}, phrase `{phrase}`:\n{text}"
+            );
+        }
+    }
+    let (_sb, said, _key) = verify_after_a_key_change(|_| {});
+    for (args, out) in &said {
+        assert!(out.status.success(), "cig {args}\n{}", text_of(out));
+    }
+    assert!(
+        text_of(&said[0].1).contains("ok: 3 runs"),
+        "{}",
+        text_of(&said[0].1)
+    );
+}
+
 /// #177: `cig doctor` names a missing ledger as a problem when there
 /// are sealed runs that recorded chain heads. A fresh home with no
 /// runs does not.

@@ -2722,6 +2722,29 @@ probe = "none"
 remedy = "`cig runs --verify` names the line; keep a copy of the ledger, then cut the torn last line away"
 
 [[code]]
+code = "E765"
+title = "the seal key file is not a key"
+meaning = "The tin's key file (seal.key in the keys folder, or the file CIG_SEAL_KEY_FILE names) is there, and what it holds is not a key: a key is 64 hex digits, with a newline after them or not. The file is empty, holds another number of characters, holds a character that is not a hex digit, or is not text. Nothing is signed, sealed, opened or verified under it, and cig makes no new key in its place: a new key opens nothing the old one sealed and verifies nothing the old one signed. The message names the file and what is wrong with its shape (its length, the place of the first character that is not a hex digit), never what it holds. cig runs --verify reports it and exits non-zero; it said ok before 1.22.0."
+fix = "cig tin key import puts back a key exported with cig tin key export; or copy the key file back from a copy you trust, then cig runs --verify"
+no = "cant-see-any"
+arises = ["run", "unburn", "runs"]
+tags = ["kernel"]
+since = "1.22.0"
+related = ["E764", "E721", "E708"]
+[[code.cause]]
+why = "the key file was overwritten or emptied, by hand or by a tool that wrote to the wrong path"
+probe = "path-exists"
+remedy = "copy the key back from a copy you trust, or cig tin key import; leave the file as it is until then, since a new key opens nothing the old one sealed"
+[[code.cause]]
+why = "the key file was cut short by a full disk or a crash while it was being written"
+probe = "path-exists"
+remedy = "put back the key from a copy (cig tin key export makes one); if there is none, the sealed objects and the history's signatures cannot be read again"
+[[code.cause]]
+why = "CIG_SEAL_KEY_FILE names a file that is not a key file"
+probe = "env-var"
+remedy = "point CIG_SEAL_KEY_FILE at the key file, or unset it to use seal.key in the keys folder"
+
+[[code]]
 code = "E800"
 title = "usage error"
 meaning = "The command line or the environment is wrong."

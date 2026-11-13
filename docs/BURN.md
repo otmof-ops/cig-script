@@ -668,10 +668,19 @@ one more than 4× its live size.
 the fast path and compares its computed chain head with both the
 record's saved head and the ledger's head for that run, so a journal
 cut short, an older journal swapped back in or a stale cached record
-is caught without opening every journal (#177). A missing, empty or
-unreadable ledger, with sealed runs on disk, is a problem (not a
-silent `ok`): the fast path falls back to a deep walk so the chains
-are still checked, and the exit is non-zero. `--deep` walks each
+is caught without opening every journal (#177). A missing or empty
+ledger, with sealed runs on disk, is a problem (not a silent `ok`): the
+fast path falls back to a deep walk so the chains are still checked,
+and the exit is non-zero. So is a ledger that cannot be read, said with
+its cause (#215): a key file that is there and is not a key (empty, the
+wrong length, a character that is not a hex digit) is `E765`, naming
+the file and what is wrong with it, never what it holds; a key file
+that is gone is said to be gone, and verifying makes no new key in its
+place; a well-formed key that is not the one the history was signed
+under is the ledger's broken chain (`E764`). `cig runs <id> --verify`
+does not pass a journal whose chain it could not check for want of the
+key, and the whole-history walk counts such journals and says so once.
+`--deep` walks each
 journal's full chain as `cig runs <id> --verify` does, slower but
 opt-in. E704 attribution keeps the one-pass-per-path, first-twenty-
 named behaviour (#128).

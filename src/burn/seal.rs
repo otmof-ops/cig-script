@@ -840,6 +840,15 @@ fn key_uncached() -> Result<(Key, Keeper), String> {
             Ok(k) => return Ok((k, Keeper::Keyring)),
             Err(e) => {
                 let first = fs::metadata(key_path()).is_err();
+                if first && NO_NEW_KEY.load(std::sync::atomic::Ordering::Relaxed) {
+                    // Nothing is made while the history is verified, so
+                    // the note below ("kept in ... instead") would not be
+                    // true: say why the keyring gave none with the file's
+                    // own reason.
+                    return file_key()
+                        .map(|k| (k, Keeper::File))
+                        .map_err(|f| format!("{f} (the OS keyring gave none: {e})"));
+                }
                 if first {
                     eprintln!(
                         "note: the OS keyring is not available ({e}); the tin's key is kept in {} instead, readable by you alone (cig config seal_key file makes that the rule)",
@@ -870,6 +879,9 @@ fn keyring_key() -> Result<Key, String> {
                     k
                 }
                 Err(keyring::Error::NoEntry) => {
+                    if NO_NEW_KEY.load(std::sync::atomic::Ordering::Relaxed) {
+                        return Err(format!("the keyring has no {SERVICE}/{USER} entry"));
+                    }
                     if sealed_in_use() {
                         return Err(format!(
                             "the keyring has no {SERVICE}/{USER} entry, and this machine holds sealed objects only the key that sealed them opens; a new key would lock them out for good"
@@ -925,6 +937,49 @@ fn sealed_in_use() -> bool {
         .unwrap_or(false)
 }
 
+/// Set by a command that only checks the history (`cig runs --verify`):
+/// where no key is found, none is made. A key made then would be one the
+/// history was never written under, and a missing key would read as a
+/// broken ledger.
+static NO_NEW_KEY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// For the rest of this process, a missing key is an error and no new key
+/// is made in its place.
+pub fn make_no_new_key() {
+    NO_NEW_KEY.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The `E765` message for a key file that is there and is not a key.
+fn not_a_key(path: &Path, fault: &str) -> String {
+    format!(
+        "E765 burn: the seal key {} is not a key: {fault}. Put the key back from a copy you trust (cig tin key import); a new key opens nothing the old one sealed",
+        crate::crash::tilde(path)
+    )
+}
+
+/// What is wrong with a key file's text, by its shape alone: never a byte
+/// of it. A key is 64 hex digits, with an optional newline after them.
+fn key_text_fault(text: &str) -> String {
+    let t = text.trim();
+    if t.is_empty() {
+        return if text.is_empty() {
+            "the file is empty".to_string()
+        } else {
+            "the file is empty but for white space".to_string()
+        };
+    }
+    let n = t.chars().count();
+    let digits = if n == 1 { "character" } else { "characters" };
+    match t.chars().position(|c| !c.is_ascii_hexdigit()) {
+        Some(i) if n == 64 => format!("character {} is not a hex digit", i + 1),
+        Some(i) => format!(
+            "it holds {n} {digits}, not the 64 hex digits of a key, and character {} is not a hex digit",
+            i + 1
+        ),
+        None => format!("it holds {n} hex digits, not the 64 of a key"),
+    }
+}
+
 fn file_key() -> Result<Key, String> {
     let path = key_path();
     // Keys live in the keys folder; even when CIG_SEAL_KEY_FILE names a
@@ -940,13 +995,22 @@ fn file_key() -> Result<Key, String> {
             let mut text = String::new();
             if let Err(e) = io::Read::read_to_string(&mut f, &mut text) {
                 wipe(text);
+                if e.kind() == io::ErrorKind::InvalidData {
+                    return Err(not_a_key(&path, "it is not text"));
+                }
                 return Err(format!("cannot read the key file {}: {e}", path.display()));
             }
-            let k = decode_key(text.trim());
+            let k = decode_key(text.trim()).map_err(|_| not_a_key(&path, &key_text_fault(&text)));
             wipe(text);
             k
         }
         None => {
+            if NO_NEW_KEY.load(std::sync::atomic::Ordering::Relaxed) {
+                return Err(format!(
+                    "the seal key {} is not there, and none is made while the history is verified. Put the key back (the keyring entry {SERVICE}/{USER}, or that file, from a copy you trust)",
+                    crate::crash::tilde(&path)
+                ));
+            }
             if sealed_in_use() {
                 return Err(format!(
                     "the tin's key is gone ({} is not there), and this machine holds sealed objects only that key opens; a new key would lock them out for good. Put the key back (the keyring entry {SERVICE}/{USER}, or that file), or move {} and the sealed snapshots under {} away to start over",

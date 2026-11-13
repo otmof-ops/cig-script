@@ -2056,6 +2056,7 @@ folds and packs: refusals when automation is composed.
 | [`E762`](#e762-a-parcel-could-not-be-written-or-imported) | a parcel could not be written or imported | can't see any ciggies bro | cig unparcel --show <file> lists the roots to map; --root name=path for each, --cwd when the working directory cannot be told, --allow-sealed-missing to import what this machine cannot open |
 | [`E763`](#e763-the-box-could-not-be-made,-or-its-layer-not-applied) | the box could not be made, or its layer not applied | can't see any ciggies bro | the warning needs nothing done unless the box was the point: Linux 5.11 or later with user namespaces allowed (kernel.apparmor_restrict_unprivileged_userns=0 on Ubuntu); the error names the path that refused |
 | [`E764`](#e764-the-ledger's-chain-is-broken,-so-nothing-is-appended) | the ledger's chain is broken, so nothing is appended | can't see any ciggies bro | `cig runs --verify` names the first line that does not fit; look at what changed the ledger before anything else is trusted |
+| [`E765`](#e765-the-seal-key-file-is-not-a-key) | the seal key file is not a key | can't see any ciggies bro | cig tin key import puts back a key exported with cig tin key export; or copy the key file back from a copy you trust, then cig runs --verify |
 
 ### E750 literal path outside the pack
 
@@ -2318,6 +2319,25 @@ Every ledger line is signed over the line before it, under the tin's key. An app
 3. the last line was cut short by a crash or a full disk (no probe; a suggestion, not a finding). **Remedy:** `cig runs --verify` names the line; keep a copy of the ledger, then cut the torn last line away
 
 Related: `E760`, `E709`.
+
+
+### E765 the seal key file is not a key
+
+*burn · since 1.22.0 · arises in run, unburn, runs*
+
+**Kind of no:** can't see any ciggies bro (yours: you're pointed at the wrong place; wrong address: a path, a name, a directory not on PATH; ENOENT).
+
+The tin's key file (seal.key in the keys folder, or the file CIG_SEAL_KEY_FILE names) is there, and what it holds is not a key: a key is 64 hex digits, with a newline after them or not. The file is empty, holds another number of characters, holds a character that is not a hex digit, or is not text. Nothing is signed, sealed, opened or verified under it, and cig makes no new key in its place: a new key opens nothing the old one sealed and verifies nothing the old one signed. The message names the file and what is wrong with its shape (its length, the place of the first character that is not a hex digit), never what it holds. cig runs --verify reports it and exits non-zero; it said ok before 1.22.0.
+
+**What to type next:** cig tin key import puts back a key exported with cig tin key export; or copy the key file back from a copy you trust, then cig runs --verify
+
+**Known causes**, ranked; doctor checks them in this order:
+
+1. the key file was overwritten or emptied, by hand or by a tool that wrote to the wrong path (probe `path-exists`). **Remedy:** copy the key back from a copy you trust, or cig tin key import; leave the file as it is until then, since a new key opens nothing the old one sealed
+2. the key file was cut short by a full disk or a crash while it was being written (probe `path-exists`). **Remedy:** put back the key from a copy (cig tin key export makes one); if there is none, the sealed objects and the history's signatures cannot be read again
+3. CIG_SEAL_KEY_FILE names a file that is not a key file (probe `env-var`). **Remedy:** point CIG_SEAL_KEY_FILE at the key file, or unset it to use seal.key in the keys folder
+
+Related: `E764`, `E721`, `E708`.
 
 
 ## guard (`E770`–`E799`)
@@ -3489,7 +3509,7 @@ A program records the name of the script it was compiled from, and prints it in 
 
 **Kind of no:** not one of the four (a mistake in the text, in the arithmetic, or in CigScript; syntax, type or logic error; an internal error).
 
-This program's bytes do not match the sha256 in its trailer, its record does not read, or its trailer is not at its end: it was cut short, edited, or had bytes written after it once it was compiled, and it refuses to run. A program knows it is one even without its trailer (its record starts where its runtime's image ends), so a damaged program never runs as cig. Zero padding, or a Windows certificate table from signing, may follow the trailer. The sha256 catches damage, not tampering: programs are unsigned.
+This program's bytes do not match the sha256 in its trailer, its record does not read, its trailer is not at its end, or its bytecode does not verify (format 2 and later): it was cut short, edited, had bytes written after it once it was compiled, or carries a bytecode the verifier refuses. A program knows it is one even without its trailer (its record starts where its runtime's image ends), so a damaged program never runs as cig. Zero padding, or a Windows certificate table from signing, may follow the trailer. The sha256 catches damage, not tampering: programs are unsigned. A bytecode that fails to verify is refused with the rule and the `fn+pc` where it failed.
 
 **What to type next:** compile it again (cigcompile build), or fetch it again from where it came from
 
@@ -3497,6 +3517,7 @@ This program's bytes do not match the sha256 in its trailer, its record does not
 
 1. the file was cut short or changed after it was compiled: a partial download, a copy that stopped, a tool that rewrote it (probe `file-hash`). **Remedy:** compare its sha256 with the one from the build, then rebuild it or fetch it again
 2. something was written after the program: a tool that appends data, or a signature that is not a PE certificate table (probe `file-hash`). **Remedy:** build it again, then sign it with a tool that keeps the program's end (cig-compile#10)
+3. the program's bytecode (format 2 and later, cig-compile#31) does not verify: a register is past the frame, a jump targets outside the function, a constant index is out of range, a handler range interleaves another, or a `BURN.OP` sits outside its region (no probe; a suggestion, not a finding). **Remedy:** compile it again with the cigcompile that matches this cig, since the verifier runs on every build
 
 Related: `E1051`.
 
