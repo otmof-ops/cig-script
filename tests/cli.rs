@@ -6982,21 +6982,36 @@ fn a_contained_hops_network_works_with_cig_under_tmp() {
         format!("pack {{ \"./p\" }}\nburn {{\n  proc.run(\"python3\", [\"probe.py\"], {{cwd: \"p\", box: {{network: \"registry\", allow_hosts: [\"127.0.0.1:{port}\"], contain: true, expect: [\"reg.txt\"]}}}})\n}}\n"),
     )
     .unwrap();
-    let out = Command::new(&cig)
-        .args(["run", "s.cig"])
+    let mut run = Command::new(&cig);
+    run.args(["run", "s.cig"])
         .current_dir(root)
         .env("CIGSCRIPT_HOME", root.join("home"))
         .env("NO_COLOR", "1")
         .env("CIG_SEAL_KEY", "file")
         .env("CIG_BUDGET_SYNC", "1")
         .env("CIG_UPDATE_MANIFEST", root.join("no-releases.json"))
-        .env_remove("CI")
-        .output()
-        .unwrap();
+        .env_remove("CI");
+    let out = output_of_a_copy(&mut run).unwrap();
     let err = String::from_utf8_lossy(&out.stderr).to_string();
     assert!(out.status.success(), "{err}");
     let got = fs::read_to_string(root.join("p/reg.txt")).unwrap_or_default();
     assert_eq!(got, "200 hello from the registry", "{err}");
+}
+
+/// Run a binary this test has just copied. A multithreaded test process
+/// can hit ETXTBSY: another test's fork still holds the new file open for
+/// writing between its fork and its exec. That passes in a moment; try
+/// again.
+fn output_of_a_copy(c: &mut Command) -> std::io::Result<Output> {
+    for _ in 0..80 {
+        match c.output() {
+            Err(e) if cfg!(unix) && e.raw_os_error() == Some(26) => {
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            other => return other,
+        }
+    }
+    c.output()
 }
 
 /// A hop that connects to the registry network at once is queued for the
