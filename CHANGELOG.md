@@ -5,6 +5,32 @@ project follows semantic versioning.
 
 ## Unreleased
 
+- **A stage `b` program runs its bytecode on the VM** (cig-compile#31,
+  step 4 of cig-compile's decision 0004). Its run reads the `bytecode`
+  section (sha256 against the table), parses, verifies and loads the
+  module, and runs it through the same run as `cig run`: kernel, record,
+  journal, plan, rollback, step budget, arguments, output and exit codes.
+  A body, module, verifier or loader failure is `E1050` with the rule and
+  `fn<i>+<pc>`, and nothing runs: the script is never run in its place.
+  `--interp` runs the program's script on the tree-walker instead (no
+  change on a stage `a` program). The `source` section is read only when
+  used: `--interp`, `--chains`, `--light`'s list of chains, and an error
+  that quotes its line; a damaged one leaves that error without its line
+  and with a note (`E1050`), exit code unchanged. The run's record takes
+  the script's sha256 from the program's record, so `cig runs` and
+  `--unburn` see one program at either stage. `--light` answers as the
+  tree-walker does: `chain.make` with C = 1 declares a top-level chain in
+  the globals, and a top level that returns a map of its names declares
+  them there (`docs/BYTECODE.md`). New tests:
+  `a_program_with_damaged_bytecode_is_e1050`,
+  `interp_fallback_gives_the_same_bytes`,
+  `a_stage_b_burn_journals_plans_and_unburns_as_stage_a`,
+  `a_stage_b_pack_runs_where_the_tree_walker_runs_it`,
+  `max_steps_stops_a_stage_b_program_where_it_stops_the_tree_walker`,
+  `a_stage_b_error_quotes_its_line_from_the_source_section`,
+  `light_and_chains_answer_the_same_at_stage_b`,
+  `the_top_level_declares_its_names_in_the_globals`.
+
 - **Programs move to payload format 2: a record, a table of hashed
   sections, and a start that hashes only the head** (cig-compile#31,
   cig-compile#71, cig-compile#8, cig-compile#40; cig-compile's decision
@@ -26,8 +52,7 @@ project follows semantic versioning.
   and `--chains` read `source`. `--cig-program` lists the new record keys
   and the section table, as text and with `--json`; a format 1 program
   prints what it did. `CIG_VALIDATE=1` checks every section before a
-  start. A stage `b` program is refused (`E1050`) until this cig runs
-  bytecode. Format 1 programs read and run as before, and `append` still
+  start. Format 1 programs read and run as before, and `append` still
   writes them for one release. `E1050` names the section and table
   causes; `E1010` is registered for cigcompile (a script that cannot be
   a stage `b` program). New tests: `archive_tamper_refused`,
@@ -77,6 +102,25 @@ project follows semantic versioning.
   `a_damaged_pack_record_is_refused_and_the_rest_restore`,
   `a_text_snapshot_costs_at_most_0_3_bytes_per_byte`,
   `a_damaged_compressed_object_is_refused`.
+- **A compiled program can take every argument itself: `own_flags: true`
+  in the `pack`** (cig-compile#8). A `pack` may carry an option beside its
+  roots, in any order (`pack { ".", own_flags: true }`); the one option is
+  `own_flags`, a fact about the program a compiler makes from the script.
+  A program whose record carries it gives its whole command line to its
+  script, flags included, so `tool --version` reaches the script where it
+  was refused (`E1052`); it takes no run flags, from its command line or
+  from anywhere else. `cig run` ignores the option. An option cig does not
+  know, one given twice, or a value that is not the literal `true` or
+  `false` is `E766`. A pack with only options declares no scope and the
+  kernel is never told of one; a pack with a root fences as before.
+  `syntax::ast::Program::own_flags()` tells a compiler whether a script
+  asks for it. Format 1 programs and programs without the key start as
+  before. Tests: `a_program_with_own_flags_gets_every_argument`,
+  `an_old_program_keeps_its_bytes`,
+  `a_rootless_pack_in_a_program_writes_where_no_pack_writes`,
+  `a_pack_option_is_checked_where_it_is_written`,
+  `a_rootless_pack_declares_no_scope`,
+  `a_pack_with_roots_fences_the_same_with_the_option`.
 - **`cig tin vault update` waits for the restarted vault to answer**. The
   service is `Type=simple`, so systemd calls it active as soon as
   `ExecStart` has forked; the socket appears a moment later. `update`

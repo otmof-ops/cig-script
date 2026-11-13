@@ -4782,6 +4782,81 @@ fn burn_operands_the_verifier_leaves_are_checked_at_load() {
     assert!(refused_with(f).ends_with("region-label at fn0+0"));
 }
 
+#[test]
+fn the_top_level_declares_its_names_in_the_globals() {
+    // `chain go { f }` at the top level (C = 1), one in a block (C = 0),
+    // and the top level's names returned as a map.
+    let f = child_fn("f", 0, 1, vec![ret(0)]);
+    let mut a = Asm::default();
+    a.children.push(f);
+    a.i(Instr::abx(Op::CLOSURE, 0, 0));
+    a.loadk(2, Constant::Str("go".into()))
+        .loadk(3, Constant::Str("f".into()))
+        .op(Op::MOV, 4, 0, 0)
+        .op(Op::CHAIN_MAKE, 1, 3, 1);
+    a.loadk(6, Constant::Str("inner".into()))
+        .loadk(7, Constant::Str("f".into()))
+        .op(Op::MOV, 8, 0, 0)
+        .op(Op::CHAIN_MAKE, 5, 3, 0);
+    a.i(Instr::asbx(Op::LOADINT, 9, 5));
+    a.op(Op::NEWMAP, 10, 2, 0);
+    a.loadk(11, Constant::Str("n".into()))
+        .op(Op::INSERTMAP, 10, 11, 9);
+    a.loadk(11, Constant::Str("go".into()))
+        .op(Op::INSERTMAP, 10, 11, 1);
+    a.i(ret(10));
+    let m = module(a.finish("", 0, 12));
+    let mut i = interp();
+    run_script(&mut i, &program(&m)).expect("runs");
+    assert!(matches!(i.globals.get("go"), Some(Value::Chain(_))));
+    assert!(matches!(i.globals.get("n"), Some(Value::Int(5))));
+    assert!(i.globals.get("inner").is_none(), "a chain in a block");
+
+    // A top-level chain whose name is taken: the tree-walker's E306.
+    let mut a = Asm::default();
+    a.loadk(2, Constant::Str("len".into()))
+        .op(Op::CHAIN_MAKE, 1, 1, 1)
+        .op(Op::CHAIN_MAKE, 1, 1, 1)
+        .op(Op::LOADNULL, 1, 0, 0)
+        .i(ret(1));
+    let e = run_script(&mut interp(), &program(&module(a.finish("", 0, 3))))
+        .expect_err("declared twice");
+    assert_eq!(e.code, "E306");
+
+    // C = 1 outside the top level, or C > 1: a lowering's mistake.
+    for (c, inside) in [(1, true), (2, false)] {
+        let mut body = Asm::default();
+        body.loadk(2, Constant::Str("x".into()))
+            .op(Op::CHAIN_MAKE, 1, 1, c)
+            .op(Op::LOADNULL, 1, 0, 0)
+            .i(ret(1));
+        let m = if inside {
+            let mut a = Asm::default();
+            a.children.push(body.finish("g", 0, 3));
+            a.i(Instr::abx(Op::CLOSURE, 0, 0))
+                .op(Op::CALL, 0, 0, 0)
+                .op(Op::LOADNULL, 0, 0, 0)
+                .i(ret(0));
+            module(a.finish("", 0, 2))
+        } else {
+            module(body.finish("", 0, 3))
+        };
+        let e = run_script(&mut interp(), &program(&m)).expect_err("refused");
+        assert_eq!(e.kind, Kind::Internal, "{}", e.message);
+    }
+
+    // A top level that returns no map declares nothing; exit() is an end.
+    let exit = catalogue_index("exit") as u8;
+    let mut a = Asm::default();
+    a.i(Instr::asbx(Op::LOADINT, 1, 4))
+        .op(Op::CALLB, 0, exit, 1)
+        .op(Op::LOADNULL, 0, 0, 0)
+        .i(ret(0));
+    let mut i = interp();
+    run_script(&mut i, &program(&module(a.finish("", 0, 2)))).expect("an exit");
+    assert_eq!(i.exit_requested, Some(4));
+}
+
 // ----- computed labels and burns left by jumps -----------------------------------------------
 
 /// The `nth` `needle` in `src`, `len` bytes of it from `skip`.

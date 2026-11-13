@@ -98,10 +98,11 @@ pub fn chains_source(ctx: &Ctx, name: &str, source: &str) -> i32 {
     exit::OK
 }
 
-/// The literal roots of a script's `pack { }`, if it declares one.
+/// The literal roots of a script's `pack { }`, if it declares one with a
+/// root; `pack { own_flags: true }` declares no scope.
 pub fn declared_pack(program: &crate::syntax::ast::Program) -> Option<Vec<String>> {
     program.body.iter().find_map(|stmt| match stmt {
-        Stmt::Pack(p) => Some(
+        Stmt::Pack(p) if !p.roots.is_empty() => Some(
             p.roots
                 .iter()
                 .map(|r| match &r.kind {

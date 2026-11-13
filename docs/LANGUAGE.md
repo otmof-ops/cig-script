@@ -280,6 +280,21 @@ it, and the way to keep such a step honest is `burn (s) { } unburn { }`.
 One pack per script (`E753`); parameters and cartons are the next seam of
 `HAMMER.md`.
 
+A pack may also carry an option beside its roots, in any order, written as
+a name, a colon and a literal: `pack { ".", own_flags: true }`. There is one
+option:
+
+- **`own_flags: true`** is a fact about the program a compiler makes from
+  the script, read when it is compiled (`docs/PROGRAMS.md`): such a program
+  gives every argument on its command line to the script. It changes nothing
+  about `cig run`, and nothing about the pack's scope.
+
+An option cig does not know, one given twice, or a value that is not the
+literal `true` or `false` is refused before the run (`E766`). A pack with
+only options, `pack { own_flags: true }`, declares **no** scope: writes are
+exactly as in a script with no `pack`, and a plan prints no pack. A pack
+with a root fences the same whether an option is there or not.
+
 ## Chains
 
 ```cig

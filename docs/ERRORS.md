@@ -2057,6 +2057,7 @@ folds and packs: refusals when automation is composed.
 | [`E763`](#e763-the-box-could-not-be-made,-or-its-layer-not-applied) | the box could not be made, or its layer not applied | can't see any ciggies bro | the warning needs nothing done unless the box was the point: Linux 5.11 or later with user namespaces allowed (kernel.apparmor_restrict_unprivileged_userns=0 on Ubuntu); the error names the path that refused |
 | [`E764`](#e764-the-ledger's-chain-is-broken,-so-nothing-is-appended) | the ledger's chain is broken, so nothing is appended | can't see any ciggies bro | `cig runs --verify` names the first line that does not fit; look at what changed the ledger before anything else is trusted |
 | [`E765`](#e765-the-seal-key-file-is-not-a-key) | the seal key file is not a key | can't see any ciggies bro | cig tin key import puts back a key exported with cig tin key export; or copy the key file back from a copy you trust, then cig runs --verify |
+| [`E766`](#e766-bad-pack-option) | bad pack option | not one of the four | write the option as own_flags: true or own_flags: false, once, beside the pack's roots |
 
 ### E750 literal path outside the pack
 
@@ -2338,6 +2339,24 @@ The tin's key file (seal.key in the keys folder, or the file CIG_SEAL_KEY_FILE n
 3. CIG_SEAL_KEY_FILE names a file that is not a key file (probe `env-var`). **Remedy:** point CIG_SEAL_KEY_FILE at the key file, or unset it to use seal.key in the keys folder
 
 Related: `E764`, `E721`, `E708`.
+
+
+### E766 bad pack option
+
+*burn · since 1.22.0 · arises in check*
+
+**Kind of no:** not one of the four (a mistake in the text, in the arithmetic, or in CigScript; syntax, type or logic error; an internal error).
+
+A pack gives an option beside its roots (`pack { ".", own_flags: true }`) that cig does not know, gives one twice, or gives a value that is not the literal true or false. The pack's one option is own_flags, which a compiled program reads: with it, every argument is the program's and it takes no run flags. It never changes the pack's scope. The script is refused before anything runs.
+
+**What to type next:** write the option as own_flags: true or own_flags: false, once, beside the pack's roots
+
+**Known causes**, ranked; doctor checks them in this order:
+
+1. a misspelt option name, or a root written as name: value (probe `source-line`). **Remedy:** the option is own_flags; a root is a string, pack { "./build" }
+2. own_flags given twice, or given a string, a number or a variable (probe `source-line`). **Remedy:** keep one own_flags, with the word true or false after it
+
+Related: `E753`, `E755`, `E1052`.
 
 
 ## guard (`E770`–`E799`)
@@ -3537,7 +3556,8 @@ This program's bytes do not match the sha256 in its trailer, its record does not
 3. the program's bytecode (format 2 and later, cig-compile#31) does not verify: a register is past the frame, a jump targets outside the function, a constant index is out of range, a handler range interleaves another, or a `BURN.OP` sits outside its region (no probe; a suggestion, not a finding). **Remedy:** compile it again with the cigcompile that matches this cig, since the verifier runs on every build
 4. a section's bytes do not match the sha256 in the section table (format 2): the body was changed after the program was built. A start reads no body, so this shows when the program first uses the section (its script, for a run or --chains), or at once with CIG_VALIDATE=1 (probe `file-hash`). **Remedy:** compile it again, or fetch it again; CIG_VALIDATE=1 checks every section before the program starts
 5. the section table does not read (format 2): an id that is not lower-case ASCII or is repeated or out of order, a body outside the space between the record and the table, overlapping another, off its 16-byte alignment or with padding that is not zero, an encoding or flag bit this cig does not know, or a size over 64 MiB (no probe; a suggestion, not a finding). **Remedy:** compile it again with the cigcompile for this cig
-6. the program needs a section this cig does not read, or the section its stage runs is missing; a stage `b` program (bytecode) is refused by a cig that does not run stage `b` yet (no probe; a suggestion, not a finding). **Remedy:** compile it again with the cigcompile for this cig
+6. the program needs a section this cig does not read, or the section its stage runs is missing (no probe; a suggestion, not a finding). **Remedy:** compile it again with the cigcompile for this cig
+7. a stage `b` program's module does not read (its magic, format version or BLAKE3 hash), or this cig's VM refuses it at load: a builtin, a prelude name or a burn-op kind this cig does not have (`unknown-builtin`, `unknown-prelude-name`, `unknown-burn-op` at `fn<i>+<pc>`). Nothing runs: the program's script is run only with --interp (no probe; a suggestion, not a finding). **Remedy:** compile it again with the cigcompile for this cig; --interp runs its script on the tree-walker meanwhile
 
 Related: `E1051`.
 
@@ -3599,7 +3619,7 @@ Related: `E1050`.
 
 **Kind of no:** not one of the four (a mistake in the text, in the arithmetic, or in CigScript; syntax, type or logic error; an internal error).
 
-A compiled program takes the run's flags first and its own arguments after them; this one is not a run flag, it lacks its value, or an argument is not valid UTF-8. Nothing ran.
+A compiled program takes the run's flags first and its own arguments after them; this one is not a run flag, it lacks its value, or an argument is not valid UTF-8. Nothing ran. A program compiled with own_flags takes no run flags: every argument is its own, so only an argument that is not valid UTF-8 is refused.
 
 **What to type next:** put the program's own arguments after --: tool -- --flag (tool --help lists the run flags)
 

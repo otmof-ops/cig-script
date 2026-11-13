@@ -41,6 +41,7 @@ const FEATURES: &[(&str, Version)] = &[
     ("fs.write_text(path, text, {sensitive})", Version(1, 5, 0)),
     ("box: true", Version(1, 6, 0)),
     ("skip", Version(1, 18, 0)),
+    ("pack { own_flags: true }", Version(1, 22, 0)),
 ];
 
 pub const FIRST: Version = Version(1, 0, 0);
@@ -117,6 +118,10 @@ fn stmt(s: &Stmt, out: &mut Vec<Use>) {
         Stmt::Chain(c) => c.steps.iter().for_each(|e| expr(e, out)),
         Stmt::Pack(p) => {
             note(out, "pack { }", feature("pack { }"), p.span);
+            if let Some(o) = p.options.first() {
+                let what = "pack { own_flags: true }";
+                note(out, what, feature(what), o.name_span);
+            }
             p.roots.iter().for_each(|e| expr(e, out));
         }
         Stmt::Snuff { value, .. } => {
@@ -341,5 +346,15 @@ mod tests {
         // The same keys on a map that is not a hop's options are nothing.
         let p = parse("stick m = {box: true, touches_sealed: 1}\n").unwrap();
         assert!(uses(&p).is_empty());
+    }
+
+    #[test]
+    fn a_pack_option_needs_the_cig_that_reads_it() {
+        let p = parse("pack { \".\", own_flags: true }\n").unwrap();
+        let names: Vec<String> = uses(&p).into_iter().map(|u| u.what).collect();
+        assert_eq!(names, vec!["pack { }", "pack { own_flags: true }"]);
+        assert_eq!(minimum(&p), Version(1, 22, 0));
+        let p = parse("pack { \".\" }\n").unwrap();
+        assert_eq!(minimum(&p), Version(1, 1, 0));
     }
 }

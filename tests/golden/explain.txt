@@ -152,6 +152,7 @@ E750-E769  folds and packs: refusals when automation is composed
   E763  the box could not be made, or its layer not applied burn
   E764  the ledger's chain is broken, so nothing is appended burn
   E765  the seal key file is not a key     burn
+  E766  bad pack option                    burn
 
 E770-E799  the box for untrusted code: its network, the watch, kept layers, the kill switch
   E771  a host outside the allow list      burn
@@ -2687,6 +2688,25 @@ E765 the seal key file is not a key  (burn, fold family, since 1.22.0)
 
   arises in: run, unburn, runs  ·  related: E764, E721, E708  ·  tags: kernel
 
+======== E766 ========
+E766 bad pack option  (burn, fold family, since 1.22.0)
+
+  kind of no: not one of the four  (a mistake in the text, in the arithmetic, or in CigScript; syntax, type or logic error; an internal error)
+
+  A pack gives an option beside its roots (`pack { ".", own_flags: true }`) that cig does not know, gives one twice, or gives a value that is not the literal true or false. The pack's one option is own_flags, which a compiled program reads: with it, every argument is the program's and it takes no run flags. It never changes the pack's scope. The script is refused before anything runs.
+
+  what to type next: write the option as own_flags: true or own_flags: false, once, beside the pack's roots
+
+  known causes, ranked; doctor checks them in this order
+  1. a misspelt option name, or a root written as name: value
+     probe: source-line (the source line under the caret)
+     remedy: the option is own_flags; a root is a string, pack { "./build" }
+  2. own_flags given twice, or given a string, a number or a variable
+     probe: source-line (the source line under the caret)
+     remedy: keep one own_flags, with the word true or false after it
+
+  arises in: check  ·  related: E753, E755, E1052
+
 ======== E800 ========
 E800 usage error  (usage, usage family, since 1.0.0)
 
@@ -3653,9 +3673,12 @@ E1050 a damaged program  (usage, build family, since 1.15.0)
   5. the section table does not read (format 2): an id that is not lower-case ASCII or is repeated or out of order, a body outside the space between the record and the table, overlapping another, off its 16-byte alignment or with padding that is not zero, an encoding or flag bit this cig does not know, or a size over 64 MiB
      probe: none; a suggestion, not a finding
      remedy: compile it again with the cigcompile for this cig
-  6. the program needs a section this cig does not read, or the section its stage runs is missing; a stage `b` program (bytecode) is refused by a cig that does not run stage `b` yet
+  6. the program needs a section this cig does not read, or the section its stage runs is missing
      probe: none; a suggestion, not a finding
      remedy: compile it again with the cigcompile for this cig
+  7. a stage `b` program's module does not read (its magic, format version or BLAKE3 hash), or this cig's VM refuses it at load: a builtin, a prelude name or a burn-op kind this cig does not have (`unknown-builtin`, `unknown-prelude-name`, `unknown-burn-op` at `fn<i>+<pc>`). Nothing runs: the program's script is run only with --interp
+     probe: none; a suggestion, not a finding
+     remedy: compile it again with the cigcompile for this cig; --interp runs its script on the tree-walker meanwhile
 
   arises in: run  ·  related: E1051
 
@@ -3712,7 +3735,7 @@ E1052 not one of the program's run flags  (usage, build family, since 1.15.0)
 
   kind of no: not one of the four  (a mistake in the text, in the arithmetic, or in CigScript; syntax, type or logic error; an internal error)
 
-  A compiled program takes the run's flags first and its own arguments after them; this one is not a run flag, it lacks its value, or an argument is not valid UTF-8. Nothing ran.
+  A compiled program takes the run's flags first and its own arguments after them; this one is not a run flag, it lacks its value, or an argument is not valid UTF-8. Nothing ran. A program compiled with own_flags takes no run flags: every argument is its own, so only an argument that is not valid UTF-8 is refused.
 
   what to type next: put the program's own arguments after --: tool -- --flag (tool --help lists the run flags)
 

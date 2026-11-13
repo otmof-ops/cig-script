@@ -284,7 +284,7 @@ followed by `TESTN`, not a swapped operand pair.
 |----|-----|--------|
 | `pack` A, B | ABC | `pack(R(A..A+B))` (once, before any burn); trailing `nop`s may give each root its position |
 | `exhale` A, B | ABC | `exhale(R(A..A+B))` |
-| `chain.make` A, B | ABC | `R(A) = chain(R(A+1..A+1+B))`: the name, then a label and a value per step; trailing `nop`s may give each step its position |
+| `chain.make` A, B, C | ABC | `R(A) = chain(R(A+1..A+1+B))`: the name, then a label and a value per step; trailing `nop`s may give each step its position; `C = 1` also declares it as a top-level name |
 | `steps` A, Bx | ABx | set the frame's loop nesting to `A`, then charge the step budget by `Bx` ticks ("How the VM reads it" says where a lowering puts one) |
 
 ## Jump semantics (one rule)
@@ -739,6 +739,26 @@ open. A lowering writes to them.
   `nop`'s row, as `pack`'s roots do. `light` and a stick used as a step
   run on the interpreter's chain runner, which calls a compiled step
   through `call_compiled`.
+  `C` is `1` for a `chain` statement of the script's top level (directly
+  in the top-level block, not in an `if`, a loop, a `try`, a `burn` or a
+  pull) and `0` for every other: with `1` the VM also declares the chain
+  in the interpreter's globals, as the tree-walker's `chain` does, and a
+  name already there is the tree-walker's `E306`. `C = 1` outside the
+  top level's own frame, or `C` above `1`, stops with an internal error.
+- **The top level's names.** The top level's only normal end returns a
+  map of every name a top-level statement declares (`stick`, `roll`,
+  `pull`, `chain`, ... in the order they are declared), each with its
+  value at the end: `newmap R, n`, then `loadk K, "<name>"` and
+  `insertmap R, K, <its register>` per name, then `ret R`. A program's
+  run declares each in the interpreter's globals (a name already there,
+  a top-level chain, keeps its value), so after the run they hold what
+  the tree-walker's hold and `--light <name>` answers the same: a chain
+  is lit, another value is `` `<name>` is a <type>, not a chain ``, and a
+  name the top level does not declare is `E804`. A top level that
+  returns anything else declares nothing. Since a top-level `snuff` is
+  a check error (`E304`), the top level's return value has no other use.
+  After `exit()` the map is not returned: top-level chains declared
+  before it are still in the globals, other names are not.
 - `vm::NOT_BUILT` is empty: every instruction of this format runs. An
   opcode a later format adds stops with an internal error that names it
   until the VM runs it.
