@@ -155,10 +155,13 @@ fn text(b: &[u8]) -> String {
     String::from_utf8_lossy(b).to_string()
 }
 
-/// Run ids differ between two runs; nothing else may.
+/// Run ids and the time a step took differ between two runs; nothing
+/// else may.
 fn normal(s: &str) -> String {
     let re = regex::Regex::new(r"\d{8}T\d{6}-[0-9a-f]{6}").unwrap();
-    re.replace_all(s, "<run>").to_string()
+    let s = re.replace_all(s, "<run>");
+    let ms = regex::Regex::new(r"\(\d+ ms\)").unwrap();
+    ms.replace_all(&s, "(<ms>)").to_string()
 }
 
 fn same(a: &Output, b: &Output, what: &str) {

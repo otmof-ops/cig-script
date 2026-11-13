@@ -873,20 +873,15 @@ impl Machine<'_> {
     fn run_frame_code(&mut self, program: &Rc<Program>) -> Result<Option<Value>, Fault> {
         let (mut pc, mut base, mut upvals, mut proto) = self.top(program)?;
         loop {
+            if proto.plain {
+                pc = self.run_fast(proto, pc, base, &upvals);
+            }
             let Some(Some(d)) = proto.code.get(pc) else {
                 let span = proto.spans.get(pc).copied().unwrap_or_default();
                 return Err(broken("a pc that starts no instruction", span).into());
             };
             #[cfg(feature = "bench-stats")]
             let timer = stats::start(d.op);
-            if proto.plain {
-                if let Some(next) = self.fast(proto, d, base, &upvals) {
-                    #[cfg(feature = "bench-stats")]
-                    stats::stop(timer);
-                    pc = next;
-                    continue;
-                }
-            }
             // The general path: the frame's pc is where an error from this
             // instruction is offered to the tries.
             if let Some(f) = self.frames.last_mut() {
@@ -914,6 +909,29 @@ impl Machine<'_> {
                 Flow::Switched => (pc, base, upvals, proto) = self.top(program)?,
             }
         }
+    }
+
+    /// The frame's instructions from `pc` for as long as the fast path
+    /// runs them: the pc of the first one it does not run (or of no
+    /// instruction at all). A function of its own, never inlined: the
+    /// fast path's frame holds every arm's locals, and it must not be on
+    /// the stack while the general path runs a call. A builtin that calls
+    /// back into the VM then costs `run_frame_code`, `step` and the
+    /// group, as it did before there was a fast path, which is what keeps
+    /// a level of re-entry no deeper than the tree-walker's.
+    #[inline(never)]
+    fn run_fast(&mut self, proto: &Proto, mut pc: usize, base: usize, upvals: &[Cell]) -> usize {
+        while let Some(Some(d)) = proto.code.get(pc) {
+            #[cfg(feature = "bench-stats")]
+            let timer = stats::start(d.op);
+            let Some(next) = self.fast(proto, d, base, upvals) else {
+                break;
+            };
+            #[cfg(feature = "bench-stats")]
+            stats::stop(timer);
+            pc = next;
+        }
+        pc
     }
 
     /// The frame on top: its pc, its base, its upvalues and its function.
