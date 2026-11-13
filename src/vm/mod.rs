@@ -237,6 +237,10 @@ struct Proto {
     /// `cellnew`, the only instruction that gives a register one. Its
     /// registers are read and written without looking at `cells`.
     plain: bool,
+    /// Per pc, the field cache of a `getfield` or `setfield` there: the
+    /// position its key last had in the map, as the tree-walker keeps one
+    /// per field expression.
+    hints: Vec<std::cell::Cell<u32>>,
     lambda: bool,
     reg_count: usize,
     arity: usize,
@@ -440,6 +444,9 @@ fn flatten(f: &BcFunction, out: &mut Vec<Proto>, known: &Known<'_>) -> Result<us
     let proto = Proto {
         name: f.name.clone(),
         plain,
+        hints: (0..f.instrs.len())
+            .map(|_| std::cell::Cell::new(0))
+            .collect(),
         lambda: f.kind == FuncKind::Lambda,
         reg_count: f.reg_count as usize,
         arity: f.arity as usize,
@@ -1022,8 +1029,25 @@ impl Machine<'_> {
                 let Value::Str(name) = proto.consts.get(d.c as usize)? else {
                     return None;
                 };
-                let v = map.try_borrow().ok()?.get(&**name)?.clone();
+                let map = map.try_borrow().ok()?;
+                let i = field_index(&map, name, proto.hints.get(pc)?)?;
+                let v = map.get_index(i)?.1.clone();
                 v
+            }
+            Op::SETFIELD => {
+                let Value::Map(map) = self.stack.get(r(d.a))? else {
+                    return None;
+                };
+                let Value::Str(name) = proto.consts.get(d.b_u as usize)? else {
+                    return None;
+                };
+                let v = self.stack.get(r(d.c))?.clone();
+                let mut map = map.try_borrow_mut().ok()?;
+                let i = field_index(&map, name, proto.hints.get(pc)?)?;
+                let old = std::mem::replace(map.get_index_mut(i)?.1, v);
+                drop(map);
+                drop(old);
+                return Some(next);
             }
             Op::SETINDEX => {
                 let (Value::List(list), Value::Int(i)) =
@@ -1468,7 +1492,15 @@ impl Machine<'_> {
                 let obj = self.get(base, d.b_u, span)?;
                 let name = name(proto, d.c, span)?;
                 let hit = match &obj {
-                    Value::Map(map) => map.borrow().get(&*name).cloned(),
+                    Value::Map(map) => {
+                        let map = map.borrow();
+                        proto
+                            .hints
+                            .get(d.pc as usize)
+                            .and_then(|h| field_index(&map, &name, h))
+                            .and_then(|i| map.get_index(i))
+                            .map(|(_, v)| v.clone())
+                    }
                     _ => None,
                 };
                 let v = match hit {
@@ -1481,7 +1513,11 @@ impl Machine<'_> {
                 let obj = self.get(base, d.a, span)?;
                 let name = name(proto, d.b_u, span)?;
                 let v = self.get(base, d.c, span)?;
-                set_field(&obj, &name, v, &std::cell::Cell::new(0), span)?;
+                let hint = proto
+                    .hints
+                    .get(d.pc as usize)
+                    .ok_or_else(|| broken("a pc past the function", span))?;
+                set_field(&obj, &name, v, hint, span)?;
             }
             Op::GETINDEX => {
                 let obj = self.get(base, d.b_u, span)?;
@@ -2251,4 +2287,24 @@ fn fast_compare(op: BinOp, l: &Value, r: &Value) -> Option<Value> {
         (BinOp::Le, Value::Str(a), Value::Str(b)) => Some(Value::Bool(a <= b)),
         _ => None,
     }
+}
+
+/// The position of `name` in `map`: the cached one when the key there is
+/// still `name`, else a lookup, which moves the cache (the tree-walker's
+/// field cache, the same rule).
+#[inline(always)]
+fn field_index(
+    map: &IndexMap<String, Value>,
+    name: &str,
+    hint: &std::cell::Cell<u32>,
+) -> Option<usize> {
+    let guess = hint.get() as usize;
+    if let Some((k, _)) = map.get_index(guess) {
+        if k == name {
+            return Some(guess);
+        }
+    }
+    let i = map.get_index_of(name)?;
+    hint.set(u32::try_from(i).unwrap_or(0));
+    Some(i)
 }
