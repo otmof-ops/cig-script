@@ -785,6 +785,11 @@ recorded there, not failed.
 
 ## What is here now, and what is next
 
+The first committed baseline of the whole family, taken before the bytecode VM
+runs programs, is [BASELINE-2026-11-13.md](BASELINE-2026-11-13.md); its numbers
+case by case are `bench/baseline-2026-11-13.json` here and in each of the other
+four repositories (#213).
+
 This page describes **all eight steps** of #179 and #145's gates. The manifest
 still accepts and ignores a case's `score` and `config`, reserved for what
 comes after.
