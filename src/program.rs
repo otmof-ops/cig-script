@@ -10,7 +10,24 @@
 //! the same run as `cig run` (the same kernel, journal, plan and rollback)
 //! and takes no command.
 //!
-//! The end of a program's executable:
+//! Format 2 (cig-compile's decision 0004) is what [`append2`] writes:
+//!
+//! ```text
+//! ... cig ...        the runtime, as released; its image ends at P
+//! record             JSON, `{"format":2,...`, at most 64 KiB
+//! zero padding       to the first body's alignment
+//! section bodies     in table order, each at a file offset that is a multiple of 16
+//! section table      count x 64 bytes
+//! "CIGPROG2" ...     the trailer, 56 bytes: payload and record lengths, the
+//!                    section count, flags, sha256(record + table)
+//! ```
+//!
+//! A start reads the trailer, the record and the table and checks their
+//! sha256: a constant amount, whatever the script's size. A body is read,
+//! hashed and decoded only when it is used ([`Loaded::body`]).
+//!
+//! Format 1, which [`append`] still writes for one release, is one JSON
+//! record that holds the script, then a 48-byte trailer:
 //!
 //! ```text
 //! ... cig ...                                  the runtime, as released
@@ -18,15 +35,15 @@
 //! "CIGPROG1"  len (u64, LE)  sha256(payload)   the trailer, 48 bytes
 //! ```
 //!
-//! A trailer whose payload does not hash to the sha256 it carries is a
-//! damaged program, and it refuses to run (E1050). The payload is written
-//! with its fields in one fixed order and nothing that changes between
-//! builds, so the same script, compiler and runtime give the same bytes.
+//! [`read`] reads both. A program whose hashes do not match is damaged, and
+//! it refuses to run (E1050). The writers put everything in one fixed order
+//! and nothing that changes between builds, so the same script, compiler
+//! and runtime give the same bytes.
 //!
 //! The sha256s are integrity, not authenticity: they catch a damaged or
 //! truncated program, not an edited one (anyone can recompute them), and
 //! the runtime half is not covered. Programs are unsigned until
-//! cig-compile#10.
+//! cig-compile#40.
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -164,22 +181,1006 @@ pub fn append(runtime: &[u8], program: &Program) -> Vec<u8> {
     out
 }
 
-/// Does `bytes` end in a trailer (a program, damaged or not)?
-pub fn carries_program(bytes: &[u8]) -> bool {
-    bytes.len() >= TRAILER_LEN as usize && bytes[bytes.len() - TRAILER_LEN as usize..][..8] == MAGIC
+// ----- Format 2: the record, the section table, the bodies -----
+
+/// A format 2 trailer's first eight bytes.
+pub const MAGIC2: [u8; 8] = *b"CIGPROG2";
+/// A format 2 trailer's length: magic, payload length, record length,
+/// section count, flags, head sha256.
+pub const TRAILER2_LEN: u64 = 56;
+/// The format [`append2`] writes.
+pub const FORMAT2: u32 = 2;
+/// A section table entry's length.
+pub const ENTRY_LEN: u64 = 64;
+/// The most a format 2 record may hold.
+pub const MAX_RECORD: u64 = 65_536;
+/// The most sections a table may list.
+pub const MAX_SECTIONS: u64 = 32;
+/// The most a format 2 payload may hold, and the most a body may decode to.
+pub const MAX_PAYLOAD2: u64 = 64 * 1024 * 1024;
+/// Every body starts at a file offset that is a multiple of this.
+pub const ALIGN: u64 = 16;
+/// A script this long or longer is kept DEFLATE-compressed.
+pub const DEFLATE_FROM: usize = 4096;
+/// The one DEFLATE level the writer uses, so the same text gives the same bytes.
+pub const DEFLATE_LEVEL: u32 = 9;
+/// The sections this cig knows, in the order a table lists them; a table
+/// lists any other id after these, in byte order.
+pub const KNOWN_SECTIONS: [&str; 5] = ["source", "bytecode", "tree", "snap", "sbom"];
+/// `CIG_VALIDATE=1`: a start hashes and validates every section before it runs.
+pub const VALIDATE_ENV: &str = "CIG_VALIDATE";
+
+/// Which body a format 2 program runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Stage {
+    /// The `source` section, on the tree-walker.
+    #[serde(rename = "a")]
+    A,
+    /// The `bytecode` section, on the VM.
+    #[serde(rename = "b")]
+    B,
 }
 
-/// The program at the end of `f`, if one is there. `Ok(None)`: none is;
-/// `Err`: one is there and it is damaged.
+impl Stage {
+    /// `a` or `b`, as the record writes it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Stage::A => "a",
+            Stage::B => "b",
+        }
+    }
+
+    /// The section a program at this stage cannot run without.
+    pub fn needs(self) -> &'static str {
+        match self {
+            Stage::A => "source",
+            Stage::B => "bytecode",
+        }
+    }
+}
+
+/// How a section's body is kept.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Encoding {
+    /// As is (`0`).
+    Stored,
+    /// Raw DEFLATE, RFC 1951 (`1`).
+    Deflate,
+}
+
+impl Encoding {
+    /// The byte the table entry carries.
+    pub fn code(self) -> u8 {
+        match self {
+            Encoding::Stored => 0,
+            Encoding::Deflate => 1,
+        }
+    }
+
+    /// The encoding a table byte names, if this cig reads it.
+    pub fn from_code(b: u8) -> Option<Encoding> {
+        match b {
+            0 => Some(Encoding::Stored),
+            1 => Some(Encoding::Deflate),
+            _ => None,
+        }
+    }
+
+    /// `stored` or `deflate`, for `--cig-program`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Encoding::Stored => "stored",
+            Encoding::Deflate => "deflate",
+        }
+    }
+}
+
+/// A format 2 program's record: what it is, who made it, for which cig,
+/// and how. Its keys are written in this order, without whitespace;
+/// readers ignore keys they do not know.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Record {
+    /// [`FORMAT2`]; first, so a cut program is still recognized.
+    pub format: u32,
+    /// The program's name.
+    pub name: String,
+    /// The script's file name as compiled; errors point here.
+    pub file: String,
+    /// sha256 of the script's text (decoded), hex: as in format 1.
+    pub sha256: String,
+    /// The cig version the program runs on.
+    pub cig: String,
+    /// What compiled it, e.g. `cigcompile 0.4.0`.
+    pub compiler: String,
+    /// Which body runs.
+    pub stage: Stage,
+    /// The optimization level it was built at: `0`, `1`, `2`.
+    pub opt: String,
+    /// The target triple it was built for.
+    pub target: String,
+    /// sha256 of the bytes before the payload: the runtime as appended to, hex.
+    pub runtime_sha256: String,
+    /// Every argument is the program's (written only when set).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub own_flags: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
+/// One entry of a format 2 section table, as the file holds it. Until the
+/// table is checked ([`Loaded::check`]) its fields are only what the bytes
+/// say.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Entry {
+    /// The id's eight bytes: lower-case ASCII, zero-padded.
+    pub raw_id: [u8; 8],
+    /// The body's own format: `1` for `source` and `sbom`.
+    pub version: u16,
+    /// The encoding byte: `0` stored, `1` DEFLATE ([`Entry::encoding`]).
+    pub encoding: u8,
+    /// Bit 0: required. Other bits are refused.
+    pub flags: u8,
+    /// The body's length decoded.
+    pub decoded_len: u32,
+    /// Where the body starts, from the payload's start.
+    pub offset: u64,
+    /// The body's stored length.
+    pub length: u64,
+    /// sha256 of the stored bytes.
+    pub sha256: [u8; 32],
+}
+
+impl Entry {
+    fn parse(b: &[u8]) -> Entry {
+        let u = |at: usize, n: usize| int(b, at, n, false).unwrap_or(0);
+        let mut raw_id = [0u8; 8];
+        raw_id.copy_from_slice(&b[..8]);
+        let mut sha256 = [0u8; 32];
+        sha256.copy_from_slice(&b[32..64]);
+        Entry {
+            raw_id,
+            version: u(8, 2) as u16,
+            encoding: b[10],
+            flags: b[11],
+            decoded_len: u(12, 4) as u32,
+            offset: u(16, 8),
+            length: u(24, 8),
+            sha256,
+        }
+    }
+
+    fn bytes(&self) -> [u8; ENTRY_LEN as usize] {
+        let mut b = [0u8; ENTRY_LEN as usize];
+        b[..8].copy_from_slice(&self.raw_id);
+        b[8..10].copy_from_slice(&self.version.to_le_bytes());
+        b[10] = self.encoding;
+        b[11] = self.flags;
+        b[12..16].copy_from_slice(&self.decoded_len.to_le_bytes());
+        b[16..24].copy_from_slice(&self.offset.to_le_bytes());
+        b[24..32].copy_from_slice(&self.length.to_le_bytes());
+        b[32..].copy_from_slice(&self.sha256);
+        b
+    }
+
+    /// The id as text; empty when its bytes are not an id.
+    pub fn id(&self) -> &str {
+        id_text(&self.raw_id).unwrap_or("")
+    }
+
+    /// Bit 0 of the flags: a reader that does not know this id refuses the program.
+    pub fn required(&self) -> bool {
+        self.flags & 1 != 0
+    }
+
+    /// The encoding, when it is one this cig reads.
+    pub fn encoding(&self) -> Option<Encoding> {
+        Encoding::from_code(self.encoding)
+    }
+
+    /// The sha256 of the stored bytes, hex.
+    pub fn sha256_hex(&self) -> String {
+        hex::encode(self.sha256)
+    }
+}
+
+/// An id's text: lower-case ASCII letters, digits and `-`, a letter first,
+/// then zero bytes to eight.
+fn id_text(raw: &[u8; 8]) -> Option<&str> {
+    let n = raw.iter().position(|b| *b == 0).unwrap_or(8);
+    let (id, pad) = raw.split_at(n);
+    let good = !id.is_empty()
+        && id[0].is_ascii_lowercase()
+        && id
+            .iter()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'-')
+        && pad.iter().all(|b| *b == 0);
+    good.then(|| std::str::from_utf8(id).expect("ascii"))
+}
+
+/// Where an id sits in a table: the known sections first, in their order,
+/// then any other by its bytes.
+fn order_key(raw: &[u8; 8]) -> (usize, [u8; 8]) {
+    let id = id_text(raw).unwrap_or("");
+    let at = KNOWN_SECTIONS
+        .iter()
+        .position(|k| *k == id)
+        .unwrap_or(KNOWN_SECTIONS.len());
+    (at, *raw)
+}
+
+/// A section for [`append2`] to write beside `source`: its body as it is
+/// used (the writer encodes it).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Section {
+    /// Lower-case ASCII letters, digits and `-`, a letter first, at most 8.
+    pub id: String,
+    /// The body's own format.
+    pub version: u16,
+    /// How the writer keeps it.
+    pub encoding: Encoding,
+    /// A reader that does not know this id refuses the program.
+    pub required: bool,
+    /// The body, decoded.
+    pub bytes: Vec<u8>,
+}
+
+/// What [`append2`] makes a format 2 program from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Build {
+    /// The program's name ([`good_name`]).
+    pub name: String,
+    /// The script's file name as compiled.
+    pub file: String,
+    /// The script.
+    pub source: String,
+    /// What compiled it.
+    pub compiler: String,
+    /// The cig it runs on; [`Build::new`] gives this cig's version.
+    pub cig: String,
+    /// Which body runs.
+    pub stage: Stage,
+    /// The optimization level: `0`, `1`, `2`.
+    pub opt: String,
+    /// The target triple.
+    pub target: String,
+    /// Every argument is the program's.
+    pub own_flags: bool,
+    /// The sections after `source`, in table order.
+    pub sections: Vec<Section>,
+}
+
+impl Build {
+    /// A stage `a` program for this cig, at `opt` `0`, with no other section.
+    pub fn new(name: &str, file: &str, source: &str, compiler: &str, target: &str) -> Build {
+        Build {
+            name: name.to_string(),
+            file: file.to_string(),
+            source: source.to_string(),
+            compiler: compiler.to_string(),
+            cig: crate::VERSION.to_string(),
+            stage: Stage::A,
+            opt: "0".to_string(),
+            target: target.to_string(),
+            own_flags: false,
+            sections: Vec::new(),
+        }
+    }
+}
+
+/// A body ready to place: its entry (offset not yet set) and its stored bytes.
+struct Placed {
+    entry: Entry,
+    stored: Vec<u8>,
+}
+
+fn deflate(bytes: &[u8]) -> Vec<u8> {
+    use std::io::Write as _;
+    let mut e =
+        flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::new(DEFLATE_LEVEL));
+    e.write_all(bytes).expect("writing to memory");
+    e.finish().expect("writing to memory")
+}
+
+fn place(
+    id: &str,
+    version: u16,
+    encoding: Encoding,
+    required: bool,
+    body: &[u8],
+) -> Result<Placed, String> {
+    let mut raw_id = [0u8; 8];
+    if id.len() > 8 {
+        return Err(format!("section id `{id}` is longer than 8 bytes"));
+    }
+    raw_id[..id.len()].copy_from_slice(id.as_bytes());
+    if id_text(&raw_id).is_none() {
+        return Err(format!(
+            "section id `{id}` is not lower-case ASCII letters, digits and `-`"
+        ));
+    }
+    if body.len() as u64 > MAX_PAYLOAD2 {
+        return Err(format!("section `{id}` is more than 64 MiB"));
+    }
+    let stored = match encoding {
+        Encoding::Stored => body.to_vec(),
+        Encoding::Deflate => deflate(body),
+    };
+    Ok(Placed {
+        entry: Entry {
+            raw_id,
+            version,
+            encoding: encoding.code(),
+            flags: u8::from(required),
+            decoded_len: body.len() as u32,
+            offset: 0,
+            length: stored.len() as u64,
+            sha256: Sha256::digest(&stored).into(),
+        },
+        stored,
+    })
+}
+
+/// A format 2 program's executable: `runtime` with the record, the bodies
+/// (`source` first, then `b.sections`), the table and the trailer appended.
+/// The same inputs give the same bytes. `Err` names what a reader would
+/// refuse: a name, id, order or size outside the format's rules.
+pub fn append2(runtime: &[u8], b: &Build) -> Result<Vec<u8>, String> {
+    let record = Record {
+        format: FORMAT2,
+        name: b.name.clone(),
+        file: b.file.clone(),
+        sha256: hex::encode(Sha256::digest(b.source.as_bytes())),
+        cig: b.cig.clone(),
+        compiler: b.compiler.clone(),
+        stage: b.stage,
+        opt: b.opt.clone(),
+        target: b.target.clone(),
+        runtime_sha256: hex::encode(Sha256::digest(runtime)),
+        own_flags: b.own_flags,
+    };
+    check_record(&record)?;
+    let source_encoding = if b.source.len() >= DEFLATE_FROM {
+        Encoding::Deflate
+    } else {
+        Encoding::Stored
+    };
+    let mut bodies = vec![place(
+        "source",
+        1,
+        source_encoding,
+        true,
+        b.source.as_bytes(),
+    )?];
+    for s in &b.sections {
+        bodies.push(place(&s.id, s.version, s.encoding, s.required, &s.bytes)?);
+    }
+    for w in bodies.windows(2) {
+        if order_key(&w[0].entry.raw_id) >= order_key(&w[1].entry.raw_id) {
+            return Err(format!(
+                "section `{}` is repeated or out of order after `{}`",
+                w[1].entry.id(),
+                w[0].entry.id()
+            ));
+        }
+    }
+    let record = serde_json::to_vec(&record).expect("a record serialises");
+    assemble(runtime, &record, bodies)
+}
+
+/// The record, the bodies at their alignment, the table and the trailer,
+/// after `runtime`.
+fn assemble(runtime: &[u8], record: &[u8], bodies: Vec<Placed>) -> Result<Vec<u8>, String> {
+    if record.len() as u64 > MAX_RECORD {
+        return Err("the record is more than 64 KiB".to_string());
+    }
+    if bodies.is_empty() || bodies.len() as u64 > MAX_SECTIONS {
+        return Err(format!(
+            "a table lists 1 to {MAX_SECTIONS} sections, not {}",
+            bodies.len()
+        ));
+    }
+    let p = runtime.len() as u64;
+    let mut payload = record.to_vec();
+    let mut table = Vec::with_capacity(bodies.len() * ENTRY_LEN as usize);
+    for mut b in bodies {
+        let pad = (ALIGN - (p + payload.len() as u64) % ALIGN) % ALIGN;
+        payload.resize(payload.len() + pad as usize, 0);
+        b.entry.offset = payload.len() as u64;
+        payload.extend_from_slice(&b.stored);
+        table.extend_from_slice(&b.entry.bytes());
+    }
+    payload.extend_from_slice(&table);
+    if payload.len() as u64 > MAX_PAYLOAD2 {
+        return Err("the payload is more than 64 MiB".to_string());
+    }
+    let mut out = Vec::with_capacity(runtime.len() + payload.len() + TRAILER2_LEN as usize);
+    out.extend_from_slice(runtime);
+    out.extend_from_slice(&payload);
+    out.extend_from_slice(&trailer2(
+        payload.len() as u64,
+        record.len() as u32,
+        (table.len() as u64 / ENTRY_LEN) as u16,
+        record,
+        &table,
+    ));
+    Ok(out)
+}
+
+/// A format 2 trailer.
+fn trailer2(
+    payload_len: u64,
+    record_len: u32,
+    count: u16,
+    record: &[u8],
+    table: &[u8],
+) -> [u8; TRAILER2_LEN as usize] {
+    let mut t = [0u8; TRAILER2_LEN as usize];
+    t[..8].copy_from_slice(&MAGIC2);
+    t[8..16].copy_from_slice(&payload_len.to_le_bytes());
+    t[16..20].copy_from_slice(&record_len.to_le_bytes());
+    t[20..22].copy_from_slice(&count.to_le_bytes());
+    t[24..].copy_from_slice(&head_sha256(record, table));
+    t
+}
+
+fn head_sha256(record: &[u8], table: &[u8]) -> [u8; 32] {
+    let mut h = Sha256::new();
+    h.update(record);
+    h.update(table);
+    h.finalize().into()
+}
+
+/// What a program says about itself, with anything that is not printable
+/// shown escaped: a reader's message may quote a record's bytes.
+fn shown(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if printable(&c.to_string()) {
+                c.to_string()
+            } else {
+                c.escape_unicode().to_string()
+            }
+        })
+        .collect()
+}
+
+fn is_sha256_hex(s: &str) -> bool {
+    s.len() == 64
+        && s.bytes()
+            .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+}
+
+/// The record's own rules: format 1's for its words, a sha256 for each
+/// hash, and short printable text for `opt` and `target`.
+fn check_record(r: &Record) -> Result<(), String> {
+    if r.format != FORMAT2 {
+        return Err(format!(
+            "the record says format {}, and its trailer is format 2",
+            r.format
+        ));
+    }
+    check_words(&r.name, &r.file, &r.compiler, &r.cig)?;
+    for (what, v) in [("sha256", &r.sha256), ("runtime_sha256", &r.runtime_sha256)] {
+        if !is_sha256_hex(v) {
+            return Err(format!(
+                "the record's `{what}` is not a sha256 (64 lower-case hex digits)"
+            ));
+        }
+    }
+    for (what, v, max) in [("opt", &r.opt, 8), ("target", &r.target, 64)] {
+        if v.is_empty() || v.chars().count() > max || !printable(v) {
+            return Err(format!(
+                "the record's `{what}` is not printable text of 1 to {max} characters"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The format 2 program whose trailer `t` is at `at`: its trailer's fields,
+/// its record and the head's sha256 checked; its table read, not yet checked.
+fn at_trailer2<F: Read + Seek>(f: &mut F, at: u64, t: &[u8]) -> Result<Loaded, String> {
+    let len = trailer_len(t);
+    let record_len = int(t, 16, 4, false).expect("in the trailer");
+    let count = int(t, 20, 2, false).expect("in the trailer");
+    let flags = int(t, 22, 2, false).expect("in the trailer");
+    if flags != 0 {
+        return Err(format!(
+            "the trailer's flags are {flags:#06x}, and this cig knows none"
+        ));
+    }
+    if len > MAX_PAYLOAD2 {
+        return Err(format!(
+            "the trailer says the payload is {len} bytes, more than 64 MiB"
+        ));
+    }
+    if len > at {
+        return Err(format!(
+            "the trailer says the program is {len} bytes, which this file cannot hold"
+        ));
+    }
+    if record_len == 0 || record_len > MAX_RECORD {
+        return Err(format!(
+            "the trailer says the record is {record_len} bytes; a record is 1 to 65,536 bytes"
+        ));
+    }
+    if count == 0 || count > MAX_SECTIONS {
+        return Err(format!(
+            "the trailer says the section table has {count} entries; a table has 1 to {MAX_SECTIONS}"
+        ));
+    }
+    let table_len = count * ENTRY_LEN;
+    if record_len + table_len > len {
+        return Err(
+            "the record and the section table do not fit in the payload the trailer gives"
+                .to_string(),
+        );
+    }
+    let start = at - len;
+    let record = read_at(f, start, record_len)?;
+    let table = read_at(f, at - table_len, table_len)?;
+    if head_sha256(&record, &table)[..] != t[24..56] {
+        return Err(
+            "the record and the section table do not match the sha256 in the trailer".to_string(),
+        );
+    }
+    if !record.starts_with(PAYLOAD_START) {
+        return Err("the record does not start with {\"format\":".to_string());
+    }
+    let r: Record = serde_json::from_slice(&record).map_err(|e| {
+        format!(
+            "the program's record does not read: {}",
+            shown(&e.to_string())
+        )
+    })?;
+    check_record(&r)?;
+    Ok(Loaded {
+        start,
+        inner: Inner::Two(Two {
+            record: r,
+            entries: table
+                .chunks_exact(ENTRY_LEN as usize)
+                .map(Entry::parse)
+                .collect(),
+            record_len,
+            table_at: len - table_len,
+            checked: false,
+        }),
+    })
+}
+
+/// A program as a start reads it: its trailer, its record and, for format
+/// 2, its section table. No body is read until one is used.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Loaded {
+    /// Where the payload starts in its file (P): the runtime's length.
+    pub start: u64,
+    inner: Inner,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Inner {
+    One(Program),
+    Two(Two),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Two {
+    record: Record,
+    entries: Vec<Entry>,
+    record_len: u64,
+    /// The table's offset from P.
+    table_at: u64,
+    checked: bool,
+}
+
+impl Loaded {
+    /// `1` or `2`.
+    pub fn format(&self) -> u32 {
+        match &self.inner {
+            Inner::One(p) => p.format,
+            Inner::Two(t) => t.record.format,
+        }
+    }
+
+    /// A format 1 program's record, its script included.
+    pub fn format1(&self) -> Option<&Program> {
+        match &self.inner {
+            Inner::One(p) => Some(p),
+            Inner::Two(_) => None,
+        }
+    }
+
+    /// A format 2 program's record.
+    pub fn record(&self) -> Option<&Record> {
+        match &self.inner {
+            Inner::One(_) => None,
+            Inner::Two(t) => Some(&t.record),
+        }
+    }
+
+    /// A format 2 program's section table; empty for format 1.
+    pub fn table(&self) -> &[Entry] {
+        match &self.inner {
+            Inner::One(_) => &[],
+            Inner::Two(t) => &t.entries,
+        }
+    }
+
+    /// The table entry for `id`.
+    pub fn entry(&self, id: &str) -> Option<&Entry> {
+        self.table().iter().find(|e| e.id() == id)
+    }
+
+    fn words(&self) -> (&str, &str, &str, &str, &str) {
+        match &self.inner {
+            Inner::One(p) => (&p.name, &p.file, &p.sha256, &p.cig, &p.compiler),
+            Inner::Two(t) => {
+                let r = &t.record;
+                (&r.name, &r.file, &r.sha256, &r.cig, &r.compiler)
+            }
+        }
+    }
+
+    /// The program's name.
+    pub fn name(&self) -> &str {
+        self.words().0
+    }
+
+    /// The script's file name as compiled.
+    pub fn file(&self) -> &str {
+        self.words().1
+    }
+
+    /// sha256 of the script's text, hex.
+    pub fn sha256(&self) -> &str {
+        self.words().2
+    }
+
+    /// The cig it runs on.
+    pub fn cig(&self) -> &str {
+        self.words().3
+    }
+
+    /// What compiled it.
+    pub fn compiler(&self) -> &str {
+        self.words().4
+    }
+
+    /// Which body runs; format 1 is stage `a`.
+    pub fn stage(&self) -> Stage {
+        self.record().map_or(Stage::A, |r| r.stage)
+    }
+
+    /// Every argument is the program's; never for format 1.
+    pub fn own_flags(&self) -> bool {
+        self.record().is_some_and(|r| r.own_flags)
+    }
+
+    /// The record without the script, for `--cig-program` and `cig runs`:
+    /// format 1's six keys, or format 2's record as written.
+    pub fn summary(&self) -> serde_json::Value {
+        match &self.inner {
+            Inner::One(p) => p.summary(),
+            Inner::Two(t) => serde_json::to_value(&t.record).expect("a record serialises"),
+        }
+    }
+
+    /// The table as `--cig-program --json` lists it.
+    pub fn sections_json(&self) -> serde_json::Value {
+        serde_json::Value::Array(
+            self.table()
+                .iter()
+                .map(|e| {
+                    serde_json::json!({
+                        "id": e.id(),
+                        "version": e.version,
+                        "bytes": e.length,
+                        "decoded": e.decoded_len,
+                        "encoding": e.encoding().map_or("unknown", Encoding::name),
+                        "required": e.required(),
+                        "sha256": e.sha256_hex(),
+                    })
+                })
+                .collect(),
+        )
+    }
+
+    /// The table's rules and the stage's sections (a format 1 program was
+    /// checked whole when it was read). Each rule refused names itself.
+    /// Reads only the zero padding between the record, the bodies and the
+    /// table: at most 15 bytes before each body and before the table.
+    pub fn check<F: Read + Seek>(&mut self, f: &mut F) -> Result<(), String> {
+        let start = self.start;
+        let Inner::Two(t) = &mut self.inner else {
+            return Ok(());
+        };
+        if t.checked {
+            return Ok(());
+        }
+        let mut prev_end = t.record_len;
+        let mut prev_key: Option<(usize, [u8; 8])> = None;
+        for (n, e) in t.entries.iter().enumerate() {
+            let Some(id) = id_text(&e.raw_id) else {
+                return Err(format!(
+                    "section {} of the table has an id that is not lower-case ASCII, zero-padded",
+                    n + 1
+                ));
+            };
+            let key = order_key(&e.raw_id);
+            if let Some(prev) = prev_key {
+                if key == prev {
+                    return Err(format!("section `{id}` appears twice in the table"));
+                }
+                if key < prev {
+                    return Err(format!(
+                        "section `{id}` is out of order in the table (source, bytecode, tree, snap, sbom, then any other by name)"
+                    ));
+                }
+            }
+            prev_key = Some(key);
+            let Some(encoding) = e.encoding() else {
+                return Err(format!(
+                    "section `{id}` has encoding {}; this cig reads 0 (stored) and 1 (DEFLATE)",
+                    e.encoding
+                ));
+            };
+            if e.flags & !1 != 0 {
+                return Err(format!(
+                    "section `{id}` sets flag bits this cig does not know ({:#04x})",
+                    e.flags
+                ));
+            }
+            if u64::from(e.decoded_len) > MAX_PAYLOAD2 {
+                return Err(format!(
+                    "section `{id}` decodes to {} bytes, more than 64 MiB",
+                    e.decoded_len
+                ));
+            }
+            if encoding == Encoding::Stored && u64::from(e.decoded_len) != e.length {
+                return Err(format!(
+                    "section `{id}` is stored as is, and its decoded length ({}) is not its length ({})",
+                    e.decoded_len, e.length
+                ));
+            }
+            if e.offset < t.record_len {
+                return Err(format!("section `{id}` starts inside the record"));
+            }
+            if e.offset < prev_end {
+                return Err(format!("section `{id}` overlaps the section before it"));
+            }
+            let end = e
+                .offset
+                .checked_add(e.length)
+                .filter(|end| *end <= t.table_at);
+            let Some(end) = end else {
+                return Err(format!("section `{id}` runs into the section table"));
+            };
+            if start.checked_add(e.offset).map(|o| o % ALIGN) != Some(0) {
+                return Err(format!(
+                    "section `{id}` does not start at a file offset that is a multiple of 16"
+                ));
+            }
+            zero_gap(f, start, prev_end, e.offset, &format!("section `{id}`"))?;
+            prev_end = end;
+            if id == "source" && e.version != 1 {
+                return Err(format!(
+                    "section `source` is version {}; this cig reads version 1",
+                    e.version
+                ));
+            }
+        }
+        zero_gap(f, start, prev_end, t.table_at, "the section table")?;
+        for e in &t.entries {
+            if e.required() && !KNOWN_SECTIONS.contains(&e.id()) {
+                return Err(format!(
+                    "the program needs section `{}`, which this cig does not read",
+                    e.id()
+                ));
+            }
+        }
+        let needs = t.record.stage.needs();
+        if !t.entries.iter().any(|e| e.id() == needs) {
+            return Err(format!(
+                "a stage `{}` program needs section `{needs}`, and this one has none",
+                t.record.stage.as_str()
+            ));
+        }
+        t.checked = true;
+        Ok(())
+    }
+
+    /// The stored bytes of section `id`, checked against the table's sha256.
+    pub fn stored<F: Read + Seek>(&self, f: &mut F, id: &str) -> Result<Vec<u8>, String> {
+        let Inner::Two(t) = &self.inner else {
+            return Err(format!("a format 1 program has no section `{id}`"));
+        };
+        if !t.checked {
+            return Err("the section table has not been checked".to_string());
+        }
+        let Some(e) = t.entries.iter().find(|e| e.id() == id) else {
+            return Err(format!("the program has no section `{id}`"));
+        };
+        // Checked: the body lies inside the payload, at most 64 MiB.
+        let stored = read_at(f, self.start + e.offset, e.length)?;
+        if Sha256::digest(&stored)[..] != e.sha256 {
+            return Err(format!(
+                "section `{id}`'s bytes do not match the sha256 in the section table"
+            ));
+        }
+        Ok(stored)
+    }
+
+    /// Section `id`'s body, read, checked against the table's sha256 and
+    /// decoded to exactly its decoded length.
+    pub fn body<F: Read + Seek>(&self, f: &mut F, id: &str) -> Result<Vec<u8>, String> {
+        let stored = self.stored(f, id)?;
+        let e = self.entry(id).expect("stored found it");
+        match e.encoding() {
+            Some(Encoding::Deflate) => inflate(&stored, u64::from(e.decoded_len), id),
+            _ => Ok(stored),
+        }
+    }
+
+    /// The script, the one way to it: format 1's from its record; format
+    /// 2's from section `source`, its bytes checked against the table and
+    /// its text against the record's `sha256`.
+    pub fn source<F: Read + Seek>(&self, f: &mut F) -> Result<String, String> {
+        match &self.inner {
+            Inner::One(p) => Ok(p.source.clone()),
+            Inner::Two(t) => {
+                let body = self.body(f, "source")?;
+                let text = String::from_utf8(body)
+                    .map_err(|_| "section `source` is not UTF-8 text".to_string())?;
+                if hex::encode(Sha256::digest(text.as_bytes())) != t.record.sha256 {
+                    return Err(
+                        "the script in section `source` does not match the sha256 the record gives"
+                            .to_string(),
+                    );
+                }
+                Ok(text)
+            }
+        }
+    }
+
+    /// Every section read, hashed and decoded, and the script checked
+    /// against the record (`CIG_VALIDATE=1`, and `cigcompile verify`).
+    pub fn validate<F: Read + Seek>(&self, f: &mut F) -> Result<(), String> {
+        for e in self.table() {
+            self.body(f, e.id())?;
+        }
+        if self.entry("source").is_some() {
+            self.source(f)?;
+        }
+        Ok(())
+    }
+}
+
+/// The zero padding from `from` to `to` (offsets from `start`): shorter
+/// than [`ALIGN`], and all zeros.
+fn zero_gap<F: Read + Seek>(
+    f: &mut F,
+    start: u64,
+    from: u64,
+    to: u64,
+    before: &str,
+) -> Result<(), String> {
+    let gap = to - from;
+    if gap >= ALIGN {
+        return Err(format!(
+            "{gap} bytes lie before {before}, more than its alignment needs"
+        ));
+    }
+    if gap > 0 && read_at(f, start + from, gap)?.iter().any(|b| *b != 0) {
+        return Err(format!("the padding before {before} is not zero"));
+    }
+    Ok(())
+}
+
+/// Raw DEFLATE, refused when it does not inflate to exactly `len` bytes:
+/// it never inflates past them.
+fn inflate(stored: &[u8], len: u64, id: &str) -> Result<Vec<u8>, String> {
+    let mut out = Vec::new();
+    flate2::read::DeflateDecoder::new(stored)
+        .take(len + 1)
+        .read_to_end(&mut out)
+        .map_err(|e| format!("section `{id}` does not inflate: {e}"))?;
+    match (out.len() as u64).cmp(&len) {
+        std::cmp::Ordering::Equal => Ok(out),
+        std::cmp::Ordering::Greater => Err(format!(
+            "section `{id}` inflates past the {len} bytes its table entry gives"
+        )),
+        std::cmp::Ordering::Less => Err(format!(
+            "section `{id}` inflates to {} bytes, not the {len} its table entry gives",
+            out.len()
+        )),
+    }
+}
+
+/// A program this executable carries, with its file kept open: a body is
+/// read from the same file the record came from, and the script once.
+#[derive(Debug)]
+pub struct Opened {
+    program: Loaded,
+    file: std::fs::File,
+    source: std::cell::OnceCell<Result<String, String>>,
+}
+
+impl std::ops::Deref for Opened {
+    type Target = Loaded;
+    fn deref(&self) -> &Loaded {
+        &self.program
+    }
+}
+
+impl Opened {
+    /// The program as read.
+    pub fn loaded(&self) -> &Loaded {
+        &self.program
+    }
+
+    /// The script ([`Loaded::source`]), read and checked the first time
+    /// it is asked for.
+    pub fn source(&self) -> Result<&str, String> {
+        self.source
+            .get_or_init(|| self.program.source(&mut &self.file))
+            .as_deref()
+            .map_err(Clone::clone)
+    }
+
+    /// Section `id`'s body ([`Loaded::body`]).
+    pub fn body(&self, id: &str) -> Result<Vec<u8>, String> {
+        self.program.body(&mut &self.file, id)
+    }
+}
+
+/// `CIG_VALIDATE=1` is set.
+pub fn validate_by_env() -> bool {
+    std::env::var_os(VALIDATE_ENV).is_some_and(|v| v == "1")
+}
+
+/// Does `bytes` end in a trailer of either format (a program, damaged or not)?
+pub fn carries_program(bytes: &[u8]) -> bool {
+    let ends_in = |magic: &[u8; 8], len: u64| {
+        bytes.len() >= len as usize && bytes[bytes.len() - len as usize..][..8] == *magic
+    };
+    ends_in(&MAGIC, TRAILER_LEN) || ends_in(&MAGIC2, TRAILER2_LEN)
+}
+
+/// The program at the end of `f`, if one is there, with every rule of its
+/// format checked. `Ok(None)`: none is; `Err`: one is there and it is
+/// damaged. A format 2 program's bodies are not read: [`Loaded::body`]
+/// reads one when it is used, and [`Loaded::validate`] reads them all.
 ///
-/// A program's payload starts where its runtime's image ends ([`image_of`]),
-/// so a binary built as a program knows it is one even when its trailer is
-/// gone (#135): cut short, or with bytes added after it, it is damaged, never
-/// `cig`. Two things may follow a trailer and leave the program whole: zero
-/// padding, and a PE certificate table (a Windows program signed after it
-/// was built).
-pub fn read<F: Read + Seek>(f: &mut F) -> Result<Option<Program>, String> {
+/// The trailer is `CIGPROG2` (56 bytes) or `CIGPROG1` (48 bytes) at the
+/// end. A program's payload starts where its runtime's image ends
+/// ([`image_of`]), so a binary built as a program knows it is one even when
+/// its trailer is gone (#135): cut short, or with bytes added after it, it
+/// is damaged, never `cig`. Two things may follow a trailer and leave the
+/// program whole: zero padding, and a PE certificate table (a Windows
+/// program signed after it was built).
+pub fn read<F: Read + Seek>(f: &mut F) -> Result<Option<Loaded>, String> {
+    let Some(mut p) = open(f)? else {
+        return Ok(None);
+    };
+    p.check(f)?;
+    Ok(Some(p))
+}
+
+/// The first step of a start: find the trailer, read the record (and a
+/// format 2 program's table), check the head's sha256. A format 1 program
+/// is read and checked whole here, as it always was; a format 2 program's
+/// table rules wait for [`Loaded::check`].
+fn open<F: Read + Seek>(f: &mut F) -> Result<Option<Loaded>, String> {
     let end = f.seek(SeekFrom::End(0)).map_err(|e| e.to_string())?;
+    if end >= TRAILER2_LEN {
+        let t = read_at(f, end - TRAILER2_LEN, TRAILER2_LEN)?;
+        if t[..8] == MAGIC2 {
+            return at_trailer2(f, end - TRAILER2_LEN, &t).map(Some);
+        }
+    }
     if end >= TRAILER_LEN {
         let t = read_at(f, end - TRAILER_LEN, TRAILER_LEN)?;
         if t[..8] == MAGIC {
@@ -201,26 +1202,36 @@ pub fn read<F: Read + Seek>(f: &mut F) -> Result<Option<Program>, String> {
     }
     // Signed after it was built: the certificate table follows the trailer.
     if let Some((at, size)) = image.certificates {
-        if at.checked_add(size) == Some(end) && at >= image.end + TRAILER_LEN {
-            let t = read_at(f, at - TRAILER_LEN, TRAILER_LEN)?;
-            if t[..8] == MAGIC && trailer_len(&t).checked_add(image.end) == Some(at - TRAILER_LEN) {
-                return at_trailer(f, at - TRAILER_LEN, &t).map(Some);
+        if at.checked_add(size) == Some(end) {
+            for (magic, len) in [(MAGIC2, TRAILER2_LEN), (MAGIC, TRAILER_LEN)] {
+                let Some(t_at) = at.checked_sub(len).filter(|t| *t >= image.end) else {
+                    continue;
+                };
+                let t = read_at(f, t_at, len)?;
+                if t[..8] == magic && trailer_len(&t).checked_add(image.end) == Some(t_at) {
+                    return at_either(f, t_at, &t).map(Some);
+                }
             }
         }
     }
     // The newest trailer whose payload runs from the image's end to it.
     let from = end.saturating_sub(TAIL).max(image.end);
     let tail = read_at(f, from, end - from)?;
-    for q in memchr::memmem::rfind_iter(&tail, &MAGIC) {
-        let Some(t) = tail.get(q..q + TRAILER_LEN as usize) else {
+    for q in memchr::memmem::rfind_iter(&tail, &MAGIC[..7]) {
+        let len = match tail.get(q + 7) {
+            Some(b'1') => TRAILER_LEN,
+            Some(b'2') => TRAILER2_LEN,
+            _ => continue,
+        };
+        let Some(t) = tail.get(q..q + len as usize) else {
             continue;
         };
         let at = from + q as u64;
         if trailer_len(t).checked_add(image.end) != Some(at) {
             continue;
         }
-        let p = at_trailer(f, at, t)?;
-        let after = &tail[q + TRAILER_LEN as usize..];
+        let p = at_either(f, at, t)?;
+        let after = &tail[q + len as usize..];
         if after.iter().all(|b| *b == 0) {
             return Ok(Some(p));
         }
@@ -232,13 +1243,22 @@ pub fn read<F: Read + Seek>(f: &mut F) -> Result<Option<Program>, String> {
     )
 }
 
+/// The program whose trailer, of either format, is `t` at `at`.
+fn at_either<F: Read + Seek>(f: &mut F, at: u64, t: &[u8]) -> Result<Loaded, String> {
+    if t[..8] == MAGIC2 {
+        at_trailer2(f, at, t)
+    } else {
+        at_trailer(f, at, t)
+    }
+}
+
 /// The payload length a trailer gives.
 fn trailer_len(t: &[u8]) -> u64 {
     u64::from_le_bytes(t[8..16].try_into().expect("eight bytes"))
 }
 
-/// The program whose trailer `t` is at `at`.
-fn at_trailer<F: Read + Seek>(f: &mut F, at: u64, t: &[u8]) -> Result<Program, String> {
+/// The format 1 program whose trailer `t` is at `at`, read and checked whole.
+fn at_trailer<F: Read + Seek>(f: &mut F, at: u64, t: &[u8]) -> Result<Loaded, String> {
     let len = trailer_len(t);
     if len > MAX_PAYLOAD || len > at {
         return Err(format!(
@@ -260,8 +1280,11 @@ fn at_trailer<F: Read + Seek>(f: &mut F, at: u64, t: &[u8]) -> Result<Program, S
     if hex::encode(Sha256::digest(p.source.as_bytes())) != p.sha256 {
         return Err("the script does not match the sha256 the program records".to_string());
     }
-    check_words(&p)?;
-    Ok(p)
+    check_words(&p.name, &p.file, &p.compiler, &p.cig)?;
+    Ok(Loaded {
+        start: at - len,
+        inner: Inner::One(p),
+    })
 }
 
 /// `len` bytes of `f` from `at`, all of them.
@@ -482,16 +1505,16 @@ fn pe_image<F: Read + Seek>(f: &mut F, h: &[u8], end: u64) -> Option<Image> {
 /// a plain word, and nothing it carries holds a control character or an
 /// invisible one ([`printable`]): no escape sequence reaches a terminal
 /// from a payload, and no name reads backwards (#137).
-fn check_words(p: &Program) -> Result<(), String> {
-    if !good_name(&p.name) {
+fn check_words(name: &str, file: &str, compiler: &str, cig: &str) -> Result<(), String> {
+    if !good_name(name) {
         return Err(
             "the program's name is not a plain word (letters, digits, `.`, `_`, `-`)".to_string(),
         );
     }
     for (what, v, max) in [
-        ("file", &p.file, 4096),
-        ("compiler", &p.compiler, 128),
-        ("cig", &p.cig, 32),
+        ("file", file, 4096),
+        ("compiler", compiler, 128),
+        ("cig", cig, 32),
     ] {
         if v.is_empty() || v.chars().count() > max || !printable(v) {
             return Err(format!("the program's `{what}` is not printable text"));
@@ -562,7 +1585,13 @@ pub enum Unrunnable {
 /// run when it was compiled for another cig, when the system started it
 /// with more rights than its caller's (#134), and when it cannot read
 /// itself unless it is named as `cig` is (#136).
-pub fn own() -> Option<Result<Program, Unrunnable>> {
+///
+/// The order is the format's start: the trailer, the record and (format 2)
+/// the table are read and the head's sha256 checked; then raised rights,
+/// cig's internal calls and another cig are decided; then the table's rules
+/// and the stage's sections. No body is read here, unless `CIG_VALIDATE=1`
+/// asks for every one to be checked first.
+pub fn own() -> Option<Result<Opened, Unrunnable>> {
     let marked = std::env::var_os(SELF_ENV).is_some();
     if marked {
         // Before any thread starts: nothing else reads the environment yet.
@@ -572,7 +1601,7 @@ pub fn own() -> Option<Result<Program, Unrunnable>> {
         let name = self_name();
         return (!named_as_cig(&name)).then_some(Err(Unrunnable::Unreadable { name }));
     };
-    let p = match read(&mut f) {
+    let mut p = match open(&mut f) {
         Ok(None) => return None,
         Ok(Some(p)) => p,
         Err(e) => return Some(Err(Unrunnable::Damaged(e))),
@@ -581,7 +1610,9 @@ pub fn own() -> Option<Result<Program, Unrunnable>> {
     // keys where its caller's environment says, with the rights of the
     // file's owner: it stops before it reads any of that.
     if privileged() {
-        return Some(Err(Unrunnable::Raised { name: p.name }));
+        return Some(Err(Unrunnable::Raised {
+            name: p.name().to_string(),
+        }));
     }
     if marked {
         let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
@@ -589,13 +1620,25 @@ pub fn own() -> Option<Result<Program, Unrunnable>> {
             return None;
         }
     }
-    if p.cig != crate::VERSION {
+    if p.cig() != crate::VERSION {
         return Some(Err(Unrunnable::OtherCig {
-            name: p.name,
-            cig: p.cig,
+            name: p.name().to_string(),
+            cig: p.cig().to_string(),
         }));
     }
-    Some(Ok(p))
+    if let Err(e) = p.check(&mut f) {
+        return Some(Err(Unrunnable::Damaged(e)));
+    }
+    if validate_by_env() {
+        if let Err(e) = p.validate(&mut f) {
+            return Some(Err(Unrunnable::Damaged(e)));
+        }
+    }
+    Some(Ok(Opened {
+        program: p,
+        file: f,
+        source: std::cell::OnceCell::new(),
+    }))
 }
 
 /// The internal calls a program's binary answers as `cig`: the ashtray's
@@ -692,6 +1735,8 @@ mod tests {
         let bytes = append(b"\x7fELF runtime bytes", &sample());
         assert!(carries_program(&bytes));
         let back = read(&mut Cursor::new(&bytes)).unwrap().unwrap();
+        assert_eq!(back.format(), 1);
+        let back = back.format1().unwrap().clone();
         assert_eq!(back, sample());
         assert_eq!(back.cig, crate::VERSION);
     }
@@ -718,6 +1763,21 @@ mod tests {
     #[test]
     fn the_same_inputs_give_the_same_bytes() {
         assert_eq!(append(b"rt", &sample()), append(b"rt", &sample()));
+        for b in [build2(), big2(), with_extra(false)] {
+            let one = append2(&tiny_elf(), &b).unwrap();
+            assert_eq!(one, append2(&tiny_elf(), &b).unwrap());
+            // And a rebuild from what was read gives them again.
+            let l = read2(&one).unwrap();
+            let mut again = Build::new(
+                l.name(),
+                l.file(),
+                &l.source(&mut Cursor::new(&one)).unwrap(),
+                l.compiler(),
+                &l.record().unwrap().target,
+            );
+            again.sections = b.sections.clone();
+            assert_eq!(append2(&tiny_elf(), &again).unwrap(), one);
+        }
     }
 
     #[test]
@@ -871,7 +1931,7 @@ mod tests {
     }
 
     fn read_bytes(b: &[u8]) -> Result<Option<Program>, String> {
-        read(&mut Cursor::new(b))
+        read(&mut Cursor::new(b)).map(|o| o.map(|l| l.format1().expect("format 1").clone()))
     }
 
     #[test]
@@ -1002,5 +2062,697 @@ mod tests {
         assert!(read(&mut Cursor::new(&bytes))
             .unwrap_err()
             .contains("format 9"));
+    }
+
+    // ----- Format 2 -----
+
+    const TARGET: &str = "x86_64-unknown-linux-musl";
+
+    fn build2() -> Build {
+        Build::new(
+            "hello",
+            "examples/hello.cig",
+            "exhale \"hi\"\n",
+            "test 0",
+            TARGET,
+        )
+    }
+
+    /// A script long enough to be kept DEFLATE-compressed.
+    fn big2() -> Build {
+        let source: String = (0..400).map(|n| format!("exhale \"line {n}\"\n")).collect();
+        assert!(source.len() >= DEFLATE_FROM);
+        Build::new("big", "big.cig", &source, "test 0", TARGET)
+    }
+
+    /// `build2` with a test-only section after `source`.
+    fn with_extra(required: bool) -> Build {
+        let mut b = build2();
+        b.sections.push(Section {
+            id: "zz-test".to_string(),
+            version: 1,
+            encoding: Encoding::Stored,
+            required,
+            bytes: b"a test-only section's body, 41 bytes long".to_vec(),
+        });
+        b
+    }
+
+    fn make2(b: &Build) -> Vec<u8> {
+        append2(&tiny_elf(), b).unwrap()
+    }
+
+    fn read2(b: &[u8]) -> Result<Loaded, String> {
+        read(&mut Cursor::new(b)).and_then(|o| o.ok_or_else(|| "no program".to_string()))
+    }
+
+    fn refused(b: &[u8], sentence: &str) {
+        let e = read2(b).unwrap_err();
+        assert!(e.contains(sentence), "wanted {sentence:?}, got {e:?}");
+    }
+
+    /// Where a format 2 program's parts are: the trailer, the payload's
+    /// start, the record's length and the table.
+    struct Parts {
+        t: usize,
+        p: usize,
+        record_len: usize,
+        table: usize,
+    }
+
+    fn parts(b: &[u8]) -> Parts {
+        let t = b.len() - TRAILER2_LEN as usize;
+        let len = u64::from_le_bytes(b[t + 8..t + 16].try_into().unwrap()) as usize;
+        let record_len = u32::from_le_bytes(b[t + 16..t + 20].try_into().unwrap()) as usize;
+        let count = u16::from_le_bytes(b[t + 20..t + 22].try_into().unwrap()) as usize;
+        Parts {
+            t,
+            p: t - len,
+            record_len,
+            table: t - count * ENTRY_LEN as usize,
+        }
+    }
+
+    /// The head sha256 recomputed after an edit to the record or the table.
+    fn reseal(b: &mut [u8]) {
+        let x = parts(b);
+        let head = head_sha256(&b[x.p..x.p + x.record_len], &b[x.table..x.t]);
+        b[x.t + 24..x.t + 56].copy_from_slice(&head);
+    }
+
+    /// Byte `at` of table entry `n`.
+    fn entry_byte(b: &[u8], n: usize, at: usize) -> usize {
+        parts(b).table + n * ENTRY_LEN as usize + at
+    }
+
+    fn set_u64(b: &mut [u8], at: usize, v: u64) {
+        b[at..at + 8].copy_from_slice(&v.to_le_bytes());
+    }
+
+    fn get_u64(b: &[u8], at: usize) -> u64 {
+        u64::from_le_bytes(b[at..at + 8].try_into().unwrap())
+    }
+
+    fn set_u32(b: &mut [u8], at: usize, v: u32) {
+        b[at..at + 4].copy_from_slice(&v.to_le_bytes());
+    }
+
+    /// The record's text replaced by `edit` (same length), resealed.
+    fn edit_record(b: &mut [u8], from: &str, to: &str) {
+        assert_eq!(from.len(), to.len());
+        let x = parts(b);
+        let rec = String::from_utf8(b[x.p..x.p + x.record_len].to_vec()).unwrap();
+        assert!(rec.contains(from), "{rec}");
+        let rec = rec.replacen(from, to, 1);
+        b[x.p..x.p + x.record_len].copy_from_slice(rec.as_bytes());
+        reseal(b);
+    }
+
+    #[test]
+    fn a_format_2_program_reads_back_with_its_record_and_table() {
+        let bytes = make2(&with_extra(false));
+        assert!(carries_program(&bytes));
+        let l = read2(&bytes).unwrap();
+        assert_eq!(l.format(), 2);
+        assert_eq!(l.start, tiny_elf().len() as u64);
+        assert_eq!(
+            (l.name(), l.file(), l.cig(), l.compiler(), l.stage()),
+            (
+                "hello",
+                "examples/hello.cig",
+                crate::VERSION,
+                "test 0",
+                Stage::A
+            )
+        );
+        let r = l.record().unwrap();
+        assert_eq!(r.target, TARGET);
+        assert_eq!(r.opt, "0");
+        assert_eq!(r.runtime_sha256, hex::encode(Sha256::digest(tiny_elf())));
+        let ids: Vec<&str> = l.table().iter().map(Entry::id).collect();
+        assert_eq!(ids, ["source", "zz-test"]);
+        assert!(l.entry("source").unwrap().required());
+        assert!(!l.entry("zz-test").unwrap().required());
+        for e in l.table() {
+            assert_eq!((l.start + e.offset) % ALIGN, 0, "{}", e.id());
+        }
+        assert_eq!(
+            l.source(&mut Cursor::new(&bytes)).unwrap(),
+            "exhale \"hi\"\n"
+        );
+        assert_eq!(
+            l.body(&mut Cursor::new(&bytes), "zz-test").unwrap(),
+            b"a test-only section's body, 41 bytes long"
+        );
+        // The record: keys in order, no whitespace, no `own_flags` unless set.
+        let x = parts(&bytes);
+        let rec = std::str::from_utf8(&bytes[x.p..x.p + x.record_len]).unwrap();
+        assert!(
+            rec.starts_with("{\"format\":2,\"name\":\"hello\",\"file\":"),
+            "{rec}"
+        );
+        assert!(
+            rec.contains("\"stage\":\"a\",\"opt\":\"0\",\"target\":"),
+            "{rec}"
+        );
+        assert!(
+            !rec.contains("\": ") && !rec.contains(", ") && !rec.contains("own_flags"),
+            "{rec}"
+        );
+        let mut own = build2();
+        own.own_flags = true;
+        let l = read2(&make2(&own)).unwrap();
+        assert!(l.own_flags());
+        assert_eq!(l.summary()["own_flags"], true);
+    }
+
+    #[test]
+    fn a_long_script_is_kept_deflated_and_a_short_one_as_is() {
+        let big = make2(&big2());
+        let l = read2(&big).unwrap();
+        let e = l.entry("source").unwrap();
+        assert_eq!(e.encoding(), Some(Encoding::Deflate));
+        assert_eq!(e.decoded_len as usize, big2().source.len());
+        assert!(
+            e.length < e.decoded_len as u64 / 3,
+            "{} of {}",
+            e.length,
+            e.decoded_len
+        );
+        assert_eq!(l.source(&mut Cursor::new(&big)).unwrap(), big2().source);
+        let small = make2(&build2());
+        let e = read2(&small).unwrap().entry("source").unwrap().clone();
+        assert_eq!(e.encoding(), Some(Encoding::Stored));
+        assert_eq!(e.length, 12);
+    }
+
+    #[test]
+    fn the_writer_refuses_what_a_reader_would() {
+        let mut b = with_extra(false);
+        b.sections[0].id = "Upper".to_string();
+        assert!(append2(b"rt", &b).unwrap_err().contains("lower-case"));
+        b.sections[0].id = "toolongid".to_string();
+        assert!(append2(b"rt", &b).unwrap_err().contains("longer than 8"));
+        b.sections[0].id = "source".to_string();
+        assert!(append2(b"rt", &b).unwrap_err().contains("out of order"));
+        let mut b = build2();
+        for id in ["sbom", "bytecode"] {
+            b.sections.push(Section {
+                id: id.to_string(),
+                version: 1,
+                encoding: Encoding::Stored,
+                required: false,
+                bytes: Vec::new(),
+            });
+        }
+        assert!(append2(b"rt", &b).unwrap_err().contains("out of order"));
+        let mut b = build2();
+        b.name = ".hidden".to_string();
+        assert!(append2(b"rt", &b).unwrap_err().contains("plain word"));
+        let mut b = build2();
+        b.target = "x".repeat(65);
+        assert!(append2(b"rt", &b).unwrap_err().contains("`target`"));
+    }
+
+    // One case per rule of the format's section 1, each with its sentence.
+
+    #[test]
+    fn rule_trailer_flags() {
+        let mut b = make2(&build2());
+        let t = parts(&b).t;
+        b[t + 22] = 1;
+        refused(&b, "the trailer's flags are 0x0001");
+    }
+
+    #[test]
+    fn rule_payload_length() {
+        let good = make2(&build2());
+        let t = parts(&good).t;
+        let mut b = good.clone();
+        set_u64(&mut b, t + 8, MAX_PAYLOAD2 + 1);
+        refused(&b, "more than 64 MiB");
+        let mut b = good.clone();
+        set_u64(&mut b, t + 8, t as u64 + 1);
+        refused(&b, "which this file cannot hold");
+        let mut b = good;
+        set_u64(&mut b, t + 8, u64::MAX);
+        refused(&b, "more than 64 MiB");
+    }
+
+    #[test]
+    fn rule_record_length() {
+        let good = make2(&build2());
+        let t = parts(&good).t;
+        for n in [0, 65_537, u32::MAX] {
+            let mut b = good.clone();
+            set_u32(&mut b, t + 16, n);
+            refused(&b, "a record is 1 to 65,536 bytes");
+        }
+        let mut b = good;
+        let len = get_u64(&b, t + 8);
+        set_u32(&mut b, t + 16, len as u32);
+        refused(&b, "do not fit in the payload");
+    }
+
+    #[test]
+    fn rule_section_count() {
+        let good = make2(&build2());
+        let t = parts(&good).t;
+        for n in [0u16, 33, u16::MAX] {
+            let mut b = good.clone();
+            b[t + 20..t + 22].copy_from_slice(&n.to_le_bytes());
+            refused(&b, "a table has 1 to 32");
+        }
+    }
+
+    #[test]
+    fn rule_head_sha256() {
+        let good = make2(&with_extra(false));
+        let x = parts(&good);
+        for at in [x.p, x.p + x.record_len - 1, x.table, x.t - 1, x.t + 30] {
+            let mut b = good.clone();
+            b[at] ^= 0x01;
+            refused(&b, "do not match the sha256 in the trailer");
+        }
+    }
+
+    #[test]
+    fn rule_the_record() {
+        let good = make2(&build2());
+        let mut b = good.clone();
+        let p = parts(&b).p;
+        b[p] = b' ';
+        reseal(&mut b);
+        // A record that does not start as one is not where the image ends,
+        // either; at the trailer it is refused by its own rule.
+        refused(&b, "does not start with {\"format\":");
+        let mut b = good.clone();
+        edit_record(&mut b, "\"stage\":\"a\"", "\"stage\":\"c\"");
+        refused(&b, "the program's record does not read");
+        let mut b = good.clone();
+        edit_record(&mut b, "{\"format\":2,", "{\"format\":3,");
+        refused(&b, "the record says format 3, and its trailer is format 2");
+        let mut b = good.clone();
+        edit_record(&mut b, "\"name\":\"hello\"", "\"name\":\".ello\"");
+        refused(&b, "plain word");
+        let mut b = good.clone();
+        let sha = read2(&good).unwrap().sha256().to_string();
+        edit_record(&mut b, &sha[..2], "GG");
+        refused(&b, "`sha256` is not a sha256");
+        let mut b = good.clone();
+        edit_record(&mut b, "x86_64", "\\u202e");
+        refused(&b, "`target` is not printable");
+        // A key it does not know is ignored.
+        let x = parts(&good);
+        let rec = std::str::from_utf8(&good[x.p..x.p + x.record_len]).unwrap();
+        let rec = rec.replacen("{\"format\":2,", "{\"format\":2,\"later\":{\"a\":1},", 1);
+        let src = place("source", 1, Encoding::Stored, true, b"exhale \"hi\"\n").unwrap();
+        let b = assemble(&tiny_elf(), rec.as_bytes(), vec![src]).unwrap();
+        let l = read2(&b).unwrap();
+        assert_eq!(l.source(&mut Cursor::new(&b)).unwrap(), "exhale \"hi\"\n");
+    }
+
+    #[test]
+    fn rule_section_ids() {
+        let good = make2(&with_extra(false));
+        let mut b = good.clone();
+        let at = entry_byte(&b, 1, 0);
+        b[at] = b'Z';
+        reseal(&mut b);
+        refused(
+            &b,
+            "section 2 of the table has an id that is not lower-case ASCII, zero-padded",
+        );
+        let mut b = good.clone();
+        let at = entry_byte(&b, 1, 0);
+        b[at + 2] = 0;
+        reseal(&mut b);
+        refused(&b, "not lower-case ASCII, zero-padded");
+        let mut b = good.clone();
+        let at = entry_byte(&b, 1, 0);
+        b[at..at + 8].copy_from_slice(b"source\0\0");
+        reseal(&mut b);
+        refused(&b, "section `source` appears twice in the table");
+        let mut b = good;
+        let (a0, a1) = (entry_byte(&b, 0, 0), entry_byte(&b, 1, 0));
+        b[a0..a0 + 8].copy_from_slice(b"zz-test\0");
+        b[a1..a1 + 8].copy_from_slice(b"source\0\0");
+        reseal(&mut b);
+        refused(&b, "section `source` is out of order in the table");
+    }
+
+    #[test]
+    fn rule_encodings_and_flag_bits() {
+        let good = make2(&build2());
+        let mut b = good.clone();
+        let at = entry_byte(&b, 0, 10);
+        b[at] = 2;
+        reseal(&mut b);
+        refused(
+            &b,
+            "section `source` has encoding 2; this cig reads 0 (stored) and 1 (DEFLATE)",
+        );
+        let mut b = good;
+        let at = entry_byte(&b, 0, 11);
+        b[at] = 0x81;
+        reseal(&mut b);
+        refused(
+            &b,
+            "section `source` sets flag bits this cig does not know (0x81)",
+        );
+    }
+
+    #[test]
+    fn rule_decoded_sizes() {
+        let mut b = make2(&big2());
+        let at = entry_byte(&b, 0, 12);
+        set_u32(&mut b, at, MAX_PAYLOAD2 as u32 + 1);
+        reseal(&mut b);
+        refused(
+            &b,
+            "section `source` decodes to 67108865 bytes, more than 64 MiB",
+        );
+        let mut b = make2(&build2());
+        let at = entry_byte(&b, 0, 12);
+        set_u32(&mut b, at, 13);
+        reseal(&mut b);
+        refused(
+            &b,
+            "section `source` is stored as is, and its decoded length (13) is not its length (12)",
+        );
+    }
+
+    #[test]
+    fn rule_bounds_and_overlap() {
+        let good = make2(&with_extra(false));
+        let mut b = good.clone();
+        let at = entry_byte(&b, 0, 16);
+        set_u64(&mut b, at, 0);
+        reseal(&mut b);
+        refused(&b, "section `source` starts inside the record");
+        let mut b = good.clone();
+        let src = get_u64(&b, entry_byte(&b, 0, 16));
+        let at = entry_byte(&b, 1, 16);
+        set_u64(&mut b, at, src);
+        reseal(&mut b);
+        refused(&b, "section `zz-test` overlaps the section before it");
+        let mut b = good.clone();
+        for (field, v) in [(12, 4000u64), (24, 4000)] {
+            let at = entry_byte(&b, 1, field);
+            if field == 12 {
+                set_u32(&mut b, at, v as u32);
+            } else {
+                set_u64(&mut b, at, v);
+            }
+        }
+        reseal(&mut b);
+        refused(&b, "section `zz-test` runs into the section table");
+        let mut b = good;
+        let at = entry_byte(&b, 1, 24);
+        set_u64(&mut b, at, u64::MAX);
+        let at = entry_byte(&b, 1, 12);
+        set_u32(&mut b, at, u32::MAX);
+        reseal(&mut b);
+        refused(&b, "decodes to");
+    }
+
+    #[test]
+    fn rule_alignment_and_padding() {
+        let good = make2(&with_extra(false));
+        let l = read2(&good).unwrap();
+        let (src, extra) = (
+            l.entry("source").unwrap().clone(),
+            l.entry("zz-test").unwrap().clone(),
+        );
+        let gap = (extra.offset - (src.offset + src.length)) as usize;
+        assert!(gap > 0, "the test needs padding between the two bodies");
+        // A body moved off its alignment, its end where it was.
+        let mut b = good.clone();
+        set_u64(&mut b, entry_byte(&good, 1, 16), extra.offset + 1);
+        set_u64(&mut b, entry_byte(&good, 1, 24), extra.length - 1);
+        set_u32(&mut b, entry_byte(&good, 1, 12), extra.decoded_len - 1);
+        reseal(&mut b);
+        refused(
+            &b,
+            "section `zz-test` does not start at a file offset that is a multiple of 16",
+        );
+        // Moved by 16: aligned, but more padding than alignment needs.
+        let mut b = good.clone();
+        set_u64(&mut b, entry_byte(&good, 1, 16), extra.offset + 16);
+        set_u64(&mut b, entry_byte(&good, 1, 24), extra.length - 16);
+        set_u32(&mut b, entry_byte(&good, 1, 12), extra.decoded_len - 16);
+        reseal(&mut b);
+        refused(
+            &b,
+            "bytes lie before section `zz-test`, more than its alignment needs",
+        );
+        // Padding is not hashed: it must be zero.
+        let mut b = good;
+        b[l.start as usize + extra.offset as usize - 1] = 1;
+        refused(&b, "the padding before section `zz-test` is not zero");
+    }
+
+    #[test]
+    fn an_unknown_required_section_is_refused() {
+        refused(
+            &make2(&with_extra(true)),
+            "the program needs section `zz-test`, which this cig does not read",
+        );
+    }
+
+    #[test]
+    fn an_unknown_optional_section_is_skipped() {
+        let b = make2(&with_extra(false));
+        let l = read2(&b).unwrap();
+        assert_eq!(l.source(&mut Cursor::new(&b)).unwrap(), "exhale \"hi\"\n");
+        l.validate(&mut Cursor::new(&b)).unwrap();
+    }
+
+    #[test]
+    fn a_stage_without_its_section_is_refused() {
+        let mut b = build2();
+        b.stage = Stage::B;
+        refused(
+            &make2(&b),
+            "a stage `b` program needs section `bytecode`, and this one has none",
+        );
+        b.sections.push(Section {
+            id: "bytecode".to_string(),
+            version: 1,
+            encoding: Encoding::Stored,
+            required: true,
+            bytes: b"CIGB".to_vec(),
+        });
+        assert_eq!(read2(&make2(&b)).unwrap().stage(), Stage::B);
+    }
+
+    #[test]
+    fn archive_tamper_refused() {
+        let good = make2(&with_extra(false));
+        let l = read2(&good).unwrap();
+        for id in ["source", "zz-test"] {
+            let e = l.entry(id).unwrap();
+            let mut b = good.clone();
+            b[(l.start + e.offset) as usize + 2] ^= 0x20;
+            // The start reads no body, so it does not see the change...
+            let back = read2(&b).unwrap();
+            // ...and a use of the body does, as does CIG_VALIDATE's pass.
+            let want =
+                format!("section `{id}`'s bytes do not match the sha256 in the section table");
+            assert_eq!(back.body(&mut Cursor::new(&b), id).unwrap_err(), want);
+            assert_eq!(back.validate(&mut Cursor::new(&b)).unwrap_err(), want);
+            if id == "zz-test" {
+                assert!(back.source(&mut Cursor::new(&b)).is_ok());
+            } else {
+                assert_eq!(back.source(&mut Cursor::new(&b)).unwrap_err(), want);
+            }
+        }
+    }
+
+    #[test]
+    fn a_body_is_held_to_its_decoded_length_and_its_text_to_the_record() {
+        let good = make2(&big2());
+        let len = read2(&good).unwrap().entry("source").unwrap().decoded_len;
+        for (n, sentence) in [
+            (
+                len - 1,
+                format!("section `source` inflates past the {} bytes", len - 1),
+            ),
+            (
+                len + 1,
+                format!(
+                    "section `source` inflates to {len} bytes, not the {}",
+                    len + 1
+                ),
+            ),
+        ] {
+            let mut b = good.clone();
+            set_u32(&mut b, entry_byte(&good, 0, 12), n);
+            reseal(&mut b);
+            let l = read2(&b).unwrap();
+            let e = l.source(&mut Cursor::new(&b)).unwrap_err();
+            assert!(e.contains(&sentence), "{e}");
+        }
+        // A body that is not DEFLATE, with a table that says it is.
+        let mut b = make2(&build2());
+        let at = entry_byte(&b, 0, 10);
+        b[at] = 1;
+        reseal(&mut b);
+        let l = read2(&b).unwrap();
+        let e = l.source(&mut Cursor::new(&b)).unwrap_err();
+        assert!(e.contains("section `source`"), "{e}");
+        // Bytes that match the table, and a text that does not match the record.
+        let mut b = make2(&build2());
+        let other = hex::encode(Sha256::digest(b"something else"));
+        let sha = read2(&b).unwrap().sha256().to_string();
+        edit_record(&mut b, &sha, &other);
+        let l = read2(&b).unwrap();
+        assert_eq!(
+            l.source(&mut Cursor::new(&b)).unwrap_err(),
+            "the script in section `source` does not match the sha256 the record gives"
+        );
+        // Bytes that are not UTF-8, with the table's sha256 made to match.
+        let mut b = make2(&build2());
+        let l = read2(&b).unwrap();
+        let at = (l.start + l.entry("source").unwrap().offset) as usize;
+        b[at] = 0xff;
+        let sha: [u8; 32] = Sha256::digest(&b[at..at + 12]).into();
+        let e = entry_byte(&b, 0, 32);
+        b[e..e + 32].copy_from_slice(&sha);
+        reseal(&mut b);
+        let l = read2(&b).unwrap();
+        assert_eq!(
+            l.source(&mut Cursor::new(&b)).unwrap_err(),
+            "section `source` is not UTF-8 text"
+        );
+    }
+
+    /// A reader that notes every byte it is asked for.
+    struct Counting<'a> {
+        c: Cursor<&'a [u8]>,
+        reads: Vec<(u64, u64)>,
+    }
+
+    impl Read for Counting<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let at = self.c.position();
+            let n = self.c.read(buf)?;
+            if n > 0 {
+                self.reads.push((at, at + n as u64));
+            }
+            Ok(n)
+        }
+    }
+
+    impl Seek for Counting<'_> {
+        fn seek(&mut self, to: SeekFrom) -> std::io::Result<u64> {
+            self.c.seek(to)
+        }
+    }
+
+    #[test]
+    fn the_head_is_all_a_start_hashes() {
+        for b in [big2(), with_extra(false), with_extra(false)] {
+            let bytes = make2(&b);
+            let mut c = Counting {
+                c: Cursor::new(&bytes),
+                reads: Vec::new(),
+            };
+            let l = read(&mut c).unwrap().unwrap();
+            let bodies: Vec<(u64, u64)> = l
+                .table()
+                .iter()
+                .map(|e| (l.start + e.offset, l.start + e.offset + e.length))
+                .collect();
+            for (a, z) in &c.reads {
+                for (ba, bz) in &bodies {
+                    assert!(
+                        z <= ba || a >= bz,
+                        "read {a}..{z} touches a body at {ba}..{bz}"
+                    );
+                }
+            }
+            let x = parts(&bytes);
+            let read_total: u64 = c.reads.iter().map(|(a, z)| z - a).sum();
+            let head = TRAILER2_LEN as usize + x.record_len + (x.t - x.table);
+            let most = head + (ALIGN as usize - 1) * (l.table().len() + 1);
+            assert!(read_total as usize <= most, "{read_total} > {most}");
+        }
+    }
+
+    #[test]
+    fn a_damaged_format_2_program_never_panics() {
+        for b in [with_extra(false), big2()] {
+            let good = make2(&b);
+            let p = tiny_elf().len();
+            for at in p..good.len() {
+                for change in [0x01u8, 0x80, 0xff] {
+                    let mut bad = good.clone();
+                    bad[at] ^= change;
+                    match read(&mut Cursor::new(&bad)) {
+                        Err(_) => {}
+                        Ok(None) => panic!("byte {at} ^ {change:#x}: read as no program"),
+                        Ok(Some(l)) => {
+                            // Only a body's bytes pass the start; using it refuses them.
+                            let in_body = l.table().iter().any(|e| {
+                                (l.start + e.offset..l.start + e.offset + e.length)
+                                    .contains(&(at as u64))
+                            });
+                            assert!(in_body, "byte {at} ^ {change:#x} passed outside a body");
+                            assert!(
+                                l.validate(&mut Cursor::new(&bad)).is_err(),
+                                "byte {at} ^ {change:#x}: changed bytes validated"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_format_2_program_cut_short_is_damaged_never_cig() {
+        let whole = make2(&with_extra(false));
+        assert!(read2(&whole).is_ok());
+        for cut in [1, 8, 55, 56, 57, 100, whole.len() - 70] {
+            let e = read_bytes2(&whole[..whole.len() - cut]).unwrap_err();
+            assert!(e.contains("not at its end"), "{cut} cut: {e}");
+        }
+        let mut junk = whole.clone();
+        junk.extend_from_slice(b"XX");
+        assert!(read_bytes2(&junk)
+            .unwrap_err()
+            .contains("2 bytes follow its trailer"));
+        let mut padded = whole.clone();
+        padded.extend_from_slice(&[0; 4096]);
+        assert_eq!(read2(&padded).unwrap(), read2(&whole).unwrap());
+    }
+
+    fn read_bytes2(b: &[u8]) -> Result<Option<Loaded>, String> {
+        read(&mut Cursor::new(b))
+    }
+
+    #[test]
+    fn a_signed_format_2_windows_program_still_reads() {
+        let program = append2(&tiny_pe(), &with_extra(false)).unwrap();
+        let signed = sign(program.clone());
+        let l = read2(&signed).unwrap();
+        assert_eq!(
+            l.source(&mut Cursor::new(&signed)).unwrap(),
+            "exhale \"hi\"\n"
+        );
+        let mut unsigned = program;
+        unsigned.extend_from_slice(&sign(tiny_pe())[0x400..]);
+        assert!(read_bytes2(&unsigned)
+            .unwrap_err()
+            .contains("16 bytes follow its trailer"));
+    }
+
+    #[test]
+    fn a_trailer_with_another_magic_is_not_a_trailer() {
+        let mut b = make2(&build2());
+        let t = parts(&b).t;
+        b[t + 7] = b'3';
+        refused(&b, "not at its end");
     }
 }

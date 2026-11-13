@@ -273,14 +273,21 @@ pub fn run(ctx: &Ctx, args: super::RunArgs, chain: Option<String>) -> i32 {
 /// A compiled program's run (see [`crate::program`]): the script from the
 /// program's own binary, `args.file` the path it was compiled from, so an
 /// error points where `cig run` would. The same run in everything else;
-/// no pin (the program is its cig), and its record names the program.
+/// no pin (the program is its cig), and its record names the program. The
+/// script is read here, through [`crate::program::Opened::source`]: a
+/// format 2 program's `source` section, checked against its table and its
+/// record, or a damaged program (E1050).
 pub fn run_program(
     ctx: &Ctx,
     args: super::RunArgs,
-    program: &crate::program::Program,
+    program: &crate::program::Opened,
     chain: Option<String>,
 ) -> i32 {
-    run_source(ctx, args, chain, program.source.clone(), Some(program))
+    let source = match program.source() {
+        Ok(s) => s.to_string(),
+        Err(e) => return super::compiled::damaged(ctx, &e),
+    };
+    run_source(ctx, args, chain, source, Some(program.loaded()))
 }
 
 fn run_source(
@@ -288,7 +295,7 @@ fn run_source(
     args: super::RunArgs,
     chain: Option<String>,
     source: String,
-    compiled: Option<&crate::program::Program>,
+    compiled: Option<&crate::program::Loaded>,
 ) -> i32 {
     let dry_run = args.dry_run;
     // Phases and counters, when asked for by flag or by CIG_TIMINGS_FD /
@@ -320,7 +327,7 @@ fn run_source_inner(
     args: super::RunArgs,
     chain: Option<String>,
     source: String,
-    compiled: Option<&crate::program::Program>,
+    compiled: Option<&crate::program::Loaded>,
     t: &crate::timings::Timings,
 ) -> i32 {
     let name = args.file.to_string_lossy().to_string();
@@ -435,7 +442,7 @@ fn run_source_inner(
         if args.dry_run { "dry-run" } else { "run" },
     );
     if let Some(p) = compiled {
-        record.script = p.name.clone();
+        record.script = p.name().to_string();
         let mut v = p.summary();
         v["binary"] = serde_json::json!(std::env::current_exe()
             .map(|e| e.to_string_lossy().to_string())
@@ -635,7 +642,7 @@ fn run_source_inner(
                 let line = match compiled {
                     Some(p) => serde_json::json!({
                         "op": "compensate",
-                        "label": format!("{} (run {})", p.name, record.id),
+                        "label": format!("{} (run {})", p.name(), record.id),
                         "undo": [me, "--unburn", record.id],
                     }),
                     None => serde_json::json!({
