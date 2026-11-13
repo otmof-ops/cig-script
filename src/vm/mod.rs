@@ -764,7 +764,7 @@ impl Machine<'_> {
 
     fn exec(&mut self, program: &Rc<Program>) -> Result<Value, Fault> {
         loop {
-            match self.turn(program) {
+            match self.run_frame_code(program) {
                 Ok(Some(v)) => return Ok(v),
                 Ok(None) => {}
                 Err(e) => self.unwind(program, *e)?,
@@ -772,39 +772,36 @@ impl Machine<'_> {
         }
     }
 
-    /// Run one instruction. `Some(v)` when the entry frame returned `v`.
-    fn turn(&mut self, program: &Rc<Program>) -> Result<Option<Value>, Fault> {
-        {
-            let (fi, pc, base) = match self.frames.last() {
-                Some(f) => (f.func, f.pc, f.base),
-                None => return Err(broken("an empty call stack", Span::default()).into()),
-            };
-            let proto = program
-                .funcs
-                .get(fi)
-                .ok_or_else(|| broken("no such function", Span::default()))?;
+    /// Run the current frame's instructions until it calls, returns or
+    /// raises. `Some(v)` when the entry frame returned `v`. The frame and
+    /// its function are looked up once, not per instruction; the frame's
+    /// pc is kept current after each one, which is where an error raised
+    /// by the next is offered to the tries.
+    fn run_frame_code(&mut self, program: &Rc<Program>) -> Result<Option<Value>, Fault> {
+        let (fi, mut pc, base) = match self.frames.last() {
+            Some(f) => (f.func, f.pc, f.base),
+            None => return Err(broken("an empty call stack", Span::default()).into()),
+        };
+        let proto = program
+            .funcs
+            .get(fi)
+            .ok_or_else(|| broken("no such function", Span::default()))?;
+        loop {
             let span = proto.spans.get(pc).copied().unwrap_or_default();
-            let d = proto
-                .code
-                .get(pc)
-                .copied()
-                .flatten()
-                .ok_or_else(|| broken("a pc that starts no instruction", span))?;
-            match self.step(program, proto, &d, base, span)? {
+            let Some(Some(d)) = proto.code.get(pc) else {
+                return Err(broken("a pc that starts no instruction", span).into());
+            };
+            match self.step(program, proto, d, base, span)? {
                 Flow::Next(next) => {
+                    pc = next;
                     if let Some(f) = self.frames.last_mut() {
                         f.pc = next;
                     }
                 }
-                Flow::Return(v) => {
-                    if let Some(v) = self.ret(v, span)? {
-                        return Ok(Some(v));
-                    }
-                }
-                Flow::Switched => {}
+                Flow::Return(v) => return self.ret(v, span),
+                Flow::Switched => return Ok(None),
             }
         }
-        Ok(None)
     }
 
     /// Run one instruction. The groups are functions of their own, so the
@@ -947,8 +944,16 @@ impl Machine<'_> {
             // ----- the step budget ------------------------------------------------
             Op::STEPS => {
                 self.set_nest(d.a);
-                for _ in 0..d.b_u {
-                    self.interp.tick(span)?;
+                // The charge in one add when the budget holds all of it;
+                // otherwise step by step, so E515 is `tick`'s own.
+                let n = u64::from(d.b_u);
+                let i = &mut *self.interp;
+                if i.max_steps == 0 || i.steps.saturating_add(n) <= i.max_steps {
+                    i.steps += n;
+                } else {
+                    for _ in 0..d.b_u {
+                        self.interp.tick(span)?;
+                    }
                 }
             }
 
@@ -973,13 +978,13 @@ impl Machine<'_> {
         match d.op {
             Op::CALL => {
                 let callee = self.get(base, d.a, span)?;
-                let args = self.window(base, d.a + 1, d.b_u, span)?;
                 let ret = Ret {
                     reg: base.saturating_add(d.a as usize),
                     extra: d.c as usize,
                 };
                 if let Some((f, cf)) = compiled(&callee, program) {
-                    self.push(program, f, cf, args, ret, span)?;
+                    let first = base.saturating_add(d.a as usize + 1);
+                    self.push(program, f, cf, first, d.b_u as usize, ret, span)?;
                     let caller = self.frames.len().checked_sub(2);
                     if let Some(caller) = caller.and_then(|i| self.frames.get_mut(i)) {
                         caller.pc = next;
@@ -987,6 +992,7 @@ impl Machine<'_> {
                     }
                     return Ok(Flow::Switched);
                 }
+                let args = self.window(base, d.a + 1, d.b_u, span)?;
                 let v = self.interp.call(&callee, args, span)?;
                 self.write_result(ret, v, span)?;
             }
@@ -995,8 +1001,22 @@ impl Machine<'_> {
                     .get(d.b_u as usize)
                     .copied()
                     .ok_or_else(|| broken("a builtin index past the catalogue", span))?;
-                let args = self.window(base, d.a + 1, d.c, span)?;
-                let v = self.interp.call_builtin(b, &args, span)?;
+                // The arguments are read in place when no register of the
+                // window carries a cell; a callback runs in a VM of its own,
+                // so nothing writes these registers during the call.
+                let start = base.saturating_add(d.a as usize + 1);
+                let end = start.saturating_add(d.c as usize);
+                let plain = self
+                    .cells
+                    .get(start..end)
+                    .is_some_and(|c| c.iter().all(Option::is_none));
+                let v = match self.stack.get(start..end) {
+                    Some(args) if plain => self.interp.call_builtin(b, args, span)?,
+                    _ => {
+                        let args = self.window(base, d.a + 1, d.c, span)?;
+                        self.interp.call_builtin(b, &args, span)?
+                    }
+                };
                 self.set(base, d.a, v, span)?;
             }
             Op::RET => {
@@ -1284,6 +1304,9 @@ impl Machine<'_> {
     /// depth (the sum over the frames) in step.
     fn set_nest(&mut self, nest: u32) {
         if let Some(f) = self.frames.last_mut() {
+            if f.nest == nest && self.interp.loop_depth >= nest {
+                return;
+            }
             let depth = self.interp.loop_depth.saturating_sub(f.nest);
             self.interp.loop_depth = depth.saturating_add(nest);
             f.nest = nest;
@@ -1442,13 +1465,17 @@ impl Machine<'_> {
         }
     }
 
-    /// A call of a compiled function: arity, depth, then a new frame.
+    /// A call of a compiled function: arity, depth, then a new frame
+    /// whose first `n` registers are the caller's `first..first+n`, copied
+    /// across without a list in between.
+    #[allow(clippy::too_many_arguments)]
     fn push(
         &mut self,
         program: &Program,
         f: &Function,
         cf: &CompiledFn,
-        args: Vec<Value>,
+        first: usize,
+        n: usize,
         ret: Ret,
         span: Span,
     ) -> Result<(), Fault> {
@@ -1457,8 +1484,8 @@ impl Machine<'_> {
             .funcs
             .get(index)
             .ok_or_else(|| broken("no such function", span))?;
-        if args.len() != target.arity {
-            return Err(arity_mismatch(f, args.len(), span).into());
+        if n != target.arity {
+            return Err(arity_mismatch(f, n, span).into());
         }
         self.interp.enter_call(span)?;
         let base = self.stack.len();
@@ -1466,8 +1493,18 @@ impl Machine<'_> {
             self.interp.leave_call();
             return Err(e);
         }
-        for (slot, a) in self.stack.iter_mut().skip(base).zip(args) {
-            *slot = a;
+        for k in 0..n {
+            let v = match self.get_abs(first.saturating_add(k), span) {
+                Ok(v) => v,
+                Err(e) => {
+                    self.shrink(base);
+                    self.interp.leave_call();
+                    return Err(e);
+                }
+            };
+            if let Some(slot) = self.stack.get_mut(base.saturating_add(k)) {
+                *slot = v;
+            }
         }
         self.frames.push(Frame {
             func: index,
