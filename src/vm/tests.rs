@@ -3540,9 +3540,14 @@ fn a_prelude_value_loads_by_name() {
     v.out = Box::new(buf.clone());
     run(&mut v, &program(&m)).expect("runs");
     assert_eq!(buf.text(), walker);
+    // `path.join` writes the system's own separator.
+    let joined = std::path::Path::new("a").join("b");
     assert_eq!(
         walker,
-        "3 a/b [\"x\", \"y z\"] <builtin len> <module path>\n"
+        format!(
+            "3 {} [\"x\", \"y z\"] <builtin len> <module path>\n",
+            joined.display()
+        )
     );
 
     // The very values the interpreter's prelude holds: the same builtin,
