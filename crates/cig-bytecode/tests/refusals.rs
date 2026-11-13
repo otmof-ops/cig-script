@@ -698,3 +698,77 @@ fn a_loop_that_charges_each_turn_verifies() {
     });
     verify_module(&m).expect("a charged loop around a try verifies");
 }
+
+#[test]
+fn a_handler_back_to_a_charge_in_its_own_range_is_refused() {
+    // try.enter H; body: steps 0,1 (pc 1, in range); the catch jumps
+    // back to the try.enter. Once the budget is spent the `steps` raises
+    // every time and the catch takes the run round again: no charge on
+    // the way stops it.
+    let mut m = base();
+    m.main.instrs = vec![
+        Instr::abx(Op::TRY_ENTER, 0, 0),    // pc 0
+        Instr::abx(Op::STEPS, 0, 1),        // pc 1: try body
+        Instr::abc(Op::TRY_LEAVE, 0, 0, 0), // pc 2
+        Instr::abc(Op::RET, 0, 0, 0),       // pc 3
+        Instr::asbx(Op::JMP, 0, -5),        // pc 4: catch -> 0
+    ];
+    m.main.handlers.push(HandlerEntry {
+        pc_start: 1,
+        pc_end: 3,
+        handler_pc: 4,
+        catch_reg: RESERVED_U32,
+        finally_pc: RESERVED_U32,
+    });
+    assert!(uncharged_pc(&m).is_some());
+
+    // The same with a charge outside the range on the way back verifies.
+    let mut m = base();
+    m.main.instrs = vec![
+        Instr::abx(Op::STEPS, 0, 1),        // pc 0: outside the range
+        Instr::abx(Op::TRY_ENTER, 0, 0),    // pc 1
+        Instr::abx(Op::STEPS, 0, 1),        // pc 2: try body
+        Instr::abc(Op::TRY_LEAVE, 0, 0, 0), // pc 3
+        Instr::abc(Op::RET, 0, 0, 0),       // pc 4
+        Instr::asbx(Op::JMP, 0, -6),        // pc 5: catch -> 0
+    ];
+    m.main.handlers.push(HandlerEntry {
+        pc_start: 2,
+        pc_end: 4,
+        handler_pc: 5,
+        catch_reg: RESERVED_U32,
+        finally_pc: RESERVED_U32,
+    });
+    assert_eq!(uncharged_pc(&m), None);
+}
+
+#[test]
+fn loadg_names_a_string_constant_and_a_register() {
+    let mut m = base();
+    m.main.constants = vec![Constant::Str("len".into()), Constant::Int(1)];
+    m.main.reg_count = 1;
+    m.main.instrs = vec![Instr::abx(Op::LOADG, 0, 0), Instr::abc(Op::RET, 0, 0, 0)];
+    verify_module(&m).expect("loadg of a string constant verifies");
+    let dis = cig_bytecode::disasm::disassemble_module(&m);
+    assert!(
+        dis.lines()
+            .any(|l| l.contains("loadg") && l.ends_with("R0, K0 (\"len\")")),
+        "{dis}"
+    );
+
+    m.main.instrs[0] = Instr::abx(Op::LOADG, 0, 1);
+    assert!(matches!(
+        verify_module(&m).unwrap_err(),
+        VerifyError::ConstNotString { pc: 0, .. }
+    ));
+    m.main.instrs[0] = Instr::abx(Op::LOADG, 0, 2);
+    assert!(matches!(
+        verify_module(&m).unwrap_err(),
+        VerifyError::ConstOutOfRange { pc: 0, .. }
+    ));
+    m.main.instrs[0] = Instr::abx(Op::LOADG, 1, 0);
+    assert!(matches!(
+        verify_module(&m).unwrap_err(),
+        VerifyError::RegisterOutOfRange { pc: 0, .. }
+    ));
+}

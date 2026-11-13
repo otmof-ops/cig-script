@@ -87,6 +87,7 @@ fn every_register_an_opcode_names_is_bounded() {
         ("loadk A", Instr::abx(Op::LOADK, 5, 0)),
         ("loadbool A", Instr::abc(Op::LOADBOOL, 5, 1, 0)),
         ("loadint A", Instr::asbx(Op::LOADINT, 5, 0)),
+        ("loadg A", Instr::abx(Op::LOADG, 5, 0)),
         ("neg A", Instr::abc(Op::NEG, 5, 0, 0)),
         ("add A", Instr::abc(Op::ADD, 5, 0, 0)),
         ("add B", Instr::abc(Op::ADD, 0, 5, 0)),

@@ -1221,7 +1221,7 @@ fn an_unverified_module_cannot_be_run() {
 // ----- what is left ---------------------------------------------------------------------
 
 /// The instructions the VM runs.
-const BUILT: [Op; 59] = [
+const BUILT: [Op; 63] = [
     Op::NOP,
     Op::MOV,
     Op::LOADK,
@@ -1281,6 +1281,10 @@ const BUILT: [Op; 59] = [
     Op::CELLGET,
     Op::CELLSET,
     Op::EXHALE,
+    Op::LOADG,
+    Op::TRY_ENTER,
+    Op::TRY_LEAVE,
+    Op::THROW,
 ];
 
 /// A module whose first instruction is `op`, with operands that verify,
@@ -1289,18 +1293,7 @@ fn first_is(op: Op) -> (Module, usize) {
     let mut f = main_fn(8, vec![]);
     f.constants = vec![Constant::Str("x".into())];
     let code = match op {
-        Op::THROW => vec![abc(op, 0, 0, 0), ret(0)],
-        Op::TRY_ENTER => {
-            f.handlers = vec![HandlerEntry {
-                pc_start: 0,
-                pc_end: 1,
-                handler_pc: 1,
-                catch_reg: RESERVED_U32,
-                finally_pc: RESERVED_U32,
-            }];
-            vec![Instr::abx(op, 0, 0), ret(0)]
-        }
-        Op::TRY_LEAVE | Op::COMP_ENTER | Op::COMP_LEAVE => vec![abc(op, 0, 0, 0), ret(0)],
+        Op::COMP_ENTER | Op::COMP_LEAVE => vec![abc(op, 0, 0, 0), ret(0)],
         Op::BURN_ENTER => {
             f.regions = vec![BurnRegion {
                 class: 0,
@@ -1375,9 +1368,6 @@ fn instructions_not_built_yet_say_so() {
     assert_eq!(
         NOT_BUILT,
         [
-            Op::TRY_ENTER,
-            Op::TRY_LEAVE,
-            Op::THROW,
             Op::BURN_ENTER,
             Op::BURN_OP,
             Op::BURN_LEAVE,
@@ -1430,9 +1420,10 @@ const SAFE_BUILTINS: [&str; 16] = [
 ];
 
 /// A random function: registers, constants, children (`depth` levels)
-/// that capture from it, and code whose jumps go forward, except a `loop`
-/// back to a `steps` that charges, so every cycle spends budget. `parent`
-/// is the enclosing function's register and upvalue counts.
+/// that capture from it, a handler table, and code whose jumps go forward,
+/// except a `loop` back to a `steps` that charges, so every cycle spends
+/// budget. `parent` is the enclosing function's register and upvalue
+/// counts.
 fn random_fn(rng: &mut Rng, depth: u32, arity: u16, parent: Option<(u32, usize)>) -> BcFunction {
     let ops: Vec<Op> = (0..=255u8).filter_map(Op::from_byte).collect();
     let regs = 1 + rng.below(8) as u32;
@@ -1461,9 +1452,12 @@ fn random_fn(rng: &mut Rng, depth: u32, arity: u16, parent: Option<(u32, usize)>
             });
         }
     }
-    // Names for getfield, setfield and callm.
+    // Names for getfield, setfield and callm; `loadg` names K0 to K3 (a
+    // builtin, a name the prelude does not have, a module, `args`).
     f.constants.push(Constant::Str("len".into()));
     f.constants.push(Constant::Str("a".into()));
+    f.constants.push(Constant::Str("math".into()));
+    f.constants.push(Constant::Str("args".into()));
     for _ in 0..rng.below(5) {
         f.constants.push(match rng.below(4) {
             0 => Constant::Bool(rng.below(2) == 0),
@@ -1480,6 +1474,7 @@ fn random_fn(rng: &mut Rng, depth: u32, arity: u16, parent: Option<(u32, usize)>
         }
     }
     let n = 1 + rng.below(24) as usize;
+    let n_handlers = rng.below(4);
     let reg = |rng: &mut Rng| rng.below(u64::from(f.reg_count) + 1) as u8;
     let safe: Vec<usize> = SAFE_BUILTINS
         .iter()
@@ -1525,9 +1520,12 @@ fn random_fn(rng: &mut Rng, depth: u32, arity: u16, parent: Option<(u32, usize)>
                 code.push(abc(op, reg(rng), reg(rng), fwd(rng) as u8))
             }
             Op::LOADINT => code.push(Instr::asbx(op, reg(rng), rng.next() as i16)),
-            Op::LOADK | Op::CLOSURE | Op::TRY_ENTER | Op::BURN_ENTER => {
+            Op::LOADK | Op::CLOSURE | Op::BURN_ENTER => {
                 code.push(Instr::abx(op, reg(rng), rng.below(4) as u16))
             }
+            Op::TRY_ENTER => code.push(Instr::abx(op, 0, rng.below(n_handlers + 1) as u16)),
+            Op::TRY_LEAVE => code.push(abc(op, rng.below(2) as u8, 0, 0)),
+            Op::LOADG => code.push(Instr::abx(op, reg(rng), rng.below(5) as u16)),
             Op::CALLB => {
                 let b = safe[rng.below(safe.len() as u64) as usize] as u8;
                 code.push(abc(op, reg(rng), b, rng.below(3) as u8));
@@ -1559,6 +1557,39 @@ fn random_fn(rng: &mut Rng, depth: u32, arity: u16, parent: Option<(u32, usize)>
         }
     }
     code.push(ret(0));
+    // Handlers: a range, then a catch and a finally after it (sometimes
+    // the same pc: a try with no catch), on first-word pcs.
+    let starts: Vec<u32> = cig_bytecode::first_word_pcs(&code)
+        .map(|p| p.iter().collect())
+        .unwrap_or_default();
+    let pick = |rng: &mut Rng, from: u32| -> u32 {
+        let later: Vec<u32> = starts.iter().copied().filter(|p| *p >= from).collect();
+        later
+            .get(rng.below(later.len() as u64) as usize)
+            .copied()
+            .unwrap_or(from)
+    };
+    for _ in 0..n_handlers {
+        let start = pick(rng, 0);
+        let end = pick(rng, start + 1).max(start + 1);
+        let handler_pc = pick(rng, end);
+        let finally_pc = match rng.below(3) {
+            0 => RESERVED_U32,
+            1 => handler_pc,
+            _ => pick(rng, end),
+        };
+        f.handlers.push(HandlerEntry {
+            pc_start: start,
+            pc_end: end,
+            handler_pc,
+            catch_reg: if rng.below(3) == 0 {
+                RESERVED_U32
+            } else {
+                rng.below(u64::from(f.reg_count)) as u32
+            },
+            finally_pc,
+        });
+    }
     f.lines = (0..code.len() as u32)
         .map(|pc| LineEntry {
             pc,
@@ -1570,6 +1601,10 @@ fn random_fn(rng: &mut Rng, depth: u32, arity: u16, parent: Option<(u32, usize)>
         .collect();
     f.instrs = code;
     f
+}
+
+fn has_handlers(f: &BcFunction) -> bool {
+    !f.handlers.is_empty() || f.children.iter().any(has_handlers)
 }
 
 /// Every opcode in `f` and its children.
@@ -1600,6 +1635,7 @@ fn a_verified_module_never_panics() {
         };
         ops_in(&m.main, &mut seen);
         let budget = 1 + rng.below(60);
+        let handlers = has_handlers(&m.main);
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let Ok(p) = load(v) else {
                 return (0, 0);
@@ -1610,8 +1646,15 @@ fn a_verified_module_never_panics() {
             (i.steps, i.loop_depth + i.call_depth_for_tests() as u32)
         }));
         let (steps, held) = outcome.unwrap_or_else(|_| panic!("panicked on {m:?}"));
+        // A handler can catch E515; the next charge raises it again, so a
+        // run with handlers counts a few more steps on its way out.
+        let slack = if handlers {
+            4 * crate::interp::MAX_CALL_DEPTH as u64
+        } else {
+            1
+        };
         assert!(
-            steps <= budget + 1,
+            steps <= budget + slack,
             "ran past its budget: {steps} > {budget}"
         );
         assert_eq!(held, 0, "depth held after the run");
@@ -2723,11 +2766,11 @@ fn a_reentered_call_counts_depth_as_a_call() {
     );
     f.children = vec![rec];
     let m = module(f);
-    // Each level is a VM, a builtin and a VM again on the Rust stack; an
-    // unoptimized build needs more than `cig`'s 256 MiB for 4000 of them
-    // (the tree-walker's own `[n].map(f)` recursion needs more than 512).
+    // Each level is a builtin and a VM again on the Rust stack: 4000 of
+    // them fit in the stack `cig` gives its evaluator (256 MiB), even
+    // unoptimized.
     let e = std::thread::Builder::new()
-        .stack_size(1 << 30)
+        .stack_size(256 << 20)
         .spawn(move || {
             let mut i = interp();
             let r = run(&mut i, &program(&m));
@@ -2743,4 +2786,947 @@ fn a_reentered_call_counts_depth_as_a_call() {
         e.1,
         "call depth exceeded 4000; is there unbounded recursion?"
     );
+}
+
+// ----- try, catch, finally ------------------------------------------------------------------
+
+/// A function written with labels: jumps and handler pcs name a label,
+/// resolved by [`Asm::finish`]. Positions are given as source spans, each
+/// a line row at the next instruction.
+#[derive(Default)]
+struct Asm {
+    code: Vec<Instr>,
+    fixups: Vec<(usize, &'static str)>,
+    labels: std::collections::HashMap<&'static str, u32>,
+    lines: Vec<LineEntry>,
+    consts: Vec<Constant>,
+    /// (start, end, catch, catch register, finally).
+    handlers: Vec<(
+        &'static str,
+        &'static str,
+        &'static str,
+        u32,
+        Option<&'static str>,
+    )>,
+    children: Vec<BcFunction>,
+}
+
+impl Asm {
+    fn k(&mut self, c: Constant) -> u16 {
+        let i = self.consts.iter().position(|x| *x == c).unwrap_or_else(|| {
+            self.consts.push(c);
+            self.consts.len() - 1
+        });
+        i as u16
+    }
+    fn s(&mut self, s: &str) -> u16 {
+        self.k(Constant::Str(s.to_string()))
+    }
+    fn i(&mut self, i: Instr) -> &mut Self {
+        self.code.push(i);
+        self
+    }
+    fn op(&mut self, op: Op, a: u8, b: u8, c: u8) -> &mut Self {
+        self.i(abc(op, a, b, c))
+    }
+    fn label(&mut self, l: &'static str) -> &mut Self {
+        self.labels.insert(l, self.code.len() as u32);
+        self
+    }
+    /// An AsBx jump (`jmp`, `loop`, `test`, `testn`) to `l`.
+    fn jump(&mut self, op: Op, a: u8, l: &'static str) -> &mut Self {
+        self.fixups.push((self.code.len(), l));
+        self.i(Instr::asbx(op, a, 0))
+    }
+    /// A line row for the next instruction.
+    fn at(&mut self, s: Span) -> &mut Self {
+        let pc = self.code.len() as u32;
+        self.lines.retain(|r| r.pc != pc);
+        self.lines.push(row(pc, s));
+        self
+    }
+    fn loadk(&mut self, r: u8, c: Constant) -> &mut Self {
+        let k = self.k(c);
+        self.i(Instr::abx(Op::LOADK, r, k))
+    }
+    fn exhale_str(&mut self, r: u8, s: &str) -> &mut Self {
+        self.loadk(r, Constant::Str(s.to_string()))
+            .op(Op::EXHALE, r, 1, 0)
+    }
+    fn getfield(&mut self, a: u8, b: u8, name: &str) -> &mut Self {
+        let k = self.s(name) as u8;
+        self.op(Op::GETFIELD, a, b, k)
+    }
+    fn addk(&mut self, a: u8, b: u8, n: i64) -> &mut Self {
+        let k = self.k(Constant::Int(n)) as u8;
+        self.op(Op::ADDK, a, b, k)
+    }
+    fn eqk(&mut self, a: u8, b: u8, n: i64) -> &mut Self {
+        let k = self.k(Constant::Int(n)) as u8;
+        self.op(Op::EQK, a, b, k)
+    }
+    fn try_enter(&mut self, h: u16) -> &mut Self {
+        self.i(Instr::abx(Op::TRY_ENTER, 0, h))
+    }
+    fn try_leave(&mut self) -> &mut Self {
+        self.op(Op::TRY_LEAVE, 0, 0, 0)
+    }
+    fn handler(
+        &mut self,
+        start: &'static str,
+        end: &'static str,
+        catch: &'static str,
+        catch_reg: u32,
+        finally: Option<&'static str>,
+    ) -> &mut Self {
+        self.handlers.push((start, end, catch, catch_reg, finally));
+        self
+    }
+    fn finish(&mut self, name: &str, arity: u16, regs: u32) -> BcFunction {
+        let at = |l: &str| *self.labels.get(l).unwrap_or_else(|| panic!("no label {l}"));
+        let mut code = self.code.clone();
+        for &(pc, l) in &self.fixups {
+            let off = at(l) as i64 - pc as i64 - 1;
+            let i = code[pc];
+            code[pc] = Instr::asbx(i.op().expect("op"), i.a(), off as i16);
+        }
+        let mut f = if name.is_empty() {
+            main_fn(regs, vec![])
+        } else {
+            child_fn(name, arity, regs, vec![])
+        };
+        f.span_base = SpanBase {
+            byte_offset: 0,
+            line: 1,
+            col: 1,
+        };
+        f.instrs = code;
+        let mut lines = self.lines.clone();
+        lines.sort_by_key(|r| r.pc);
+        f.lines = lines;
+        f.constants = self.consts.clone();
+        f.children = std::mem::take(&mut self.children);
+        f.handlers = self
+            .handlers
+            .iter()
+            .map(|&(s, e, c, r, fin)| HandlerEntry {
+                pc_start: at(s),
+                pc_end: at(e),
+                handler_pc: at(c),
+                catch_reg: r,
+                finally_pc: fin.map(at).unwrap_or(RESERVED_U32),
+            })
+            .collect();
+        f
+    }
+}
+
+/// The span of the first `needle` in `src` (the n-th with `nth`), as the
+/// parser gives it to the expression or statement that is that text (a
+/// statement's span takes in the newline that ends it).
+fn span_of(src: &str, needle: &str) -> Span {
+    span_nth(src, needle, 0)
+}
+
+fn span_nth(src: &str, needle: &str, nth: usize) -> Span {
+    let start = src
+        .match_indices(needle)
+        .nth(nth)
+        .unwrap_or_else(|| panic!("no {needle:?} in the source"))
+        .0;
+    let line = src[..start].matches('\n').count() as u32 + 1;
+    let col = src[..start].rfind('\n').map_or(start, |nl| start - nl - 1) as u32 + 1;
+    Span::new(start, start + needle.len(), line, col)
+}
+
+/// How a run ended, as the two engines are compared on it: an `exit()`
+/// by its code; an error by code, kind, message, hint and position.
+fn ending(r: Option<Diagnostic>, exit: Option<i32>) -> String {
+    match (exit, r) {
+        (Some(code), _) => format!("exit {code}"),
+        (None, None) => "ok".to_string(),
+        (None, Some(d)) => format!(
+            "{} {:?} {} {:?} {:?}:{:?} {:?}",
+            d.code, d.kind, d.message, d.hint, d.line, d.col, d.span
+        ),
+    }
+}
+
+/// Run `src` on the tree-walker and `m` on the VM; both must print the
+/// same bytes and end the same way. Returns what was printed.
+fn agree(src: &str, m: &Module) -> String {
+    let ast = crate::syntax::parse(src).expect("parses");
+    let report = crate::check::check(&ast, &[]);
+    assert!(report.ok(), "{src}: {:?}", report.errors);
+    let wbuf = Buf::default();
+    let mut w = interp();
+    w.out = Box::new(wbuf.clone());
+    let wr = w.run_program(&ast).err();
+    let vbuf = Buf::default();
+    let mut v = interp();
+    v.out = Box::new(vbuf.clone());
+    let vr = run(&mut v, &program(m)).err();
+    assert_eq!(v.loop_depth, 0, "{src}: the loop depth is given back");
+    assert_eq!(
+        v.call_depth_for_tests(),
+        0,
+        "{src}: the depth is given back"
+    );
+    assert_eq!(vbuf.text(), wbuf.text(), "{src}: printed");
+    assert_eq!(
+        ending(vr, v.exit_requested),
+        ending(wr, w.exit_requested),
+        "{src}: ending"
+    );
+    wbuf.text()
+}
+
+/// The `try` programs: CigScript, and the same by hand in bytecode.
+fn try_programs() -> Vec<(&'static str, Module, &'static str)> {
+    let mut out = Vec::new();
+    let r = RESERVED_U32;
+
+    // Fall-through: the finally runs, then the code after the try.
+    let src = "try {\n  exhale \"a\"\n} finally {\n  exhale \"f\"\n}\nexhale \"end\"\n";
+    let mut a = Asm::default();
+    a.try_enter(0)
+        .label("s")
+        .exhale_str(0, "a")
+        .try_leave()
+        .label("e");
+    a.jump(Op::JMP, 0, "end");
+    a.label("fin").exhale_str(0, "f").try_leave();
+    a.label("end")
+        .exhale_str(0, "end")
+        .op(Op::LOADNULL, 0, 0, 0)
+        .i(ret(0));
+    a.handler("s", "e", "fin", r, Some("fin"));
+    out.push((src, module(a.finish("", 0, 2)), "a\nf\nend\n"));
+
+    // An error: the catch reads it, then the finally runs.
+    let src = "try {\n  exhale \"a\"\n  cough \"boom\"\n  exhale \"no\"\n} ashtray e {\n  exhale e.message\n} finally {\n  exhale \"f\"\n}\n";
+    let mut a = Asm::default();
+    a.try_enter(0).label("s").exhale_str(0, "a");
+    a.loadk(0, Constant::Str("boom".into()))
+        .at(span_of(src, "cough \"boom\"\n"))
+        .op(Op::THROW, 0, 0, 0);
+    a.exhale_str(0, "no")
+        .try_leave()
+        .label("e")
+        .jump(Op::JMP, 0, "end");
+    a.label("catch")
+        .getfield(0, 1, "message")
+        .op(Op::EXHALE, 0, 1, 0);
+    a.try_leave().jump(Op::JMP, 0, "end");
+    a.label("fin").exhale_str(0, "f").try_leave();
+    a.label("end").op(Op::LOADNULL, 0, 0, 0).i(ret(0));
+    a.handler("s", "e", "catch", 1, Some("fin"));
+    out.push((src, module(a.finish("", 0, 2)), "a\nboom\nf\n"));
+
+    // An error no catch takes: the finally runs and the error goes on,
+    // from where it was raised.
+    let src = "try {\n  exhale 1 / 0\n} finally {\n  exhale \"f\"\n}\nexhale \"no\"\n";
+    let mut a = Asm::default();
+    a.try_enter(0).label("s");
+    a.i(Instr::asbx(Op::LOADINT, 1, 1))
+        .i(Instr::asbx(Op::LOADINT, 2, 0));
+    a.at(span_of(src, "1 / 0")).op(Op::DIV, 0, 1, 2);
+    a.op(Op::EXHALE, 0, 1, 0)
+        .try_leave()
+        .label("e")
+        .jump(Op::JMP, 0, "end");
+    a.label("fin").exhale_str(0, "f").try_leave();
+    a.label("end")
+        .exhale_str(0, "no")
+        .op(Op::LOADNULL, 0, 0, 0)
+        .i(ret(0));
+    a.handler("s", "e", "fin", r, Some("fin"));
+    out.push((src, module(a.finish("", 0, 3)), "f\n"));
+
+    // `break` and `continue` out of a try in a loop: the finally runs on
+    // the way out of the turn.
+    for (word, want) in [
+        ("break", "1\nf\nf\nend\n"),
+        ("continue", "1\nf\nf\n3\nf\nend\n"),
+    ] {
+        let src: &'static str = Box::leak(
+            format!(
+                "roll i = 0\nwhile i < 3 {{\n  i = i + 1\n  try {{\n    if i == 2 {{\n      {word}\n    }}\n    exhale i\n  }} finally {{\n    exhale \"f\"\n  }}\n}}\nexhale \"end\"\n"
+            )
+            .into_boxed_str(),
+        );
+        let mut a = Asm::default();
+        a.i(Instr::asbx(Op::LOADINT, 0, 0)).i(steps(1, 0));
+        a.label("top")
+            .i(Instr::asbx(Op::LOADINT, 1, 3))
+            .op(Op::LT, 2, 0, 1);
+        a.jump(Op::TESTN, 2, "out").i(steps(1, 1)).addk(0, 0, 1);
+        a.try_enter(0)
+            .label("s")
+            .eqk(2, 0, 2)
+            .jump(Op::TESTN, 2, "skip");
+        a.try_leave()
+            .jump(Op::JMP, 0, if word == "break" { "out" } else { "cont" });
+        a.label("skip").op(Op::EXHALE, 0, 1, 0).try_leave();
+        a.label("e").jump(Op::JMP, 0, "cont");
+        a.label("fin").exhale_str(1, "f").try_leave();
+        a.label("cont").jump(Op::LOOP, 0, "top");
+        a.label("out").i(steps(0, 0)).exhale_str(1, "end");
+        a.op(Op::LOADNULL, 1, 0, 0).i(ret(1));
+        a.handler("s", "e", "fin", r, Some("fin"));
+        out.push((src, module(a.finish("", 0, 3)), want));
+    }
+
+    // `snuff` out of a try in a loop in a pull: the finally runs, and the
+    // value snuffed is the one before it ran.
+    let src = "pull f() {\n  roll i = 0\n  while true {\n    i = i + 1\n    try {\n      if i == 3 {\n        snuff i\n      }\n    } finally {\n      exhale \"f\", i\n      i = i + 10\n    }\n    i = i - 10\n  }\n}\nexhale f()\n";
+    let mut c = Asm::default();
+    c.i(Instr::asbx(Op::LOADINT, 0, 0)).i(steps(1, 0));
+    c.label("top").i(steps(1, 1)).addk(0, 0, 1);
+    c.try_enter(0)
+        .label("s")
+        .eqk(1, 0, 3)
+        .jump(Op::TESTN, 1, "skip");
+    c.op(Op::MOV, 3, 0, 0).try_leave().i(ret(3));
+    c.label("skip")
+        .try_leave()
+        .label("e")
+        .jump(Op::JMP, 0, "cont");
+    c.label("fin")
+        .loadk(1, Constant::Str("f".into()))
+        .op(Op::MOV, 2, 0, 0);
+    c.op(Op::EXHALE, 1, 2, 0).addk(0, 0, 10).try_leave();
+    c.label("cont").addk(0, 0, -10).jump(Op::LOOP, 0, "top");
+    c.op(Op::LOADNULL, 1, 0, 0).i(ret(1));
+    c.handler("s", "e", "fin", r, Some("fin"));
+    let mut a = Asm::default();
+    a.children.push(c.finish("f", 0, 4));
+    a.i(Instr::abx(Op::CLOSURE, 0, 0)).op(Op::CALL, 0, 0, 0);
+    a.op(Op::EXHALE, 0, 1, 0).i(ret(0));
+    out.push((src, module(a.finish("", 0, 1)), "f 1\nf 2\nf 3\n3\n"));
+
+    // Nested: the inner catch raises, the inner finally runs, the outer
+    // catch takes the new error.
+    let src = "try {\n  try {\n    cough \"in\"\n  } ashtray e {\n    cough \"re \" + e.message\n  } finally {\n    exhale \"inner f\"\n  }\n} ashtray e {\n  exhale e.message, e.line\n}\nexhale \"end\"\n";
+    let mut a = Asm::default();
+    a.try_enter(0).label("os").try_enter(1).label("is");
+    a.loadk(0, Constant::Str("in".into()))
+        .at(span_of(src, "cough \"in\"\n"))
+        .op(Op::THROW, 0, 0, 0);
+    a.try_leave().label("ie").jump(Op::JMP, 0, "iend");
+    a.label("icatch").loadk(0, Constant::Str("re ".into()));
+    a.getfield(1, 2, "message")
+        .at(span_of(src, "\"re \" + e.message"));
+    a.op(Op::ADD, 0, 0, 1);
+    a.at(span_of(src, "cough \"re \" + e.message\n"))
+        .op(Op::THROW, 0, 0, 0);
+    a.try_leave().jump(Op::JMP, 0, "iend");
+    a.label("ifin").exhale_str(0, "inner f").try_leave();
+    a.label("iend")
+        .try_leave()
+        .label("oe")
+        .jump(Op::JMP, 0, "end");
+    a.label("ocatch")
+        .getfield(0, 3, "message")
+        .getfield(1, 3, "line");
+    a.op(Op::EXHALE, 0, 2, 0)
+        .try_leave()
+        .jump(Op::JMP, 0, "end");
+    a.label("end")
+        .exhale_str(0, "end")
+        .op(Op::LOADNULL, 0, 0, 0)
+        .i(ret(0));
+    a.handler("os", "oe", "ocatch", 3, None);
+    a.handler("is", "ie", "icatch", 2, Some("ifin"));
+    out.push((src, module(a.finish("", 0, 4)), "inner f\nre in 5\nend\n"));
+
+    // A finally that raises replaces the pending error: caught, and not.
+    let src = "try {\n  try {\n    cough \"first\"\n  } finally {\n    cough \"second\"\n  }\n} ashtray e {\n  exhale e.message, e.line\n}\n";
+    let mut a = Asm::default();
+    a.try_enter(0).label("os").try_enter(1).label("is");
+    a.loadk(0, Constant::Str("first".into()))
+        .at(span_of(src, "cough \"first\"\n"))
+        .op(Op::THROW, 0, 0, 0);
+    a.try_leave().label("ie").jump(Op::JMP, 0, "iend");
+    a.label("ifin").loadk(0, Constant::Str("second".into()));
+    a.at(span_of(src, "cough \"second\"\n"))
+        .op(Op::THROW, 0, 0, 0)
+        .try_leave();
+    a.label("iend")
+        .try_leave()
+        .label("oe")
+        .jump(Op::JMP, 0, "end");
+    a.label("ocatch")
+        .getfield(0, 2, "message")
+        .getfield(1, 2, "line");
+    a.op(Op::EXHALE, 0, 2, 0).try_leave();
+    a.label("end").op(Op::LOADNULL, 0, 0, 0).i(ret(0));
+    a.handler("os", "oe", "ocatch", 2, None);
+    a.handler("is", "ie", "ifin", r, Some("ifin"));
+    out.push((src, module(a.finish("", 0, 3)), "second 5\n"));
+
+    let src = "try {\n  cough \"first\"\n} finally {\n  exhale \"f\"\n  cough \"second\"\n}\n";
+    let mut a = Asm::default();
+    a.try_enter(0)
+        .label("s")
+        .loadk(0, Constant::Str("first".into()));
+    a.at(span_of(src, "cough \"first\"\n"))
+        .op(Op::THROW, 0, 0, 0);
+    a.try_leave().label("e").jump(Op::JMP, 0, "end");
+    a.label("fin")
+        .exhale_str(0, "f")
+        .loadk(0, Constant::Str("second".into()));
+    a.at(span_of(src, "cough \"second\"\n"))
+        .op(Op::THROW, 0, 0, 0)
+        .try_leave();
+    a.label("end").op(Op::LOADNULL, 0, 0, 0).i(ret(0));
+    a.handler("s", "e", "fin", r, Some("fin"));
+    out.push((src, module(a.finish("", 0, 1)), "f\n"));
+
+    // An error raised in a callee, and in a builtin's callback, is caught
+    // by the caller's try, with the position it was raised at.
+    let bad_src = "pull bad(x) {\n  snuff 10 / x\n}\n";
+    let bad = |src: &str| {
+        let mut b = Asm::default();
+        b.i(Instr::asbx(Op::LOADINT, 1, 10));
+        b.at(span_of(src, "10 / x")).op(Op::DIV, 2, 1, 0).i(ret(2));
+        b.finish("bad", 1, 3)
+    };
+    let src: &'static str = Box::leak(
+        format!(
+            "{bad_src}try {{\n  exhale bad(0)\n}} ashtray e {{\n  exhale e.message, e.line\n}}\n"
+        )
+        .into_boxed_str(),
+    );
+    let mut a = Asm::default();
+    a.children.push(bad(src));
+    a.i(Instr::abx(Op::CLOSURE, 0, 0)).try_enter(0).label("s");
+    a.op(Op::MOV, 1, 0, 0).i(Instr::asbx(Op::LOADINT, 2, 0));
+    a.at(span_of(src, "bad(0)")).op(Op::CALL, 1, 1, 0);
+    a.op(Op::EXHALE, 1, 1, 0)
+        .try_leave()
+        .label("e")
+        .jump(Op::JMP, 0, "end");
+    a.label("catch")
+        .getfield(1, 5, "message")
+        .getfield(2, 5, "line");
+    a.op(Op::EXHALE, 1, 2, 0).try_leave();
+    a.label("end").op(Op::LOADNULL, 0, 0, 0).i(ret(0));
+    a.handler("s", "e", "catch", 5, None);
+    out.push((src, module(a.finish("", 0, 6)), "division by zero 2\n"));
+
+    let src: &'static str =
+        Box::leak(format!("{bad_src}try {{\n  exhale [1, 0].map(bad)\n}} ashtray e {{\n  exhale e.message, e.line\n}}\n").into_boxed_str());
+    let mut a = Asm::default();
+    a.children.push(bad(src));
+    a.i(Instr::abx(Op::CLOSURE, 0, 0)).try_enter(0).label("s");
+    a.op(Op::NEWLIST, 1, 2, 0).i(Instr::asbx(Op::LOADINT, 2, 1));
+    a.op(Op::APPENDLIST, 1, 2, 0)
+        .i(Instr::asbx(Op::LOADINT, 2, 0));
+    a.op(Op::APPENDLIST, 1, 2, 0).op(Op::MOV, 2, 0, 0);
+    let map = a.s("map") as u8;
+    a.at(span_of(src, "[1, 0].map(bad)"))
+        .op(Op::CALLM, 1, map, 1);
+    a.op(Op::EXHALE, 1, 1, 0)
+        .try_leave()
+        .label("e")
+        .jump(Op::JMP, 0, "end");
+    a.label("catch")
+        .getfield(1, 5, "message")
+        .getfield(2, 5, "line");
+    a.op(Op::EXHALE, 1, 2, 0).try_leave();
+    a.label("end").op(Op::LOADNULL, 0, 0, 0).i(ret(0));
+    a.handler("s", "e", "catch", 5, None);
+    out.push((src, module(a.finish("", 0, 6)), "division by zero 2\n"));
+
+    // A map's fields reach the catch, through a finally between them.
+    let src = "try {\n  try {\n    cough {\"message\": \"m\", \"code\": 7}\n  } finally {\n    exhale \"f\"\n  }\n} ashtray e {\n  exhale e.code, e.message, e.kind\n}\n";
+    let mut a = Asm::default();
+    a.try_enter(0).label("os").try_enter(1).label("is");
+    a.op(Op::NEWMAP, 0, 2, 0)
+        .loadk(1, Constant::Str("message".into()));
+    a.loadk(2, Constant::Str("m".into()))
+        .op(Op::INSERTMAP, 0, 1, 2);
+    a.loadk(1, Constant::Str("code".into()))
+        .i(Instr::asbx(Op::LOADINT, 2, 7));
+    a.op(Op::INSERTMAP, 0, 1, 2);
+    a.at(span_of(src, "cough {\"message\": \"m\", \"code\": 7}\n"))
+        .op(Op::THROW, 0, 0, 0);
+    a.try_leave().label("ie").jump(Op::JMP, 0, "iend");
+    a.label("ifin").exhale_str(0, "f").try_leave();
+    a.label("iend")
+        .try_leave()
+        .label("oe")
+        .jump(Op::JMP, 0, "end");
+    a.label("ocatch")
+        .getfield(0, 3, "code")
+        .getfield(1, 3, "message");
+    a.getfield(2, 3, "kind").op(Op::EXHALE, 0, 3, 0).try_leave();
+    a.label("end").op(Op::LOADNULL, 0, 0, 0).i(ret(0));
+    a.handler("os", "oe", "ocatch", 3, None);
+    a.handler("is", "ie", "ifin", r, Some("ifin"));
+    out.push((src, module(a.finish("", 0, 4)), "f\n7 m cough\n"));
+
+    // exit() is not caught; the finally still runs.
+    let src = "try {\n  exit(3)\n} ashtray {\n  exhale \"caught\"\n} finally {\n  exhale \"f\"\n}\nexhale \"after\"\n";
+    let mut a = Asm::default();
+    let exit = catalogue_index("exit") as u8;
+    a.try_enter(0).label("s").i(Instr::asbx(Op::LOADINT, 1, 3));
+    a.at(span_of(src, "exit(3)")).op(Op::CALLB, 0, exit, 1);
+    a.try_leave().label("e").jump(Op::JMP, 0, "end");
+    a.label("catch")
+        .exhale_str(0, "caught")
+        .try_leave()
+        .jump(Op::JMP, 0, "end");
+    a.label("fin").exhale_str(0, "f").try_leave();
+    a.label("end")
+        .exhale_str(0, "after")
+        .op(Op::LOADNULL, 0, 0, 0)
+        .i(ret(0));
+    a.handler("s", "e", "catch", r, Some("fin"));
+    out.push((src, module(a.finish("", 0, 2)), "f\n"));
+
+    // A finally's own `break` drops the pending error.
+    let src = "roll i = 0\nwhile i < 2 {\n  i = i + 1\n  try {\n    cough \"lost\"\n  } finally {\n    break\n  }\n}\nexhale \"end\", i\n";
+    let mut a = Asm::default();
+    a.i(Instr::asbx(Op::LOADINT, 0, 0)).i(steps(1, 0));
+    a.label("top")
+        .i(Instr::asbx(Op::LOADINT, 1, 2))
+        .op(Op::LT, 2, 0, 1);
+    a.jump(Op::TESTN, 2, "out").i(steps(1, 1)).addk(0, 0, 1);
+    a.try_enter(0)
+        .label("s")
+        .loadk(1, Constant::Str("lost".into()));
+    a.at(span_of(src, "cough \"lost\"\n"))
+        .op(Op::THROW, 1, 0, 0);
+    a.try_leave().label("e").jump(Op::JMP, 0, "cont");
+    a.label("fin")
+        .op(Op::TRY_LEAVE, 1, 0, 0)
+        .jump(Op::JMP, 0, "out");
+    a.label("cont").jump(Op::LOOP, 0, "top");
+    a.label("out")
+        .i(steps(0, 0))
+        .loadk(1, Constant::Str("end".into()));
+    a.op(Op::MOV, 2, 0, 0).op(Op::EXHALE, 1, 2, 0);
+    a.op(Op::LOADNULL, 1, 0, 0).i(ret(1));
+    a.handler("s", "e", "fin", r, Some("fin"));
+    out.push((src, module(a.finish("", 0, 3)), "end 1\n"));
+
+    out
+}
+
+#[test]
+fn try_catch_finally_agree_with_the_interpreter() {
+    let programs = try_programs();
+    assert_eq!(programs.len(), 14);
+    for (src, m, want) in &programs {
+        assert_eq!(agree(src, m), *want, "{src}");
+    }
+}
+
+#[test]
+fn the_step_budget_can_be_caught_and_comes_back() {
+    // E515 inside a loop inside a try: the catch takes it, its first
+    // statement's step raises it again (now outside the loop: the other
+    // wording), and the finally's once more, which is the run's error.
+    let src = "roll n = 0\ntry {\n  while n < 2 {\n    n = n + 1\n  }\n} ashtray e {\n  n = n + 100\n} finally {\n  n = n + 10\n}\nexhale n\n";
+    let ast = crate::syntax::parse(src).expect("parses");
+    let roll = ast.body[0].span();
+    let Stmt::Try {
+        body,
+        handler: Some(handler),
+        finally: Some(finally),
+        span: try_span,
+        ..
+    } = &ast.body[1]
+    else {
+        panic!("a try");
+    };
+    let Stmt::While {
+        span: wh,
+        body: wbody,
+        ..
+    } = &body.stmts[0]
+    else {
+        panic!("a while");
+    };
+    let (inc, caught, fin, ex) = (
+        wbody.stmts[0].span(),
+        handler.stmts[0].span(),
+        finally.stmts[0].span(),
+        ast.body[2].span(),
+    );
+    let mut a = Asm::default();
+    a.at(roll).i(steps(0, 1)).i(Instr::asbx(Op::LOADINT, 0, 0));
+    a.at(*try_span).i(steps(0, 1)).try_enter(0).label("s");
+    a.at(*wh).i(steps(0, 1)).i(steps(1, 0));
+    a.label("top")
+        .i(Instr::asbx(Op::LOADINT, 1, 2))
+        .op(Op::LT, 2, 0, 1);
+    a.jump(Op::TESTN, 2, "wout");
+    a.at(*wh)
+        .i(steps(1, 1))
+        .at(inc)
+        .i(steps(1, 1))
+        .addk(0, 0, 1);
+    a.jump(Op::LOOP, 0, "top");
+    a.label("wout").i(steps(0, 0)).try_leave().label("e");
+    a.jump(Op::JMP, 0, "end");
+    a.label("catch").at(caught).i(steps(0, 1)).addk(0, 0, 100);
+    a.try_leave().jump(Op::JMP, 0, "end");
+    a.label("fin")
+        .at(fin)
+        .i(steps(0, 1))
+        .addk(0, 0, 10)
+        .try_leave();
+    a.label("end").at(ex).i(steps(0, 1)).op(Op::EXHALE, 0, 1, 0);
+    a.op(Op::LOADNULL, 0, 0, 0).i(ret(0));
+    a.handler("s", "e", "catch", 3, Some("fin"));
+    let m = module(a.finish("", 0, 4));
+    let total = same_stop(src, &m);
+    assert_eq!(total, 9);
+
+    // Budget 5 runs out on the loop's second turn: caught, raised again
+    // by the catch's statement and again by the finally's, whose position
+    // and wording (no loop running) are the run's.
+    let (d, steps_taken) = vm_stop(&m, 5);
+    let d = d.expect("stopped");
+    assert_eq!(d.code, "E515");
+    assert_eq!(d.span, Some(fin));
+    assert_eq!(d.message, "the script needs more than 5 steps");
+    assert_eq!(steps_taken, 8);
+}
+
+// ----- positions and backtraces ---------------------------------------------------------------
+
+/// `pull <name>(x) { snuff 10 / x }` at the top of `src`, compiled.
+fn divides_ten(src: &str, name: &str) -> BcFunction {
+    let mut b = Asm::default();
+    b.i(Instr::asbx(Op::LOADINT, 1, 10));
+    b.at(span_of(src, "10 / x")).op(Op::DIV, 2, 1, 0).i(ret(2));
+    b.finish(name, 1, 3)
+}
+
+#[test]
+fn backtraces_match_the_interpreters() {
+    // The tree-walker's error names one place, where it was raised, through
+    // every call, closure and callback; the VM's must be the same error.
+    let deep = std::thread::Builder::new()
+        .stack_size(1 << 30)
+        .spawn(|| {
+            // Deep recursion, raised at the bottom.
+            let src = "pull down(n) {\n  if n == 0 {\n    snuff 1 / n\n  }\n  snuff down(n - 1)\n}\nexhale down(1000)\n";
+            let mut c = Asm::default();
+            c.eqk(1, 0, 0).jump(Op::TESTN, 1, "rec");
+            c.i(Instr::asbx(Op::LOADINT, 1, 1));
+            c.at(span_of(src, "1 / n")).op(Op::DIV, 2, 1, 0).i(ret(2));
+            c.label("rec").op(Op::CELLGET, 3, 0, 0).addk(4, 0, -1);
+            c.at(span_of(src, "down(n - 1)")).op(Op::CALL, 3, 1, 0).i(ret(3));
+            let mut down = c.finish("down", 1, 5);
+            down.upvalues = vec![captures(UpvalKind::ParentLocal, 0)];
+            let mut a = Asm::default();
+            a.children.push(down);
+            a.op(Op::CELLNEW, 0, 0, 0).i(Instr::abx(Op::CLOSURE, 0, 0));
+            a.op(Op::MOV, 1, 0, 0).i(Instr::asbx(Op::LOADINT, 2, 1000));
+            a.at(span_of(src, "down(1000)")).op(Op::CALL, 1, 1, 0);
+            a.op(Op::EXHALE, 1, 1, 0).i(ret(1));
+            agree(src, &module(a.finish("", 0, 3)));
+        })
+        .expect("thread")
+        .join();
+    assert!(deep.is_ok(), "deep recursion");
+
+    // An error in a closure.
+    let src = "roll k = 0\nroll f = pack(x) => x / k\nexhale f(1)\n";
+    let mut c = Asm::default();
+    c.op(Op::GETUP, 1, 0, 0);
+    c.at(span_of(src, "x / k")).op(Op::DIV, 2, 0, 1).i(ret(2));
+    let mut lambda = c.finish("lambda", 1, 3);
+    lambda.name = String::new();
+    lambda.kind = FuncKind::Lambda;
+    lambda.upvalues = vec![captures(UpvalKind::ParentLocal, 0)];
+    let mut a = Asm::default();
+    a.children.push(lambda);
+    a.i(Instr::asbx(Op::LOADINT, 0, 0))
+        .i(Instr::abx(Op::CLOSURE, 1, 0));
+    a.op(Op::MOV, 2, 1, 0).i(Instr::asbx(Op::LOADINT, 3, 1));
+    a.at(span_of(src, "f(1)")).op(Op::CALL, 2, 1, 0);
+    a.op(Op::EXHALE, 2, 1, 0).i(ret(2));
+    agree(src, &module(a.finish("", 0, 4)));
+
+    // An error in a builtin's callback.
+    let src = "exhale [1, 2].map(pack(x) => x / 0)\n";
+    let mut c = Asm::default();
+    c.i(Instr::asbx(Op::LOADINT, 1, 0));
+    c.at(span_of(src, "x / 0")).op(Op::DIV, 2, 0, 1).i(ret(2));
+    let mut lambda = c.finish("lambda", 1, 3);
+    lambda.name = String::new();
+    lambda.kind = FuncKind::Lambda;
+    let mut a = Asm::default();
+    a.children.push(lambda);
+    a.op(Op::NEWLIST, 0, 2, 0).i(Instr::asbx(Op::LOADINT, 1, 1));
+    a.op(Op::APPENDLIST, 0, 1, 0)
+        .i(Instr::asbx(Op::LOADINT, 1, 2));
+    a.op(Op::APPENDLIST, 0, 1, 0)
+        .i(Instr::abx(Op::CLOSURE, 1, 0));
+    let map = a.s("map") as u8;
+    a.at(span_of(src, "[1, 2].map(pack(x) => x / 0)"));
+    a.op(Op::CALLM, 0, map, 1).op(Op::EXHALE, 0, 1, 0).i(ret(0));
+    agree(src, &module(a.finish("", 0, 2)));
+
+    // Compiled code calls an interpreted pull, which raises.
+    let src = "pull g(x) {\n  snuff 10 / x\n}\nexhale g(0)\n";
+    let (_, walked) = walker_run(src, &[]);
+    let walked = walked.expect("E502");
+    let defined = crate::syntax::parse("pull g(x) {\n  snuff 10 / x\n}\n").expect("parses");
+    let mut i = interp();
+    i.run_program(&defined).expect("runs");
+    let g = i.globals.get("g").expect("g");
+    let mut a = Asm::default();
+    a.op(Op::MOV, 1, 0, 0).i(Instr::asbx(Op::LOADINT, 2, 0));
+    a.at(span_of(src, "g(0)")).op(Op::CALL, 1, 1, 0);
+    a.op(Op::EXHALE, 1, 1, 0).i(ret(1));
+    let mut f = a.finish("", 0, 3);
+    f.arity = 1;
+    let (_, vm) = vm_run(&module(f), vec![g]);
+    let vm = vm.err().expect("E502");
+    assert_eq!(ending(Some(vm), None), ending(Some(walked.clone()), None));
+
+    // The tree-walker calls a compiled pull, which raises.
+    let mut a = Asm::default();
+    a.children.push(divides_ten(src, "g"));
+    a.i(Instr::abx(Op::CLOSURE, 0, 0)).i(ret(0));
+    let compiled = exec(&module(a.finish("", 0, 1))).expect("a pull");
+    let (_, e) = walker_run("exhale g(0)\n", &[("g", compiled)]);
+    assert_eq!(ending(e, None), ending(Some(walked), None));
+}
+
+// ----- prelude values --------------------------------------------------------------------------
+
+#[test]
+fn a_prelude_value_loads_by_name() {
+    // `roll f = len`, `stick p = path`, `args`: the tree-walker's own values.
+    let src = "roll f = len\nstick p = path\nexhale f(\"abc\"), p.join(\"a\", \"b\"), args, repr(f), repr(p)\n";
+    let walker = {
+        let ast = crate::syntax::parse(src).expect("parses");
+        let buf = Buf::default();
+        let mut w = interp();
+        w.set_args(&["x".to_string(), "y z".to_string()]);
+        w.out = Box::new(buf.clone());
+        w.run_program(&ast).expect("runs");
+        buf.text()
+    };
+    let mut a = Asm::default();
+    let (len, path, args) = (a.s("len"), a.s("path"), a.s("args"));
+    let join = a.s("join") as u8;
+    a.i(Instr::abx(Op::LOADG, 0, len))
+        .i(Instr::abx(Op::LOADG, 1, path));
+    a.op(Op::MOV, 2, 0, 0).loadk(3, Constant::Str("abc".into()));
+    a.op(Op::CALL, 2, 1, 0);
+    a.op(Op::MOV, 3, 1, 0).loadk(4, Constant::Str("a".into()));
+    a.loadk(5, Constant::Str("b".into()))
+        .op(Op::CALLM, 3, join, 2);
+    a.i(Instr::abx(Op::LOADG, 4, args));
+    let repr = catalogue_index("repr") as u8;
+    a.op(Op::MOV, 6, 0, 0).op(Op::CALLB, 5, repr, 1);
+    a.op(Op::MOV, 7, 1, 0).op(Op::CALLB, 6, repr, 1);
+    a.op(Op::EXHALE, 2, 5, 0)
+        .op(Op::LOADNULL, 0, 0, 0)
+        .i(ret(0));
+    let m = module(a.finish("", 0, 8));
+    let buf = Buf::default();
+    let mut v = interp();
+    v.set_args(&["x".to_string(), "y z".to_string()]);
+    v.out = Box::new(buf.clone());
+    run(&mut v, &program(&m)).expect("runs");
+    assert_eq!(buf.text(), walker);
+    // `path.join` writes the system's own separator.
+    let joined = std::path::Path::new("a").join("b");
+    assert_eq!(
+        walker,
+        format!(
+            "3 {} [\"x\", \"y z\"] <builtin len> <module path>\n",
+            joined.display()
+        )
+    );
+
+    // The very values the interpreter's prelude holds: the same builtin,
+    // the same module, the same `args` list.
+    let mut a = Asm::default();
+    let (len, math, args) = (a.s("len"), a.s("math"), a.s("args"));
+    a.i(Instr::abx(Op::LOADG, 0, len))
+        .i(Instr::abx(Op::LOADG, 1, math));
+    a.i(Instr::abx(Op::LOADG, 2, args)).op(Op::NEWLIST, 3, 3, 0);
+    for r in 0..3 {
+        a.op(Op::APPENDLIST, 3, r, 0);
+    }
+    a.i(ret(3));
+    let m = module(a.finish("", 0, 4));
+    let mut v = interp();
+    v.set_args(&["q".to_string()]);
+    let got = run(&mut v, &program(&m)).expect("runs");
+    let Value::List(got) = got else {
+        panic!("a list")
+    };
+    let got = got.borrow();
+    let same = |name: &str, x: &Value| {
+        let want = v.prelude_value(name, Span::default()).expect(name);
+        match (x, &want) {
+            (Value::Builtin(a), Value::Builtin(b)) => Rc::ptr_eq(a, b),
+            (Value::Module(a), Value::Module(b)) => Rc::ptr_eq(a, b),
+            (Value::List(a), Value::List(b)) => Rc::ptr_eq(a, b),
+            _ => false,
+        }
+    };
+    assert!(same("len", &got[0]), "len");
+    assert!(same("math", &got[1]), "math");
+    assert!(same("args", &got[2]), "args");
+
+    // `args` before the script's arguments are set: the tree-walker's E501.
+    let mut a = Asm::default();
+    let args = a.s("args");
+    a.at(span_of("exhale args\n", "args"));
+    a.i(Instr::abx(Op::LOADG, 0, args))
+        .op(Op::EXHALE, 0, 1, 0)
+        .i(ret(0));
+    let e = err(&module(a.finish("", 0, 1)));
+    let (_, w) = walker_run("exhale args\n", &[]);
+    let w = w.expect("E501");
+    assert_eq!((e.code, e.line, e.col), ("E501", Some(1), Some(8)));
+    assert_eq!((e.code, &e.message), (w.code, &w.message));
+}
+
+#[test]
+fn an_unknown_prelude_name_is_refused_at_load() {
+    for (name, ok) in [
+        ("len", true),
+        ("fs", true),
+        ("args", true),
+        ("lenn", false),
+        ("fs.read", false),
+        ("", false),
+    ] {
+        let mut f = main_fn(2, vec![]);
+        f.constants = vec![Constant::Int(1), Constant::Str(name.into())];
+        f.instrs = vec![abc(Op::NOP, 0, 0, 0), Instr::abx(Op::LOADG, 1, 1), ret(0)];
+        let m = module(f);
+        let v = verify_module(&m).expect("verifies");
+        match load(v) {
+            Ok(_) => assert!(ok, "{name:?} loaded"),
+            Err(e) => {
+                assert!(!ok, "{name:?}: {}", e.message);
+                assert_eq!(e.code, "E1050");
+                assert_eq!(
+                    e.message,
+                    "the program's bytecode does not verify: unknown-prelude-name at fn0+1"
+                );
+            }
+        }
+    }
+    // In a child function too, named by its own index.
+    let mut child = child_fn("c", 0, 1, vec![Instr::abx(Op::LOADG, 0, 0), ret(0)]);
+    child.constants = vec![Constant::Str("nope".into())];
+    let mut f = main_fn(1, vec![abc(Op::LOADNULL, 0, 0, 0), ret(0)]);
+    f.children = vec![child];
+    let e = load(verify_module(&module(f)).expect("verifies"))
+        .err()
+        .expect("refused");
+    assert!(
+        e.message.ends_with("unknown-prelude-name at fn1+0"),
+        "{}",
+        e.message
+    );
+}
+
+// ----- the Rust stack a level of re-entry costs -------------------------------------------------
+
+thread_local! {
+    /// Where on the Rust stack each `mark()` ran.
+    static MARKS: std::cell::RefCell<Vec<usize>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn mark(_: &mut Interp, _: &[Value], _: Span) -> Result<Value, Diagnostic> {
+    let here = 0u8;
+    let at = std::hint::black_box(std::ptr::addr_of!(here)) as usize;
+    MARKS.with(|m| m.borrow_mut().push(at));
+    Ok(Value::Null)
+}
+
+fn mark_value() -> Value {
+    Value::Builtin(Rc::new(crate::value::Builtin {
+        name: "mark",
+        effect: crate::value::Effect::Pure,
+        min_args: 0,
+        max_args: Some(0),
+        func: mark,
+    }))
+}
+
+/// The Rust stack, in bytes, between one `mark()` and the next, averaged
+/// over the levels of a recursion that marks once per level.
+fn stack_per_level(run: impl FnOnce()) -> usize {
+    MARKS.with(|m| m.borrow_mut().clear());
+    run();
+    let marks = MARKS.with(|m| m.borrow().clone());
+    assert!(marks.len() > 2, "{} marks", marks.len());
+    let (first, last) = (marks[1], marks[marks.len() - 1]);
+    first.abs_diff(last) / (marks.len() - 2)
+}
+
+/// `pull f(n) { mark(); if n == 0 { snuff 0 }; snuff [n - 1].map(f) }`,
+/// called with `levels`: each level is a builtin calling back into a
+/// compiled function.
+fn vm_reentry(levels: i16) -> usize {
+    stack_per_level(|| {
+        let mut c = Asm::default();
+        let map = c.s("map") as u8;
+        c.op(Op::GETUP, 1, 1, 0).op(Op::CALL, 1, 0, 0);
+        c.eqk(1, 0, 0).jump(Op::TESTN, 1, "rec");
+        c.i(Instr::asbx(Op::LOADINT, 1, 0)).i(ret(1));
+        c.label("rec").op(Op::NEWLIST, 1, 1, 0).addk(2, 0, -1);
+        c.op(Op::APPENDLIST, 1, 2, 0).op(Op::CELLGET, 2, 0, 0);
+        c.op(Op::CALLM, 1, map, 1).i(ret(1));
+        let mut f = c.finish("f", 1, 3);
+        f.upvalues = vec![
+            captures(UpvalKind::ParentLocal, 1),
+            captures(UpvalKind::ParentLocal, 0),
+        ];
+        let mut a = Asm::default();
+        a.children.push(f);
+        a.op(Op::CELLNEW, 1, 0, 0).i(Instr::abx(Op::CLOSURE, 1, 0));
+        a.op(Op::MOV, 2, 1, 0)
+            .i(Instr::asbx(Op::LOADINT, 3, levels));
+        a.op(Op::CALL, 2, 1, 0).i(ret(2));
+        let mut main = a.finish("", 0, 4);
+        main.arity = 1;
+        exec_with(&module(main), vec![mark_value()]).expect("runs");
+    })
+}
+
+/// The same recursion on the tree-walker.
+fn walker_reentry(levels: i16) -> usize {
+    stack_per_level(|| {
+        let src = format!(
+            "pull f(n) {{\n  mark()\n  if n == 0 {{\n    snuff 0\n  }}\n  snuff [n - 1].map(f)\n}}\nf({levels})\n"
+        );
+        let (_, e) = walker_run(&src, &[("mark", mark_value())]);
+        assert!(e.is_none(), "{:?}", e.map(|e| e.message));
+    })
+}
+
+#[test]
+fn a_reentered_call_costs_no_more_stack_than_the_interpreters() {
+    let (vm, walker) = std::thread::Builder::new()
+        .stack_size(1 << 30)
+        .spawn(|| (vm_reentry(200), walker_reentry(200)))
+        .expect("thread")
+        .join()
+        .expect("joined");
+    eprintln!(
+        "a level of builtin re-entry: VM {vm} bytes, tree-walker {walker} bytes; \
+         4000 levels: VM {} MiB, tree-walker {} MiB",
+        (vm * 4000) >> 20,
+        (walker * 4000) >> 20
+    );
+    assert!(vm <= walker, "VM {vm} bytes a level, tree-walker {walker}");
 }

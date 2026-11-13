@@ -293,16 +293,7 @@ impl Interp {
             }
             Stmt::Cough { value, span } => {
                 let v = self.eval(value, env)?;
-                let message = match &v {
-                    Value::Map(m) => m
-                        .borrow()
-                        .get("message")
-                        .map(|m| m.display())
-                        .unwrap_or_else(|| v.repr()),
-                    other => other.display(),
-                };
-                self.cough_payload = Some(v);
-                Err(Diagnostic::new(Kind::Cough, message).at(*span).into())
+                Err(self.cough(v, *span).into())
             }
             Stmt::While { cond, body, span } => {
                 self.loop_depth += 1;
@@ -1270,6 +1261,33 @@ pub fn normalize_index(i: i64, len: usize) -> Option<usize> {
     let len = len as i64;
     let idx = if i < 0 { len + i } else { i };
     (0..len).contains(&idx).then_some(idx as usize)
+}
+
+impl Interp {
+    /// `cough v`: the error it raises at `span`, with `v` kept as the
+    /// payload the nearest `ashtray` reads. A map's `message` is the
+    /// message; any other value is shown.
+    pub(crate) fn cough(&mut self, v: Value, span: Span) -> Diagnostic {
+        let message = match &v {
+            Value::Map(m) => m
+                .borrow()
+                .get("message")
+                .map(|m| m.display())
+                .unwrap_or_else(|| v.repr()),
+            other => other.display(),
+        };
+        self.cough_payload = Some(v);
+        Diagnostic::new(Kind::Cough, message).at(span)
+    }
+
+    /// The value a prelude name holds (a builtin, a module, `args`): the
+    /// same value a script that names it gets. E501 when the name is not
+    /// there (`args` before the script's arguments are set).
+    pub(crate) fn prelude_value(&self, name: &str, span: Span) -> Eval {
+        self.prelude
+            .get(name)
+            .ok_or_else(|| unknown_name(name, &self.prelude, span))
+    }
 }
 
 /// Build the map bound by `ashtray err`.

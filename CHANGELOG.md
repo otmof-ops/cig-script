@@ -63,6 +63,30 @@ project follows semantic versioning.
   checks. Nothing in the tree executes this bytecode yet; the format
   contract is `docs/BYTECODE.md`. The error registry's `E1050`
   entry gains a bytecode-verify cause.
+- **The bytecode VM runs `try`, `cough` and prelude values**
+  (cig-compile#31, stage B). `try.enter`, `try.leave` and `throw` run
+  `try`/`ashtray`/`finally` and `cough` by the tree-walker's rules: an
+  error raised by an instruction, a builtin, a callee or a callback is
+  offered to the open tries, innermost first, out through the callers;
+  a catch takes any error unless `exit()` was asked for; a finally runs
+  on every way out (the end of the block, an error, `break`, `continue`,
+  `snuff`) and its own error or jump replaces what was pending; the
+  step budget's `E515` can be caught and the next step raises it again.
+  An error keeps the position it was raised at through all of it, as
+  in the tree-walker. A new instruction, `loadg` (opcode `0x06`), loads
+  a builtin, a module or `args` by name from the interpreter's own
+  prelude (`roll f = len`); loading refuses a name the prelude does not
+  have with `E1050`. `try.leave` reads its `A` operand (nonzero: drop
+  what the finally had pending), and the `uncharged-cycle` rule now
+  sees that a charging `steps` inside a try's range can raise to its
+  catch. Only the burn instructions, `pack` and `chain.make` are left
+  to build. Tests: `cargo test --lib vm::` (among them
+  `try_catch_finally_agree_with_the_interpreter`,
+  `the_step_budget_can_be_caught_and_comes_back`,
+  `backtraces_match_the_interpreters` and
+  `a_prelude_value_loads_by_name`) and `cargo test -p cig-bytecode`
+  (`a_handler_back_to_a_charge_in_its_own_range_is_refused`,
+  `loadg_and_the_try_instructions_round_trip`).
 - **The bytecode VM runs output, loops over data, lists and maps, method
   calls and closures** (cig-compile#31, stage B). `exhale` and string
   interpolation write through the interpreter's own writer, so the

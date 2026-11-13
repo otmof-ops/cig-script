@@ -48,6 +48,7 @@ pub enum Op {
     LOADNULL = 0x03,
     LOADBOOL = 0x04,
     LOADINT = 0x05,
+    LOADG = 0x06,
 
     // --- arithmetic (0x10-0x1F) ---
     ADD = 0x10,
@@ -150,6 +151,7 @@ impl Op {
             0x03 => LOADNULL,
             0x04 => LOADBOOL,
             0x05 => LOADINT,
+            0x06 => LOADG,
             0x10 => ADD,
             0x11 => SUB,
             0x12 => MUL,
@@ -235,6 +237,7 @@ impl Op {
             LOADNULL => "loadnull",
             LOADBOOL => "loadbool",
             LOADINT => "loadint",
+            LOADG => "loadg",
             ADD => "add",
             SUB => "sub",
             MUL => "mul",
@@ -428,6 +431,7 @@ fn info_for(op: Op) -> OpInfo {
         LOADNULL => abc(Reg, None, None),
         LOADBOOL => abc(Reg, Immediate, None),
         LOADINT => asbx(Reg, Immediate),
+        LOADG => abx(Reg, StrConst),
 
         ADD | SUB | MUL | DIV | MOD | POW => abc(Reg, Reg, Reg),
         NEG => abc(Reg, Reg, None),
@@ -471,7 +475,7 @@ fn info_for(op: Op) -> OpInfo {
         CELLSET => abc(Upvalue, Reg, None),
 
         TRY_ENTER => abx(Any, Handler),
-        TRY_LEAVE => abc(None, None, None),
+        TRY_LEAVE => abc(Any, None, None),
         THROW => abc(Reg, None, None),
 
         BURN_ENTER => abx(BurnClass, Region),

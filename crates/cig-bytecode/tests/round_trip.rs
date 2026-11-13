@@ -148,6 +148,50 @@ fn the_round_trip_generator_emits_wide_pairs() {
 }
 
 #[test]
+fn loadg_and_the_try_instructions_round_trip() {
+    let mut m = Module::empty("prelude.cig");
+    m.main.constants.push(Constant::Str("len".into()));
+    m.main.constants.push(Constant::Str("args".into()));
+    m.main.reg_count = 300;
+    m.main.instrs = vec![
+        Instr::abx(Op::LOADG, 0, 0),
+        // WIDE loadg: R(256) = K[1].
+        wide_prefix(1, 0),
+        Instr::abx(Op::LOADG, 0, 1),
+        Instr::abx(Op::TRY_ENTER, 0, 0),
+        Instr::abc(Op::THROW, 0, 0, 0),
+        Instr::abc(Op::TRY_LEAVE, 0, 0, 0),
+        Instr::abc(Op::TRY_LEAVE, 1, 0, 0),
+        Instr::abc(Op::RET, 0, 0, 0),
+    ];
+    m.main.handlers.push(HandlerEntry {
+        pc_start: 4,
+        pc_end: 6,
+        handler_pc: 6,
+        catch_reg: 1,
+        finally_pc: RESERVED_U32,
+    });
+    verify_module(&m).expect("verifies");
+    let bytes = serialize_module(&m);
+    let back = parse_module(&bytes).expect("parse");
+    assert_eq!(m, back);
+    assert_eq!(bytes, serialize_module(&back));
+    assert_eq!(Op::from_byte(0x06), Some(Op::LOADG));
+    assert_eq!(Op::LOADG.mnemonic(), "loadg");
+    let dis = cig_bytecode::disasm::disassemble_module(&back);
+    assert!(
+        dis.lines()
+            .any(|l| l.contains("loadg") && l.ends_with("R256, K1 (\"args\")")),
+        "{dis}"
+    );
+    assert!(
+        dis.lines()
+            .any(|l| l.contains("try.leave") && l.ends_with(" 1")),
+        "{dis}"
+    );
+}
+
+#[test]
 fn a_function_encodes_the_same_wherever_it_sits() {
     // Take a child function, encode it on its own, then encode the
     // same child nested inside a parent that has other constants and

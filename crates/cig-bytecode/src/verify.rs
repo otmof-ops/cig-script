@@ -686,8 +686,13 @@ fn verify_termination(func: u32, f: &Function, pcs: &FirstWordPcs) -> Result<(),
 /// handler's node, and the nodes chain outward, so the edge count stays
 /// linear in the function's size.
 ///
-/// The check removes the charging `steps`, then peels off every node with
-/// no remaining predecessor (Kahn's algorithm, with a queue: no recursion).
+/// A charging `steps` ends every path through it but one: once the budget
+/// is spent it raises every time it runs, so inside a handler's range it
+/// keeps its edge to that handler. A handler that leads back into its own
+/// range therefore needs a charge outside the range on the way.
+///
+/// The check peels off every node with no remaining predecessor (Kahn's
+/// algorithm, with a queue: no recursion).
 /// Whatever is left lies on or after a cycle; walking predecessors from it
 /// lands on one, whose lowest pc is reported.
 fn verify_charged_cycles(func: u32, f: &Function, pcs: &FirstWordPcs) -> Result<(), VerifyError> {
@@ -735,9 +740,9 @@ fn verify_charged_cycles(func: u32, f: &Function, pcs: &FirstWordPcs) -> Result<
     let total = n + n_handlers;
     // A node's successors, at most three: pc nodes have a fall-through,
     // one jump and one handler; handler nodes have handler_pc, finally_pc
-    // and the parent handler. A charging `steps` is out of the graph.
+    // and the parent handler. A charging `steps` has only its handler.
     let live = |u: usize| match code.get(u) {
-        Some(Some(d)) => !charges(d),
+        Some(Some(_)) => true,
         Some(None) => false,
         None => u < total,
     };
@@ -746,6 +751,9 @@ fn verify_charged_cycles(func: u32, f: &Function, pcs: &FirstWordPcs) -> Result<
         if let Some(slot) = code.get(u) {
             let Some(d) = slot else { return };
             if charges(d) {
+                if let Some(Some(h)) = inner.get(u) {
+                    out.push(n + h);
+                }
                 return;
             }
             let pc = i64::from(d.pc);
