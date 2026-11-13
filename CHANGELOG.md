@@ -5,6 +5,31 @@ project follows semantic versioning.
 
 ## Unreleased
 
+- **The bytecode VM is about twice as fast as it was** (cig-compile#31 step 9,
+  #230's steps 1 to 6 in part). Over the 25 programs of `bench/compute`, run in
+  process against the tree-walker, the median moved from 0.37 to about 0.7 times
+  the tree-walker's speed, and the instructions executed per run fell by about
+  half (fib 1,102M to 541M, loop 1,187M to 328M, nbody 8,696M to 2,677M). `loop`
+  now runs about 1.4 times as fast as the tree-walker, `nbody` about 1.55 times
+  and `mandel` about 1.2 times; most other programs are still slower than the
+  tree-walker. What changed: errors inside the VM are boxed, so a step moves a
+  word instead of a whole diagnostic; the dispatch loop keeps its frame and
+  function in hand and stays in it across calls and returns; the common cases
+  of the hot instructions (moves, constants, arithmetic, comparisons, jumps,
+  the step charge, the integer `for`, list and map reads and writes) run on
+  registers by reference; a `steps` charge is one add; a call copies its
+  arguments register to register; `getfield` and `setfield` keep the
+  tree-walker's field cache per instruction; the fast path runs in a function
+  of its own, so a builtin that calls back into the VM costs less stack than
+  the tree-walker's. Every error keeps its code and position, the step budget
+  stops on the same step, and burns still go through the one kernel entry.
+- **`getindex` and `setindex` take their parts' positions from trailing `nop`s**
+  (`docs/BYTECODE.md`): a wrong index type is raised at the index's position and
+  a store into something that is neither a list nor a map at the object's, as
+  the tree-walker raises them. Without the `nop`s nothing changes.
+- **`CIG_VM_STATS=1`** prints the VM's instructions executed and time by opcode
+  at the end of a run, in a build with the `bench-stats` feature only; a release
+  does not read the variable.
 - **A stage `b` start checks its bytecode once, by the module's own
   hash** (cig-compile#31; cig-compile's decision 0004, section 5). The run no longer
   hashes the whole `bytecode` section with the table's sha256 before

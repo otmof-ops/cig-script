@@ -5108,3 +5108,141 @@ fn an_unlit_burn_runs_in_a_one_register_frame() {
     f.region_rows = lexical_rows(&f.instrs);
     assert_eq!(ok(&module(f)), "null");
 }
+
+/// `CIG_VM_STATS` is read only by a `bench-stats` build: a default build
+/// writes nothing for it.
+#[cfg(not(feature = "bench-stats"))]
+#[test]
+fn vm_stats_need_the_bench_stats_build() {
+    #[derive(Clone, Default)]
+    struct Kept(Rc<RefCell<Vec<u8>>>);
+    impl std::io::Write for Kept {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.borrow_mut().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    std::env::set_var("CIG_VM_STATS", "1");
+    let err = Kept::default();
+    let mut i = interp();
+    i.err = Box::new(err.clone());
+    let m = module(main_fn(1, vec![Instr::asbx(Op::LOADINT, 0, 7), ret(0)]));
+    run_script(&mut i, &program(&m)).expect("runs");
+    assert!(
+        err.0.borrow().is_empty(),
+        "a default build ignores CIG_VM_STATS"
+    );
+}
+
+// ----- the positions of an index's parts ---------------------------------------------
+
+/// `R0` the object and `R1` the index, made by `obj` and `idx`, then `op`
+/// (`getindex R2, R0, R1` or `setindex R0, R1, R3`) and `nops` trailing
+/// `nop`s. The error, and the pc of `op`.
+fn index_error(obj: &str, idx: &str, store: bool, nops: usize) -> (Diagnostic, u32) {
+    let mut code = vec![Instr::asbx(Op::LOADINT, 3, 5)];
+    code.extend(match obj {
+        "list" => vec![abc(Op::NEWLIST, 0, 1, 0), abc(Op::APPENDLIST, 0, 3, 0)],
+        "string" => vec![Instr::abx(Op::LOADK, 0, 0)],
+        "map" => vec![
+            abc(Op::NEWMAP, 0, 1, 0),
+            Instr::abx(Op::LOADK, 4, 1),
+            abc(Op::INSERTMAP, 0, 4, 3),
+        ],
+        _ => vec![abc(Op::LOADNULL, 0, 0, 0)],
+    });
+    code.push(match idx {
+        "int" => Instr::asbx(Op::LOADINT, 1, 0),
+        "far" => Instr::asbx(Op::LOADINT, 1, 9),
+        "key" => Instr::abx(Op::LOADK, 1, 1),
+        "missing" => Instr::abx(Op::LOADK, 1, 2),
+        _ => abc(Op::LOADBOOL, 1, 1, 0),
+    });
+    let at = code.len() as u32;
+    code.push(if store {
+        abc(Op::SETINDEX, 0, 1, 3)
+    } else {
+        abc(Op::GETINDEX, 2, 0, 1)
+    });
+    code.extend((0..nops).map(|_| abc(Op::NOP, 0, 0, 0)));
+    code.push(ret(3));
+    let mut f = main_fn(5, code);
+    f.constants = vec![
+        Constant::Str("abc".into()),
+        Constant::Str("k".into()),
+        Constant::Str("zz".into()),
+    ];
+    (err(&module(f)), at)
+}
+
+#[test]
+fn a_wrong_index_type_is_raised_at_the_index() {
+    // (object, index, raised at the trailing `nop`)
+    let reads = [
+        ("list", "bool", true),
+        ("string", "bool", true),
+        ("map", "int", true),
+        ("null", "int", false),
+        ("list", "far", false),
+        ("string", "far", false),
+        ("map", "missing", false),
+    ];
+    for (obj, idx, at_nop) in reads {
+        let (bare, at) = index_error(obj, idx, false, 0);
+        assert_eq!(at_pc(&bare), Some(at), "{obj}[{idx}] with no nop");
+        let (e, at) = index_error(obj, idx, false, 1);
+        let want = if at_nop { at + 1 } else { at };
+        assert_eq!(at_pc(&e), Some(want), "{obj}[{idx}]");
+        assert_eq!(
+            (e.code, &e.message),
+            (bare.code, &bare.message),
+            "{obj}[{idx}]"
+        );
+    }
+}
+
+#[test]
+fn a_store_raises_at_the_index_the_object_or_itself() {
+    // (object, index, the trailing `nop` it is raised at: 0 for the
+    // instruction's own position)
+    let stores = [
+        ("list", "bool", 1),
+        ("map", "int", 1),
+        ("null", "int", 2),
+        ("string", "int", 2),
+        ("list", "far", 0),
+    ];
+    for (obj, idx, nop) in stores {
+        let (bare, at) = index_error(obj, idx, true, 0);
+        assert_eq!(at_pc(&bare), Some(at), "{obj}[{idx}] = with no nop");
+        let (e, at) = index_error(obj, idx, true, 2);
+        assert_eq!(at_pc(&e), Some(at + nop), "{obj}[{idx}] =");
+        assert_eq!(
+            (e.code, &e.message),
+            (bare.code, &bare.message),
+            "{obj}[{idx}] ="
+        );
+    }
+    // The run goes on past the `nop`s.
+    let mut f = main_fn(
+        4,
+        vec![
+            Instr::asbx(Op::LOADINT, 3, 5),
+            abc(Op::NEWLIST, 0, 1, 0),
+            abc(Op::APPENDLIST, 0, 3, 0),
+            Instr::asbx(Op::LOADINT, 1, 0),
+            Instr::asbx(Op::LOADINT, 2, 7),
+            abc(Op::SETINDEX, 0, 1, 2),
+            abc(Op::NOP, 0, 0, 0),
+            abc(Op::NOP, 0, 0, 0),
+            abc(Op::GETINDEX, 3, 0, 1),
+            abc(Op::NOP, 0, 0, 0),
+            ret(3),
+        ],
+    );
+    f.constants = vec![];
+    assert_eq!(ok(&module(f)), "7");
+}
