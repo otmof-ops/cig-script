@@ -5,6 +5,30 @@ project follows semantic versioning.
 
 ## Unreleased
 
+- **A stage `b` program reads, verifies and loads a function the first time
+  it enters it** (cig-script#230, cig-compile#71; `docs/BYTECODE.md`, "How
+  the VM reads it"; `docs/PROGRAMS.md`). A start checks the whole module's
+  hash, its head, string pool, directory and tree, every function's upvalues
+  against its parent's counts, and reads, verifies and loads the top level;
+  every other function is read, verified and loaded at its first call, before
+  its first instruction runs. A function that does not verify is `E1050` at
+  that call, an error of the run, so its burns roll back; none of its
+  instructions run. Damage is still refused before anything runs (the hash
+  covers every byte), and `CIG_VALIDATE=1` verifies every function at the
+  start. A function's instructions are decoded once, for the verifier's rules
+  and the loader together; a position is kept per line row instead of per
+  instruction; prelude names and burn-op callees are found by lookup; the
+  program is not taken apart on the way out. A compiled cig-orchestrator's
+  `--version` went from 36.8 ms to 12.3 ms on the test laptop (the
+  instructions it executes from 196M to 63M; the start before its first
+  instruction from 30 ms to 7.4 ms), and its agent hook from 39.5 ms to
+  15.4 ms. New: `cig_bytecode::Reader`,
+  `verify_function`, `verify_upvalues`, `decode_table`, `vm::open`. Tests:
+  `a_function_is_verified_when_it_is_first_entered` (`tests/programs.rs`),
+  and in `crates/cig-bytecode/tests/layout.rs` the reader and the
+  per-function verifier against `parse_module` and `verify_module` on 20,000
+  mutated modules.
+
 - **The bytecode module's layout 2: a directory of functions, read in
   place** (cig-compile#31, cig-compile#71; `docs/BYTECODE.md`, "File
   layout"). `FORMAT_VERSION` is 2. A module is now a head, a directory with

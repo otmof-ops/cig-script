@@ -425,10 +425,15 @@ first-word pc.
 
 ## The verifier's rules
 
-The verifier runs on every module before the VM executes it. It
-returns the first failing rule as a `VerifyError`; the VM wraps the
-result as `E1050` with the text
-`the program's bytecode does not verify: <rule> at fn<i>+<pc>`.
+The verifier runs on every function before the VM executes any of its
+instructions: on the whole module at once (`verify_module`), or on one
+function at its place in the module (`verify_function`, with the counts
+it needs from its parent and its children taken from the directory; "How
+the VM reads it" says when a run does which). It returns the first
+failing rule as a `VerifyError`; the VM wraps the result as `E1050` with
+the text `the program's bytecode does not verify: <rule> at fn<i>+<pc>`.
+Each function's rules read one decode of its instructions, which the VM
+loads from.
 
 The rules (one bullet per `VerifyError` variant, matched by its
 `rule()` method):
@@ -601,11 +606,42 @@ refuses the module (or the call) with the interpreter's own error.
 The VM core (`src/vm/`) settles these points the tables above leave
 open. A lowering writes to them.
 
-- **Only a verified module runs.** `verify_module` returns a
-  `Verified`, which nothing else can make, and `vm::load` takes only
-  that. `vm::refusal` words a `VerifyError` as the `E1050` above.
-- **Load-time checks.** Every function is decoded once, through
-  `crate::instr::decode`, into a table by pc. A `callb` index past the
+- **Only verified code runs: each function is verified before its
+  first instruction runs.** `verify_module` returns a `Verified` and
+  `verify_function` a `VerifiedFunction`, which nothing else can make;
+  `vm::load` takes only the first, and the VM loads a function only from
+  the second. `vm::refusal` words a `VerifyError` as the `E1050` above.
+- **When.** `vm::load` verifies and loads every function of a parsed
+  module before anything runs. A compiled program's start opens its
+  module with `vm::open` instead, which reads only what the start needs:
+  - at the start, before the first instruction: the header, the BLAKE3
+    over every byte after it, the head, the string pool (UTF-8 as a
+    whole), every directory entry's offsets and lengths, the tree and its
+    depth (`cig_bytecode::Reader::open`); every function's name, kind,
+    flags and upvalue descriptors, and its upvalues against its parent's
+    registers and upvalues (`verify_upvalues`: the one rule that reads
+    another function, checked for every function); and the top level,
+    read, verified and loaded;
+  - every other function the first time a run enters it (a call, a tail
+    call, a callback from a builtin), before its first instruction: its
+    body and line rows read with every check the parser makes of them,
+    every verifier rule at its place, then the load-time checks below.
+    A function that fails is `E1050` (`does not verify: <rule> at
+    fn<i>+<pc>`, or `does not read: <what>`), raised at the call as an
+    error of the run, so the run's burns roll back; it stays unloaded,
+    and none of its instructions ever run. `closure` makes a closure
+    without entering its function: it reads only the head checked at the
+    start;
+  - `CIG_VALIDATE=1` parses the whole module and verifies and loads every
+    function at the start, as `vm::load` does: a module any function of
+    which fails is refused before anything runs.
+
+  Damage is never deferred: the start checks the hash over every byte of
+  the module, so a changed byte anywhere is refused before the first
+  instruction. Only a module whose hash was recomputed after a change can
+  reach a refusal at a first call.
+- **Load-time checks.** Each function is decoded once, through
+  `crate::instr::decode`, into a table by pc (the verifier's table). A `callb` index past the
   builtin catalogue refuses the module with `E1050` (`unknown-builtin
   at fn<i>+<pc>`), and so do a `loadg` name the prelude does not have
   (`unknown-prelude-name`), a `burn.op` whose callee is not a builtin of
@@ -617,7 +653,8 @@ open. A lowering writes to them.
   the program was compiled against.
 - **Positions.** An error at a pc takes its position from the line
   row at that pc; a pc with no row takes the nearest row before it,
-  and a pc before every row takes `span_base`. A lowering gives a row
+  and a pc before every row takes `span_base`. The VM builds one
+  position per row, not one per instruction. A lowering gives a row
   to every pc whose error the interpreter positions differently from
   the instruction before it.
 - **The step budget.** `steps A, Bx` sets the frame's loop nesting to

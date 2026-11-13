@@ -7,9 +7,10 @@
 //! named rule, or by the verifier. Random and mutated bytes never panic.
 
 use cig_bytecode::{
-    parse_module, serialize_module, verify_module, BurnRegion, Constant, FuncKind, Function,
-    HandlerEntry, Instr, LineEntry, Module, Op, ParseError, RegionLabel, RegionRow, SpanBase,
-    UpvalDesc, UpvalKind, FORMAT_VERSION, RESERVED_U32,
+    parse_module, serialize_module, verify_function, verify_module, BurnRegion, Constant, FuncKind,
+    Function, HandlerEntry, Instr, LineEntry, Module, Op, ParentCounts, ParseError, Place, Reader,
+    RegionLabel, RegionRow, SpanBase, UpvalDesc, UpvalKind, VerifyError, FORMAT_VERSION,
+    RESERVED_U32,
 };
 
 /// A module with something in every table: three functions under main
@@ -752,6 +753,167 @@ fn random_and_mutated_bytes_never_panic() {
         }
     }
     println!("mutated: {read} of 20000 read after rehashing, {judged} of those verified");
+}
+
+/// A parsed module's functions in pre-order, each without its children
+/// (as [`Reader::function`] gives them).
+fn preorder(m: &Module) -> Vec<Function> {
+    let mut out = Vec::new();
+    let mut stack = vec![&m.main];
+    while let Some(f) = stack.pop() {
+        let mut g = f.clone();
+        g.children.clear();
+        out.push(g);
+        stack.extend(f.children.iter().rev());
+    }
+    out
+}
+
+/// The module read one function at a time: opened, then each function's
+/// head and body, the last first (the order `parse_module` builds them).
+fn lazily(b: &[u8]) -> Result<Vec<Function>, ParseError> {
+    let r = Reader::open(b.to_vec())?;
+    let n = r.len() as u32;
+    let mut out = vec![None; n as usize];
+    for i in (0..n).rev() {
+        r.head(i)?;
+        out[i as usize] = Some(r.function(i)?);
+    }
+    Ok(out.into_iter().flatten().collect())
+}
+
+/// Every function verified at its own place, in pre-order: the first error.
+fn verified_lazily(b: &[u8]) -> Result<(), VerifyError> {
+    let r = Reader::open(b.to_vec()).expect("opens");
+    for i in 0..r.len() as u32 {
+        let f = r.function(i).expect("reads");
+        verify_function(&f, r.place(i).expect("a place"))?;
+    }
+    Ok(())
+}
+
+#[test]
+fn a_reader_reads_each_function_as_the_parser_does() {
+    let m = sample();
+    let b = serialize_module(&m);
+    let r = Reader::open(b.clone()).unwrap();
+    assert_eq!(r.len(), 4);
+    assert_eq!(r.source_name(), "layout.cig");
+    assert_eq!(lazily(&b).unwrap(), preorder(&m));
+    // main, write (under main), inner (under write), b (under main).
+    assert_eq!(r.children(0), [1, 3]);
+    assert_eq!(r.children(1), [2]);
+    assert!(r.children(2).is_empty() && r.children(3).is_empty() && r.children(9).is_empty());
+    assert_eq!(
+        r.place(2),
+        Some(Place {
+            index: 2,
+            depth: 2,
+            children: 0,
+            parent: Some(ParentCounts {
+                reg_count: 3,
+                upvalues: 1
+            }),
+        })
+    );
+    assert_eq!(r.place(0).unwrap().parent, None);
+    assert_eq!(r.place(4), None);
+    let h = r.head(1).unwrap();
+    assert_eq!(
+        (
+            h.name.as_str(),
+            h.kind,
+            h.arity,
+            h.reg_count,
+            h.requires_burn
+        ),
+        ("write", FuncKind::Lambda, 1, 3, false)
+    );
+    assert_eq!(h.upvalues, m.main.children[0].upvalues);
+    assert!(r.head(3).unwrap().requires_burn);
+    assert!(matches!(r.function(4), Err(ParseError::BadIndex { .. })));
+    // Each function verifies at its place, and hands back its decoded code.
+    for i in 0..4 {
+        let f = r.function(i).unwrap();
+        let v = verify_function(&f, r.place(i).unwrap()).unwrap();
+        assert_eq!(v.index(), i);
+        assert_eq!(v.code().len(), f.instrs.len());
+        assert!(v.code().iter().flatten().count() > 0);
+    }
+}
+
+#[test]
+fn a_function_refused_at_its_place_is_refused_as_the_module_verifier_refuses_it() {
+    // One rule broken in one function at a time: fn2 (inner) moves a register
+    // past its frame; fn1's upvalue names a register past main's; fn3 has
+    // no terminator; fn2 makes a closure of a child it does not have.
+    let edits: [fn(&mut Module); 4] = [
+        |m| m.main.children[0].children[0].instrs[0] = Instr::abc(Op::MOV, 9, 0, 0),
+        |m| m.main.children[0].upvalues[0].index = 4,
+        |m| m.main.children[1].instrs = vec![Instr::abc(Op::LOADNULL, 0, 0, 0)],
+        |m| m.main.children[0].children[0].instrs[0] = Instr::abx(Op::CLOSURE, 0, 0),
+    ];
+    for (k, edit) in edits.iter().enumerate() {
+        let mut m = sample();
+        edit(&mut m);
+        let want = verify_module(&m).expect_err("refused");
+        let b = serialize_module(&m);
+        assert_eq!(verified_lazily(&b), Err(want.clone()), "edit {k}");
+        // The other functions verify on their own.
+        let r = Reader::open(b).unwrap();
+        let bad = (0..4)
+            .filter(|&i| verify_function(&r.function(i).unwrap(), r.place(i).unwrap()).is_err())
+            .count();
+        assert_eq!(bad, 1, "edit {k}: {want}");
+    }
+}
+
+/// Mutated modules, the hash recomputed: reading one function at a time
+/// gives exactly what `parse_module` gives (the same functions, or the same
+/// first error), and verifying each function at its place gives exactly
+/// what `verify_module` gives. So every check the eager reader and the
+/// eager verifier make is made by the lazy ones, each before the bytes it
+/// guards are used.
+#[test]
+fn reading_and_verifying_one_function_at_a_time_refuses_what_the_whole_module_refuses() {
+    let good = serialize_module(&sample());
+    let mut rng = Rng(0x2545_F491_4F6C_DD1D);
+    let (mut read, mut verified) = (0, 0);
+    for _ in 0..20_000 {
+        let mut b = good.clone();
+        for _ in 0..1 + rng.below(3) {
+            let at = 40 + rng.below(b.len() - 40);
+            match rng.below(3) {
+                0 => b[at] ^= 1 << rng.below(8),
+                1 => b[at] = rng.next() as u8,
+                _ if at + 4 <= b.len() => {
+                    let v = u32_at(&b, at & !3);
+                    let w = [0, 1, v.wrapping_add(1), v.wrapping_sub(1), u32::MAX][rng.below(5)];
+                    set_u32(&mut b, at & !3, w);
+                }
+                _ => b[at] ^= 0x80,
+            }
+        }
+        rehash(&mut b);
+        let eager = parse_module(&b);
+        let lazy = lazily(&b);
+        match (&eager, &lazy) {
+            (Ok(m), Ok(fs)) => {
+                read += 1;
+                // Debug text, so a NaN constant compares equal to itself.
+                assert_eq!(format!("{:?}", preorder(m)), format!("{fs:?}"));
+                let want = verify_module(m).map(|_| ());
+                if want.is_ok() {
+                    verified += 1;
+                }
+                assert_eq!(verified_lazily(&b), want);
+            }
+            (Err(a), Err(b)) => assert_eq!(a, b),
+            _ => panic!("eager {:?}, lazy {:?}", eager.map(|_| ()), lazy.map(|_| ())),
+        }
+    }
+    println!("mutated: {read} of 20000 read, {verified} verified");
+    assert!(read > 0 && verified > 0);
 }
 
 #[test]

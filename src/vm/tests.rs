@@ -5246,3 +5246,149 @@ fn a_store_raises_at_the_index_the_object_or_itself() {
     f.constants = vec![];
     assert_eq!(ok(&module(f)), "7");
 }
+
+// ----- the lazy start: a function verified and loaded at its first entry ---------
+
+/// The module through a compiled program's start: serialized, then
+/// [`open`], which loads only the top level.
+fn opened(m: &Module) -> Rc<Program> {
+    open(cig_bytecode::serialize_module(m))
+        .unwrap_or_else(|e| panic!("does not open: {}", e.message))
+}
+
+/// `bad(x)`: moves a register past its frame, the verifier's
+/// register-out-of-range at fn1+0.
+fn bad_fn() -> BcFunction {
+    child_fn("bad", 1, 2, vec![abc(Op::MOV, 9, 0, 0), ret(0)])
+}
+
+const BAD: &str = "the program's bytecode does not verify: register-out-of-range at fn1+0";
+
+#[test]
+fn a_lazy_start_runs_what_a_loaded_program_runs() {
+    for tail in [false, true] {
+        let m = recursion_module(tail, 100);
+        let p = opened(&m);
+        assert!(p.funcs.get(1).is_none(), "loaded before it was entered");
+        let got = run(&mut interp(), &p).map(|v| v.repr());
+        assert_eq!(got.ok(), Some(ok(&m)), "tail {tail}");
+        assert!(p.funcs.get(1).is_some(), "entered, and loaded");
+    }
+    // Entered first by a builtin's callback.
+    let mut f = main_fn(
+        5,
+        vec![
+            Instr::asbx(Op::LOADINT, 1, 5),
+            Instr::abx(Op::CLOSURE, 4, 0),
+            abc(Op::MOV, 3, 0, 0),
+            abc(Op::CALLM, 3, 0, 1),
+            ret(3),
+        ],
+    );
+    f.arity = 1;
+    f.constants = vec![Constant::Str("map".into())];
+    f.children = vec![times_ten_plus(1)];
+    let xs = Value::list(vec![Value::Int(1), Value::Int(2), Value::Int(3)]);
+    let got = run_function(&mut interp(), &opened(&module(f)), 0, vec![xs]);
+    assert_eq!(got.map(|v| v.repr()).ok(), Some("[15, 25, 35]".to_string()));
+}
+
+#[test]
+fn a_function_that_does_not_verify_is_refused_at_its_first_entry() {
+    // Made but never entered: the run never verifies it.
+    let mut f = main_fn(2, vec![Instr::abx(Op::CLOSURE, 0, 0), ret(0)]);
+    f.children = vec![bad_fn()];
+    assert_eq!(
+        verify_module(&module(f.clone()))
+            .map(|_| ())
+            .map_err(|e| refusal(&e).message),
+        Err(BAD.to_string())
+    );
+    let p = opened(&module(f));
+    assert!(run(&mut interp(), &p).is_ok());
+    assert!(p.funcs.get(1).is_none());
+
+    // Entered: E1050 at the call (main_fn's rows name the pc), by a call,
+    // a tail call, a builtin's callback and a run of the function itself.
+    let call = [
+        Instr::abx(Op::CLOSURE, 0, 0),
+        abc(Op::MOV, 1, 0, 0),
+        abc(Op::CALL, 0, 1, 0),
+        ret(0),
+    ];
+    let tail = [
+        Instr::abx(Op::CLOSURE, 0, 0),
+        abc(Op::MOV, 1, 0, 0),
+        abc(Op::TAILCALL, 0, 1, 0),
+    ];
+    // R0 = xs (the argument); R0 = xs.map(bad).
+    let callback = [
+        Instr::abx(Op::CLOSURE, 1, 0),
+        abc(Op::CALLM, 0, 0, 1),
+        ret(0),
+    ];
+    let cases = [
+        ("call", &call[..], 2),
+        ("tail call", &tail[..], 2),
+        ("callback", &callback[..], 1),
+    ];
+    for (what, code, pc) in cases {
+        let mut f = main_fn(3, code.to_vec());
+        f.arity = 1;
+        f.constants = vec![Constant::Str("map".into())];
+        f.children = vec![bad_fn()];
+        let p = opened(&module(f));
+        for _ in 0..2 {
+            let xs = Value::list(vec![Value::Int(1)]);
+            let Err(e) = run_function(&mut interp(), &p, 0, vec![xs]) else {
+                panic!("{what}: ran");
+            };
+            assert_eq!((e.code, e.message.as_str()), ("E1050", BAD), "{what}");
+            assert_eq!(at_pc(&e), Some(pc), "{what}: the call's position");
+            // It stays unloaded: a second entry refuses again.
+            assert!(p.funcs.get(1).is_none(), "{what}");
+        }
+    }
+    let mut f = main_fn(1, vec![abc(Op::LOADNULL, 0, 0, 0), ret(0)]);
+    f.children = vec![bad_fn()];
+    let Err(e) = run_function(&mut interp(), &opened(&module(f)), 1, vec![Value::Null]) else {
+        panic!("run_frame: ran");
+    };
+    assert_eq!((e.code, e.message.as_str()), ("E1050", BAD));
+}
+
+#[test]
+fn the_start_checks_every_functions_upvalues_and_the_top_level() {
+    // fn1 is never entered; its upvalue names a register past main's.
+    let mut c = child_fn("c", 0, 1, vec![ret(0)]);
+    c.upvalues = vec![captures(UpvalKind::ParentLocal, 7)];
+    let mut f = main_fn(2, vec![abc(Op::LOADNULL, 0, 0, 0), ret(0)]);
+    f.children = vec![c];
+    let e = open(cig_bytecode::serialize_module(&module(f)))
+        .err()
+        .expect("refused at the start");
+    assert_eq!(e.code, "E1050");
+    assert!(
+        e.message.ends_with("upvalue-capture-out-of-range in fn1"),
+        "{}",
+        e.message
+    );
+    // The top level is verified and loaded at the start.
+    let f = main_fn(2, vec![abc(Op::MOV, 9, 0, 0), ret(0)]);
+    let e = open(cig_bytecode::serialize_module(&module(f)))
+        .err()
+        .expect("refused at the start");
+    assert_eq!(
+        e.message,
+        "the program's bytecode does not verify: register-out-of-range at fn0+0"
+    );
+    // A changed byte is refused by the hash before anything is read.
+    let mut b = cig_bytecode::serialize_module(&recursion_module(false, 3));
+    let last = b.len() - 1;
+    b[last] ^= 1;
+    let e = open(b).err().expect("refused");
+    assert_eq!(
+        e.message,
+        "the program's bytecode does not read: bytecode integrity hash does not match"
+    );
+}

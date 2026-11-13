@@ -13,9 +13,9 @@
 //! operands are checked against the function's bounds.
 
 use crate::error::VerifyError;
-use crate::instr::{decode, first_word_pcs, DecodeError, DecodedInstr, FirstWordPcs};
+use crate::instr::{decode_table, DecodeError, DecodedInstr, FirstWordPcs};
 use crate::module::{
-    Constant, Function, Module, RegionLabel, RegionRow, UpvalKind, MAX_FUNCTION_DEPTH,
+    Constant, Function, Module, RegionLabel, RegionRow, UpvalDesc, UpvalKind, MAX_FUNCTION_DEPTH,
     MAX_REG_COUNT, RESERVED_U32,
 };
 use crate::opcode::{Fmt, Op, OperandKind};
@@ -50,13 +50,100 @@ pub fn verify_module(m: &Module) -> Result<Verified<'_>, VerifyError> {
     // field. The id is a pre-order index: 0 is main, each child
     // continues the sequence.
     let mut counter = 0u32;
-    verify_function(&m.main, None, &mut counter, 0)?;
+    verify_tree(&m.main, None, &mut counter, 0)?;
     Ok(Verified { module: m })
 }
 
-fn verify_function(
+/// What a function's rules need from outside the function: its pre-order
+/// index (`fn<i>` in an error), its nesting depth, its number of children
+/// (the bound of `closure`'s operand) and its parent's register and
+/// upvalue counts (the bounds of its upvalue descriptors; `None` for the
+/// top level, which has no upvalues).
+///
+/// A module's reader gives each function's place from the module's
+/// directory, which the reader checked as one tree when it opened the
+/// module (`docs/BYTECODE.md`, "The tree").
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Place {
+    /// The function's pre-order index.
+    pub index: u32,
+    /// Its depth: 0 for the top level.
+    pub depth: u32,
+    /// How many children it has.
+    pub children: u32,
+    /// Its parent's counts; `None` for the top level.
+    pub parent: Option<ParentCounts>,
+}
+
+/// The two counts of a function's parent that its upvalue descriptors are
+/// checked against.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ParentCounts {
+    /// The parent's register count.
+    pub reg_count: u32,
+    /// The parent's upvalue count.
+    pub upvalues: u32,
+}
+
+/// One function the verifier has accepted, with its instructions decoded
+/// once: the table every rule read, which the VM loads from instead of
+/// decoding the function again.
+///
+/// Only [`verify_function`] makes one.
+#[derive(Debug)]
+pub struct VerifiedFunction<'f> {
+    function: &'f Function,
+    index: u32,
+    code: Vec<Option<DecodedInstr>>,
+}
+
+impl<'f> VerifiedFunction<'f> {
+    /// The function the verifier accepted.
+    pub fn function(&self) -> &'f Function {
+        self.function
+    }
+
+    /// Its pre-order index.
+    pub fn index(&self) -> u32 {
+        self.index
+    }
+
+    /// The decoded instruction at each first-word pc, `None` at the second
+    /// word of a `WIDE` pair.
+    pub fn code(&self) -> &[Option<DecodedInstr>] {
+        &self.code
+    }
+
+    /// The decoded table, taken.
+    pub fn into_code(self) -> Vec<Option<DecodedInstr>> {
+        self.code
+    }
+}
+
+/// Verify one function at its place in its module: every rule
+/// [`verify_module`] checks for that function, in the same order, with
+/// the counts it would take from the function's parent and children taken
+/// from `place`. The function's children are not verified here: each is
+/// verified at its own place (`f.children` is not read; a function a lazy
+/// reader gives has none).
+pub fn verify_function(f: &Function, place: Place) -> Result<VerifiedFunction<'_>, VerifyError> {
+    if place.depth > MAX_FUNCTION_DEPTH {
+        return Err(VerifyError::NestedTooDeep {
+            depth: place.depth,
+            max: MAX_FUNCTION_DEPTH,
+        });
+    }
+    let code = check_function(f, place)?;
+    Ok(VerifiedFunction {
+        function: f,
+        index: place.index,
+        code,
+    })
+}
+
+fn verify_tree(
     f: &Function,
-    parent: Option<&Function>,
+    parent: Option<ParentCounts>,
     counter: &mut u32,
     depth: u32,
 ) -> Result<(), VerifyError> {
@@ -69,6 +156,30 @@ fn verify_function(
     let func = *counter;
     *counter += 1;
 
+    check_function(
+        f,
+        Place {
+            index: func,
+            depth,
+            children: f.children.len() as u32,
+            parent,
+        },
+    )?;
+
+    let counts = ParentCounts {
+        reg_count: f.reg_count,
+        upvalues: f.upvalues.len() as u32,
+    };
+    for c in &f.children {
+        verify_tree(c, Some(counts), counter, depth + 1)?;
+    }
+
+    Ok(())
+}
+
+/// Every rule of one function; the decoded table they read.
+fn check_function(f: &Function, place: Place) -> Result<Vec<Option<DecodedInstr>>, VerifyError> {
+    let func = place.index;
     if f.instrs.is_empty() {
         return Err(VerifyError::EmptyFunction { func });
     }
@@ -83,13 +194,13 @@ fn verify_function(
         return Err(VerifyError::ArityExceedsRegCount { func });
     }
 
-    verify_upvalue_captures(func, f, parent)?;
+    verify_upvalues(func, &f.upvalues, place.parent)?;
 
     // One pass over the instruction stream, so that WIDE pairs and
-    // unknown opcodes are caught first and the boundary set is built
-    // once.
-    let pcs = match first_word_pcs(&f.instrs) {
-        Ok(pcs) => pcs,
+    // unknown opcodes are caught first and the boundary set and the
+    // decoded table every rule reads are built once.
+    let (pcs, code) = match decode_table(&f.instrs) {
+        Ok(t) => t,
         Err(DecodeError::BadOpcode { pc, byte }) => {
             return Err(VerifyError::BadOpcode { func, pc, byte })
         }
@@ -110,27 +221,28 @@ fn verify_function(
     verify_handlers(func, f, &pcs)?;
     verify_regions(func, f, &pcs)?;
     verify_line_table(func, f, &pcs)?;
-    verify_instructions(func, f, &pcs)?;
-    verify_burn_rows(func, f, &pcs)?;
-    verify_termination(func, f, &pcs)?;
-    verify_charged_cycles(func, f, &pcs)?;
+    verify_instructions(func, f, place.children, &pcs, &code)?;
+    verify_burn_rows(func, f, &pcs, &code)?;
+    verify_termination(func, &pcs, &code)?;
+    verify_charged_cycles(func, f, &code)?;
 
-    for c in &f.children {
-        verify_function(c, Some(f), counter, depth + 1)?;
-    }
-
-    Ok(())
+    Ok(code)
 }
 
-fn verify_upvalue_captures(
+/// The upvalue rule on its own: each descriptor inside its parent's
+/// registers or upvalues, and none at the top level. It is the one rule
+/// that reads another function's counts; a reader that defers the other
+/// rules to a function's first call can check this one for every function
+/// when it opens the module.
+pub fn verify_upvalues(
     func: u32,
-    f: &Function,
-    parent: Option<&Function>,
+    upvalues: &[UpvalDesc],
+    parent: Option<ParentCounts>,
 ) -> Result<(), VerifyError> {
     let Some(parent) = parent else {
         // The top-level function has no parent, so it must have no
         // upvalues.
-        if !f.upvalues.is_empty() {
+        if !upvalues.is_empty() {
             return Err(VerifyError::UpvalueCaptureOutOfRange {
                 func,
                 upvalue: 0,
@@ -139,10 +251,10 @@ fn verify_upvalue_captures(
         }
         return Ok(());
     };
-    for (i, u) in f.upvalues.iter().enumerate() {
+    for (i, u) in upvalues.iter().enumerate() {
         let (bound, idx) = match u.kind {
             UpvalKind::ParentLocal => (parent.reg_count, u.index as u32),
-            UpvalKind::ParentUpvalue => (parent.upvalues.len() as u32, u.index as u32),
+            UpvalKind::ParentUpvalue => (parent.upvalues, u.index as u32),
         };
         if idx >= bound {
             return Err(VerifyError::UpvalueCaptureOutOfRange {
@@ -283,36 +395,24 @@ fn verify_regions(func: u32, f: &Function, pcs: &FirstWordPcs) -> Result<(), Ver
 
 // ---- instruction stream ---------------------------------------------
 
-fn verify_instructions(func: u32, f: &Function, pcs: &FirstWordPcs) -> Result<(), VerifyError> {
+fn verify_instructions(
+    func: u32,
+    f: &Function,
+    n_func: u32,
+    pcs: &FirstWordPcs,
+    code: &[Option<DecodedInstr>],
+) -> Result<(), VerifyError> {
     let n_const = f.constants.len() as u32;
-    let n_func = f.children.len() as u32;
     let n_regions = f.regions.len() as u32;
 
-    for d in crate::instr::walk(&f.instrs) {
-        let d = match d {
-            Ok(d) => d,
-            Err(DecodeError::BadOpcode { pc, byte }) => {
-                return Err(VerifyError::BadOpcode { func, pc, byte })
-            }
-            Err(DecodeError::DanglingWide { pc } | DecodeError::DoubleWide { pc }) => {
-                return Err(VerifyError::WideDangling { func, pc })
-            }
-            Err(DecodeError::Eof { pc }) => {
-                return Err(VerifyError::JumpOutOfRange {
-                    func,
-                    pc,
-                    target: pc as i64,
-                    len: pcs.len(),
-                })
-            }
-        };
+    for d in code.iter().flatten() {
         let info = d.op.info();
 
-        verify_operand_a(func, &d, info.a, f, n_const, n_func, n_regions)?;
-        verify_operand_b(func, &d, info, f, n_const, n_func, n_regions, pcs)?;
-        verify_operand_c(func, &d, info, f, n_const, pcs)?;
+        verify_operand_a(func, d, info.a, f, n_const, n_func, n_regions)?;
+        verify_operand_b(func, d, info, f, n_const, n_func, n_regions, pcs)?;
+        verify_operand_c(func, d, info, f, n_const, pcs)?;
 
-        verify_reg_ranges(func, &d, f)?;
+        verify_reg_ranges(func, d, f)?;
 
         if d.op == Op::BURN_ENTER {
             // The operand checks above put `Bx` inside the region table.
@@ -656,15 +756,14 @@ fn verify_reg_ranges(func: u32, d: &DecodedInstr, f: &Function) -> Result<(), Ve
 /// These refuse a malformed module early; the VM's burn stack at run time
 /// stays the guarantee. Linear in the function's size, after a sort of
 /// the rows.
-fn verify_burn_rows(func: u32, f: &Function, pcs: &FirstWordPcs) -> Result<(), VerifyError> {
+fn verify_burn_rows(
+    func: u32,
+    f: &Function,
+    pcs: &FirstWordPcs,
+    code: &[Option<DecodedInstr>],
+) -> Result<(), VerifyError> {
     let n = f.instrs.len();
     let unbalanced = |pc: u32, why: &'static str| VerifyError::BurnUnbalanced { func, pc, why };
-    let mut code: Vec<Option<DecodedInstr>> = vec![None; n];
-    for pc in pcs.iter() {
-        if let (Ok(d), Some(slot)) = (decode(&f.instrs, pc), code.get_mut(pc as usize)) {
-            *slot = Some(d);
-        }
-    }
     let at = |pc: u32| code.get(pc as usize).copied().flatten();
 
     // The rows, outer first; each one's parent, the row around it.
@@ -812,14 +911,18 @@ fn verify_burn_rows(func: u32, f: &Function, pcs: &FirstWordPcs) -> Result<(), V
 
 // ---- termination -----------------------------------------------------
 
-fn verify_termination(func: u32, f: &Function, pcs: &FirstWordPcs) -> Result<(), VerifyError> {
+fn verify_termination(
+    func: u32,
+    pcs: &FirstWordPcs,
+    code: &[Option<DecodedInstr>],
+) -> Result<(), VerifyError> {
     // The last decoded instruction in the function must be a
     // terminator, or a JMP (whose target the jump rule has already
     // checked).
     let Some(last_pc) = pcs.last_start() else {
         return Err(VerifyError::NotTerminated { func });
     };
-    let Ok(d) = decode(&f.instrs, last_pc) else {
+    let Some(Some(d)) = code.get(last_pc as usize) else {
         return Err(VerifyError::NotTerminated { func });
     };
     match d.op {
@@ -854,14 +957,12 @@ fn verify_termination(func: u32, f: &Function, pcs: &FirstWordPcs) -> Result<(),
 /// algorithm, with a queue: no recursion).
 /// Whatever is left lies on or after a cycle; walking predecessors from it
 /// lands on one, whose lowest pc is reported.
-fn verify_charged_cycles(func: u32, f: &Function, pcs: &FirstWordPcs) -> Result<(), VerifyError> {
+fn verify_charged_cycles(
+    func: u32,
+    f: &Function,
+    code: &[Option<DecodedInstr>],
+) -> Result<(), VerifyError> {
     let n = f.instrs.len();
-    let mut code: Vec<Option<DecodedInstr>> = vec![None; n];
-    for pc in pcs.iter() {
-        if let (Ok(d), Some(slot)) = (decode(&f.instrs, pc), code.get_mut(pc as usize)) {
-            *slot = Some(d);
-        }
-    }
     let charges = |d: &DecodedInstr| d.op == Op::STEPS && d.b_u >= 1;
 
     // Handlers by (start ascending, end descending): an outer one comes

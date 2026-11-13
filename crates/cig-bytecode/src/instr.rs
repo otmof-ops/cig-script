@@ -328,6 +328,34 @@ pub fn first_word_pcs(instrs: &[Instr]) -> Result<FirstWordPcs, DecodeError> {
     })
 }
 
+/// A function's instructions decoded once: the first-word pcs, as
+/// [`first_word_pcs`] gives them, and the decoded instruction at each
+/// first-word pc (`None` at the second word of a `WIDE` pair). The
+/// verifier's rules and the VM's loader share this one decode. The first
+/// error is the one [`first_word_pcs`] returns for the same words.
+pub fn decode_table(
+    instrs: &[Instr],
+) -> Result<(FirstWordPcs, Vec<Option<DecodedInstr>>), DecodeError> {
+    let mut starts = Vec::with_capacity(instrs.len());
+    let mut code = vec![None; instrs.len()];
+    let mut pc = 0u32;
+    while (pc as usize) < instrs.len() {
+        starts.push(pc);
+        let d = decode(instrs, pc)?;
+        if let Some(slot) = code.get_mut(pc as usize) {
+            *slot = Some(d);
+        }
+        pc = d.pc + d.width;
+    }
+    Ok((
+        FirstWordPcs {
+            starts,
+            len: instrs.len() as u32,
+        },
+        code,
+    ))
+}
+
 /// The set of first-word pcs returned by [`first_word_pcs`].
 #[derive(Clone, Debug)]
 pub struct FirstWordPcs {

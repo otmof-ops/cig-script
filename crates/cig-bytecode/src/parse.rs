@@ -19,99 +19,24 @@ use crate::serialize::{
     body_len, CHILD_LEN, CONST_LEN, DIRECTORY_AT, ENTRY_LEN, HANDLER_LEN, HEADER_LEN, INSTR_LEN,
     REGION_LEN, REGION_ROW_LEN, UPVALUE_LEN,
 };
+use crate::verify::{ParentCounts, Place};
 
 /// Parse a module from bytes. Returns the module, or the first
 /// [`ParseError`] encountered.
 pub fn parse_module(bytes: &[u8]) -> Result<Module, ParseError> {
-    // Header: 4-byte magic, 2-byte version, 2-byte flags, 32-byte hash.
-    let magic = take(bytes, 0, 4, "magic")?;
-    if magic != MAGIC {
-        return Err(ParseError::BadMagic);
-    }
-    let version = u16_at(bytes, 4, "version")?;
-    if version != FORMAT_VERSION {
-        return Err(ParseError::BadVersion {
-            found: version,
-            supported: FORMAT_VERSION,
-        });
-    }
-    // No flag is defined: a module with any bit set is not this revision.
-    // With the magic, the version and the BLAKE3 over the payload, this
-    // check leaves no byte of the module unchecked.
-    let flags = u16_at(bytes, 6, "flags")?;
-    if flags != 0 {
-        return Err(ParseError::BadFlags { flags });
-    }
-    let claimed_hash = take(bytes, 8, 32, "integrity hash")?;
-    let actual_hash = blake3::hash(&bytes[HEADER_LEN..]);
-    if actual_hash.as_bytes()[..] != claimed_hash[..] {
-        return Err(ParseError::BadIntegrity);
-    }
-
-    let head = Head::read(bytes)?;
-    let pool = Pool::read(bytes, &head)?;
-    let source_name = pool
-        .string(
-            u32_at(bytes, 44, "source name")?,
-            u32_at(bytes, 48, "source name")?,
-            "source name",
-        )?
-        .to_owned();
-
-    let n = head.functions as usize;
-    let mut entries = Vec::with_capacity(n);
-    let mut body_at = head.bodies_at;
-    let mut lines_at = 0u64;
-    for i in 0..head.functions {
-        let e = Entry::read(bytes, i)?;
-        e.expect("body offset", u64::from(e.body_at), body_at)?;
-        let want = body_len(
-            u64::from(e.instrs),
-            u64::from(e.constants),
-            u64::from(e.handlers),
-            u64::from(e.region_rows),
-            u64::from(e.regions),
-            u64::from(e.upvalues),
-            u64::from(e.children),
-        );
-        e.expect("body length", u64::from(e.body_len), want)?;
-        body_at += want;
-        if body_at > head.pool_at {
-            return Err(ParseError::BadOffset {
-                at: "body length",
-                function: i,
-                found: u64::from(e.body_len),
-                expected: head.pool_at - u64::from(e.body_at),
-            });
-        }
-        e.expect("line rows offset", u64::from(e.lines_at), lines_at)?;
-        lines_at += u64::from(e.lines_len);
-        if lines_at > head.lines_len {
-            return Err(ParseError::BadOffset {
-                at: "line rows length",
-                function: i,
-                found: u64::from(e.lines_len),
-                expected: head.lines_len - u64::from(e.lines_at),
-            });
-        }
-        entries.push(e);
-    }
-    expect_head("pool offset", head.pool_at, body_at)?;
-    expect_head("line region length", head.lines_len, lines_at)?;
-
-    check_tree(bytes, &entries)?;
+    let index = Index::read(bytes)?;
+    let n = index.entries.len();
 
     // Build each function, the last first: a function's children all
     // come after it, so they are built when it is.
     let mut built: Vec<Option<Function>> = Vec::with_capacity(n);
     built.resize_with(n, || None);
-    for (i, e) in entries.iter().enumerate().rev() {
-        let mut f = read_function(bytes, &head, &pool, e)?;
-        let at = e.body_at as usize + e.child_table_at();
-        let mut children = Vec::with_capacity(e.children as usize);
-        for k in 0..e.children as usize {
-            let c = u32_at(bytes, at + k * CHILD_LEN, "child")? as usize;
-            match built.get_mut(c).and_then(Option::take) {
+    for (i, e) in index.entries.iter().enumerate().rev() {
+        let mut f = read_function(bytes, &index.head, e)?;
+        let kids = index.children(i);
+        let mut children = Vec::with_capacity(kids.len());
+        for &c in kids {
+            match built.get_mut(c as usize).and_then(Option::take) {
                 Some(child) => children.push(child),
                 None => {
                     return Err(ParseError::BadTree {
@@ -125,12 +50,252 @@ pub fn parse_module(bytes: &[u8]) -> Result<Module, ParseError> {
         built[i] = Some(f);
     }
     match built.first_mut().and_then(Option::take) {
-        Some(main) => Ok(Module { source_name, main }),
+        Some(main) => Ok(Module {
+            source_name: index.source_name,
+            main,
+        }),
         None => Err(ParseError::BadCount {
             at: "functions",
             count: 0,
             remaining: bytes.len(),
         }),
+    }
+}
+
+/// A module opened for reading one function at a time (layout 2 makes it
+/// possible: `docs/BYTECODE.md`, "How the VM reads it").
+///
+/// [`Reader::open`] makes every check that covers the module as a whole:
+/// the header (magic, version, flags), the BLAKE3 over every byte after
+/// it, the head, the string pool as UTF-8, every directory entry's body
+/// and line-row offsets and lengths against the places the layout gives
+/// them, the child tables as one tree in pre-order, and the depth. A
+/// function's own bytes (its name, kind, tables, constants, padding and
+/// line rows) are checked by [`Reader::head`] and [`Reader::function`],
+/// each before anything is built from them: the same checks
+/// [`parse_module`] makes, with the same errors.
+#[derive(Debug)]
+pub struct Reader {
+    bytes: Vec<u8>,
+    index: Index,
+}
+
+/// What [`Reader::head`] reads of a function: its directory fields and its
+/// upvalue descriptors, without its code, tables or line rows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FunctionHead {
+    /// The function's name (empty for an anonymous lambda).
+    pub name: String,
+    /// Its kind.
+    pub kind: FuncKind,
+    /// Its `requires_burn` flag.
+    pub requires_burn: bool,
+    /// Its parameter count.
+    pub arity: u16,
+    /// Its register count.
+    pub reg_count: u32,
+    /// Its upvalue descriptors.
+    pub upvalues: Vec<UpvalDesc>,
+}
+
+impl Reader {
+    /// Open a module: every check that covers the module as a whole (see
+    /// [`Reader`]). No function body is read.
+    pub fn open(bytes: Vec<u8>) -> Result<Reader, ParseError> {
+        let index = Index::read(&bytes)?;
+        Ok(Reader { bytes, index })
+    }
+
+    /// The number of functions (at least 1).
+    pub fn len(&self) -> usize {
+        self.index.entries.len()
+    }
+
+    /// Always false: a module has a top level.
+    pub fn is_empty(&self) -> bool {
+        self.index.entries.is_empty()
+    }
+
+    /// The module's source name.
+    pub fn source_name(&self) -> &str {
+        &self.index.source_name
+    }
+
+    /// The pre-order indices of function `i`'s children, in its child
+    /// table's order (checked at open); empty past the last function.
+    pub fn children(&self, i: u32) -> &[u32] {
+        self.index.children(i as usize)
+    }
+
+    /// Function `i`'s place in the tree, for the verifier
+    /// ([`crate::verify_function`]): its index, depth, child count and
+    /// its parent's register and upvalue counts, all from the directory.
+    pub fn place(&self, i: u32) -> Option<Place> {
+        let e = self.index.entries.get(i as usize)?;
+        let parent = match e.parent {
+            RESERVED_U32 => None,
+            p => {
+                let pe = self.index.entries.get(p as usize)?;
+                Some(ParentCounts {
+                    reg_count: pe.reg_count,
+                    upvalues: pe.upvalues,
+                })
+            }
+        };
+        Some(Place {
+            index: i,
+            depth: self.index.depth.get(i as usize).copied()?,
+            children: e.children,
+            parent,
+        })
+    }
+
+    /// Function `i`'s directory fields and upvalue descriptors, each
+    /// checked as [`parse_module`] checks it.
+    pub fn head(&self, i: u32) -> Result<FunctionHead, ParseError> {
+        let e = self.entry(i)?;
+        let (name, kind) = read_name_kind(&self.bytes, &self.index.head, e)?;
+        Ok(FunctionHead {
+            name,
+            kind,
+            requires_burn: e.requires_burn == 1,
+            arity: e.arity,
+            reg_count: e.reg_count,
+            upvalues: read_upvalues(&self.bytes, e)?,
+        })
+    }
+
+    /// Function `i`, read from its body and its line rows with every
+    /// check [`parse_module`] makes of them. Its `children` is empty: its
+    /// children are functions of their own ([`Reader::children`]).
+    pub fn function(&self, i: u32) -> Result<Function, ParseError> {
+        let e = self.entry(i)?;
+        read_function(&self.bytes, &self.index.head, e)
+    }
+
+    fn entry(&self, i: u32) -> Result<&Entry, ParseError> {
+        self.index
+            .entries
+            .get(i as usize)
+            .ok_or(ParseError::BadIndex {
+                at: "function",
+                index: i,
+                len: self.index.entries.len(),
+            })
+    }
+}
+
+/// What opening a module reads: the head, the source name, the directory
+/// with every offset and length checked, and the tree.
+#[derive(Debug)]
+struct Index {
+    head: Head,
+    source_name: String,
+    entries: Vec<Entry>,
+    /// Every function's child table, one after another.
+    kids: Vec<u32>,
+    /// Where function `i`'s children start in `kids` (one more entry than
+    /// there are functions).
+    kids_at: Vec<usize>,
+    /// Each function's depth: 0 for the top level.
+    depth: Vec<u32>,
+}
+
+impl Index {
+    fn read(bytes: &[u8]) -> Result<Index, ParseError> {
+        // Header: 4-byte magic, 2-byte version, 2-byte flags, 32-byte hash.
+        let magic = take(bytes, 0, 4, "magic")?;
+        if magic != MAGIC {
+            return Err(ParseError::BadMagic);
+        }
+        let version = u16_at(bytes, 4, "version")?;
+        if version != FORMAT_VERSION {
+            return Err(ParseError::BadVersion {
+                found: version,
+                supported: FORMAT_VERSION,
+            });
+        }
+        // No flag is defined: a module with any bit set is not this revision.
+        // With the magic, the version and the BLAKE3 over the payload, this
+        // check leaves no byte of the module unchecked.
+        let flags = u16_at(bytes, 6, "flags")?;
+        if flags != 0 {
+            return Err(ParseError::BadFlags { flags });
+        }
+        let claimed_hash = take(bytes, 8, 32, "integrity hash")?;
+        let actual_hash = blake3::hash(&bytes[HEADER_LEN..]);
+        if actual_hash.as_bytes()[..] != claimed_hash[..] {
+            return Err(ParseError::BadIntegrity);
+        }
+
+        let head = Head::read(bytes)?;
+        Pool::check(bytes, &head)?;
+        let source_name = pool_str(
+            bytes,
+            &head,
+            u32_at(bytes, 44, "source name")?,
+            u32_at(bytes, 48, "source name")?,
+            "source name",
+        )?
+        .to_owned();
+
+        let n = head.functions as usize;
+        let mut entries = Vec::with_capacity(n);
+        let mut body_at = head.bodies_at;
+        let mut lines_at = 0u64;
+        for i in 0..head.functions {
+            let e = Entry::read(bytes, i)?;
+            e.expect("body offset", u64::from(e.body_at), body_at)?;
+            let want = body_len(
+                u64::from(e.instrs),
+                u64::from(e.constants),
+                u64::from(e.handlers),
+                u64::from(e.region_rows),
+                u64::from(e.regions),
+                u64::from(e.upvalues),
+                u64::from(e.children),
+            );
+            e.expect("body length", u64::from(e.body_len), want)?;
+            body_at += want;
+            if body_at > head.pool_at {
+                return Err(ParseError::BadOffset {
+                    at: "body length",
+                    function: i,
+                    found: u64::from(e.body_len),
+                    expected: head.pool_at - u64::from(e.body_at),
+                });
+            }
+            e.expect("line rows offset", u64::from(e.lines_at), lines_at)?;
+            lines_at += u64::from(e.lines_len);
+            if lines_at > head.lines_len {
+                return Err(ParseError::BadOffset {
+                    at: "line rows length",
+                    function: i,
+                    found: u64::from(e.lines_len),
+                    expected: head.lines_len - u64::from(e.lines_at),
+                });
+            }
+            entries.push(e);
+        }
+        expect_head("pool offset", head.pool_at, body_at)?;
+        expect_head("line region length", head.lines_len, lines_at)?;
+
+        let (kids, kids_at, depth) = check_tree(bytes, &entries)?;
+        Ok(Index {
+            head,
+            source_name,
+            entries,
+            kids,
+            kids_at,
+            depth,
+        })
+    }
+
+    fn children(&self, i: usize) -> &[u32] {
+        match (self.kids_at.get(i), self.kids_at.get(i + 1)) {
+            (Some(&a), Some(&b)) => self.kids.get(a..b).unwrap_or(&[]),
+            _ => &[],
+        }
     }
 }
 
@@ -180,6 +345,7 @@ fn expect_head(at: &'static str, found: u64, expected: u64) -> Result<(), ParseE
 }
 
 /// The head: the function count and where each region lies.
+#[derive(Debug)]
 struct Head {
     functions: u32,
     bodies_at: u64,
@@ -236,45 +402,57 @@ impl Head {
     }
 }
 
-/// The string pool, checked as UTF-8 once.
-struct Pool<'a> {
-    text: &'a str,
-}
+/// The string pool, checked as UTF-8 once, when the module is opened.
+struct Pool;
 
-impl<'a> Pool<'a> {
-    fn read(bytes: &'a [u8], h: &Head) -> Result<Pool<'a>, ParseError> {
+impl Pool {
+    fn check(bytes: &[u8], h: &Head) -> Result<(), ParseError> {
         let raw = &bytes[h.pool_at as usize..(h.pool_at + h.pool_len) as usize];
         match core::str::from_utf8(raw) {
-            Ok(text) => Ok(Pool { text }),
+            Ok(_) => Ok(()),
             Err(e) => Err(ParseError::BadString {
                 at: "string pool",
                 index: e.valid_up_to() as u32,
             }),
         }
     }
+}
 
-    /// The string at `off`, `len` bytes long: inside the pool, and starting
-    /// and ending on a character.
-    fn string(&self, off: u32, len: u32, what: &'static str) -> Result<&'a str, ParseError> {
-        let end = u64::from(off) + u64::from(len);
-        if end > self.text.len() as u64 {
-            return Err(ParseError::BadIndex {
-                at: what,
-                index: off,
-                len: self.text.len(),
-            });
-        }
-        match self.text.get(off as usize..end as usize) {
-            Some(s) => Ok(s),
-            None => Err(ParseError::BadString {
-                at: what,
-                index: off,
-            }),
-        }
+/// The pool's string at `off`, `len` bytes long: inside the pool, and
+/// starting and ending on a character. The pool is UTF-8 as a whole
+/// (checked at open), so the slice is UTF-8 exactly when both of its ends
+/// fall on a character.
+fn pool_str<'a>(
+    bytes: &'a [u8],
+    h: &Head,
+    off: u32,
+    len: u32,
+    what: &'static str,
+) -> Result<&'a str, ParseError> {
+    let end = u64::from(off) + u64::from(len);
+    if end > h.pool_len {
+        return Err(ParseError::BadIndex {
+            at: what,
+            index: off,
+            len: h.pool_len as usize,
+        });
     }
+    let start = h.pool_at + u64::from(off);
+    let raw = bytes
+        .get(start as usize..(h.pool_at + end) as usize)
+        .ok_or(ParseError::BadIndex {
+            at: what,
+            index: off,
+            len: h.pool_len as usize,
+        })?;
+    core::str::from_utf8(raw).map_err(|_| ParseError::BadString {
+        at: what,
+        index: off,
+    })
 }
 
 /// One directory entry, as the file holds it.
+#[derive(Debug)]
 struct Entry {
     index: u32,
     name_at: u32,
@@ -379,8 +557,15 @@ impl Entry {
 /// fn 0 to the function before it; each function lists as its children
 /// exactly the functions that name it as their parent, in increasing
 /// order; no function is deeper than [`MAX_FUNCTION_DEPTH`].
-fn check_tree(bytes: &[u8], entries: &[Entry]) -> Result<(), ParseError> {
+/// Returns every child table, one after another, where each function's
+/// starts, and each function's depth.
+#[allow(clippy::type_complexity)]
+fn check_tree(
+    bytes: &[u8],
+    entries: &[Entry],
+) -> Result<(Vec<u32>, Vec<usize>, Vec<u32>), ParseError> {
     let parents: Vec<u32> = entries.iter().map(|e| e.parent).collect();
+    let mut depths: Vec<u32> = Vec::with_capacity(entries.len());
     // The path from fn 0 to the function before.
     let mut path: Vec<u32> = Vec::new();
     for (i, e) in entries.iter().enumerate() {
@@ -417,9 +602,13 @@ fn check_tree(bytes: &[u8], entries: &[Entry]) -> Result<(), ParseError> {
                 max: MAX_FUNCTION_DEPTH,
             });
         }
+        depths.push(depth);
     }
     let mut listed = 0u64;
+    let mut kids: Vec<u32> = Vec::with_capacity(entries.len().saturating_sub(1));
+    let mut kids_at: Vec<usize> = Vec::with_capacity(entries.len() + 1);
     for e in entries {
+        kids_at.push(kids.len());
         let at = e.body_at as usize + e.child_table_at();
         let mut prev: Option<u32> = None;
         for k in 0..e.children as usize {
@@ -444,27 +633,23 @@ fn check_tree(bytes: &[u8], entries: &[Entry]) -> Result<(), ParseError> {
                 });
             }
             prev = Some(c);
+            kids.push(c);
         }
         listed += u64::from(e.children);
     }
+    kids_at.push(kids.len());
     if listed != entries.len() as u64 - 1 {
         return Err(ParseError::BadTree {
             function: 0,
             at: "child count",
         });
     }
-    Ok(())
+    Ok((kids, kids_at, depths))
 }
 
-fn read_function(
-    bytes: &[u8],
-    head: &Head,
-    pool: &Pool<'_>,
-    e: &Entry,
-) -> Result<Function, ParseError> {
-    let name = pool
-        .string(e.name_at, e.name_len, "function name")?
-        .to_owned();
+/// A function's name, kind and `requires_burn` flag, checked.
+fn read_name_kind(bytes: &[u8], head: &Head, e: &Entry) -> Result<(String, FuncKind), ParseError> {
+    let name = pool_str(bytes, head, e.name_at, e.name_len, "function name")?.to_owned();
     let kind = FuncKind::from_tag(e.kind).ok_or(ParseError::BadTag {
         at: "function kind",
         value: u32::from(e.kind),
@@ -475,6 +660,36 @@ fn read_function(
             value: u32::from(e.requires_burn),
         });
     }
+    Ok((name, kind))
+}
+
+/// A function's upvalue descriptors, checked.
+fn read_upvalues(bytes: &[u8], e: &Entry) -> Result<Vec<UpvalDesc>, ParseError> {
+    let body = e.body_at as usize;
+    let mut upvalues = Vec::with_capacity(e.upvalues as usize);
+    for k in 0..e.upvalues as usize {
+        let at = body + e.upvalues_at() + k * UPVALUE_LEN;
+        let b = take(bytes, at, UPVALUE_LEN, "upvalue")?;
+        if b[1] != 0 {
+            return Err(ParseError::BadPadding {
+                at: "upvalue padding",
+                offset: at + 1,
+            });
+        }
+        let kind = UpvalKind::from_tag(b[0]).ok_or(ParseError::BadTag {
+            at: "upvalue kind",
+            value: u32::from(b[0]),
+        })?;
+        upvalues.push(UpvalDesc {
+            kind,
+            index: u16::from_le_bytes([b[2], b[3]]),
+        });
+    }
+    Ok(upvalues)
+}
+
+fn read_function(bytes: &[u8], head: &Head, e: &Entry) -> Result<Function, ParseError> {
+    let (name, kind) = read_name_kind(bytes, head, e)?;
     let body = e.body_at as usize;
 
     let mut instrs = Vec::with_capacity(e.instrs as usize);
@@ -498,8 +713,7 @@ fn read_function(
             2 => Constant::Int(v as i64),
             3 => Constant::Float(f64::from_bits(v)),
             4 => Constant::Str(
-                pool.string(v as u32, (v >> 32) as u32, "string constant")?
-                    .to_owned(),
+                pool_str(bytes, head, v as u32, (v >> 32) as u32, "string constant")?.to_owned(),
             ),
             _ => {
                 return Err(ParseError::BadTag {
@@ -559,25 +773,7 @@ fn read_function(
         regions.push(BurnRegion { class, label });
     }
 
-    let mut upvalues = Vec::with_capacity(e.upvalues as usize);
-    for k in 0..e.upvalues as usize {
-        let at = body + e.upvalues_at() + k * UPVALUE_LEN;
-        let b = take(bytes, at, UPVALUE_LEN, "upvalue")?;
-        if b[1] != 0 {
-            return Err(ParseError::BadPadding {
-                at: "upvalue padding",
-                offset: at + 1,
-            });
-        }
-        let kind = UpvalKind::from_tag(b[0]).ok_or(ParseError::BadTag {
-            at: "upvalue kind",
-            value: u32::from(b[0]),
-        })?;
-        upvalues.push(UpvalDesc {
-            kind,
-            index: u16::from_le_bytes([b[2], b[3]]),
-        });
-    }
+    let upvalues = read_upvalues(bytes, e)?;
 
     let pad_at = body + e.padding_at();
     let pad_end = body + e.body_len as usize;

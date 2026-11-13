@@ -1408,6 +1408,89 @@ fn a_stage_b_start_checks_its_bytecode_by_the_modules_own_hash() {
     assert_eq!(s.runs(), before, "CIG_VALIDATE=1: it began a run");
 }
 
+/// A script that burns, says "before", then calls `bad()`, a function whose
+/// module form does not verify.
+const LAZY_SCRIPT: &str =
+    "burn {\n  fs.write_text(\"e.txt\", \"x\")\n}\nexhale \"before\"\nbad()\nexhale \"never\"\n";
+
+/// `bad`: says "inside", then moves a register past its frame (the
+/// verifier's register-out-of-range at fn1+2). With `call`, the top level
+/// calls it; without, it only makes the closure.
+fn lazy_module(call: bool) -> Module {
+    let src = LAZY_SCRIPT;
+    let mut c = Asm::default();
+    c.exhale(0, "inside").op(Op::MOV, 9, 0, 0).ret_null(0);
+    let bad = c.function("bad", FuncKind::Pull, 2);
+    let mut a = Asm::default();
+    a.children.push(bad);
+    a.at(src, "burn {").burn_enter();
+    a.loadk(2, "e.txt").loadk(3, "x");
+    a.at(src, "fs.write_text(\"e.txt\", \"x\")")
+        .burn_op(1, "fs.write_text", 2)
+        .op(Op::BURN_LEAVE, 0, 0, 0);
+    a.at(src, "exhale \"before\"").exhale(1, "before");
+    a.at(src, "bad()").i(Instr::abx(Op::CLOSURE, 1, 0));
+    if call {
+        a.op(Op::CALL, 1, 0, 0);
+    }
+    a.at(src, "exhale \"never\"").exhale(2, "never");
+    a.ret_null(0);
+    a.module("e.cig", 4)
+}
+
+#[test]
+fn a_function_is_verified_when_it_is_first_entered() {
+    let s = Sandbox::new();
+    s.write("e.cig", LAZY_SCRIPT);
+    let rule = "the program's bytecode does not verify: register-out-of-range at fn1+2";
+    // The eager verifier refuses both modules.
+    for call in [false, true] {
+        let e = bc::verify_module(&lazy_module(call)).expect_err("does not verify");
+        assert!(rule.ends_with(&e.to_string()), "{e}");
+    }
+
+    // Never entered: the run does not verify it, and ends normally.
+    let exe = s.compile_module("unentered", "e.cig", &lazy_module(false));
+    let (out, _) = s.prog_run(&exe, &[]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert_eq!(text(&out.stdout), "before\nnever\n");
+    assert_eq!(s.read("e.txt").as_deref(), Some("x"));
+    fs::remove_file(s.path().join("e.txt")).unwrap();
+
+    // ... and CIG_VALIDATE=1 verifies every function before anything runs.
+    let before = s.runs();
+    let out = output(s.command(&exe).env(program::VALIDATE_ENV, "1")).unwrap();
+    let err = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(3), "{err}");
+    assert!(err.contains("E1050") && err.contains(rule), "{err}");
+    assert_eq!(text(&out.stdout), "");
+    assert!(!s.exists("e.txt"));
+    assert_eq!(s.runs(), before, "CIG_VALIDATE=1: it began a run");
+
+    // Entered: E1050 at the call, as an error of the run. None of `bad`'s
+    // instructions ran ("inside" is never said), and the burn before the
+    // call rolled back.
+    let exe = s.compile_module("entered", "e.cig", &lazy_module(true));
+    let (out, id) = s.prog_run(&exe, &[]);
+    let err = text(&out.stderr);
+    assert!(!out.status.success(), "{err}");
+    assert!(err.contains("E1050") && err.contains(rule), "{err}");
+    assert!(err.contains("--> e.cig:5:1"), "the call's position: {err}");
+    assert_eq!(text(&out.stdout), "before\n");
+    assert!(!s.exists("e.txt"), "the burn did not roll back");
+    let (run, _) = s.run_json(&id);
+    assert_eq!(run["status"], "rolled_back", "{run}");
+
+    // The same module under CIG_VALIDATE=1: refused at the start.
+    let before = s.runs();
+    let out = output(s.command(&exe).env(program::VALIDATE_ENV, "1")).unwrap();
+    let err = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(3), "{err}");
+    assert!(err.contains("E1050") && err.contains(rule), "{err}");
+    assert_eq!(text(&out.stdout), "");
+    assert_eq!(s.runs(), before, "CIG_VALIDATE=1: it began a run");
+}
+
 #[test]
 fn interp_fallback_gives_the_same_bytes() {
     let s = Sandbox::new();

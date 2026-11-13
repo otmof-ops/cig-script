@@ -359,22 +359,37 @@ pub fn run_program(
 
 /// A stage `b` program's module: section `bytecode` read (not hashed with
 /// the table's sha256: cig-compile's decision 0004, section 5), then
-/// `parse_module` (its
-/// magic, version, flags and the BLAKE3 over every byte after its header),
-/// `verify_module` and `vm::load` (builtins, prelude names, burn-op kinds).
-/// The head's sha256 covers the table entry that says where the body lies;
-/// the module's header and its BLAKE3 cover every byte of the body. The
-/// error names the rule, and `fn<i>+<pc>` where the verifier or the loader
-/// gives one, as `docs/BYTECODE.md` words it.
+/// opened by [`crate::vm::open`]: its magic, version, flags and the BLAKE3
+/// over every byte after its header, its head, string pool, directory and
+/// tree, every function's upvalues against its parent's counts, and the
+/// top level read, verified and loaded. Every other function is read,
+/// verified and loaded the first time the run enters it, before its first
+/// instruction runs. With `CIG_VALIDATE=1` the whole module is parsed and
+/// every function verified and loaded here instead (`parse_module`,
+/// `verify_module`, `vm::load`), before anything runs. The head's sha256
+/// covers the table entry that says where the body lies; the module's
+/// header and its BLAKE3 cover every byte of the body. The error names the
+/// rule, and `fn<i>+<pc>` where the verifier or the loader gives one, as
+/// `docs/BYTECODE.md` words it.
+///
+/// The program is never dropped: it lives until the process ends, which
+/// is right after the run, so its tables are not taken apart on the way
+/// out.
 fn load_bytecode(
     program: &crate::program::Opened,
 ) -> Result<std::rc::Rc<crate::vm::Program>, String> {
     let body = program.bytecode()?;
-    let module = cig_bytecode::parse_module(&body)
-        .map_err(|e| format!("the program's bytecode does not read: {e}"))?;
-    let verified =
-        cig_bytecode::verify_module(&module).map_err(|e| crate::vm::refusal(&e).message)?;
-    crate::vm::load(verified).map_err(|d| d.message)
+    let loaded = if crate::program::validate_by_env() {
+        let module = cig_bytecode::parse_module(&body)
+            .map_err(|e| format!("the program's bytecode does not read: {e}"))?;
+        let verified =
+            cig_bytecode::verify_module(&module).map_err(|e| crate::vm::refusal(&e).message)?;
+        crate::vm::load(verified).map_err(|d| d.message)?
+    } else {
+        crate::vm::open(body).map_err(|d| d.message)?
+    };
+    std::mem::forget(std::rc::Rc::clone(&loaded));
+    Ok(loaded)
 }
 
 fn run_source(
