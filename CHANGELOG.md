@@ -5,6 +5,25 @@ project follows semantic versioning.
 
 ## Unreleased
 
+- **The VM's own instruction costs less on loops over numbers and indexes
+  (cig-script#230 step 7, #235; `docs/BYTECODE.md`).** The fast loop takes
+  the frame's registers once instead of checking and offsetting every
+  register number at every read and write; each arithmetic and comparison
+  instruction handles its numbers where it is matched instead of going
+  through two more dispatches, and `/` of two ints and arithmetic mixing
+  an int and a float no longer leave the fast loop; and overwriting a
+  register that held a number, a bool or null no longer calls the code
+  that drops a value. A turn of the plain counting loop takes 332 machine
+  instructions (was 392). On cig's `bench/compute` the VM executes 37%
+  fewer instructions on `spectral`, 27% fewer on `loop`, 26% fewer on
+  `mandel`, 18% fewer on `deltablue`, 10% fewer on `fannkuch`, 9% fewer on
+  `nbody`, 8% fewer on `dispatch`, 6% fewer on `richards` and 5% fewer on
+  `sieve`, and none more. Values, errors, their positions and every step
+  budget are unchanged. A `bench-stats` build's opcode table
+  (`CIG_VM_STATS=1`) now counts every instruction once: a call, a return
+  and a tail call between compiled functions were not counted at all
+  since 1.23.0.
+
 ## 1.23.0 — 2026-11-14
 
 Calls at a fraction of their cost. A method is found without a scan of
