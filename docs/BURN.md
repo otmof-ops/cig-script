@@ -107,6 +107,51 @@ code pay nothing.
 Directory deletes snapshot the whole tree, so deleting a large directory costs
 a copy of it. Moves cost nothing: rollback moves the file back.
 
+**When a run's record is durable.** Every real run writes its record
+(`run.json`) and its line in the run index when it starts, so `cig runs`
+lists it while it runs, and writes them again when it ends. They are flushed
+to the disk at the moment the run first has something to undo: its first
+burn flushes the record, the run's folder, the run index and the folder
+again, in that order, before it takes the op's before-state, before the
+journal's first line and before the effect. A hop that says it only reads
+(`proc.run(..., {reads: true})`) is not journaled before it runs (the pack
+is watched around it, and what it changed there is journaled after), so it
+makes the same flush before the watch begins and before the child starts,
+with the run's `hops/` folder made first so the flush carries it. From then on the run is as
+durable as every run used to be from its start, and its end flushes the
+finished record as before. A run that burns nothing (a dry run never had a
+record) flushes nothing at all: no `fsync` from start to end. What a power
+cut or an operating-system crash can do to such a run, and only to such a
+run (a killed cig is not one: the kernel keeps what it was given):
+
+- the run is missing from `cig runs` (its folder, or the record in it, never
+  reached the disk), and an id the run handed out names nothing;
+- `cig runs` lists it `interrupted` with no burns (the record written at its
+  start is the one on the disk), and `cig doctor` has nothing to do for it;
+- its `run.json` is there but does not parse (empty, cut short): `cig runs`
+  lists it `interrupted`, "burned nothing", not `damaged`, because a run's
+  first burn, and a `reads: true` hop, flush the record before the journal's
+  first line and before the hop starts, so a record that is not whole beside
+  a journal with no line and no `hops/` folder belongs to a run that changed
+  nothing. Beside a journal with lines, or a `hops/` folder, it is still
+  `damaged`, and so is a record that cannot be read for another reason
+  (permissions);
+- its record is there and its `journal.jsonl` and `hops/` are not: `cig
+  unburn` says there is nothing to unburn;
+- the run index ends mid-line: the next listing rebuilds it from the run
+  folders and says so once.
+
+A run that burned, or started a `reads: true` hop, is never in any of these
+states: its record and its folder are durable before its first effect, with
+the journal's first line (a burn) or the `hops/` folder (such a hop) in them.
+A power cut during a `reads: true` hop leaves what it left before: the
+record says `running`, `cig runs` lists it `interrupted`, and what the hop
+changed before the watch could journal it is in no journal, as it never
+was. `cig doctor <id>` then reports it with `E706`, not as a run that
+stopped before it burned anything. What the trial reads to find
+a script's last good version is the run records, so a run that burned nothing
+and was lost to a power cut is not counted there either.
+
 ### Durability, by platform
 
 The journal is write-ahead: the snapshot and the entry are flushed before the
@@ -240,7 +285,10 @@ run that is still running.
 status `running` and no totals. `cig runs` recognises it (the pid is gone,
 the journal is intact), shows it as `interrupted` with its burn count taken
 from the journal, and `cig doctor` reports it with `E706` and, under `--fix`,
-offers `cig unburn <id>`.
+offers `cig unburn <id>`. A run whose process stopped before its first burn
+is `interrupted` with no burns: there is nothing to put back, `cig doctor`
+does not report it, and `cig doctor <id>` says it stopped before it burned
+anything.
 
 
 **A file another program holds open (Windows).** A restore stages the
@@ -646,7 +694,12 @@ choice) and the status each last had, so a missing run is explained.
 **run index** (one JSONL file beside the home's run folders), kept in
 step as runs start, finish, are pruned, forgotten or unburned, instead
 of opening every run folder. Writers serialise on `runs-index.lock`, so
-two concurrent runs never interleave; a hand-edited or hand-deleted
+two concurrent runs never interleave; a run's lines are flushed with its
+record (at its first burn and at its end), and a run that burns nothing
+leaves its lines to the system to write back, so another run's flush can
+carry such a line to the disk without its record: the default table
+`stat`s each `run.json` it shows (one call a row) and reads the folders
+instead when one no longer matches its line; a hand-edited or hand-deleted
 `run.json` is caught on a cheap stat; and a torn tail from a crashed
 append is a cache miss, so the next listing rebuilds the view from the
 folders and says so once. The index is also kept **near its live view**:

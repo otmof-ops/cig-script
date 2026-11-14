@@ -995,10 +995,24 @@ fn touches_counts_in(scans: &[Scan], touches: &[String]) -> Vec<(String, usize)>
 impl Kernel {
     /// A kernel that journals into `run_dir`, or in memory only when `None`.
     pub fn new(mode: Mode, run_dir: Option<PathBuf>) -> Result<Self, Diagnostic> {
-        Ok(Self {
+        let journal = Journal::open(run_dir)
+            .map_err(|e| burn_error(format!("could not open the run journal: {e}")))?;
+        Ok(Self::with_journal(mode, journal))
+    }
+
+    /// The kernel of a run that has just begun: its record was saved
+    /// without a flush (`RunRecord::save_unsynced`), and the first burn
+    /// makes it durable before anything else (`Journal::open_new_run`).
+    pub fn new_run(mode: Mode, run_dir: PathBuf) -> Result<Self, Diagnostic> {
+        let journal = Journal::open_new_run(run_dir)
+            .map_err(|e| burn_error(format!("could not open the run journal: {e}")))?;
+        Ok(Self::with_journal(mode, journal))
+    }
+
+    fn with_journal(mode: Mode, journal: Journal) -> Self {
+        Self {
             mode,
-            journal: Journal::open(run_dir)
-                .map_err(|e| burn_error(format!("could not open the run journal: {e}")))?,
+            journal,
             planned: Vec::new(),
             trips: Vec::new(),
             seq: 0,
@@ -1017,7 +1031,7 @@ impl Kernel {
             late_warnings: Vec::new(),
             late_claims: Vec::new(),
             git_pins: std::collections::BTreeMap::new(),
-        })
+        }
     }
 
     /// Declare the pack: the roots every native write must stay inside. A
@@ -2453,6 +2467,42 @@ impl Kernel {
         let hops = dir.join("hops");
         std::fs::create_dir_all(&hops).ok()?;
         Some(hops.join(format!("{}.jsonl", self.seq)))
+    }
+
+    /// Before a hop that is not journaled before it runs (`reads: true`):
+    /// the pack is watched around it and what it changed is journaled after
+    /// it, so the run's record has to be durable before it starts, as a
+    /// first burn makes it. The hop's folder (`hops/`) is made first, so the
+    /// flush carries its name: a run folder that holds `hops/` had a hop
+    /// start, and is never read as one that changed nothing. A failure
+    /// refuses the hop (E702), before it runs.
+    pub fn before_unjournaled_hop(&mut self) -> Result<(), Diagnostic> {
+        if self.mode == Mode::DryRun {
+            return Ok(());
+        }
+        let refused = |e: std::io::Error| {
+            burn_error(format!("could not make the run's record durable before the hop: {e}"))
+                .code("E702")
+                .with_hint("free space or fix permissions under ~/.cigscript (CIGSCRIPT_HOME), then run again; nothing was changed")
+        };
+        // `hops/` is made here only when it was not there, and a refused
+        // flush takes it away again: a run whose hop never started must not
+        // be read, after a power cut, as one whose hop did.
+        let made = match self.journal.run_dir() {
+            Some(dir) => {
+                let hops = dir.join("hops");
+                let made = !hops.exists();
+                std::fs::create_dir_all(&hops).map_err(refused)?;
+                made.then_some(hops)
+            }
+            None => None,
+        };
+        self.journal.make_durable().map_err(|e| {
+            if let Some(hops) = &made {
+                let _ = std::fs::remove_dir(hops);
+            }
+            refused(e)
+        })
     }
 
     /// The ghost filesystem, when this is a dry-run.

@@ -611,6 +611,13 @@ pub struct Journal {
     /// for, with the first entry, so a run that burns nothing never touches
     /// the keyring (#129).
     pending: bool,
+    /// The run's record, its folder and its line in the run index are
+    /// written but not yet flushed to the disk (`open_new_run`). They are
+    /// flushed before anything else the first burn does, in the order the
+    /// start of a run used to flush them, so a run that burns nothing
+    /// makes nothing durable and a run that burns is as durable as before
+    /// from its first burn on.
+    undurable: bool,
 }
 
 impl Drop for Journal {
@@ -649,6 +656,19 @@ impl RollbackReport {
 
 impl Journal {
     pub fn open(run_dir: Option<PathBuf>) -> Result<Self, io::Error> {
+        Self::open_inner(run_dir, false)
+    }
+
+    /// `open` for the journal of a run that has just begun: its record was
+    /// saved without a flush (`RunRecord::save_unsynced`), and its folder is
+    /// not flushed here either. Both are flushed by the first burn
+    /// (`make_durable`), before its before-state is taken and before its
+    /// journal line is written.
+    pub fn open_new_run(run_dir: PathBuf) -> Result<Self, io::Error> {
+        Self::open_inner(Some(run_dir), true)
+    }
+
+    fn open_inner(run_dir: Option<PathBuf>, new_run: bool) -> Result<Self, io::Error> {
         let mut head = String::new();
         let mut chain = Chain::default();
         let mut format = JOURNAL_FORMAT;
@@ -676,11 +696,18 @@ impl Journal {
                     format = loaded.format;
                     mac_key = loaded.mac_key.take();
                 }
-                sync_dir(dir)?;
+                if !new_run {
+                    sync_dir(dir)?;
+                }
                 Some(f)
             }
             None => None,
         };
+        // Every new run's record is flushed by its first burn, whatever its
+        // folder held before (a folder reused by an id that came round
+        // again keeps its journal lines, and its fresh record is still
+        // unflushed).
+        let undurable = new_run && run_dir.is_some();
         Ok(Self {
             run_dir,
             file,
@@ -691,7 +718,40 @@ impl Journal {
             chain,
             mac_key,
             pending,
+            undurable,
         })
+    }
+
+    /// The run's record and folder are flushed to the disk: always, except
+    /// for a run opened with `open_new_run` that has not burned yet.
+    pub fn record_durable(&self) -> bool {
+        !self.undurable
+    }
+
+    /// What the start of a run used to flush, flushed now, at the first
+    /// burn, in the same order: the record (`run.json`), the run's
+    /// folder (the record's name in it), the run index, and the folder
+    /// again (the journal's and the snapshots' names in it). Nothing of the
+    /// burn has happened yet: its before-state is taken after this, and its
+    /// effect after its journal line is durable. A failure here refuses the
+    /// burn (E702), as a journal that cannot be written does.
+    pub(crate) fn make_durable(&mut self) -> io::Result<()> {
+        if !self.undurable {
+            return Ok(());
+        }
+        let Some(dir) = self.run_dir.clone() else {
+            self.undurable = false;
+            return Ok(());
+        };
+        // A record is never made durable ahead of the snapshots it stands
+        // for (`RunRecord::save`); none can be pending before a first burn.
+        super::tin::sync_deferred()?;
+        sync_file(&dir.join("run.json"))?;
+        sync_dir(&dir)?;
+        super::runs_index::sync_index()?;
+        sync_dir(&dir)?;
+        self.undurable = false;
+        Ok(())
     }
 
     /// The first line: it names the format and seeds the chain. It has no
@@ -916,6 +976,7 @@ impl Journal {
             chain,
             mac_key,
             pending: empty,
+            undurable: false,
         })
     }
 
@@ -1008,6 +1069,7 @@ impl Journal {
     }
 
     fn append_line_inner(&mut self, mut v: serde_json::Value, sync: bool) -> io::Result<()> {
+        self.make_durable()?;
         // A finished run's journal may have been compressed under an open
         // handle: lines go to the plain file, made again from the stream.
         if let Some(dir) = &self.run_dir {
@@ -1120,6 +1182,9 @@ impl Journal {
         compensation: Option<Compensation>,
         compensated: bool,
     ) -> Result<(), io::Error> {
+        // The first burn makes the run's record durable before it takes
+        // anything: the before-state, the line, the effect all follow it.
+        self.make_durable()?;
         let before = self.capture_before(seq, &op)?;
         self.record_with_before(seq, op, before, compensation, compensated)
     }
@@ -1134,6 +1199,7 @@ impl Journal {
         compensation: Option<Compensation>,
         compensated: bool,
     ) -> Result<(), io::Error> {
+        self.make_durable()?;
         // The snapshots kept since the last flush are flushed together: when
         // the group is due, and always before a process runs. The line below
         // is still synced on its own, as every line is.
@@ -3290,6 +3356,153 @@ mod tests {
         }
     }
     use std::collections::BTreeMap;
+
+    #[test]
+    fn a_new_runs_record_is_made_durable_by_its_first_burn_only() {
+        let _home = scratch_home();
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let run_dir = root.join("run");
+        fs::create_dir_all(&run_dir).unwrap();
+        fs::write(run_dir.join("run.json"), "{}").unwrap();
+        let f = root.join("f.txt");
+        let mut j = Journal::open_new_run(run_dir.clone()).unwrap();
+        assert!(!j.record_durable(), "nothing is flushed before a burn");
+        assert!(j.wrote_nothing());
+        j.record(
+            1,
+            Op::Write {
+                path: f.clone(),
+                sensitive: false,
+            },
+        )
+        .unwrap();
+        assert!(j.record_durable(), "the first burn flushes the record");
+        assert!(!j.wrote_nothing());
+        // A journal opened the old way, or loaded, is durable from the start.
+        assert!(Journal::open(Some(root.join("other")))
+            .unwrap()
+            .record_durable());
+        assert!(Journal::load(&run_dir).unwrap().record_durable());
+    }
+
+    #[test]
+    fn a_new_run_whose_record_cannot_be_flushed_refuses_its_first_burn() {
+        let _home = scratch_home();
+        let tmp = tempfile::tempdir().unwrap();
+        let run_dir = tmp.path().join("run");
+        fs::create_dir_all(&run_dir).unwrap();
+        // No run.json: the flush the first burn owes cannot be made, and
+        // the burn is refused before its line, and so before its effect.
+        let f = tmp.path().join("g.txt");
+        let mut j = Journal::open_new_run(run_dir.clone()).unwrap();
+        assert!(j
+            .record(
+                1,
+                Op::Write {
+                    path: f.clone(),
+                    sensitive: false,
+                },
+            )
+            .is_err());
+        assert!(j.is_empty());
+        assert!(!j.record_durable());
+        assert_eq!(fs::read(run_dir.join("journal.jsonl")).unwrap().len(), 0);
+    }
+
+    /// A hop that says it only reads (`reads: true`) is not journaled
+    /// before it runs: the pack is watched around it and what it changed is
+    /// journaled after. The run's record is made durable before the watch
+    /// and the child, with the hop's folder in the flush, so a power cut
+    /// mid-hop never leaves the run reading as one that burned nothing.
+    #[test]
+    fn a_reads_hop_makes_the_record_durable_before_it_runs() {
+        use super::super::{Kernel, Mode};
+        let _home = scratch_home();
+        let tmp = tempfile::tempdir().unwrap();
+        let pack = tmp.path().join("pack");
+        fs::create_dir_all(&pack).unwrap();
+        let pack = pack.canonicalize().unwrap();
+        let run_dir = tmp.path().join("20260101T000000-abcdef");
+        fs::create_dir_all(&run_dir).unwrap();
+        fs::write(run_dir.join("run.json"), "{}").unwrap();
+        let mut k = Kernel::new_run(Mode::Run, run_dir.clone()).unwrap();
+        k.set_pack(vec![pack.clone()]).unwrap();
+        assert!(!k.journal().record_durable());
+        let mark = k.mark();
+        // What `proc.run(..., {reads: true})` does before the watch.
+        k.before_unjournaled_hop().unwrap();
+        assert!(k.journal().record_durable(), "durable before the hop runs");
+        assert!(
+            run_dir.join("hops").is_dir(),
+            "the hop's folder is flushed with it"
+        );
+        let watch = k.pack_watch_begin(None, &[], &[], &[]).expect("watched");
+        fs::write(pack.join("made-by-hop.txt"), "x").unwrap();
+        // A power cut now, the record torn by hand: not "burned nothing".
+        let e = io::Error::new(io::ErrorKind::InvalidData, "EOF while parsing");
+        let shown =
+            super::super::runs::RunRecord::unreadable("20260101T000000-abcdef", &run_dir, &e);
+        assert_eq!(shown.status, "damaged");
+        let writes = k.pack_watch_end(watch, Vec::new(), None, mark);
+        assert_eq!(writes.created, vec![pack.join("made-by-hop.txt")]);
+        assert_eq!(k.journal().len(), 1);
+    }
+
+    /// A refused flush before a `reads: true` hop leaves nothing of the hop
+    /// behind: the hop never ran, and its folder would read as one whose
+    /// hop started.
+    #[test]
+    fn a_refused_flush_before_a_reads_hop_leaves_no_hops_folder() {
+        use super::super::{Kernel, Mode};
+        let _home = scratch_home();
+        let tmp = tempfile::tempdir().unwrap();
+        let run_dir = tmp.path().join("20260101T000000-abcdef");
+        fs::create_dir_all(&run_dir).unwrap();
+        // No run.json: the flush the hop owes cannot be made.
+        let mut k = Kernel::new_run(Mode::Run, run_dir.clone()).unwrap();
+        assert!(k.before_unjournaled_hop().is_err());
+        assert!(!run_dir.join("hops").exists());
+        assert!(super::super::runs::changed_nothing_on_disk(&run_dir));
+        // A folder that was there before the call is not taken away.
+        fs::create_dir_all(run_dir.join("hops")).unwrap();
+        assert!(k.before_unjournaled_hop().is_err());
+        assert!(run_dir.join("hops").is_dir());
+    }
+
+    /// A run id that names a folder whose journal already has lines (an id
+    /// that came round again) is still a new run: its record, saved
+    /// without a flush, is flushed by its first burn.
+    #[test]
+    fn a_new_run_over_a_folder_with_journal_lines_is_made_durable_by_its_first_burn() {
+        let _home = scratch_home();
+        let tmp = tempfile::tempdir().unwrap();
+        let run_dir = tmp.path().join("run");
+        fs::create_dir_all(&run_dir).unwrap();
+        fs::write(run_dir.join("run.json"), "{}").unwrap();
+        {
+            let mut j = Journal::open(Some(run_dir.clone())).unwrap();
+            j.record(
+                1,
+                Op::Write {
+                    path: tmp.path().join("a.txt"),
+                    sensitive: false,
+                },
+            )
+            .unwrap();
+        }
+        let mut j = Journal::open_new_run(run_dir.clone()).unwrap();
+        assert!(!j.record_durable(), "the fresh record is not flushed yet");
+        j.record(
+            2,
+            Op::Write {
+                path: tmp.path().join("b.txt"),
+                sensitive: false,
+            },
+        )
+        .unwrap();
+        assert!(j.record_durable());
+    }
 
     #[test]
     fn restored_markers_are_written_newest_first() {

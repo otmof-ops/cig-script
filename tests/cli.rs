@@ -20172,3 +20172,443 @@ fn cig_run_of_a_script_with_the_option_is_unchanged() {
     assert_eq!(outs[0], outs[1]);
     assert_eq!(outs[0][1].1.trim(), "[\"--version\", \"x\"]");
 }
+
+// ---- When a run's record is made durable (a run that burns nothing makes
+// nothing durable; a run that burns flushes its record before its first
+// burn, in the order the start flushed it before).
+
+/// Is strace here to count the flushes with?
+#[cfg(target_os = "linux")]
+fn have_strace() -> bool {
+    Command::new("strace")
+        .arg("-V")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// `cig run <script>` under `strace -f -y`, tracing `calls`; the trace's
+/// lines, or None (with the reason said) where strace is not installed.
+/// `CIG_REQUIRE_STRACE=1` turns the skip into a failure.
+#[cfg(target_os = "linux")]
+fn strace_run(sb: &Sandbox, script: &str, calls: &str) -> Option<Vec<String>> {
+    if !have_strace() {
+        assert!(
+            std::env::var_os("CIG_REQUIRE_STRACE").is_none(),
+            "strace is not installed"
+        );
+        eprintln!("skipped: strace is not installed, so the flushes cannot be counted");
+        return None;
+    }
+    let trace = sb.path().join("strace.txt");
+    let out = Command::new("strace")
+        .args(["-f", "-y", "-e"])
+        .arg(format!("trace={calls}"))
+        .arg("-o")
+        .arg(&trace)
+        .arg(cig_bin())
+        .args(["run", script])
+        .current_dir(sb.path())
+        .env("CIGSCRIPT_HOME", sb.home())
+        .env("HOME", sb.path())
+        .env("NO_COLOR", "1")
+        .env("CIG_SEAL_KEY", "file")
+        .env("CIG_JOURNAL_ZST", "off")
+        .env("CIG_BUDGET_SYNC", "1")
+        .env("CIG_INTERNAL_TRACKER_DIR", sb.path().join("tracker"))
+        .env("CIG_UPDATE_MANIFEST", sb.path().join("no-releases.json"))
+        // The process stays traceable once the tin's key is loaded, so
+        // strace can name the files it flushes.
+        .env("CIG_ALLOW_DEBUG", "1")
+        .env_remove("CI")
+        .output()
+        .expect("run strace");
+    assert!(
+        out.status.success(),
+        "strace cig run {script}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = fs::read_to_string(&trace).expect("strace output");
+    Some(text.lines().map(str::to_string).collect())
+}
+
+/// The file a traced `fsync(fd</path>)` or `fdatasync` flushed, as a name
+/// relative to the sandbox's home: `runs/<id>/run.json` reads `run.json`,
+/// the run's folder reads `<run>`, anything else under the home its path.
+#[cfg(target_os = "linux")]
+fn flushed(line: &str, home: &Path, run: &Path) -> Option<String> {
+    let at = line.find("fsync(").or_else(|| line.find("fdatasync("))?;
+    let rest = &line[at..];
+    let open = rest.find('<')?;
+    let close = rest[open..].find('>')? + open;
+    let path = PathBuf::from(&rest[open + 1..close]);
+    if path == run {
+        return Some("<run>".to_string());
+    }
+    if let Ok(r) = path.strip_prefix(run) {
+        return Some(r.to_string_lossy().to_string());
+    }
+    Some(
+        path.strip_prefix(home)
+            .map(|r| r.to_string_lossy().to_string())
+            .unwrap_or_else(|_| path.to_string_lossy().to_string()),
+    )
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_run_that_burns_nothing_makes_no_flush_and_is_still_listed() {
+    let sb = Sandbox::new();
+    sb.write("hello.cig", "exhale \"hello\"\n");
+    // The first run makes the home; the second is the one measured.
+    sb.run_ok(&["run", "hello.cig"]);
+    let Some(lines) = strace_run(
+        &sb,
+        "hello.cig",
+        "fsync,fdatasync,sync_file_range,syncfs,sync",
+    ) else {
+        return;
+    };
+    let flushes: Vec<&String> = lines
+        .iter()
+        .filter(|l| {
+            [
+                "fsync(",
+                "fdatasync(",
+                "sync_file_range(",
+                "syncfs(",
+                "sync(",
+            ]
+            .iter()
+            .any(|c| l.contains(c))
+        })
+        .collect();
+    assert!(
+        flushes.is_empty(),
+        "a run that burns nothing flushed:\n{}",
+        lines.join("\n")
+    );
+    let runs = sb.runs();
+    assert_eq!(runs.len(), 2, "{runs:?}");
+    assert_eq!(runs[0]["status"], "ok", "{runs:?}");
+    assert_eq!(runs[0]["burns"], 0, "{runs:?}");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_run_that_burns_flushes_its_record_before_its_first_burn_in_the_old_order() {
+    let sb = Sandbox::new();
+    // A run that burned before: the home, the tin's key and the ledger
+    // are there, as on any machine after its first burn.
+    sb.write(
+        "first.cig",
+        "burn {\n  fs.write_text(\"first.txt\", \"1\\n\")\n}\n",
+    );
+    sb.run_ok(&["run", "first.cig"]);
+    sb.write(
+        "one.cig",
+        "burn {\n  fs.write_text(\"out.txt\", \"one\\n\")\n}\n",
+    );
+    // `open` beside `openat`: a musl build opens a file with the older call
+    // where there is one (`?`: strace leaves it out where there is not).
+    let Some(lines) = strace_run(
+        &sb,
+        "one.cig",
+        "fsync,fdatasync,?open,openat,rename,renameat2",
+    ) else {
+        return;
+    };
+    let runs = sb.runs();
+    let id = runs[0]["id"].as_str().unwrap().to_string();
+    assert_eq!(runs[0]["burns"], 1, "{runs:?}");
+    let home = sb.home().canonicalize().unwrap();
+    let run = home.join("runs").join(&id);
+    // The burn's effect: the file opened to be written.
+    let effect = lines
+        .iter()
+        .position(|l| {
+            (l.contains("openat(") || l.contains(" open("))
+                && l.contains("out.txt\"")
+                && l.contains("O_CREAT")
+        })
+        .unwrap_or_else(|| panic!("the burn's write was not traced:\n{}", lines.join("\n")));
+    let before: Vec<String> = lines[..effect]
+        .iter()
+        .filter_map(|l| flushed(l, &home, &run))
+        .collect();
+    // What the start used to flush (the record, the run's folder,
+    // the index, the folder again), then the journal's first line and the
+    // folder, then the op's own line: all of it before the effect. The
+    // record is flushed by its name now; the start flushed it as
+    // `run.json.tmp` before the rename, the same inode and bytes.
+    assert_eq!(
+        before,
+        [
+            "run.json",
+            "<run>",
+            "runs-index.jsonl",
+            "<run>",
+            "journal.jsonl",
+            "<run>",
+            "journal.jsonl"
+        ],
+        "the flushes before the burn's effect:\n{}",
+        lines.join("\n")
+    );
+    // Nothing of the journal is written before the record is durable: the
+    // journal's first line comes after the record's flush.
+    let after: Vec<String> = lines[effect..]
+        .iter()
+        .filter_map(|l| flushed(l, &home, &run))
+        .collect();
+    // The end of a run that burned is as durable as it was: the finished
+    // record, its name, its index line, in that order, after the ledger.
+    let tail: Vec<&str> = after.iter().map(String::as_str).collect();
+    let at = tail
+        .iter()
+        .position(|f| *f == "run.json.tmp")
+        .unwrap_or_else(|| panic!("the finished record was not flushed: {tail:?}"));
+    assert_eq!(
+        &tail[at..at + 3],
+        ["run.json.tmp", "<run>", "runs-index.jsonl"],
+        "{tail:?}"
+    );
+}
+
+/// A run that burned nothing, its id, and its folder.
+fn quiet_run(sb: &Sandbox) -> (String, PathBuf) {
+    sb.write("hello.cig", "exhale \"hello\"\n");
+    sb.run_ok(&["run", "hello.cig"]);
+    let id = sb.runs()[0]["id"].as_str().unwrap().to_string();
+    let dir = sb.home().join("runs").join(&id);
+    (id, dir)
+}
+
+#[test]
+fn a_quiet_run_whose_record_a_power_cut_tore_is_interrupted_not_damaged() {
+    for torn in ["", "{\"id\": \"2026", "\0\0\0\0"] {
+        let sb = Sandbox::new();
+        let (id, dir) = quiet_run(&sb);
+        fs::write(dir.join("run.json"), torn).unwrap();
+        let runs = sb.runs();
+        let rec = runs
+            .iter()
+            .find(|r| r["id"] == id.as_str())
+            .expect("listed");
+        assert_eq!(rec["status"], "interrupted", "{torn:?}: {rec}");
+        assert_eq!(rec["burns"], 0, "{rec}");
+        assert!(
+            rec["error"].as_str().unwrap().contains("burned nothing"),
+            "{rec}"
+        );
+        let shown = sb.run_ok(&["runs", &id]);
+        assert!(!shown.contains("damaged"), "{shown}");
+        sb.run_ok(&["runs"]);
+        let out = sb.cig(&["runs", "--verify"]);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let out = sb.cig(&["unburn", &id]);
+        assert!(out.status.success(), "{out:?}");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("burned nothing"),
+            "{out:?}"
+        );
+        assert!(
+            !doctor_findings(&sb)
+                .iter()
+                .any(|f| f["check"] == "interrupted-run" && f["severity"] == "action"),
+            "{torn:?}"
+        );
+        let out = sb.cig(&["report-bundle", &id, "--json"]);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
+
+#[test]
+fn a_burning_run_whose_record_is_torn_is_still_damaged() {
+    let sb = Sandbox::new();
+    sb.write("s.cig", "burn {\n  fs.write_text(\"t.txt\", \"1\")\n}\n");
+    sb.run_ok(&["run", "s.cig"]);
+    let id = sb.runs()[0]["id"].as_str().unwrap().to_string();
+    fs::write(sb.home().join("runs").join(&id).join("run.json"), "").unwrap();
+    let rec = sb
+        .runs()
+        .into_iter()
+        .find(|r| r["id"] == id.as_str())
+        .expect("listed");
+    assert_eq!(rec["status"], "damaged", "{rec}");
+    assert_eq!(rec["burns"], 1, "{rec}");
+    let out = sb.cig(&["runs", &id, "--verify"]);
+    assert!(!out.status.success(), "{out:?}");
+}
+
+#[test]
+fn a_quiet_run_left_running_by_a_power_cut_has_nothing_to_put_back() {
+    let sb = Sandbox::new();
+    let (id, dir) = quiet_run(&sb);
+    // What the record says when the finished one never reached the disk:
+    // the one written at the start.
+    let path = dir.join("run.json");
+    let mut rec: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    rec["status"] = serde_json::json!("running");
+    rec["finished"] = serde_json::Value::Null;
+    rec["pid"] = serde_json::json!(2_147_483_647u32);
+    fs::write(&path, rec.to_string()).unwrap();
+    let runs = sb.runs();
+    assert_eq!(runs[0]["status"], "interrupted", "{runs:?}");
+    assert_eq!(runs[0]["burns"], 0, "{runs:?}");
+    let out = sb.cig(&["doctor", &id]);
+    let (o, e) = (
+        String::from_utf8_lossy(&out.stdout).to_string(),
+        String::from_utf8_lossy(&out.stderr).to_string(),
+    );
+    assert!(out.status.success(), "{o}{e}");
+    assert!(!e.contains("E706"), "{e}");
+    assert!(o.contains("stopped before it burned anything"), "{o}");
+    assert!(
+        !doctor_findings(&sb)
+            .iter()
+            .any(|f| f["check"] == "interrupted-run" && f["severity"] == "action"),
+        "a quiet interrupted run is no action"
+    );
+    let out = sb.cig(&["unburn", &id]);
+    assert!(out.status.success(), "{out:?}");
+    let out = sb.cig(&["runs", "--verify"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn a_quiet_run_whose_folder_lost_its_record_or_journal_to_a_power_cut() {
+    // No record (the folder's names never reached the disk, or only the
+    // temporary one did): the run is not listed, and nothing else minds.
+    let sb = Sandbox::new();
+    let (id, dir) = quiet_run(&sb);
+    fs::rename(dir.join("run.json"), dir.join("run.json.tmp")).unwrap();
+    assert!(
+        !sb.runs().iter().any(|r| r["id"] == id.as_str()),
+        "a folder without a record is not a run"
+    );
+    let out = sb.cig(&["runs", "--verify"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let err = sb.run_err(&["unburn", &id], 3);
+    assert!(err.contains("E803"), "{err}");
+    // A record and no journal: listed as it is, and unburn has nothing to
+    // do and says so, without an error.
+    let sb = Sandbox::new();
+    let (id, dir) = quiet_run(&sb);
+    fs::remove_file(dir.join("journal.jsonl")).unwrap();
+    let runs = sb.runs();
+    assert_eq!(runs[0]["id"], id.as_str());
+    assert_eq!(runs[0]["status"], "ok", "{runs:?}");
+    let out = sb.cig(&["unburn", &id]);
+    assert!(out.status.success(), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("nothing to unburn"),
+        "{out:?}"
+    );
+    let out = sb.cig(&["runs", &id, "--verify"]);
+    assert!(out.status.success(), "{out:?}");
+    let out = sb.cig(&["runs", "--verify"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // No folder at all: nothing is listed, and the index, if its line
+    // reached the disk, does not bring the run back.
+    let sb = Sandbox::new();
+    let (id, dir) = quiet_run(&sb);
+    fs::remove_dir_all(&dir).unwrap();
+    assert!(!sb.runs().iter().any(|r| r["id"] == id.as_str()));
+    let table = sb.run_ok(&["runs"]);
+    assert!(!table.contains(&id), "{table}");
+}
+
+#[test]
+fn a_torn_runs_index_after_a_power_cut_is_rebuilt_and_lists_every_run() {
+    let sb = Sandbox::new();
+    let (id, _) = quiet_run(&sb);
+    let index = sb.home().join("runs-index.jsonl");
+    let mut text = fs::read(&index).unwrap();
+    text.extend_from_slice(b"{\"op\":\"set\",\"id\":\"2026");
+    fs::write(&index, text).unwrap();
+    let out = sb.cig(&["--json", "runs"]);
+    assert!(out.status.success(), "{out:?}");
+    let runs: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(runs[0]["id"], id.as_str(), "{runs}");
+    assert_eq!(runs[0]["status"], "ok", "{runs}");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_reads_hop_that_writes_into_the_pack_flushes_the_record_before_it_starts() {
+    let sb = Sandbox::new();
+    // A run that burned before: the home, the tin's key and the ledger are
+    // there, as on any machine after its first burn.
+    sb.write(
+        "first.cig",
+        "burn {\n  fs.write_text(\"first.txt\", \"1\\n\")\n}\n",
+    );
+    sb.run_ok(&["run", "first.cig"]);
+    sb.write("w/keep.txt", "k\n");
+    // A hop that says it only reads, and writes into the pack anyway: it is
+    // not journaled before it runs; the watch journals what it changed.
+    sb.write(
+        "r.cig",
+        "pack { \"w\" }\nburn {\n  proc.run(\"sh\", [\"-c\", \"echo x > w/made.txt\"], {reads: true})\n}\n",
+    );
+    let Some(lines) = strace_run(&sb, "r.cig", "fsync,fdatasync,execve") else {
+        return;
+    };
+    let runs = sb.runs();
+    let id = runs[0]["id"].as_str().unwrap().to_string();
+    assert!(sb.exists("w/made.txt"));
+    assert!(
+        runs[0]["burns"].as_u64().unwrap() >= 1,
+        "the watch journaled the change: {runs:?}"
+    );
+    let home = sb.home().canonicalize().unwrap();
+    let run = home.join("runs").join(&id);
+    assert!(run.join("hops").is_dir());
+    // The child: the first execve after cig's own.
+    let child = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| l.contains("execve("))
+        .nth(1)
+        .map(|(i, _)| i)
+        .unwrap_or_else(|| panic!("the hop's start was not traced:\n{}", lines.join("\n")));
+    let before: Vec<String> = lines[..child]
+        .iter()
+        .filter_map(|l| flushed(l, &home, &run))
+        .collect();
+    assert!(
+        before.len() >= 4,
+        "the record was not flushed before the hop started:\n{}",
+        lines.join("\n")
+    );
+    assert_eq!(
+        &before[..4],
+        ["run.json", "<run>", "runs-index.jsonl", "<run>"],
+        "the record's flushes before the hop:\n{}",
+        lines.join("\n")
+    );
+}
