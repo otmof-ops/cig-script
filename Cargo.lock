@@ -469,7 +469,7 @@ dependencies = [
 
 [[package]]
 name = "cigscript"
-version = "1.21.0"
+version = "1.22.0"
 dependencies = [
  "argon2",
  "blake3",

@@ -5,6 +5,19 @@ project follows semantic versioning.
 
 ## Unreleased
 
+## 1.22.0 — 2026-11-14
+
+The bytecode VM and its format: a compiled program can carry bytecode
+(stage `b`) and run it on a register VM, through the same kernel as the
+tree-walker and held to it instruction by instruction; the module's
+layout 2, a verifier, and a start that verifies and loads a function the
+first time it is entered. Programs move to payload format 2 (a record
+and a table of hashed sections), and a program can take every argument
+itself (`own_flags`). The tin packs small before-states and compresses
+what it keeps. Fixes to `cig runs --verify`, `cig bench`, the vault's
+update and the crash flusher (cig-compile#31, cig-compile#71,
+cig-compile#8, #213, #215, #230).
+
 - **A call costs no argument copy and no stack resize (cig-script#230
   step 3, cig-compile#31; `docs/BYTECODE.md`).** A callee's frame starts at
   the caller's `R(A+1)`: its parameters are the arguments where they are,
