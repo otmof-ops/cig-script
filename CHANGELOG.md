@@ -17,6 +17,16 @@ leaving its frame loop, on a frame record of 64 bytes that owns nothing.
 Nothing a program can observe changes: output, errors and their
 positions, the journal and every step budget are as before (#235, #230).
 
+Timed as it ships (the release build, whole processes, cig's
+`bench/compute`, programs that burn nothing as dry runs, one machine):
+a stage `b` program is now faster than `cig run` on all 21 compute
+programs, 1.45x at the median (in 1.22.0 it was slower on nine); it
+takes 0.72 of the time 1.22.0's took at the geometric mean, and `cig
+run` itself 0.89 of 1.22.0's. Beside the same programs in Lua 5.4.9 a
+stage `b` program takes 1.49 times Lua's time at the geometric mean
+(2.06 in 1.22.0), and less than Lua's on `strings`, `regex-ish`, `maps`
+and `lists`.
+
 - **A call, a return and a callback cost the VM a third less (cig-script#230
   step 3, #235; `docs/BYTECODE.md`).** A call of a compiled function, its
   return and a tail call change frames in the VM's frame loop instead of
