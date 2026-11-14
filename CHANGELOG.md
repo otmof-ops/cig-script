@@ -5,6 +5,22 @@ project follows semantic versioning.
 
 ## Unreleased
 
+- **A compiled program runs its script as fast as `cig run` does
+  (cig-script#213; `docs/PROGRAMS.md`).** A program compiled at stage `a`,
+  and `--interp` on a stage `b` one, skip the check (it ran when the program
+  was compiled), and the check is also what tells the tree-walker where each
+  name lives, so such a program looked every name up by name at every read:
+  up to 1.65 times the machine instructions of `cig run` on the same script
+  (mandel), 1.52 (fannkuch), 1.41 (nbody). Its names are now resolved by
+  the check's own walk with its diagnostics off: the top level before the
+  first line, each function's body the first time it is called. The seven
+  programs counted now run within 1% of `cig run` both ways, and cigo's
+  start (`--version`) gains 2.3 million instructions of its 369 million
+  (resolving it all at the start cost 21.6 million, about 7 ms). Nothing is
+  reported, and a name the walk cannot place is looked up by name as
+  before. `cig run --no-check` resolves the same way, and the run's timings
+  name the step `resolve`.
+
 ## 1.23.0 — 2026-11-14
 
 Calls at a fraction of their cost. A method is found without a scan of

@@ -495,6 +495,7 @@ is set:
 | `start` | from the first instruction of `main` to the start of the run: arguments, configuration, reading the script |
 | `lower` | parsing the source into the program |
 | `check` | the static check (not written with `--no-check`) |
+| `resolve` | in its place when there is no check (`--no-check`, a compiled program on the tree-walker): resolving the top level's names; a function body's are resolved inside `run`, the first time it is called |
 | `begin` | the trial's plan comparison, the run's record and the kernel |
 | `run` | the interpreter, the script itself |
 | `burn` | what a run leaves behind once the program has ended: rollback, the record, the journal's head, the ledger, the report |

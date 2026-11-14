@@ -506,6 +506,14 @@ fn run_source_inner(
                 );
             }
         }
+    } else if let Some((program, _)) = tree {
+        // Unchecked here (a compiled program, `--interp`, `--no-check`): its
+        // names are still resolved, by the check's own walk without its
+        // diagnostics, so the tree-walker reads them by position as it does
+        // after the check.
+        let resolve_t = t.start();
+        check::resolve(program);
+        t.end("resolve", resolve_t);
     }
 
     // Everything between the check and the first line of the script: the

@@ -45,6 +45,47 @@ impl Program {
 pub struct Block {
     pub stmts: Vec<Stmt>,
     pub span: Span,
+    /// A function body whose names [`crate::check::resolve`] left for its
+    /// first call; empty on every other block.
+    pub pending: Pending,
+}
+
+/// What the names of a function body need from the scopes around it, kept
+/// by [`crate::check::resolve`] from the walk that found the body, until
+/// the body first runs ([`crate::check::enter`]).
+#[derive(Default)]
+pub struct Pending(pub(crate) Cell<Option<Rc<crate::check::Outer>>>);
+
+impl Pending {
+    /// The scopes kept for this body, taken: the body is resolved once.
+    pub(crate) fn take(&self) -> Option<Rc<crate::check::Outer>> {
+        self.0.take()
+    }
+
+    pub(crate) fn set(&self, outer: Rc<crate::check::Outer>) {
+        self.0.set(Some(outer));
+    }
+
+    pub fn is_pending(&self) -> bool {
+        let kept = self.0.take();
+        let is = kept.is_some();
+        self.0.set(kept);
+        is
+    }
+}
+
+impl Clone for Pending {
+    fn clone(&self) -> Self {
+        let kept = self.0.take();
+        self.0.set(kept.clone());
+        Pending(Cell::new(kept))
+    }
+}
+
+impl std::fmt::Debug for Pending {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(if self.is_pending() { "Pending" } else { "-" })
+    }
 }
 
 impl Block {

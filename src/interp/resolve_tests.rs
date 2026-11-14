@@ -227,3 +227,74 @@ fn no_allocation_per_call_in_steady_state() {
     eprintln!("allocations per fib call: {per_call}");
     assert!(per_call <= 0.01, "{per_call} allocations per fib call");
 }
+
+/// What `check` refuses, run without it (a compiled program built by an
+/// older compiler, a hand-made one, `--no-check`): `check::resolve` places
+/// what it can and leaves the rest to the lookup by name, so each script
+/// prints and fails as it does with every name looked up: the same output,
+/// the same error (code, message, position), no panic. A debug build checks
+/// every resolved read against the lookup by name as it happens.
+#[test]
+fn a_refused_script_runs_as_it_does_unresolved() {
+    let cases = [
+        "exhale 1\nexhale x\nroll x = 1\n",
+        "roll a = 1\nroll a = 2\nexhale a\n",
+        "stick s = 1\nexhale s\ns = 2\nexhale s\n",
+        "pull g() {\n  snuff z\n}\nroll z = 1\nexhale g()\nroll z = 2\nexhale g()\n",
+        "pull f() {\n  snuff 1\n}\npull f() {\n  snuff 2\n}\nexhale f()\n",
+        "roll y = 1\nburn {\n  exhale y\n} unburn {\n  exhale y\n}\nexhale y\n",
+        "exhale fs.read_txt(\"x\")\n",
+        "roll n = 0\nwhile n < 3 {\n  n += 1\n  roll k = n\n  roll k = 2\n}\n",
+        "roll f = pack() => missing + 1\nroll missing = 1\nexhale f()\nexhale undefined_name\n",
+        "if true {\n  roll inner = 1\n}\nexhale inner\n",
+    ];
+    let outcome = |src: &str, resolved: bool| {
+        let program = crate::syntax::parse(src).expect("parses");
+        if resolved {
+            crate::check::resolve(&program);
+        }
+        let sink = Sink::default();
+        let mut interp = Interp::new(Kernel::ephemeral(Mode::Run));
+        interp.out = Box::new(sink.clone());
+        interp.set_max_steps(0);
+        let err = interp
+            .run_program(&program)
+            .err()
+            .map(|d| (d.code, d.message, d.line, d.col));
+        let out = String::from_utf8(sink.0.borrow().clone()).expect("utf-8");
+        (out, err)
+    };
+    for src in cases {
+        assert!(
+            !crate::check::check(&crate::syntax::parse(src).unwrap(), &[]).ok(),
+            "check accepts {src:?}"
+        );
+        assert_eq!(outcome(src, true), outcome(src, false), "{src:?}");
+    }
+}
+
+/// A run that was not checked (a compiled program, `--interp`,
+/// `--no-check`) resolves its names with `check::resolve`, each function's
+/// body when it is first called: every resolved read and write is checked
+/// against the lookup by name as it happens, none falls back, and the
+/// output is the checked run's.
+#[test]
+fn resolved_without_check_reads_as_checked() {
+    for (name, src, want) in SCRIPTS {
+        let program = crate::syntax::parse(src).expect("parses");
+        crate::check::resolve(&program);
+        let sink = Sink::default();
+        let mut interp = Interp::new(Kernel::ephemeral(Mode::Run));
+        interp.out = Box::new(sink.clone());
+        interp.set_max_steps(0);
+        let (checked_before, missed_before) = (resolved_checked(), resolved_missed());
+        interp.run_program(&program).expect("runs");
+        assert!(
+            resolved_checked() > checked_before,
+            "{name}: nothing was resolved"
+        );
+        assert_eq!(resolved_missed(), missed_before, "{name}: a read fell back");
+        let out = String::from_utf8(sink.0.borrow().clone()).expect("utf-8");
+        assert_eq!(out, want, "{name}");
+    }
+}

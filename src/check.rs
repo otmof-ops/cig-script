@@ -12,8 +12,9 @@ use crate::diagnostics::{Diagnostic, Kind};
 use crate::syntax::ast::*;
 use crate::syntax::span::Span;
 use crate::value::{Effect, Value};
-use std::cell::Cell;
+use std::cell::{Cell, OnceCell};
 use std::collections::HashMap;
+use std::rc::Rc;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Binding {
@@ -22,24 +23,31 @@ enum Binding {
     Function,
 }
 
+/// A scope's names: each one's binding and its position among the names the
+/// scope declares, in the order the evaluator declares them (hoisted pulls
+/// first, then each `roll`, `stick` and `chain` as it runs).
+type Names = HashMap<String, (Binding, u32)>;
+
 struct Scope<'a> {
-    /// Each name, its binding and its position among the names this scope
-    /// declares, in the order the evaluator declares them (hoisted pulls
-    /// first, then each `roll`, `stick` and `chain` as it runs).
-    names: HashMap<String, (Binding, u16)>,
+    names: Names,
     /// The scope of a `pull` or a lambda: what runs in it runs when called.
     is_fn: bool,
     /// Reads made from inside a function body that passed over this scope
-    /// without finding their name. If this scope declares the name later, a
-    /// call after that finds the new one, so the read is not resolved.
-    misses: Vec<(String, &'a Cell<Res>)>,
+    /// without finding their name, by name. If this scope declares the name
+    /// later, a call after that finds the new one, so the read is not
+    /// resolved.
+    misses: HashMap<String, Vec<&'a Cell<Res>>>,
+    /// Where this scope's names go when the walk is done with it, for the
+    /// function bodies found inside it and left for their first call, and
+    /// the last [`Outer`] made for it.
+    kept: Option<(Rc<OnceCell<Names>>, Rc<Outer>)>,
 }
 
 impl Scope<'_> {
     fn add(&mut self, name: &str, binding: Binding) {
         let idx = match self.names.get(name) {
             Some((_, i)) => *i,
-            None => u16::try_from(self.names.len()).unwrap_or(u16::MAX),
+            None => u32::try_from(self.names.len()).unwrap_or(u32::MAX),
         };
         self.names.insert(name.to_string(), (binding, idx));
     }
@@ -48,13 +56,51 @@ impl Scope<'_> {
         Scope {
             names: HashMap::new(),
             is_fn,
-            misses: Vec::new(),
+            misses: HashMap::new(),
+            kept: None,
         }
+    }
+}
+
+/// One of the scopes around a function body that [`resolve`] left for its
+/// first call, as the walk that found the body saw it: how many names it had
+/// declared by then, and all of its names once the walk is done with it (it
+/// is, before the body can run). A name it declared after the body was
+/// found is one the body's reads passed over then: [`Checker::resolve`]
+/// leaves such a read unresolved, as the walk does when the declaration
+/// comes after the read (the scope's `misses`).
+pub(crate) struct Outer {
+    names: Rc<OnceCell<Names>>,
+    seen: usize,
+    is_fn: bool,
+    parent: Option<Rc<Outer>>,
+}
+
+/// `Res::Local`, or `Unresolved` where the depth does not fit.
+fn local(depth: usize, idx: u32) -> Res {
+    match u16::try_from(depth) {
+        Ok(depth) => Res::Local {
+            depth,
+            idx: u16::try_from(idx).unwrap_or(u16::MAX),
+        },
+        Err(_) => Res::Unresolved,
     }
 }
 
 pub struct Checker<'a> {
     scopes: Vec<Scope<'a>>,
+    /// The scopes around the body this walk resolves, when it is one that
+    /// [`resolve`] left for its first call ([`enter`]); the outermost of
+    /// them is the prelude's.
+    outer: Option<Rc<Outer>>,
+    /// Off for [`resolve`] and [`enter`]: the same walk, resolving the same
+    /// names, with every diagnostic and every check that only leads to one
+    /// left out, and a function body's (a block's; a lambda's expression is
+    /// walked where it is) left for its first call.
+    diagnose: bool,
+    /// The bodies left for their first call, for the tests that enter them.
+    #[cfg(test)]
+    found: Vec<(Rc<Block>, Vec<String>)>,
     /// Names the prelude provides (modules and builtins), which a
     /// compensation may use.
     prelude: std::collections::HashSet<String>,
@@ -129,7 +175,7 @@ pub(crate) fn pack_misplaced(place: PackPlace, span: Span) -> Diagnostic {
 /// Check a whole program. `extra_globals` are names the host will provide
 /// (for the REPL, everything already defined).
 pub fn check(program: &Program, extra_globals: &[String]) -> Report {
-    let mut c = Checker::new(extra_globals);
+    let mut c = Checker::new(extra_globals, true);
     for (i, stmt) in program.body.iter().enumerate() {
         if let Stmt::Pack(p) = stmt {
             if i != 0 {
@@ -144,13 +190,51 @@ pub fn check(program: &Program, extra_globals: &[String]) -> Report {
     }
 }
 
+/// Resolve the names of a program that is not checked here (a compiled
+/// program, which was checked when it was compiled, and `--no-check`): the
+/// walk [`check`] makes, which sets the same [`Res`] on every node, and
+/// nothing else. No diagnostic is made and nothing is printed. A name it
+/// cannot place, in a script [`check`] would refuse as in any other, is
+/// left `Unresolved` and looked up by name when it is read.
+///
+/// The top level is resolved here; a function body (a block) is resolved
+/// the first time it runs ([`enter`]), with what it needs from the scopes
+/// around it kept from this walk, so a start does the work of the
+/// functions its run uses.
+pub fn resolve(program: &Program) {
+    let mut c = Checker::new(&[], false);
+    c.block_stmts(&program.body);
+    c.finish();
+}
+
+/// Before a function body runs: resolve its names, the first time, if
+/// [`resolve`] left it for now. Nothing to do for any other body.
+#[inline]
+pub fn enter(params: &[String], body: &Block) {
+    if let Some(outer) = body.pending.take() {
+        enter_now(outer, params, body);
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn enter_now<'b>(outer: Rc<Outer>, params: &[String], body: &'b Block) -> Checker<'b> {
+    let mut c = Checker::around(outer);
+    c.function(params, &body.stmts);
+    c.finish();
+    c
+}
+
 impl<'a> Checker<'a> {
-    fn new(extra_globals: &[String]) -> Self {
+    fn new(extra_globals: &[String], diagnose: bool) -> Self {
         let mut root = Scope::new(false);
         let mut effectful = HashMap::new();
         let mut modules = HashMap::new();
         for (name, value) in crate::stdlib::prelude() {
             root.add(name, Binding::Immutable);
+            if !diagnose {
+                continue;
+            }
             match &value {
                 Value::Module(m) => {
                     let mut items = Vec::new();
@@ -174,9 +258,17 @@ impl<'a> Checker<'a> {
         for g in extra_globals {
             root.add(g, Binding::Mutable);
         }
-        let prelude: std::collections::HashSet<String> = root.names.keys().cloned().collect();
+        let prelude: std::collections::HashSet<String> = if diagnose {
+            root.names.keys().cloned().collect()
+        } else {
+            std::collections::HashSet::new()
+        };
         Self {
             scopes: vec![root, Scope::new(false)],
+            outer: None,
+            diagnose,
+            #[cfg(test)]
+            found: Vec::new(),
             prelude,
             comp_floor: None,
             elided: 0,
@@ -191,6 +283,81 @@ impl<'a> Checker<'a> {
             errors: Vec::new(),
             warnings: Vec::new(),
         }
+    }
+
+    /// The walk of a body [`resolve`] left for its first call, inside the
+    /// scopes kept for it.
+    fn around(outer: Rc<Outer>) -> Self {
+        Self {
+            scopes: Vec::new(),
+            outer: Some(outer),
+            diagnose: false,
+            #[cfg(test)]
+            found: Vec::new(),
+            prelude: std::collections::HashSet::new(),
+            comp_floor: None,
+            elided: 0,
+            pack_roots: Vec::new(),
+            pack_seen: false,
+            hoisted_chains: Vec::new(),
+            effectful: HashMap::new(),
+            modules: HashMap::new(),
+            burn_depth: 0,
+            fn_depth: 0,
+            loop_depth: 0,
+            errors: Vec::new(),
+            warnings: Vec::new(),
+        }
+    }
+
+    /// The walk is done: every scope still open is closed (its names go to
+    /// the bodies that keep it).
+    fn finish(&mut self) {
+        while !self.scopes.is_empty() {
+            self.pop();
+        }
+    }
+
+    /// Leave a function body for its first call ([`enter`]), with the
+    /// scopes open now, as they are now, kept for it.
+    fn defer(&mut self, body: &Rc<Block>, params: &[String]) {
+        let mut parent = self.outer.clone();
+        for s in &mut self.scopes {
+            let reuse = s.kept.as_ref().and_then(|(_, o)| {
+                let same_parent = match (&o.parent, &parent) {
+                    (Some(a), Some(b)) => Rc::ptr_eq(a, b),
+                    (None, None) => true,
+                    _ => false,
+                };
+                (o.seen == s.names.len() && same_parent).then(|| Rc::clone(o))
+            });
+            let node = match reuse {
+                Some(o) => o,
+                None => {
+                    let cell = s
+                        .kept
+                        .as_ref()
+                        .map(|(c, _)| Rc::clone(c))
+                        .unwrap_or_default();
+                    let o = Rc::new(Outer {
+                        names: Rc::clone(&cell),
+                        seen: s.names.len(),
+                        is_fn: s.is_fn,
+                        parent,
+                    });
+                    s.kept = Some((cell, Rc::clone(&o)));
+                    o
+                }
+            };
+            parent = Some(node);
+        }
+        if let Some(outer) = parent {
+            body.pending.set(outer);
+        }
+        #[cfg(test)]
+        self.found.push((Rc::clone(body), params.to_vec()));
+        #[cfg(not(test))]
+        let _ = params;
     }
 
     /// `proc.run("sh", ["-c", built])` with a command string built at run
@@ -390,12 +557,22 @@ impl<'a> Checker<'a> {
     }
 
     fn pop(&mut self) {
-        self.scopes.pop();
+        if let Some(Scope {
+            names,
+            kept: Some((cell, _)),
+            ..
+        }) = self.scopes.pop()
+        {
+            let _ = cell.set(names);
+        }
     }
 
     fn declare(&mut self, name: &str, binding: Binding, span: Span) {
         let scope = self.scopes.last_mut().expect("scope stack is never empty");
         if scope.names.contains_key(name) {
+            if !self.diagnose {
+                return;
+            }
             self.error_code(
                 "E306",
                 format!("`{name}` is already declared in this scope"),
@@ -404,17 +581,18 @@ impl<'a> Checker<'a> {
             .hint = Some(format!("assign with `{name} = ...`, or pick another name"));
             return;
         }
-        scope.add(name, binding);
+        let idx = u32::try_from(scope.names.len()).unwrap_or(u32::MAX);
+        scope.names.insert(name.to_string(), (binding, idx));
         // A function body that read this name from further out, before it
         // was declared here, finds this one when it is called after.
-        scope.misses.retain(|(n, cell)| {
-            if n == name {
+        if scope.misses.is_empty() {
+            return;
+        }
+        if let Some(cells) = scope.misses.remove(name) {
+            for cell in cells {
                 cell.set(Res::Unresolved);
-                false
-            } else {
-                true
             }
-        });
+        }
     }
 
     fn lookup(&self, name: &str) -> Option<Binding> {
@@ -433,25 +611,59 @@ impl<'a> Checker<'a> {
             // An `unburn { }` runs later from the journal, never from this tree.
             return;
         }
-        let top = self.scopes.len() - 1;
+        let live = self.scopes.len();
         let mut inside_fn = false;
-        for i in (0..=top).rev() {
+        for i in (0..live).rev() {
             if let Some((_, idx)) = self.scopes[i].names.get(name) {
-                let found = if i == 0 {
+                let found = if i == 0 && self.outer.is_none() {
                     Res::Prelude
                 } else {
-                    match u16::try_from(top - i) {
-                        Ok(depth) => Res::Local { depth, idx: *idx },
-                        Err(_) => Res::Unresolved,
-                    }
+                    local(live - 1 - i, *idx)
                 };
                 cell.set(found);
                 return;
             }
             if inside_fn {
-                self.scopes[i].misses.push((name.to_string(), cell));
+                let misses = &mut self.scopes[i].misses;
+                match misses.get_mut(name) {
+                    Some(cells) => cells.push(cell),
+                    None => {
+                        misses.insert(name.to_string(), vec![cell]);
+                    }
+                }
             }
             inside_fn |= self.scopes[i].is_fn;
+        }
+        // The scopes kept around a body left for its first call: each with
+        // all its names now, of which the first `seen` were declared when
+        // the body was found.
+        let mut depth = live;
+        let mut at = self.outer.as_deref();
+        while let Some(o) = at {
+            let Some(names) = o.names.get() else {
+                // Not done with (never, before the body runs): not placed.
+                cell.set(Res::Unresolved);
+                return;
+            };
+            if let Some((_, idx)) = names.get(name) {
+                if usize::try_from(*idx).is_ok_and(|i| i < o.seen) {
+                    cell.set(if o.parent.is_none() {
+                        Res::Prelude
+                    } else {
+                        local(depth, *idx)
+                    });
+                    return;
+                }
+                if inside_fn {
+                    // Declared there after the body was found: the read
+                    // missed it then and finds it on a later call.
+                    cell.set(Res::Unresolved);
+                    return;
+                }
+            }
+            inside_fn |= o.is_fn;
+            depth += 1;
+            at = o.parent.as_deref();
         }
     }
 
@@ -477,7 +689,9 @@ impl<'a> Checker<'a> {
                 self.declare(&f.name, Binding::Function, f.span);
             }
             if let Stmt::Chain(c) = stmt {
-                self.hoisted_chains.push(c.name.clone());
+                if self.diagnose {
+                    self.hoisted_chains.push(c.name.clone());
+                }
             }
         }
         for stmt in stmts {
@@ -527,6 +741,9 @@ impl<'a> Checker<'a> {
                 match target {
                     AssignTarget::Var(name, cell) => {
                         self.resolve(name, cell);
+                        if !self.diagnose {
+                            return;
+                        }
                         match self.lookup(name) {
                             None => {
                                 self.unknown(name, *span);
@@ -564,6 +781,7 @@ impl<'a> Checker<'a> {
                     AssignTarget::Member { object, .. } => self.expr(object),
                 }
             }
+            Stmt::Pull(f) if !self.diagnose => self.defer(&f.body, &f.params),
             Stmt::Pull(f) => self.function(&f.params, &f.body.stmts),
             Stmt::Chain(ch) => {
                 for step in &ch.steps {
@@ -572,7 +790,7 @@ impl<'a> Checker<'a> {
                 self.declare(&ch.name, Binding::Immutable, ch.span);
             }
             Stmt::Snuff { value, span } => {
-                if self.fn_depth == 0 {
+                if self.diagnose && self.fn_depth == 0 {
                     self.error_code("E304", "`snuff` outside of a pull or pack", *span)
                         .hint = Some("to stop the whole script use exit(code)".to_string());
                 }
@@ -616,7 +834,7 @@ impl<'a> Checker<'a> {
                 self.loop_depth -= 1;
             }
             Stmt::Break(span) | Stmt::Continue(span) => {
-                if self.loop_depth == 0 {
+                if self.diagnose && self.loop_depth == 0 {
                     let what = if matches!(stmt, Stmt::Break(_)) {
                         "break"
                     } else {
@@ -664,7 +882,9 @@ impl<'a> Checker<'a> {
                 self.block_stmts(&body.stmts);
                 self.burn_depth -= 1;
                 self.pop();
-                if let Some(u) = unburn {
+                // Nothing in a compensation is resolved (see `resolve`), so
+                // without diagnostics there is nothing to walk there.
+                if let Some(u) = unburn.as_ref().filter(|_| self.diagnose) {
                     // The compensation runs later, from the journal alone:
                     // only the state map, the prelude and its own names.
                     let floor = self.scopes.len();
@@ -682,15 +902,19 @@ impl<'a> Checker<'a> {
             }
             Stmt::Pack(p) => {
                 // Two scopes are the top level: the prelude and the script's own.
-                if self.scopes.len() + self.elided > 2 {
+                if !self.diagnose {
+                } else if self.scopes.len() + self.elided > 2 {
                     self.errors.push(pack_misplaced(PackPlace::InBlock, p.span));
                 } else if self.pack_seen {
                     self.errors.push(pack_misplaced(PackPlace::Second, p.span));
                 }
                 self.pack_seen = true;
-                self.pack_options(&p.options);
+                if self.diagnose {
+                    self.pack_options(&p.options);
+                }
                 for r in &p.roots {
                     match literal_text(r) {
+                        Some(_) if !self.diagnose => {}
                         Some(text) if text.trim().is_empty() => {
                             self.error_code("E755", "a pack root is empty", r.span).hint = Some(
                                 "name the directory the script may write in, pack { \"./build\" }; an empty root would mean the whole working directory".to_string(),
@@ -771,7 +995,8 @@ impl<'a> Checker<'a> {
             }
             ExprKind::Ident(name) => {
                 self.resolve(name, &expr.res);
-                if self.lookup(name).is_none() {
+                if !self.diagnose {
+                } else if self.lookup(name).is_none() {
                     if !(self.fn_depth > 0 && self.hoisted_chains.iter().any(|c| c == name)) {
                         self.unknown(name, expr.span);
                     }
@@ -809,7 +1034,9 @@ impl<'a> Checker<'a> {
                 self.expr(rhs);
             }
             ExprKind::Call { callee, args } => {
-                self.effect_check(callee);
+                if self.diagnose {
+                    self.effect_check(callee);
+                }
                 self.expr(callee);
                 args.iter().for_each(|a| self.expr(a));
             }
@@ -820,7 +1047,7 @@ impl<'a> Checker<'a> {
                 ..
             } => {
                 // `fs.rm(...)` parses as a method call on the module ident.
-                if let ExprKind::Ident(module) = &receiver.kind {
+                if let (true, ExprKind::Ident(module)) = (self.diagnose, &receiver.kind) {
                     if module == "proc" && name == "run" {
                         self.shell_check(args, expr.span);
                     }
@@ -853,7 +1080,7 @@ impl<'a> Checker<'a> {
                 args.iter().for_each(|a| self.expr(a));
             }
             ExprKind::Member { object, name, .. } => {
-                if let ExprKind::Ident(module) = &object.kind {
+                if let (true, ExprKind::Ident(module)) = (self.diagnose, &object.kind) {
                     if let Some(items) = self.modules.get(module) {
                         if self.lookup(module) == Some(Binding::Immutable) && !items.contains(name)
                         {
@@ -886,12 +1113,15 @@ impl<'a> Checker<'a> {
                     self.fn_depth -= 1;
                     self.pop();
                 }
+                LambdaBody::Block(b) if !self.diagnose => self.defer(b, params),
                 LambdaBody::Block(b) => self.function(params, &b.stmts),
             },
             ExprKind::Pipe { lhs, rhs } => {
                 self.expr(lhs);
                 if let ExprKind::Call { callee, args } = &rhs.kind {
-                    self.effect_check(callee);
+                    if self.diagnose {
+                        self.effect_check(callee);
+                    }
                     self.expr(callee);
                     args.iter().for_each(|a| self.expr(a));
                 } else {
@@ -1016,5 +1246,146 @@ mod tests {
         // The pack's other rules hold for a rootless pack as for any.
         let e = at("roll x = 1\npack { own_flags: true }\n");
         assert_eq!(e[0].0, "E753", "{e:?}");
+    }
+
+    /// Every `.cig` file under `dir`, at any depth, in a stable order.
+    fn scripts_under(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        let mut paths: Vec<_> = entries.flatten().map(|e| e.path()).collect();
+        paths.sort();
+        for p in paths {
+            if p.is_dir() {
+                scripts_under(&p, out);
+            } else if p.extension().is_some_and(|e| e == "cig") {
+                out.push(p);
+            }
+        }
+    }
+
+    /// The names that interleave function bodies with later declarations,
+    /// shadowing, loops, burns and compensations, beside the suite's files.
+    const RESOLVE_CASES: [&str; 6] = [
+        "pull f() { snuff g() + x }\nroll x = 1\npull g() { snuff x }\nexhale f()\nroll late = 2\n",
+        "roll a = 1\npull f() {\n  roll b = a\n  pull h() { snuff a + b + c }\n  roll c = 3\n  snuff h\n}\nroll a2 = f()\nexhale a2()\n",
+        "roll xs = []\nfor i in 0..3 {\n  roll j = i\n  xs.push(pack() => i + j)\n}\nexhale xs.map(pack(f) => f())\n",
+        "burn s {\n  s.v = 1\n  roll inner = 2\n} unburn s {\n  exhale s.v\n}\nroll print2 = print\nprint2(len([1]))\n",
+        "try {\n  cough \"x\"\n} catch e {\n  exhale e\n} finally {\n  roll z = 1\n  exhale z\n}\n",
+        "chain c = [pack() => 1]\npull use() { snuff later }\nroll later = c\nwhile false { break }\n",
+    ];
+
+    /// [`resolve`], then every function body entered as a run enters it
+    /// (an outer body before the bodies inside it): what [`enter`] does on
+    /// a body's first call. The number of bodies entered.
+    fn resolve_and_enter_all(p: &Program) -> usize {
+        let mut c = Checker::new(&[], false);
+        c.block_stmts(&p.body);
+        c.finish();
+        let mut todo = std::mem::take(&mut c.found);
+        let mut entered = 0;
+        while let Some((body, params)) = todo.pop() {
+            let outer = body.pending.take().expect("left for its first call");
+            let mut c = enter_now(outer, &params, &body);
+            todo.append(&mut c.found);
+            entered += 1;
+        }
+        entered
+    }
+
+    /// `resolve`, with every function body entered, sets the `Res`
+    /// `check` sets, on every node: the trees' debug forms, which show every
+    /// node's `Res`, are the same, for every script the suite has (the
+    /// examples, the bench set, every script under `tests/`) and for the
+    /// cases above, those `check` refuses among them.
+    #[test]
+    fn resolve_sets_what_check_sets_on_every_node() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut files = Vec::new();
+        for dir in ["examples", "bench", "tests"] {
+            scripts_under(&root.join(dir), &mut files);
+        }
+        let mut sources: Vec<(String, String)> = files
+            .iter()
+            .map(|p| {
+                let text = std::fs::read_to_string(p).expect("reads");
+                (p.display().to_string(), text)
+            })
+            .collect();
+        assert!(sources.len() > 60, "{} scripts found", sources.len());
+        for (i, case) in RESOLVE_CASES.iter().enumerate() {
+            sources.push((format!("case {i}"), case.to_string()));
+        }
+        let (mut compared, mut refused, mut resolved_some) = (0, 0, 0);
+        for (name, src) in &sources {
+            let Ok(checked) = parse(src) else { continue };
+            let unresolved = format!("{checked:?}");
+            if !check(&checked, &[]).ok() {
+                refused += 1;
+            }
+            let quiet = parse(src).expect("parses twice");
+            resolve_and_enter_all(&quiet);
+            let want = format!("{checked:?}");
+            assert_eq!(
+                format!("{quiet:?}"),
+                want,
+                "{name}: resolve differs from check"
+            );
+            resolved_some += usize::from(want != unresolved);
+            compared += 1;
+        }
+        assert!(
+            compared > 60 && refused > 3,
+            "{compared} compared, {refused} refused"
+        );
+        assert!(resolved_some > 60, "{resolved_some} resolved anything");
+    }
+
+    /// `resolve` leaves a function body as it is until the body is entered,
+    /// and `enter` resolves it once, from the scopes as the walk found them:
+    /// a name the enclosing scope declares after the function is left to
+    /// the lookup by name, as `check` leaves it.
+    #[test]
+    fn a_body_is_resolved_when_it_is_first_entered() {
+        let src = "roll a = 1\nroll b = 2\nif true {\n  pull f(p) {\n    snuff a + p + b\n  }\n  roll b = 3\n  exhale f(0)\n}\n";
+        let pull = |p: &Program| -> FnDecl {
+            let Stmt::If { branches, .. } = &p.body[2] else {
+                panic!("an if")
+            };
+            let Stmt::Pull(f) = &branches[0].1.stmts[0] else {
+                panic!("a pull")
+            };
+            f.clone()
+        };
+        let p = parse(src).unwrap();
+        resolve(&p);
+        let f = pull(&p);
+        assert!(f.body.pending.is_pending());
+        let before = format!("{:?}", f.body.stmts);
+        assert!(!before.contains("Local"), "{before}");
+        enter(&f.params, &f.body);
+        assert!(!f.body.pending.is_pending());
+        let after = format!("{:?}", f.body.stmts);
+        let checked = parse(src).unwrap();
+        assert!(check(&checked, &[]).ok());
+        assert_eq!(after, format!("{:?}", pull(&checked).body.stmts));
+        // `a` two scopes up, `p` in the body's own, `b` by name.
+        assert_eq!(after.matches("Local").count(), 2, "{after}");
+        assert!(after.contains("Unresolved"), "{after}");
+        // A second entry changes nothing.
+        enter(&f.params, &f.body);
+        assert_eq!(format!("{:?}", f.body.stmts), after);
+    }
+
+    /// `resolve` makes no diagnostic: a script full of what `check` refuses
+    /// goes through it, and the same tree checked still reports all of it.
+    #[test]
+    fn resolve_reports_nothing() {
+        let src = "exhale nope\nroll a = 1\nroll a = 2\nstick s = 1\ns = 2\nbreak\nsnuff 1\nfs.rm(\"x\")\nexhale fs.read_txt(\"x\")\n";
+        let p = parse(src).unwrap();
+        let mut c = Checker::new(&[], false);
+        c.block_stmts(&p.body);
+        assert!(c.errors.is_empty() && c.warnings.is_empty());
+        assert!(run(src).errors.len() >= 6);
     }
 }

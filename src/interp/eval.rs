@@ -936,7 +936,11 @@ impl Interp {
         self.enter_call(span)?;
         let result = match &func.body {
             FnBody::Expr(e) => self.eval(e, &scope).map_err(Signal::Error),
-            FnBody::Block(b) => self.exec_block_in(&b.stmts, &scope).map(|()| Value::Null),
+            FnBody::Block(b) => {
+                // A body `check::resolve` left for its first call.
+                crate::check::enter(&func.params, b);
+                self.exec_block_in(&b.stmts, &scope).map(|()| Value::Null)
+            }
             // `call_function` sends a compiled function to the VM before a
             // scope is made, and the fast call path leaves it to that.
             FnBody::Compiled(_) => Err(Signal::Error(crate::vm::misrouted(span))),
