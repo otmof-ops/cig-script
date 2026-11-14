@@ -277,7 +277,9 @@ struct Proto {
     plain: bool,
     /// Per pc, the field cache of a `getfield` or `setfield` there: the
     /// position its key last had in the map, as the tree-walker keeps one
-    /// per field expression.
+    /// per field expression. At a `callm`, the method cache: the
+    /// receiver's type and the builtin method it resolved to
+    /// ([`crate::stdlib::method_slot`]; 0 before the first call).
     hints: Vec<std::cell::Cell<u32>>,
     reg_count: usize,
     arity: usize,
@@ -1083,7 +1085,7 @@ impl Machine<'_> {
         let (mut pc, mut base, mut upvals, mut proto) = self.top(program)?;
         loop {
             if proto.plain {
-                pc = self.run_fast(proto, pc, base, &upvals);
+                pc = self.run_fast(proto, pc, base, &upvals)?;
             }
             let Some(Some(d)) = proto.code.get(pc) else {
                 let span = proto.spans.get(pc).copied().unwrap_or_default();
@@ -1122,25 +1124,183 @@ impl Machine<'_> {
 
     /// The frame's instructions from `pc` for as long as the fast path
     /// runs them: the pc of the first one it does not run (or of no
-    /// instruction at all). A function of its own, never inlined: the
-    /// fast path's frame holds every arm's locals, and it must not be on
-    /// the stack while the general path runs a call. A builtin that calls
-    /// back into the VM then costs `run_frame_code`, `step` and the
-    /// group, as it did before there was a fast path, which is what keeps
-    /// a level of re-entry no deeper than the tree-walker's.
+    /// instruction at all), or the error a builtin it called raised. A
+    /// function of its own, never inlined: the fast path's frame holds
+    /// every arm's locals, and it must not be on the stack while the
+    /// general path runs a call. A builtin that calls back into the VM
+    /// (`Builtin::calls_back`) is therefore never called here: it costs
+    /// `run_frame_code`, `step` and the group, as it did before there was
+    /// a fast path, which is what keeps a level of re-entry no deeper than
+    /// the tree-walker's.
     #[inline(never)]
-    fn run_fast(&mut self, proto: &Proto, mut pc: usize, base: usize, upvals: &[Cell]) -> usize {
+    fn run_fast(
+        &mut self,
+        proto: &Proto,
+        mut pc: usize,
+        base: usize,
+        upvals: &[Cell],
+    ) -> Result<usize, Fault> {
         while let Some(Some(d)) = proto.code.get(pc) {
             #[cfg(feature = "bench-stats")]
             let timer = stats::start(d.op);
-            let Some(next) = self.fast(proto, d, base, upvals) else {
-                break;
+            let next = match self.fast(proto, d, base, upvals) {
+                Some(next) => next,
+                None => match self.fast_call(proto, d, base) {
+                    Some(Ok(next)) => next,
+                    Some(Err(e)) => {
+                        // As on the general path: the frame's pc is where
+                        // the error is offered to the tries.
+                        if let Some(f) = self.frames.last_mut() {
+                            f.pc = pc;
+                        }
+                        #[cfg(feature = "bench-stats")]
+                        stats::stop(timer);
+                        return Err(e);
+                    }
+                    None => break,
+                },
             };
             #[cfg(feature = "bench-stats")]
             stats::stop(timer);
             pc = next;
         }
-        pc
+        Ok(pc)
+    }
+
+    /// The fast loop's second tier, for a frame whose registers carry no
+    /// cell: the calls of builtins that cannot call back into the VM
+    /// (`callb`, and `callm` on a site whose cache holds the receiver's
+    /// type), `interp`, string `+`, and the list and map builders and
+    /// stores. `None`
+    /// when `d` is not one of them or not its common case, having changed
+    /// nothing, so the general path runs it from the start; a builtin's
+    /// error comes back as the general path raises it.
+    #[inline(never)]
+    fn fast_call(
+        &mut self,
+        proto: &Proto,
+        d: &DecodedInstr,
+        base: usize,
+    ) -> Option<Result<usize, Fault>> {
+        let pc = d.pc as usize;
+        let next = pc + d.width as usize;
+        let r = |x: u32| base.saturating_add(x as usize);
+        let v = match d.op {
+            Op::CALLB => {
+                let b = *crate::stdlib::builtin_catalogue().get(d.b_u as usize)?;
+                if b.calls_back {
+                    return None;
+                }
+                // `R(A)`, where the result goes, then the arguments.
+                let start = r(d.a);
+                let args = self
+                    .stack
+                    .get(start..start.saturating_add(d.c as usize).saturating_add(1))?
+                    .get(1..)?;
+                let span = span_at(proto, pc);
+                match self.interp.call_builtin(b, args, span) {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(e.into())),
+                }
+            }
+            Op::CALLM => {
+                let start = r(d.a);
+                let argv = self
+                    .stack
+                    .get(start..start.saturating_add(d.c as usize).saturating_add(1))?;
+                let recv = argv.first()?;
+                let b = crate::stdlib::method_at(recv, proto.hints.get(pc)?.get())?;
+                if b.calls_back || !b.arity_ok(argv.len()) {
+                    return None;
+                }
+                if let Value::Map(map) = recv {
+                    // A function the map holds under the name is called
+                    // instead: the general path's case.
+                    let Value::Str(name) = proto.consts.get(d.b_u as usize)? else {
+                        return None;
+                    };
+                    let held = map
+                        .try_borrow()
+                        .ok()?
+                        .get(&**name)
+                        .is_some_and(|f| matches!(f, Value::Func(_) | Value::Builtin(_)));
+                    if held {
+                        return None;
+                    }
+                }
+                let span = span_at(proto, pc);
+                match (b.func)(self.interp, argv, span) {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(e.or_at(span).into())),
+                }
+            }
+            Op::INTERP => {
+                let first = r(d.b_u);
+                let parts = self
+                    .stack
+                    .get(first..first.saturating_add(d.c as usize).saturating_add(1))?;
+                interpolate(parts)
+            }
+            // String `+`: the operator's own result, made in one block.
+            Op::ADD => {
+                let (Value::Str(l), Value::Str(rv)) =
+                    (self.stack.get(r(d.b_u))?, self.stack.get(r(d.c))?)
+                else {
+                    return None;
+                };
+                crate::value::build_str(|out| {
+                    out.reserve(l.len() + rv.len());
+                    out.push_str(l);
+                    out.push_str(rv);
+                })
+            }
+            Op::NEWLIST => Value::list(Vec::with_capacity(d.b_u as usize)),
+            Op::NEWMAP => Value::map(IndexMap::with_capacity(d.b_u as usize)),
+            Op::APPENDLIST => {
+                let v = self.stack.get(r(d.b_u))?.clone();
+                let Value::List(list) = self.stack.get(r(d.a))? else {
+                    return None;
+                };
+                list.try_borrow_mut().ok()?.push(v);
+                return Some(Ok(next));
+            }
+            Op::INSERTMAP => {
+                let Value::Str(key) = self.stack.get(r(d.b_u))? else {
+                    return None;
+                };
+                let v = self.stack.get(r(d.c))?.clone();
+                let Value::Map(map) = self.stack.get(r(d.a))? else {
+                    return None;
+                };
+                let old = map.try_borrow_mut().ok()?.insert(key.to_string(), v);
+                drop(old);
+                return Some(Ok(next));
+            }
+            Op::SETINDEX => {
+                let (Value::Map(map), Value::Str(key)) =
+                    (self.stack.get(r(d.a))?, self.stack.get(r(d.b_u))?)
+                else {
+                    return None;
+                };
+                let v = self.stack.get(r(d.c))?.clone();
+                let mut map = map.try_borrow_mut().ok()?;
+                // A key already there keeps its place (as `insert` does)
+                // and needs no `String` made for it.
+                let old = match map.get_mut(&**key) {
+                    Some(slot) => Some(std::mem::replace(slot, v)),
+                    None => map.insert(key.to_string(), v),
+                };
+                drop(map);
+                drop(old);
+                return Some(Ok(past_nops(proto, next, 2)));
+            }
+            _ => return None,
+        };
+        // The register exists: each arm above read it or its window.
+        if let Some(slot) = self.stack.get_mut(r(d.a)) {
+            *slot = v;
+        }
+        Some(Ok(next))
     }
 
     /// The frame on top: its pc, its base, its upvalues and its function.
@@ -1548,10 +1708,28 @@ impl Machine<'_> {
                 return Ok(Flow::Return(v));
             }
             Op::CALLM => {
-                let recv = self.get(base, d.a, span)?;
                 let name = name(proto, d.b_u, span)?;
-                let args = self.window(base, d.a + 1, d.c, span)?;
-                let v = self.interp.call_method(recv, &name, args, span)?;
+                // The receiver and its arguments, `R(A)` onwards: the
+                // layout a method takes, read in place when no register
+                // of it carries a cell (a callback runs in a VM of its
+                // own, so nothing writes these registers during the call).
+                let start = base.saturating_add(d.a as usize);
+                let n = (d.c as usize).saturating_add(1);
+                let v = match in_place(&self.stack, &self.cells, start, n) {
+                    Some(argv) => {
+                        if let (Some(recv), Some(hint)) = (argv.first(), proto.hints.get(pc)) {
+                            // The site's cache, for the fast loop's next call.
+                            if let Some(slot) = crate::stdlib::method_slot(recv, &name) {
+                                hint.set(slot);
+                            }
+                        }
+                        self.interp.call_method(argv, &name, span)?
+                    }
+                    None => {
+                        let argv = self.window(base, d.a, d.c.saturating_add(1), span)?;
+                        self.interp.call_method(&argv, &name, span)?
+                    }
+                };
                 self.set(base, d.a, v, span)?;
             }
             Op::CLOSURE => {
@@ -1627,12 +1805,13 @@ impl Machine<'_> {
                 self.interp.write_exhaled(line)?;
             }
             Op::INTERP => {
-                let parts = self.window(base, d.b_u, d.c + 1, span)?;
-                let mut s = String::new();
-                for v in &parts {
-                    s.push_str(&v.display());
-                }
-                self.set(base, d.a, Value::str(s), span)?;
+                let first = base.saturating_add(d.b_u as usize);
+                let n = (d.c as usize).saturating_add(1);
+                let s = match in_place(&self.stack, &self.cells, first, n) {
+                    Some(parts) => interpolate(parts),
+                    None => interpolate(&self.window(base, d.b_u, d.c.saturating_add(1), span)?),
+                };
+                self.set(base, d.a, s, span)?;
             }
 
             _ => return Err(broken("an instruction sent to the wrong group", span).into()),
@@ -1775,8 +1954,7 @@ impl Machine<'_> {
             Op::GETINDEX => {
                 let obj = self.get(base, d.b_u, span)?;
                 let idx = self.get(base, d.c, span)?;
-                let at = part_spans(proto, next, 1, span);
-                let idx_span = at.first().copied().unwrap_or(span);
+                let idx_span = part_span(proto, next, 0, span);
                 let v = self.interp.index(obj, idx, span, idx_span)?;
                 self.set(base, d.a, v, span)?;
                 return Ok(Flow::Next(past_nops(proto, next, 1)));
@@ -1785,9 +1963,8 @@ impl Machine<'_> {
                 let obj = self.get(base, d.a, span)?;
                 let idx = self.get(base, d.b_u, span)?;
                 let v = self.get(base, d.c, span)?;
-                let at = part_spans(proto, next, 2, span);
-                let idx_span = at.first().copied().unwrap_or(span);
-                let obj_span = at.get(1).copied().unwrap_or(span);
+                let idx_span = part_span(proto, next, 0, span);
+                let obj_span = part_span(proto, next, 1, span);
                 set_index(&obj, &idx, v, span, idx_span, obj_span)?;
                 return Ok(Flow::Next(past_nops(proto, next, 2)));
             }
@@ -2477,6 +2654,65 @@ impl Machine<'_> {
         range_fits(0, i64::try_from(turns).unwrap_or(i64::MAX), span)?;
         Ok((start, u64::try_from(turns).unwrap_or(u64::MAX)))
     }
+}
+
+/// The position of part `i` of the instruction ending at `next` (an
+/// index's, an object's): the line row of the `i`-th `nop` right after
+/// the instruction when the run of `nop`s reaches it, else the
+/// instruction's own. [`part_spans`]'s rule, for one part and with
+/// nothing allocated.
+fn part_span(proto: &Proto, next: usize, i: usize, span: Span) -> Span {
+    let all_nops = (0..=i).all(
+        |k| matches!(proto.code.get(next.saturating_add(k)), Some(Some(d)) if d.op == Op::NOP),
+    );
+    if !all_nops {
+        return span;
+    }
+    proto
+        .spans
+        .get(next.saturating_add(i))
+        .copied()
+        .unwrap_or(span)
+}
+
+/// The position of the instruction at `pc` (the function's first token's
+/// when the line table gives none), as the general path takes it.
+#[inline]
+fn span_at(proto: &Proto, pc: usize) -> Span {
+    proto.spans.get(pc).copied().unwrap_or_default()
+}
+
+/// `R(start..start+n)` read in place: `None` when a register of it
+/// carries a cell (or it runs past the stack), so the caller reads it
+/// through the cells.
+#[inline]
+fn in_place<'s>(
+    stack: &'s [Value],
+    cells: &[Option<Cell>],
+    start: usize,
+    n: usize,
+) -> Option<&'s [Value]> {
+    let end = start.saturating_add(n);
+    let plain = cells
+        .get(start..end)
+        .is_some_and(|c| c.iter().all(Option::is_none));
+    if !plain {
+        return None;
+    }
+    stack.get(start..end)
+}
+
+/// `interp`'s string: every part written into one buffer in place, a
+/// literal piece and a string's text copied once, an int without
+/// `core::fmt`, and the value made from the buffer with one copy.
+#[inline]
+fn interpolate(parts: &[Value]) -> Value {
+    crate::value::build_str(|out| {
+        out.reserve(parts.iter().map(Value::display_len_hint).sum());
+        for v in parts {
+            v.write_display(out);
+        }
+    })
 }
 
 /// The positions of the `n` parts of the instruction ending at `next`

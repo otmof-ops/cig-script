@@ -56,15 +56,15 @@ pub static LIST: &[Builtin] = &[
     b("list.slice", Effect::Pure, 2, Some(3), l_slice),
     b("list.contains", Effect::Pure, 2, Some(2), l_contains),
     b("list.index_of", Effect::Pure, 2, Some(2), l_index_of),
-    b("list.map", Effect::Pure, 2, Some(2), l_map),
-    b("list.filter", Effect::Pure, 2, Some(2), l_filter),
-    b("list.reduce", Effect::Pure, 3, Some(3), l_reduce),
-    b("list.each", Effect::Pure, 2, Some(2), l_each),
-    b("list.any", Effect::Pure, 2, Some(2), l_any),
-    b("list.all", Effect::Pure, 2, Some(2), l_all),
-    b("list.find", Effect::Pure, 2, Some(2), l_find),
+    b("list.map", Effect::Pure, 2, Some(2), l_map).calling_back(),
+    b("list.filter", Effect::Pure, 2, Some(2), l_filter).calling_back(),
+    b("list.reduce", Effect::Pure, 3, Some(3), l_reduce).calling_back(),
+    b("list.each", Effect::Pure, 2, Some(2), l_each).calling_back(),
+    b("list.any", Effect::Pure, 2, Some(2), l_any).calling_back(),
+    b("list.all", Effect::Pure, 2, Some(2), l_all).calling_back(),
+    b("list.find", Effect::Pure, 2, Some(2), l_find).calling_back(),
     b("list.sort", Effect::Pure, 1, Some(1), l_sort),
-    b("list.sort_by", Effect::Pure, 2, Some(2), l_sort_by),
+    b("list.sort_by", Effect::Pure, 2, Some(2), l_sort_by).calling_back(),
     b("list.reverse", Effect::Pure, 1, Some(1), l_reverse),
     b("list.join", Effect::Pure, 1, Some(2), l_join),
     b("list.unique", Effect::Pure, 1, Some(1), l_unique),
@@ -91,6 +91,92 @@ pub static MAP: &[Builtin] = &[
     b("map.merge", Effect::Pure, 2, Some(2), m_merge),
     b("map.copy", Effect::Pure, 1, Some(1), m_copy),
 ];
+
+/// The row of [`STR`] that holds the string method `name`.
+pub(super) fn str_row(name: &str) -> Option<usize> {
+    Some(match name {
+        "len" => 0,
+        "upper" => 1,
+        "lower" => 2,
+        "trim" => 3,
+        "trim_start" => 4,
+        "trim_end" => 5,
+        "split" => 6,
+        "lines" => 7,
+        "chars" => 8,
+        "contains" => 9,
+        "starts_with" => 10,
+        "ends_with" => 11,
+        "replace" => 12,
+        "find" => 13,
+        "slice" => 14,
+        "repeat" => 15,
+        "pad_left" => 16,
+        "pad_right" => 17,
+        "reverse" => 18,
+        "is_empty" => 19,
+        "to_int" => 20,
+        "to_float" => 21,
+        _ => return None,
+    })
+}
+
+/// The row of [`LIST`] that holds the list method `name`.
+pub(super) fn list_row(name: &str) -> Option<usize> {
+    Some(match name {
+        "len" => 0,
+        "is_empty" => 1,
+        "push" => 2,
+        "pop" => 3,
+        "insert" => 4,
+        "remove" => 5,
+        "first" => 6,
+        "last" => 7,
+        "get" => 8,
+        "slice" => 9,
+        "contains" => 10,
+        "index_of" => 11,
+        "map" => 12,
+        "filter" => 13,
+        "reduce" => 14,
+        "each" => 15,
+        "any" => 16,
+        "all" => 17,
+        "find" => 18,
+        "sort" => 19,
+        "sort_by" => 20,
+        "reverse" => 21,
+        "join" => 22,
+        "unique" => 23,
+        "flatten" => 24,
+        "sum" => 25,
+        "min" => 26,
+        "max" => 27,
+        "zip" => 28,
+        "enumerate" => 29,
+        "chunks" => 30,
+        "copy" => 31,
+        _ => return None,
+    })
+}
+
+/// The row of [`MAP`] that holds the map method `name`.
+pub(super) fn map_row(name: &str) -> Option<usize> {
+    Some(match name {
+        "len" => 0,
+        "is_empty" => 1,
+        "keys" => 2,
+        "values" => 3,
+        "entries" => 4,
+        "has" => 5,
+        "get" => 6,
+        "set" => 7,
+        "remove" => 8,
+        "merge" => 9,
+        "copy" => 10,
+        _ => return None,
+    })
+}
 
 // ----- strings -----------------------------------------------------------------
 
@@ -226,22 +312,10 @@ fn s_is_empty(_: &mut Interp, a: &[Value], s: Span) -> Result<Value, Diagnostic>
     Ok(Value::Bool(expect_str(a, 0, "is_empty", s)?.is_empty()))
 }
 fn s_to_int(i: &mut Interp, a: &[Value], s: Span) -> Result<Value, Diagnostic> {
-    let f = crate::stdlib::method(&Value::Null, "")
-        .map(|_| ())
-        .is_none();
-    let _ = f;
-    super::core::GLOBALS
-        .iter()
-        .find(|g| g.name == "int")
-        .map(|g| (g.func)(i, &a[..1], s))
-        .expect("int is a global")
+    super::core::to_int(i, &a[..1], s)
 }
 fn s_to_float(i: &mut Interp, a: &[Value], s: Span) -> Result<Value, Diagnostic> {
-    super::core::GLOBALS
-        .iter()
-        .find(|g| g.name == "float")
-        .map(|g| (g.func)(i, &a[..1], s))
-        .expect("float is a global")
+    super::core::to_float(i, &a[..1], s)
 }
 
 /// `(start, end)` for `.slice(start[, end])` with negative indexes counting
@@ -479,16 +553,18 @@ fn l_reverse(_: &mut Interp, a: &[Value], s: Span) -> Result<Value, Diagnostic> 
 fn l_join(_: &mut Interp, a: &[Value], s: Span) -> Result<Value, Diagnostic> {
     let list = expect_list(a, 0, "join", s)?;
     let sep = match a.get(1) {
-        Some(_) => expect_str(a, 1, "join", s)?.to_string(),
-        None => String::new(),
+        Some(_) => expect_str(a, 1, "join", s)?,
+        None => "",
     };
-    let joined = list
-        .borrow()
-        .iter()
-        .map(|v| v.display())
-        .collect::<Vec<_>>()
-        .join(&sep);
-    Ok(Value::str(joined))
+    let items = list.borrow();
+    Ok(crate::value::build_str(|out| {
+        for (n, v) in items.iter().enumerate() {
+            if n > 0 {
+                out.push_str(sep);
+            }
+            v.write_display(out);
+        }
+    }))
 }
 fn l_unique(_: &mut Interp, a: &[Value], s: Span) -> Result<Value, Diagnostic> {
     let items = expect_list(a, 0, "unique", s)?.borrow().clone();

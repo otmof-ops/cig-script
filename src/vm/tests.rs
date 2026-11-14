@@ -3865,6 +3865,7 @@ fn mark_value() -> Value {
         min_args: 0,
         max_args: Some(0),
         func: mark,
+        calls_back: false,
     }))
 }
 
@@ -5531,4 +5532,338 @@ fn the_start_checks_every_functions_upvalues_and_the_top_level() {
         e.message,
         "the program's bytecode does not read: bytecode integrity hash does not match"
     );
+}
+
+// ----- the fast loop's calls, and the method cache ------------------------------------------
+
+/// `for r in rs { try { exhale <call on r> } ashtray e { exhale e.kind, e.message } }`,
+/// with the call at one site, so its second turn runs from the site's
+/// cache (`callm`) or the fast loop (`callb`). The try covers the call
+/// alone: an error raised in the fast loop is caught only when the frame's
+/// pc is the call's.
+fn calls_in_a_loop(call: impl FnOnce(&mut Asm)) -> Module {
+    let mut a = Asm::default();
+    a.i(steps(1, 0))
+        .op(Op::MOV, 1, 0, 0)
+        .op(Op::ITERPREP, 1, 0, 0);
+    a.label("next").jump(Op::ITERNEXT, 1, "done");
+    // The move runs in the fast loop between `try.enter` (the general
+    // path, which leaves the frame's pc at the move) and the try's range.
+    a.i(steps(1, 1))
+        .try_enter(0)
+        .op(Op::MOV, 5, 4, 0)
+        .op(Op::MOV, 6, 4, 0)
+        .label("s");
+    call(&mut a);
+    a.op(Op::EXHALE, 5, 1, 0).try_leave().label("e");
+    a.jump(Op::JMP, 0, "after");
+    a.label("catch")
+        .getfield(7, 6, "kind")
+        .getfield(8, 6, "message")
+        .op(Op::EXHALE, 7, 2, 0)
+        .try_leave();
+    a.label("after").jump(Op::LOOP, 0, "next");
+    a.label("done")
+        .i(steps(0, 0))
+        .op(Op::LOADNULL, 0, 0, 0)
+        .i(ret(0));
+    a.handler("s", "e", "catch", 6, None);
+    let mut f = a.finish("", 0, 12);
+    f.arity = 1;
+    module(f)
+}
+
+fn same_calls_in_a_loop(call_src: &str, rs: Value, call: impl FnOnce(&mut Asm)) {
+    let src = format!(
+        "for r in rs {{\n  try {{\n    exhale {call_src}\n  }} ashtray e {{\n    exhale e.kind, e.message\n  }}\n}}\n"
+    );
+    let copy = |v: &Value| match v {
+        Value::List(l) => Value::list(
+            l.borrow()
+                .iter()
+                .map(|x| match x {
+                    Value::List(i) => Value::list(i.borrow().clone()),
+                    Value::Map(m) => Value::map(m.borrow().clone()),
+                    other => other.clone(),
+                })
+                .collect(),
+        ),
+        other => other.clone(),
+    };
+    let (want, e) = walker_run(&src, &[("rs", copy(&rs))]);
+    assert!(e.is_none(), "{src}: {:?}", e.map(|e| e.message));
+    let (got, r) = vm_run(&calls_in_a_loop(call), vec![rs]);
+    assert!(r.is_ok(), "{src}: {:?}", r.err().map(|e| e.message));
+    assert_eq!(got, want, "{src}");
+}
+
+fn builtin_value(name: &str) -> Value {
+    Value::Builtin(Rc::new(
+        *crate::stdlib::builtin_catalogue()[catalogue_index(name)],
+    ))
+}
+
+#[test]
+fn callm_from_the_site_cache_is_the_interpreters_call() {
+    let s = Value::str;
+    let list = |xs: Vec<Value>| Value::list(xs);
+    let map = |kv: Vec<(&str, Value)>| {
+        Value::map(kv.into_iter().map(|(k, v)| (k.to_string(), v)).collect())
+    };
+    // (receivers, the method and its constant arguments)
+    let cases: Vec<(Value, &str, Vec<Constant>)> = vec![
+        // The receiver's type changes under one site: each turn its own method.
+        (
+            list(vec![
+                s("ab"),
+                list(vec![Value::Int(1)]),
+                map(vec![("a", Value::Int(1))]),
+                s("abc"),
+            ]),
+            "len",
+            vec![],
+        ),
+        // A method that changes its receiver, twice from the cache.
+        (
+            list(vec![
+                list(vec![]),
+                list(vec![Value::Int(1)]),
+                list(vec![Value::Int(2)]),
+            ]),
+            "push",
+            vec![Constant::Int(9)],
+        ),
+        // The method's own error, raised from the cache: caught at the call.
+        (list(vec![s("12"), s("x"), s("7")]), "to_int", vec![]),
+        // An arity error on every turn, the second from a filled cache.
+        (
+            list(vec![list(vec![]), list(vec![])]),
+            "push",
+            vec![Constant::Int(1), Constant::Int(2)],
+        ),
+        (list(vec![s("a"), s("b")]), "upper", vec![Constant::Int(1)]),
+        // A map holding a function under the method's name, after the
+        // site cached the map method `has`: the function is called.
+        (
+            list(vec![
+                map(vec![("a", Value::Int(1))]),
+                map(vec![("has", builtin_value("len"))]),
+                map(vec![("b", Value::Int(1))]),
+            ]),
+            "has",
+            vec![Constant::Str("abc".into())],
+        ),
+        // A type with no methods after one that has them; a module.
+        (
+            list(vec![s("x"), Value::Int(1), Value::Null, s("y")]),
+            "upper",
+            vec![],
+        ),
+        (
+            list(vec![s("x"), crate::stdlib::prelude()[0].1.clone()]),
+            "len",
+            vec![],
+        ),
+        // A method that calls back: never from the fast loop.
+        (
+            list(vec![
+                list(vec![Value::Int(1), Value::Int(2)]),
+                list(vec![Value::Int(3)]),
+            ]),
+            "map",
+            vec![],
+        ),
+    ];
+    for (rs, name, args) in cases {
+        let shown: Vec<String> = args
+            .iter()
+            .map(|c| match c {
+                Constant::Int(i) => i.to_string(),
+                Constant::Str(s) => format!("\"{s}\""),
+                _ => unreachable!(),
+            })
+            .collect();
+        let (call_src, fn_arg) = if name == "map" {
+            ("r.map(str)".to_string(), true)
+        } else {
+            (format!("r.{name}({})", shown.join(", ")), false)
+        };
+        same_calls_in_a_loop(&call_src, rs, |a| {
+            for (i, c) in args.iter().enumerate() {
+                a.loadk(6 + i as u8, c.clone());
+            }
+            let mut n = args.len() as u8;
+            if fn_arg {
+                // `str` as a value: a name of the prelude.
+                let g = a.s("str");
+                a.i(Instr::abx(Op::LOADG, 6, g));
+                n = 1;
+            }
+            let k = a.s(name) as u8;
+            a.op(Op::CALLM, 5, k, n);
+        });
+    }
+}
+
+#[test]
+fn callb_in_the_fast_loop_raises_where_the_general_path_does() {
+    let int = catalogue_index("int") as u8;
+    let rs = Value::list(vec![Value::str("12"), Value::str("x"), Value::Float(2.5)]);
+    same_calls_in_a_loop("int(r)", rs, |a| {
+        a.op(Op::CALLB, 5, int, 1);
+    });
+}
+
+#[test]
+fn interp_writes_every_part_as_display_does() {
+    let parts = printable_values();
+    let n = parts.len();
+    let mut code = vec![abc(Op::INTERP, n as u8, 0, (n - 1) as u8), ret(n as u8)];
+    // Twice: the scratch buffer is reused, and a nested build gets its own.
+    code.insert(1, abc(Op::INTERP, n as u8, 0, (n - 1) as u8));
+    let mut f = main_fn(n as u32 + 1, code);
+    f.arity = n as u16;
+    let want: String = parts.iter().map(Value::display).collect();
+    let (_, r) = vm_run(&module(f), parts);
+    match r {
+        Ok(Value::Str(s)) => assert_eq!(&*s, want),
+        other => panic!("{:?}", other.map(|v| v.repr()).map_err(|e| e.message)),
+    }
+}
+
+#[test]
+fn map_stores_and_literals_in_the_fast_loop_keep_the_maps_order() {
+    let src = "roll m = {b: 1, a: 2}\nm[\"a\"] = 3\nm[\"c\"] = 4\nm[\"b\"] = 5\nexhale m\n";
+    let (want, e) = walker_run(src, &[]);
+    assert!(e.is_none());
+    let mut a = Asm::default();
+    a.op(Op::NEWMAP, 0, 2, 0)
+        .loadk(1, Constant::Str("b".into()))
+        .i(Instr::asbx(Op::LOADINT, 2, 1))
+        .op(Op::INSERTMAP, 0, 1, 2)
+        .loadk(1, Constant::Str("a".into()))
+        .i(Instr::asbx(Op::LOADINT, 2, 2))
+        .op(Op::INSERTMAP, 0, 1, 2);
+    for (k, v) in [("a", 3), ("c", 4), ("b", 5)] {
+        a.loadk(1, Constant::Str(k.into()))
+            .i(Instr::asbx(Op::LOADINT, 2, v))
+            .op(Op::SETINDEX, 0, 1, 2)
+            .op(Op::NOP, 0, 0, 0)
+            .op(Op::NOP, 0, 0, 0);
+    }
+    a.op(Op::EXHALE, 0, 1, 0).i(ret(0));
+    let (got, r) = vm_run(&module(a.finish("", 0, 3)), vec![]);
+    assert!(r.is_ok(), "{:?}", r.err().map(|e| e.message));
+    assert_eq!(got, want);
+    assert_eq!(got, "{b: 5, a: 3, c: 4}\n");
+}
+
+#[test]
+fn the_tree_walkers_interpolation_nests_and_stops_on_an_error() {
+    let src = "try {\n  exhale \"a${1 / 0}\"\n} ashtray e {\n  exhale \"caught\"\n}\nexhale \"a${\"b${1 + 1}c\"}d${[1, \"x\"]}e${-9223372036854775807 - 1}\"\n";
+    let (out, e) = walker_run(src, &[]);
+    assert!(e.is_none(), "{:?}", e.map(|e| e.message));
+    assert_eq!(out, "caught\nab2cd[1, \"x\"]e-9223372036854775808\n");
+}
+
+// ----- the fast tier and the method cache, against the tree-walker on changing receivers -----
+
+#[test]
+fn the_fast_tier_matches_the_walker_on_changing_receivers() {
+    let s = Value::str;
+    let list = |xs: Vec<Value>| Value::list(xs);
+    let map = |kv: Vec<(&str, Value)>| {
+        Value::map(kv.into_iter().map(|(k, v)| (k.to_string(), v)).collect())
+    };
+    // A method whose argument is its receiver, twice from the cache.
+    same_calls_in_a_loop(
+        "r.push(r)",
+        list(vec![list(vec![Value::Int(1)]), list(vec![Value::Int(2)])]),
+        |a| {
+            let k = a.s("push") as u8;
+            a.op(Op::CALLM, 5, k, 1);
+        },
+    );
+    // The same name on two types at different rows, and types without it.
+    same_calls_in_a_loop(
+        "r.contains(\"a\")",
+        list(vec![
+            list(vec![Value::Int(1), s("a")]),
+            s("abc"),
+            list(vec![s("b")]),
+            s("xa"),
+            Value::Int(3),
+            map(vec![("a", Value::Int(1))]),
+            s("zz"),
+        ]),
+        |a| {
+            a.loadk(6, Constant::Str("a".into()));
+            let k = a.s("contains") as u8;
+            a.op(Op::CALLM, 5, k, 1);
+        },
+    );
+    // A map holding a non-function under the method's name.
+    same_calls_in_a_loop(
+        "r.len()",
+        list(vec![
+            map(vec![("len", Value::Int(5))]),
+            map(vec![("len", Value::Int(6))]),
+            s("ab"),
+        ]),
+        |a| {
+            let k = a.s("len") as u8;
+            a.op(Op::CALLM, 5, k, 0);
+        },
+    );
+    // The method's own type error after a hit.
+    same_calls_in_a_loop(
+        "r.get(\"a\")",
+        list(vec![
+            map(vec![("a", Value::Int(1))]),
+            list(vec![s("x")]),
+            map(vec![("a", Value::Int(2))]),
+        ]),
+        |a| {
+            a.loadk(6, Constant::Str("a".into()));
+            let k = a.s("get") as u8;
+            a.op(Op::CALLM, 5, k, 1);
+        },
+    );
+    // String `+` from the second tier, and its fall-backs.
+    same_calls_in_a_loop(
+        "r + r",
+        list(vec![
+            s("a"),
+            s("bc"),
+            Value::Int(1),
+            Value::Float(2.5),
+            s(""),
+            Value::Null,
+        ]),
+        |a| {
+            a.op(Op::ADD, 5, 5, 6);
+        },
+    );
+    // `interp` of a cyclic list and of strings inside containers.
+    same_calls_in_a_loop(
+        "\"${r}|${r}\"",
+        list(vec![
+            list(vec![s("q\"x"), Value::Int(i64::MIN), Value::Float(-0.0)]),
+            map(vec![("a b", s("é")), ("n", Value::Null)]),
+            Value::Int(i64::MAX),
+        ]),
+        |a| {
+            a.loadk(7, Constant::Str("|".into()));
+            a.op(Op::MOV, 8, 6, 0);
+            a.op(Op::INTERP, 5, 6, 2);
+        },
+    );
+}
+
+#[test]
+fn the_walkers_interpolation_is_reentered_through_calls() {
+    let src = "pull f(x) {\n  snuff \"<${x}>\"\n}\npull g(x) {\n  try {\n    snuff \"${x}${1 / 0}\"\n  } ashtray e {\n    snuff \"E${x}\"\n  }\n}\nexhale \"a${f(\"b${f(1)}\")}c${g(2)}d${f(g(3))}e${[f(4), g(5)].join(\"${f(6)}\")}\"\nexhale \"after\"\n";
+    let (out, e) = walker_run(src, &[]);
+    assert!(e.is_none(), "{:?}", e.map(|e| e.message));
+    assert_eq!(out, "a<b<1>>cE2d<E3>e<4><6>E5\nafter\n");
 }

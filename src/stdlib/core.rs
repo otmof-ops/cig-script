@@ -25,7 +25,7 @@ pub static GLOBALS: &[Builtin] = &[
     b("assert", Effect::Pure, 1, Some(2), assert),
     b("exit", Effect::Pure, 0, Some(1), exit),
     b("stdin", Effect::Read, 0, Some(0), stdin),
-    b("light", Effect::Pure, 1, Some(2), super::chain::light),
+    b("light", Effect::Pure, 1, Some(2), super::chain::light).calling_back(),
 ];
 
 fn len(_: &mut Interp, args: &[Value], span: Span) -> Result<Value, Diagnostic> {
@@ -63,7 +63,7 @@ fn int_from_float(f: f64, span: Span) -> Result<Value, Diagnostic> {
     Ok(Value::Int(t as i64))
 }
 
-fn to_int(_: &mut Interp, args: &[Value], span: Span) -> Result<Value, Diagnostic> {
+pub(super) fn to_int(_: &mut Interp, args: &[Value], span: Span) -> Result<Value, Diagnostic> {
     match &args[0] {
         Value::Int(i) => Ok(Value::Int(*i)),
         Value::Float(f) if f.is_finite() => int_from_float(*f, span),
@@ -87,7 +87,7 @@ fn to_int(_: &mut Interp, args: &[Value], span: Span) -> Result<Value, Diagnosti
     }
 }
 
-fn to_float(_: &mut Interp, args: &[Value], span: Span) -> Result<Value, Diagnostic> {
+pub(super) fn to_float(_: &mut Interp, args: &[Value], span: Span) -> Result<Value, Diagnostic> {
     match &args[0] {
         Value::Int(i) => Ok(Value::Float(*i as f64)),
         Value::Float(f) => Ok(Value::Float(*f)),
