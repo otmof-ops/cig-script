@@ -1388,4 +1388,42 @@ mod tests {
         assert!(c.errors.is_empty() && c.warnings.is_empty());
         assert!(run(src).errors.len() >= 6);
     }
+
+    /// `resolve`, with every body entered (in the order found, and in the
+    /// reverse), sets on every node what `check` sets, for shapes that put
+    /// late declarations, shadowing and nested bodies around a body.
+    #[test]
+    fn resolve_matches_check_on_late_names_and_nested_bodies() {
+        let cases = [
+            "roll v = 1\npull outer() {\n  pull inner() {\n    snuff v\n  }\n  roll a = inner()\n  roll v = 3\n  snuff inner()\n}\nexhale outer()\n",
+            "pull l1() {\n  pull l2() {\n    pull l3() {\n      snuff [p, q, r, len]\n    }\n    roll r = 3\n    snuff l3()\n  }\n  roll q = 2\n  snuff l2()\n}\nroll p = 1\nroll len = 0\nexhale l1()\n",
+            "if true {\n  roll a = 1\n  pull f() {\n    snuff a + b\n  }\n  roll b = 2\n  pull g() {\n    snuff a + b + c\n  }\n  roll c = 3\n  exhale f(), g()\n}\n",
+            "roll k = 1\npull f() {\n  roll h = pack() => pack() {\n    snuff k + m\n  }\n  roll m = 2\n  snuff h()()\n}\nexhale f()\n",
+            "for i in 0..2 {\n  pull g() {\n    snuff [i, j]\n  }\n  roll j = i\n  if i > 0 {\n    pull g2() {\n      snuff j\n    }\n    roll j = 9\n  }\n}\n",
+            "pull f(x, len) {\n  pull g(y) {\n    snuff x + y + len + z\n  }\n  roll z = 1\n  snuff g\n}\n",
+            "roll a = 1\nroll b = 2\nroll c = 3\npull f() {\n  snuff a\n}\nroll d = 4\npull g() {\n  snuff d + e\n}\nroll e = 5\n",
+            "try {\n  pull t() {\n    snuff u\n  }\n  roll u = 1\n} ashtray e {\n  pull t2() {\n    snuff e\n  }\n}\n",
+            "burn (s) {\n  pull h() {\n    snuff s.v + w\n  }\n  roll w = 1\n}\n",
+        ];
+        for src in cases {
+            let checked = parse(src).unwrap();
+            let _ = check(&checked, &[]);
+            let want = format!("{checked:?}");
+            let quiet = parse(src).unwrap();
+            resolve_and_enter_all(&quiet);
+            assert_eq!(format!("{quiet:?}"), want, "lifo: {src}");
+            // The other order: first found, first entered.
+            let fifo = parse(src).unwrap();
+            let mut c = Checker::new(&[], false);
+            c.block_stmts(&fifo.body);
+            c.finish();
+            let mut todo: std::collections::VecDeque<_> = std::mem::take(&mut c.found).into();
+            while let Some((body, params)) = todo.pop_front() {
+                let outer = body.pending.take().expect("pending");
+                let mut c = enter_now(outer, &params, &body);
+                todo.extend(c.found.drain(..));
+            }
+            assert_eq!(format!("{fifo:?}"), want, "fifo: {src}");
+        }
+    }
 }

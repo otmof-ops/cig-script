@@ -298,3 +298,124 @@ fn resolved_without_check_reads_as_checked() {
         assert_eq!(out, want, "{name}");
     }
 }
+
+/// One run of `src`: what it printed, its error (code, message, position),
+/// how many resolved reads were checked and how many fell back by name.
+/// `mode`: 0 every name by name, 1 `check::check` first, 2 `check::resolve`.
+#[allow(clippy::type_complexity)]
+fn outcome_in(
+    src: &str,
+    mode: u8,
+    runs: usize,
+) -> (
+    String,
+    Option<(String, String, Option<u32>, Option<u32>)>,
+    u64,
+) {
+    let program = crate::syntax::parse(src).expect("parses");
+    match mode {
+        1 => {
+            let _ = crate::check::check(&program, &[]);
+        }
+        2 => crate::check::resolve(&program),
+        _ => {}
+    }
+    let sink = Sink::default();
+    let missed_before = resolved_missed();
+    let mut err = None;
+    for _ in 0..runs {
+        let mut interp = Interp::new(Kernel::ephemeral(Mode::Run));
+        interp.out = Box::new(sink.clone());
+        interp.set_max_steps(0);
+        err = interp
+            .run_program(&program)
+            .err()
+            .map(|d| (d.code.to_string(), d.message, d.line, d.col));
+    }
+    let out = String::from_utf8(sink.0.borrow().clone()).expect("utf-8");
+    (out, err, resolved_missed() - missed_before)
+}
+
+/// Shapes that interleave function bodies with declarations, shadowing,
+/// loops, branches, `try`, burns, nested functions and callbacks: run
+/// resolved lazily, each prints and fails as with every name looked up by
+/// name, and, where `check` accepts it, as after `check`, with the same
+/// number of resolved reads that fall back by name.
+#[test]
+fn lazily_resolved_shapes_run_as_checked_and_as_unresolved() {
+    let many: String = (0..40)
+        .map(|i| format!("roll n{i} = {i}\n"))
+        .collect::<String>()
+        + "pull pick() {\n  snuff n35 + n2\n}\nexhale pick()\n";
+    let cases: Vec<String> = [
+        // late top-level name, read in a body called after it
+        "pull f() {\n  snuff x\n}\nroll x = 1\nexhale f()\n",
+        "if true {\n  pull f() {\n    snuff y\n  }\n  roll y = 2\n  exhale f()\n}\n",
+        // a closure reading a name its enclosing function declares later
+        "roll v = 1\npull outer() {\n  pull inner() {\n    snuff v\n  }\n  exhale inner()\n  roll v = 3\n  snuff inner()\n}\nexhale outer()\nexhale outer()\n",
+        // shadowing in nested blocks and a loop body
+        "roll a = 1\nfor i in 0..3 {\n  pull g() {\n    snuff a\n  }\n  exhale g()\n  roll a = i\n  exhale g()\n  if i > 0 {\n    roll a = 10\n    exhale a, g()\n  }\n}\nexhale a\n",
+        // functions defined in a loop, a branch, a try, a burn, a function
+        "roll out = []\nwhile len(out) < 2 {\n  roll k = len(out)\n  pull w() {\n    snuff k * 2\n  }\n  out.push(w)\n}\nexhale out.map(pack(f) => f())\n",
+        "roll z = 4\nif z > 1 {\n  pull b() {\n    snuff z + 1\n  }\n  exhale b()\n} else {\n  pull b() {\n    snuff 0\n  }\n  exhale b()\n}\n",
+        "roll t = 0\ntry {\n  pull tt() {\n    t += 1\n    snuff t\n  }\n  exhale tt()\n  cough \"boom\"\n} ashtray e {\n  exhale e.message\n  exhale t\n}\n",
+        "burn (s) {\n  s.v = 1\n  pull h() {\n    snuff s.v + 1\n  }\n  exhale h()\n}\n",
+        // recursion and mutual recursion, a call before the definition
+        "exhale even(7)\npull even(n) {\n  if n == 0 {\n    snuff true\n  }\n  snuff odd(n - 1)\n}\npull odd(n) {\n  if n == 0 {\n    snuff false\n  }\n  snuff even(n - 1)\n}\n",
+        "pull fib(n) {\n  if n < 2 {\n    snuff n\n  }\n  snuff fib(n - 1) + fib(n - 2)\n}\nexhale fib(12)\n",
+        // a parameter shadowing a global and a prelude name
+        "roll x = 5\npull f(x, len) {\n  snuff x + len\n}\nexhale f(1, 2)\nexhale len([1, 2])\nexhale x\n",
+        // a block lambda against an expression lambda
+        "roll k = 2\nroll f = pack(a) {\n  snuff a * k\n}\nroll g = pack(a) => a * k\nexhale f(3), g(3)\nk = 5\nexhale f(3), g(3)\n",
+        // one function value made twice, entered from two places
+        "pull mk() {\n  roll c = 0\n  snuff pack() {\n    c += 1\n    snuff c\n  }\n}\nroll p = mk()\nroll q = mk()\nexhale p(), p(), q()\n",
+        // a callback from a builtin, first entered there
+        "roll base = 10\nexhale [1, 2, 3].map(pack(x) {\n  snuff x + base\n})\n",
+        // compound assignment on a captured variable
+        "roll n = 0\npull inc() {\n  n += 2\n  n *= 3\n}\ninc()\ninc()\nexhale n\n",
+        // a nested pull shadowing a hoisted outer one, called before its definition
+        "pull f() {\n  snuff 1\n}\nif true {\n  exhale f()\n  pull f() {\n    snuff 2\n  }\n}\nexhale f()\n",
+        // a prelude name shadowed after the function, the function called before and after
+        "pull f() {\n  snuff len([1])\n}\nexhale f()\nroll len = pack(x) => 99\nexhale f()\n",
+        // the enclosing scope gains names between the definition and the first call
+        "if true {\n  roll a = 1\n  pull f() {\n    snuff a + b\n  }\n  roll b = 2\n  roll c = 3\n  exhale f()\n}\n",
+        // three levels, a late name at each
+        "pull l1() {\n  pull l2() {\n    pull l3() {\n      snuff [p, q, r]\n    }\n    roll r = 3\n    snuff l3()\n  }\n  roll q = 2\n  snuff l2()\n}\nroll p = 1\nexhale l1()\n",
+        // a body entered only on a later call; arity error first
+        "pull two(a, b) {\n  snuff a + b\n}\ntry {\n  exhale two(1)\n} ashtray e {\n  exhale e.message\n}\nexhale two(1, 2)\n",
+        // break outside a loop inside a lazily entered body
+        "pull brk() {\n  break\n}\nexhale 1\nbrk()\n",
+        // a stick reassigned inside a body; a typo in a module item inside a body
+        "stick s = 1\npull f() {\n  s = 2\n}\nf()\n",
+        "pull f() {\n  snuff fs.read_txt(\"x\")\n}\nexhale f()\n",
+        // a name that exists only in a branch not taken
+        "if false {\n  roll only = 1\n}\npull f() {\n  snuff only\n}\nexhale f()\n",
+        // a chain read by a body before its declaration
+        "pull step() {\n  snuff 1\n}\npull use() {\n  snuff later\n}\nchain later { step }\nexhale len(use())\n",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .chain(std::iter::once(many))
+    .collect();
+    for src in &cases {
+        let by_name = outcome_in(src, 0, 1);
+        let resolved = outcome_in(src, 2, 1);
+        assert_eq!(
+            (&resolved.0, &resolved.1),
+            (&by_name.0, &by_name.1),
+            "resolved against by name: {src}"
+        );
+        if crate::check::check(&crate::syntax::parse(src).unwrap(), &[]).ok() {
+            let checked = outcome_in(src, 1, 1);
+            assert_eq!(resolved, checked, "resolved against checked: {src}");
+        }
+        // The same tree run twice (a trial, then the run) after one resolve.
+        let twice_resolved = outcome_in(src, 2, 2);
+        let twice_by_name = outcome_in(src, 0, 2);
+        assert_eq!(
+            (&twice_resolved.0, &twice_resolved.1),
+            (&twice_by_name.0, &twice_by_name.1),
+            "twice: {src}"
+        );
+    }
+}
