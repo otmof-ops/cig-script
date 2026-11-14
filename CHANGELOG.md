@@ -5,6 +5,18 @@ project follows semantic versioning.
 
 ## Unreleased
 
+## 1.23.0 — 2026-11-14
+
+Calls at a fraction of their cost. A method is found without a scan of
+its type's table and called without an argument vector, on both engines;
+a string made by interpolation, `+` or `join` is written into one buffer
+and copied once. The bytecode VM keeps built-in calls, interpolation and
+list and map building in its fast loop, remembers at each method call
+the method it found, and runs a call, a return and a tail call without
+leaving its frame loop, on a frame record of 64 bytes that owns nothing.
+Nothing a program can observe changes: output, errors and their
+positions, the journal and every step budget are as before (#235, #230).
+
 - **A call, a return and a callback cost the VM a third less (cig-script#230
   step 3, #235; `docs/BYTECODE.md`).** A call of a compiled function, its
   return and a tail call change frames in the VM's frame loop instead of
