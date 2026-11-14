@@ -805,7 +805,7 @@ fn run_frame(
         frames: Vec::new(),
     };
     let first = proto.spans.first().copied().unwrap_or_default();
-    m.grow(proto.reg_count, first).map_err(|e| *e)?;
+    m.grow_to(proto.reg_count, first).map_err(|e| *e)?;
     for (slot, a) in m.stack.iter_mut().zip(args) {
         *slot = a;
     }
@@ -937,8 +937,16 @@ enum Flow {
 }
 
 impl Machine<'_> {
-    fn grow(&mut self, by: usize, span: Span) -> Result<(), Fault> {
-        let len = self.stack.len().saturating_add(by);
+    /// Make the register stack `len` long when it is shorter. It is never
+    /// shrunk: a frame that returns leaves its registers to the next frame
+    /// that starts there. Its length is at most the deepest chain of
+    /// frames' registers (each frame starts inside its caller's), so the
+    /// depth limit (`E506`) times the largest frame; `check_alloc`'s
+    /// ceiling (`E514`) refuses it first.
+    fn grow_to(&mut self, len: usize, span: Span) -> Result<(), Fault> {
+        if len <= self.stack.len() {
+            return Ok(());
+        }
         crate::value::check_alloc(
             (len as u128).saturating_mul(std::mem::size_of::<Value>() as u128),
             "the VM's registers",
@@ -949,9 +957,15 @@ impl Machine<'_> {
         Ok(())
     }
 
-    fn shrink(&mut self, len: usize) {
-        self.stack.truncate(len);
-        self.cells.truncate(len);
+    /// The registers `from..to` carry no cell from now on. Only a frame
+    /// whose function has a `cellnew` makes cells, and only in its own
+    /// registers, so this runs for those frames alone: when one ends, and
+    /// for a caller's registers above a call's result when it calls.
+    fn forget_cells(&mut self, from: usize, to: usize) {
+        let to = to.min(self.cells.len());
+        if let Some(cells) = self.cells.get_mut(from.min(to)..to) {
+            cells.fill(None);
+        }
     }
 
     fn release(&mut self, f: &Frame) {
@@ -1096,7 +1110,7 @@ impl Machine<'_> {
                 // A call or a return: the loop goes on in the frame on top
                 // now, without going back through `exec`.
                 Flow::Return(v) => {
-                    if let Some(v) = self.ret(v, span)? {
+                    if let Some(v) = self.ret(program, v, span)? {
                         return Ok(Some(v));
                     }
                     (pc, base, upvals, proto) = self.top(program)?;
@@ -1482,7 +1496,8 @@ impl Machine<'_> {
                 };
                 if let Some((f, cf)) = compiled(&callee, program) {
                     let first = base.saturating_add(d.a as usize + 1);
-                    self.push(program, f, cf, first, d.b_u as usize, ret, span)?;
+                    let caller = (!proto.plain).then(|| base.saturating_add(proto.reg_count));
+                    self.push(program, f, cf, first, d.b_u as usize, ret, caller, span)?;
                     let caller = self.frames.len().checked_sub(2);
                     if let Some(caller) = caller.and_then(|i| self.frames.get_mut(i)) {
                         caller.pc = next;
@@ -1523,11 +1538,12 @@ impl Machine<'_> {
             }
             Op::TAILCALL => {
                 let callee = self.get(base, d.a, span)?;
-                let args = self.window(base, d.a + 1, d.b_u, span)?;
                 if let Some((f, cf)) = compiled(&callee, program) {
-                    self.replace(program, f, cf, args, span)?;
+                    let first = base.saturating_add(d.a as usize + 1);
+                    self.replace(program, proto, f, cf, first, d.b_u as usize, span)?;
                     return Ok(Flow::Switched);
                 }
+                let args = self.window(base, d.a + 1, d.b_u, span)?;
                 let v = self.interp.call(&callee, args, span)?;
                 return Ok(Flow::Return(v));
             }
@@ -1920,7 +1936,7 @@ impl Machine<'_> {
             }
             if let Some(f) = self.frames.pop() {
                 self.release(&f);
-                self.shrink(f.base);
+                self.end_cells(program, &f);
             }
             at = self.frames.last().map(|f| f.site);
         }
@@ -1987,9 +2003,13 @@ impl Machine<'_> {
         }
     }
 
-    /// A call of a compiled function: arity, depth, then a new frame
-    /// whose first `n` registers are the caller's `first..first+n`, copied
-    /// across without a list in between.
+    /// A call of a compiled function: arity, depth, then a new frame that
+    /// starts at `first`, the caller's `R(A+1)`: its first `n` registers
+    /// are the arguments where they are, nothing is copied, and the rest
+    /// of its registers are set to null. `caller` is the end of the
+    /// caller's registers when its function makes cells: its cells from
+    /// `first` up are gone (an argument's value is read out of its cell),
+    /// as `docs/BYTECODE.md` says of what a call leaves undefined.
     #[allow(clippy::too_many_arguments)]
     fn push(
         &mut self,
@@ -1999,6 +2019,7 @@ impl Machine<'_> {
         first: usize,
         n: usize,
         ret: Ret,
+        caller: Option<usize>,
         span: Span,
     ) -> Result<(), Fault> {
         let index = cf.index;
@@ -2011,23 +2032,25 @@ impl Machine<'_> {
             return Err(arity_mismatch(f, n, span).into());
         }
         self.interp.enter_call(span)?;
-        let base = self.stack.len();
-        if let Err(e) = self.grow(target.reg_count, span) {
+        let base = first;
+        let params = base.saturating_add(n);
+        let end = base.saturating_add(target.reg_count);
+        if let Err(e) = self.grow_to(end, span) {
             self.interp.leave_call();
             return Err(e);
         }
-        for k in 0..n {
-            let v = match self.get_abs(first.saturating_add(k), span) {
-                Ok(v) => v,
-                Err(e) => {
-                    self.shrink(base);
-                    self.interp.leave_call();
-                    return Err(e);
+        if let Some(caller_end) = caller {
+            for i in base..params {
+                if let Some(cell) = self.cells.get_mut(i).and_then(Option::take) {
+                    if let Some(slot) = self.stack.get_mut(i) {
+                        *slot = cell.borrow().clone();
+                    }
                 }
-            };
-            if let Some(slot) = self.stack.get_mut(base.saturating_add(k)) {
-                *slot = v;
             }
+            self.forget_cells(params, caller_end);
+        }
+        if let Some(regs) = self.stack.get_mut(params..end) {
+            regs.fill(Value::Null);
         }
         self.frames.push(Frame {
             func: index,
@@ -2045,15 +2068,28 @@ impl Machine<'_> {
         Ok(())
     }
 
+    /// A frame that ends gives up the cells it made.
+    fn end_cells(&mut self, program: &Program, f: &Frame) {
+        if let Some(p) = program.funcs.get(f.func).filter(|p| !p.plain) {
+            self.forget_cells(f.base, f.base.saturating_add(p.reg_count));
+        }
+    }
+
     /// A tail call of a compiled function: the frame is reused, and keeps
     /// holding the depth and loop nesting of the frame it replaces, so the
-    /// interpreter's counts are the ones a plain call would leave.
+    /// interpreter's counts are the ones a plain call would leave. The
+    /// arguments, `first..first+n` of the frame, move down to its `R(0..n)`
+    /// (each register is read before one below it is written over), and
+    /// the rest of the new function's registers are set to null.
+    #[allow(clippy::too_many_arguments)]
     fn replace(
         &mut self,
         program: &Program,
+        proto: &Proto,
         f: &Function,
         cf: &CompiledFn,
-        args: Vec<Value>,
+        first: usize,
+        n: usize,
         span: Span,
     ) -> Result<(), Fault> {
         let index = cf.index;
@@ -2062,8 +2098,8 @@ impl Machine<'_> {
             .funcs
             .get(index)
             .ok_or_else(|| broken("no such function", span))?;
-        if args.len() != target.arity {
-            return Err(arity_mismatch(f, args.len(), span).into());
+        if n != target.arity {
+            return Err(arity_mismatch(f, n, span).into());
         }
         // The replaced function ends: its burns close as a `snuff` leaves them.
         self.close_burns(0, true)?;
@@ -2082,17 +2118,27 @@ impl Machine<'_> {
             }
             None => return Err(broken("an empty call stack", span).into()),
         };
-        self.shrink(base);
-        self.grow(target.reg_count, span)?;
-        for (slot, a) in self.stack.iter_mut().skip(base).zip(args) {
-            *slot = a;
+        for k in 0..n {
+            let v = self.get_abs(first.saturating_add(k), span)?;
+            if let Some(slot) = self.stack.get_mut(base.saturating_add(k)) {
+                *slot = v;
+            }
+        }
+        if !proto.plain {
+            self.forget_cells(base, base.saturating_add(proto.reg_count));
+        }
+        let params = base.saturating_add(n);
+        let end = base.saturating_add(target.reg_count);
+        self.grow_to(end, span)?;
+        if let Some(regs) = self.stack.get_mut(params..end) {
+            regs.fill(Value::Null);
         }
         Ok(())
     }
 
     /// Leave the current frame with `v`. `Some(v)` when it was the entry
     /// frame: the run is over.
-    fn ret(&mut self, v: Value, span: Span) -> Result<Option<Value>, Fault> {
+    fn ret(&mut self, program: &Program, v: Value, span: Span) -> Result<Option<Value>, Fault> {
         // `snuff` out of a burn: each burn is left as completed first, and
         // an error recording one is raised here, in the frame.
         self.close_burns(0, true)?;
@@ -2101,7 +2147,7 @@ impl Machine<'_> {
             .pop()
             .ok_or_else(|| broken("an empty call stack", span))?;
         self.release(&frame);
-        self.shrink(frame.base);
+        self.end_cells(program, &frame);
         match frame.ret {
             None => Ok(Some(v)),
             Some(ret) => {

@@ -63,8 +63,8 @@ exhale "moved ${plan.len()} files"
 ```
 $ cig run --dry-run tidy.cig -- ~/Downloads
 dry-run plan: 14 ops
-     1  reversible    mkdir /home/jay/Downloads/pdf
-     2  reversible    move /home/jay/Downloads/paper.pdf -> /home/jay/Downloads/pdf/paper.pdf
+     1  reversible    mkdir /home/you/Downloads/pdf
+     2  reversible    move /home/you/Downloads/paper.pdf -> /home/you/Downloads/pdf/paper.pdf
      ...
 nothing was changed
 

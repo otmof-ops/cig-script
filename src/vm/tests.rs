@@ -765,6 +765,146 @@ fn a_tail_call_returns_and_counts_depth_as_a_call() {
     assert_eq!(i.loop_depth, 0);
 }
 
+// ----- a call's frame starts at its arguments (cig-script#230 step 3) ----------------------
+
+#[test]
+fn a_callees_registers_past_its_parameters_start_null() {
+    // The callee's frame starts at the caller's R1: its R1 is the caller's
+    // R2, which held 99; the callee reads it as null.
+    let mut f = main_fn(
+        3,
+        vec![
+            Instr::abx(Op::CLOSURE, 0, 0),
+            Instr::asbx(Op::LOADINT, 1, 5),
+            Instr::asbx(Op::LOADINT, 2, 99),
+            abc(Op::CALL, 0, 1, 0),
+            ret(0),
+        ],
+    );
+    f.children = vec![child_fn("f", 1, 2, vec![ret(1)])];
+    assert_eq!(ok(&module(f.clone())), "null");
+    // Its parameter is the argument in place.
+    f.children = vec![child_fn("f", 1, 2, vec![ret(0)])];
+    assert_eq!(ok(&module(f)), "5");
+}
+
+#[test]
+fn an_argument_is_read_out_of_the_callers_cell() {
+    // R1 carries a cell written after it was made: the stack slot under
+    // it still holds 4, the cell 6. The callee's parameter is 6.
+    let mut f = main_fn(
+        2,
+        vec![
+            Instr::abx(Op::CLOSURE, 0, 0),
+            Instr::asbx(Op::LOADINT, 1, 4),
+            abc(Op::CELLNEW, 1, 0, 0),
+            Instr::asbx(Op::LOADINT, 1, 6),
+            abc(Op::CALL, 0, 1, 0),
+            ret(0),
+        ],
+    );
+    f.children = vec![child_fn("id", 1, 1, vec![ret(0)])];
+    assert_eq!(ok(&module(f)), "6");
+}
+
+#[test]
+fn a_captured_parameter_gets_its_cell_and_gives_it_up() {
+    // keep(x): cellnew R0, a getter of it, then R0 = 5 through the cell.
+    let mut getter = child_fn("get", 0, 1, vec![abc(Op::GETUP, 0, 0, 0), ret(0)]);
+    getter.upvalues = vec![captures(UpvalKind::ParentLocal, 0)];
+    let mut keep = child_fn(
+        "keep",
+        1,
+        3,
+        vec![
+            abc(Op::CELLNEW, 0, 0, 0),
+            Instr::abx(Op::CLOSURE, 1, 0),
+            Instr::asbx(Op::LOADINT, 0, 5),
+            abc(Op::CALL, 1, 0, 0),
+            ret(1),
+        ],
+    );
+    keep.children = vec![getter];
+    // Called twice from the same window: the second call's frame starts
+    // where the first one's cell was, and makes its own.
+    let mut f = main_fn(
+        4,
+        vec![
+            Instr::abx(Op::CLOSURE, 1, 0),
+            Instr::asbx(Op::LOADINT, 2, 3),
+            abc(Op::CALL, 1, 1, 0),
+            abc(Op::MOV, 0, 1, 0),
+            Instr::abx(Op::CLOSURE, 1, 0),
+            Instr::asbx(Op::LOADINT, 2, 3),
+            abc(Op::CALL, 1, 1, 0),
+            abc(Op::ADD, 0, 0, 1),
+            ret(0),
+        ],
+    );
+    f.children = vec![keep];
+    assert_eq!(ok(&module(f)), "10");
+}
+
+#[test]
+fn a_cell_above_a_calls_window_is_gone_after_the_call() {
+    // R4 carries a cell a getter shares; it is above the window R2..R3,
+    // so after the call a write to R4 is a plain write and the getter
+    // still reads 7 (docs/BYTECODE.md, what a call leaves undefined).
+    let mut getter = child_fn("get", 0, 1, vec![abc(Op::GETUP, 0, 0, 0), ret(0)]);
+    getter.upvalues = vec![captures(UpvalKind::ParentLocal, 4)];
+    let mut f = main_fn(
+        5,
+        vec![
+            Instr::asbx(Op::LOADINT, 4, 7),
+            abc(Op::CELLNEW, 4, 0, 0),
+            Instr::abx(Op::CLOSURE, 0, 0),
+            Instr::abx(Op::CLOSURE, 2, 1),
+            Instr::asbx(Op::LOADINT, 3, 1),
+            abc(Op::CALL, 2, 1, 0),
+            Instr::asbx(Op::LOADINT, 4, 9),
+            abc(Op::MOV, 1, 0, 0),
+            abc(Op::CALL, 1, 0, 0),
+            ret(1),
+        ],
+    );
+    f.children = vec![getter, child_fn("id", 1, 3, vec![ret(0)])];
+    assert_eq!(ok(&module(f)), "7");
+}
+
+#[test]
+fn a_tail_calls_frame_moves_its_arguments_down_and_starts_null() {
+    // f(x): R3 = 77, then tailcall g(x); g's frame is f's, so g's R3 is
+    // where 77 was.
+    let tail_module = |g_ret: u8| {
+        let mut f = child_fn(
+            "f",
+            1,
+            4,
+            vec![
+                Instr::abx(Op::CLOSURE, 1, 0),
+                Instr::asbx(Op::LOADINT, 3, 77),
+                abc(Op::MOV, 2, 0, 0),
+                abc(Op::TAILCALL, 1, 1, 0),
+            ],
+        );
+        f.children = vec![child_fn("g", 1, 5, vec![ret(g_ret)])];
+        let mut m = main_fn(
+            2,
+            vec![
+                Instr::abx(Op::CLOSURE, 0, 0),
+                Instr::asbx(Op::LOADINT, 1, 5),
+                abc(Op::CALL, 0, 1, 0),
+                ret(0),
+            ],
+        );
+        m.children = vec![f];
+        module(m)
+    };
+    assert_eq!(ok(&tail_module(0)), "5");
+    assert_eq!(ok(&tail_module(3)), "null");
+    assert_eq!(ok(&tail_module(4)), "null");
+}
+
 #[test]
 fn a_tail_call_of_a_builtin_returns_its_value() {
     let mut f = main_fn(2, vec![abc(Op::TAILCALL, 0, 1, 0)]);

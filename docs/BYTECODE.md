@@ -365,6 +365,25 @@ followed by `TESTN`, not a swapped operand pair.
 | `ret` A | ABC | return `R(A)` |
 | `tailcall` A, B | ABC | tail-call, `B` args from `R(A+1..A+1+B)` |
 
+**What a call leaves undefined.** `call A, B, C` runs the callee in a
+frame that starts at `R(A+1)`: its parameters are the arguments where
+they already are, and its other registers lie over the caller's
+registers from `R(A+1+B)` up. So after `call A, B, C`, every register
+past the call's result row (`R(A+C+1)` and up; `C` is the count of
+result registers the row covers after `R(A)`, `0` for one result)
+holds no value a run may read before an instruction writes it, and a
+cell that register carried is gone: a write after the call is a plain
+write, and the closures that shared the cell keep it. `R(A)` is the
+result and `R(A+1..A+C+1)` are null, as before. This holds on every way
+on from the call: the next pc, and a catch or a finally an error from
+the callee reaches. A lowering places a call's window above every
+register that holds a value across the call; the verifier holds a
+module to it (`read-before-write`). `tailcall` ends its frame and
+leaves nothing behind to read. `callb`, `callm` and `burn.op` make no
+frame in this machine (a builtin, a method or a callback that runs
+compiled code runs it in a VM of its own) and leave every register but
+their result as it was.
+
 ### Closures
 
 | op | fmt | effect |
@@ -526,6 +545,26 @@ The rules (one bullet per `VerifyError` variant, matched by its
   there, or the module's top-level function declares an upvalue (it
   has no parent).
 - **`nested-too-deep`** — the function nesting exceeds 64 levels.
+- **`read-before-write`** — an instruction reads a register whose value
+  is undefined on some way a run can reach it, and nothing writes the
+  register first. The one case is a call's (`after-call`): after `call
+  A, B, C`, `R(A+C+1)` and up are undefined (see "What a call leaves
+  undefined"). The rule follows every way the VM can go: jumps and
+  fall-throughs (a fused jump, `testset`, `forprep`, `forloop` and
+  `iternext` write their registers only on the way they write them), an
+  error offered to the tries open at its pc as the VM offers it (to a
+  catch, whose `catch_reg` is then written, or a finally; an error from
+  a call's callee comes with the callee's frame having run), a `try.leave`
+  into its finally, and a finally's end back to the pc after the
+  `try.leave` that entered it, or out with its error. What counts as a
+  read is what the VM reads: every register operand an instruction takes
+  a value from (a call's callee and arguments, the windows of `interp`,
+  `exhale`, `pack`, `chain.make` and `burn.op`, the `for` and iterator
+  windows, `cellnew`'s own register), a `closure`'s captured parent
+  registers, a `burn.enter`'s register label, and `comp.enter`'s state
+  register when it names one. The error names the read's pc, the
+  register, and a call that leaves it undefined. A read the run never
+  reaches is not refused.
 - **`uncharged-cycle`** — within a function, the instructions that are
   not a `steps` with `Bx >= 1` form a cycle: some way back to an
   instruction already run passes no `steps` that charges the step
@@ -684,8 +723,30 @@ open. A lowering writes to them.
   the arity (`E401`) and the depth (`E506`, at 4000) as the
   interpreter does, then runs the callee in a new frame whose `R(0..B)`
   are the arguments. Anything else in `R(A)` (a builtin, a module, a
-  number) goes to the interpreter's own call. The result goes to
-  `R(A)`; `R(A+1..A+C+1)`, the rest of the row's window, is set to
+  number) goes to the interpreter's own call. The callee's frame starts
+  at the caller's `R(A+1)`: its parameters are the arguments in place,
+  nothing is copied, and its registers past them start null. The result
+  goes to `R(A)`; `R(A+1..A+C+1)`, the rest of the row's window, is set
+  to null. Registers above the row may hold anything after the call
+  (what the callee left there); the verifier has refused every read of
+  one before a write (`read-before-write`). A frame that makes cells
+  (its function has a `cellnew`) gives them up when it ends, and its
+  call takes them off its registers from `R(A+1)` up (an argument is
+  read out of its cell first), so a callee's frame never starts on a
+  cell. The register stack grows when a frame needs more than there is
+  and is not shrunk when one returns: it is at most the deepest chain of
+  frames' registers (each frame starts inside its caller's), so `E506`'s
+  depth times the largest frame, and the allocation ceiling (`E514`)
+  refuses it before that. What a returned frame left in its registers
+  stays there until a later frame starts over them (setting them null)
+  or the run ends, where the tree-walker drops a call's values when it
+  returns. No program can see the difference: no value has a drop that
+  does anything a program can observe (values are strings, lists, maps,
+  functions, builtins, modules and chains; a closure's cell is kept by
+  the closures that share it), and no register left that way is read
+  again before it is written. It is memory held a little longer, bounded
+  by the deepest the stack has been. `tailcall` moves its arguments down
+  to the frame's `R(0)` and sets the rest of the new function's registers
   null. `tailcall` reuses the frame, and still counts one call of
   depth and keeps the replaced frame's loop nesting until the chain
   returns, so `E506` and `E515` read as they would after a plain call.
