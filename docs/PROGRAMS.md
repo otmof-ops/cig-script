@@ -112,7 +112,7 @@ A program without `own_flags` is unchanged.
 
 The same: the kernel, burns, rollback, `--dry-run`, error positions (they point at `file` as compiled), and the burn protocol.
 
-- **No check at start.** The script was checked when it was compiled, and the warnings were shown then.
+- **No check at start.** The script was checked when it was compiled, and the warnings were shown then. Its names are still resolved as the check resolves them, by the check's own walk without its diagnostics, so the tree-walker (stage `a`, and `--interp`) reads a variable from its place as `cig run` does: the top level before the first line runs, a function's body the first time it is called. Nothing is reported there; a name it cannot place is looked up by name when it is read, as it always was. `cig run --no-check` does the same.
 - **No pin, no trial.** The program is its cig, so there is nothing to dispatch to or compare against.
 - **Named runs.** `cig runs` lists a run as `<name> (program)` and shows the file it was compiled from, its sha256, its compiler and the binary. The record also carries `no_rollback`.
 - **`--unburn` is for its own runs.** A run made by another script or program is refused (`E1053`); `cig unburn <run>` puts back any run. A journal written by a newer cig is not handed on: the program refuses and names `cig unburn`.

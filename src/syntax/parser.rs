@@ -268,6 +268,7 @@ impl Parser {
         Ok(Block {
             stmts,
             span: open.span.to(close.span),
+            pending: Pending::default(),
         })
     }
 
