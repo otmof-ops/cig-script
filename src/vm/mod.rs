@@ -761,7 +761,7 @@ pub(crate) fn run_function(
     index: usize,
     args: Vec<Value>,
 ) -> Result<Value, Diagnostic> {
-    run_frame(interp, program, index, Rc::from(Vec::new()), args)
+    run_frame(interp, program, index, Rc::from(Vec::new()), args, true)
 }
 
 /// Call a compiled function from outside the VM: a builtin's callback
@@ -785,7 +785,14 @@ pub(crate) fn call_compiled(
         return Err(arity_mismatch(f, args.len(), span));
     }
     interp.enter_call(span)?;
-    let result = run_frame(interp, &cf.program, cf.index, Rc::clone(&cf.upvals), args);
+    let result = run_frame(
+        interp,
+        &cf.program,
+        cf.index,
+        Rc::clone(&cf.upvals),
+        args,
+        false,
+    );
     interp.leave_call();
     result
 }
@@ -796,6 +803,7 @@ fn run_frame(
     index: usize,
     upvals: Rc<[Cell]>,
     args: Vec<Value>,
+    window: bool,
 ) -> Result<Value, Diagnostic> {
     program.ready(index, Span::default())?;
     let proto = program
@@ -818,6 +826,7 @@ fn run_frame(
         tries: regs.tries,
         burns: regs.burns,
         upvals: regs.upvals,
+        window,
     };
     let first = proto.spans.first().copied().unwrap_or_default();
     let result = match m.grow_to(proto.reg_count, first) {
@@ -973,6 +982,12 @@ struct Machine<'i> {
     burns: Vec<OpenBurn>,
     /// The upvalues of each frame whose closure captured any.
     upvals: Vec<Rc<[Cell]>>,
+    /// The fast loop keeps [`REG_WINDOW`] registers in the stack from the
+    /// running frame's base, growing it once for each new depth: a run's
+    /// own machine. A builtin's callback runs in a machine that does not
+    /// (its stack starts empty each time, and the window would be filled
+    /// at every callback).
+    window: bool,
 }
 
 /// A machine's vectors between two runs. The interpreter keeps one set
@@ -1048,6 +1063,7 @@ impl Machine<'_> {
             mut tries,
             mut burns,
             mut upvals,
+            window: _,
         } = self;
         stack.clear();
         cells.clear();
@@ -1320,169 +1336,79 @@ impl Machine<'_> {
     /// `run_frame_code`, `step` and the group, as it did before there was
     /// a fast path, which is what keeps a level of re-entry no deeper than
     /// the tree-walker's.
+    ///
+    /// The registers are taken once here, not at every instruction: the
+    /// [`Window`] of [`REG_WINDOW`] registers from the frame's base when
+    /// the stack holds that many, which a one-word instruction's register
+    /// numbers index with no check, and otherwise the stack from the base
+    /// on, read with a check. The interpreter and the frame are borrowed
+    /// beside them, so nothing in the loop goes back through the machine.
     #[inline(never)]
     fn run_fast(&mut self, proto: &Proto, mut pc: usize, base: usize) -> Result<usize, Fault> {
-        while let Some(Some(d)) = proto.code.get(pc) {
-            #[cfg(feature = "bench-stats")]
-            let timer = stats::start(d.op);
-            let next = match self.fast(proto, d, base) {
-                Some(next) => next,
-                None => match self.fast_call(proto, d, base) {
-                    Some(Ok(next)) => next,
-                    Some(Err(e)) => {
-                        // As on the general path: the frame's pc is where
-                        // the error is offered to the tries.
-                        if let Some(f) = self.frames.last_mut() {
-                            f.pc = pc;
-                        }
-                        #[cfg(feature = "bench-stats")]
-                        stats::stop(timer);
-                        return Err(e);
-                    }
-                    None => break,
+        let end = base.saturating_add(REG_WINDOW);
+        if self.window && self.stack.len() < end {
+            // Once for each new depth a run reaches. Refused (the ceiling
+            // on the registers' memory), the checked registers serve.
+            let _ = self.grow_to(end, Span::default());
+        }
+        let Machine {
+            interp,
+            stack,
+            frames,
+            upvals,
+            ..
+        } = self;
+        let interp: &mut Interp = interp;
+        let Some(frame) = frames.last_mut() else {
+            return Ok(pc);
+        };
+        // The frame's closure's upvalues, found through the frame once
+        // here (none when it captured nothing): a call, a return and a
+        // tail call all leave this loop, so the frame is the same one
+        // until it does.
+        let upvals: &[Cell] = if frame.up == NO_UPVALS {
+            &[]
+        } else {
+            upvals.get(frame.up as usize).map_or(&[], |u| u)
+        };
+        loop {
+            let stop = match stack
+                .get_mut(base..end)
+                .and_then(|s| <&mut Window>::try_from(s).ok())
+            {
+                Some(w) => fast_run(w, interp, frame, proto, pc, upvals),
+                None => match stack.get_mut(base..) {
+                    Some(regs) => fast_run(regs, interp, frame, proto, pc, upvals),
+                    None => Stop::Here(pc),
                 },
             };
-            #[cfg(feature = "bench-stats")]
-            stats::stop(timer);
-            pc = next;
-        }
-        Ok(pc)
-    }
-
-    /// The fast loop's second tier, for a frame whose registers carry no
-    /// cell: the calls of builtins that cannot call back into the VM
-    /// (`callb`, and `callm` on a site whose cache holds the receiver's
-    /// type), `interp`, string `+`, and the list and map builders and
-    /// stores. `None`
-    /// when `d` is not one of them or not its common case, having changed
-    /// nothing, so the general path runs it from the start; a builtin's
-    /// error comes back as the general path raises it.
-    #[inline(never)]
-    fn fast_call(
-        &mut self,
-        proto: &Proto,
-        d: &DecodedInstr,
-        base: usize,
-    ) -> Option<Result<usize, Fault>> {
-        let pc = d.pc as usize;
-        let next = pc + d.width as usize;
-        let r = |x: u32| base.saturating_add(x as usize);
-        let v = match d.op {
-            Op::CALLB => {
-                let b = *crate::stdlib::builtin_catalogue().get(d.b_u as usize)?;
-                if b.calls_back {
-                    return None;
-                }
-                // `R(A)`, where the result goes, then the arguments.
-                let start = r(d.a);
-                let args = self
-                    .stack
-                    .get(start..start.saturating_add(d.c as usize).saturating_add(1))?
-                    .get(1..)?;
-                let span = span_of(proto, pc);
-                match self.interp.call_builtin(b, args, span) {
-                    Ok(v) => v,
-                    Err(e) => return Some(Err(e.into())),
-                }
-            }
-            Op::CALLM => {
-                let start = r(d.a);
-                let argv = self
-                    .stack
-                    .get(start..start.saturating_add(d.c as usize).saturating_add(1))?;
-                let recv = argv.first()?;
-                let b = crate::stdlib::method_at(recv, proto.hints.get(pc)?.get())?;
-                if b.calls_back || !b.arity_ok(argv.len()) {
-                    return None;
-                }
-                if let Value::Map(map) = recv {
-                    // A function the map holds under the name is called
-                    // instead: the general path's case.
-                    let Value::Str(name) = proto.consts.get(d.b_u as usize)? else {
-                        return None;
+            match stop {
+                Stop::Here(at) => return Ok(at),
+                // A two-word instruction names registers past a byte: it
+                // runs on the checked registers, and the window again
+                // after it.
+                Stop::Wide(at) => {
+                    let (Some(regs), Some(Some(d))) = (stack.get_mut(base..), proto.code.get(at))
+                    else {
+                        return Ok(at);
                     };
-                    let held = map
-                        .try_borrow()
-                        .ok()?
-                        .get(&**name)
-                        .is_some_and(|f| matches!(f, Value::Func(_) | Value::Builtin(_)));
-                    if held {
-                        return None;
+                    match fast_one(regs, interp, frame, proto, d, upvals) {
+                        Some(Ok(next)) => pc = next,
+                        Some(Err(e)) => {
+                            frame.pc = at;
+                            return Err(e);
+                        }
+                        None => return Ok(at),
                     }
                 }
-                let span = span_of(proto, pc);
-                match (b.func)(self.interp, argv, span) {
-                    Ok(v) => v,
-                    Err(e) => return Some(Err(e.or_at(span).into())),
+                // As on the general path: the frame's pc is where the
+                // error is offered to the tries.
+                Stop::Raised(at, e) => {
+                    frame.pc = at;
+                    return Err(e);
                 }
             }
-            Op::INTERP => {
-                let first = r(d.b_u);
-                let parts = self
-                    .stack
-                    .get(first..first.saturating_add(d.c as usize).saturating_add(1))?;
-                interpolate(parts)
-            }
-            // String `+`: the operator's own result, made in one block.
-            Op::ADD => {
-                let (Value::Str(l), Value::Str(rv)) =
-                    (self.stack.get(r(d.b_u))?, self.stack.get(r(d.c))?)
-                else {
-                    return None;
-                };
-                crate::value::build_str(|out| {
-                    out.reserve(l.len() + rv.len());
-                    out.push_str(l);
-                    out.push_str(rv);
-                })
-            }
-            Op::NEWLIST => Value::list(Vec::with_capacity(d.b_u as usize)),
-            Op::NEWMAP => Value::map(IndexMap::with_capacity(d.b_u as usize)),
-            Op::APPENDLIST => {
-                let v = self.stack.get(r(d.b_u))?.clone();
-                let Value::List(list) = self.stack.get(r(d.a))? else {
-                    return None;
-                };
-                list.try_borrow_mut().ok()?.push(v);
-                return Some(Ok(next));
-            }
-            Op::INSERTMAP => {
-                let Value::Str(key) = self.stack.get(r(d.b_u))? else {
-                    return None;
-                };
-                let v = self.stack.get(r(d.c))?.clone();
-                let Value::Map(map) = self.stack.get(r(d.a))? else {
-                    return None;
-                };
-                let old = map.try_borrow_mut().ok()?.insert(key.to_string(), v);
-                drop(old);
-                return Some(Ok(next));
-            }
-            Op::SETINDEX => {
-                let (Value::Map(map), Value::Str(key)) =
-                    (self.stack.get(r(d.a))?, self.stack.get(r(d.b_u))?)
-                else {
-                    return None;
-                };
-                let v = self.stack.get(r(d.c))?.clone();
-                let mut map = map.try_borrow_mut().ok()?;
-                // A key already there keeps its place (as `insert` does)
-                // and needs no `String` made for it.
-                let old = match map.get_mut(&**key) {
-                    Some(slot) => Some(std::mem::replace(slot, v)),
-                    None => map.insert(key.to_string(), v),
-                };
-                drop(map);
-                drop(old);
-                return Some(Ok(past_nops(proto, next, 2)));
-            }
-            _ => return None,
-        };
-        // The register exists: each arm above read it or its window.
-        if let Some(slot) = self.stack.get_mut(r(d.a)) {
-            *slot = v;
         }
-        Some(Ok(next))
     }
 
     /// The frame on top: its pc, its base and its function. An
@@ -1498,161 +1424,6 @@ impl Machine<'_> {
             .get(fi)
             .ok_or_else(|| broken("no such function", Span::default()))?;
         Ok((pc, base, proto))
-    }
-
-    /// The common cases of the hot instructions in a frame whose registers
-    /// carry no cell: the next pc when `d` ran here, `None` when it did not
-    /// and changed nothing, so the general path runs it from the start and
-    /// raises its error, if any, with the tree-walker's code and position.
-    #[inline(always)]
-    fn fast(&mut self, proto: &Proto, d: &DecodedInstr, base: usize) -> Option<usize> {
-        let pc = d.pc as usize;
-        let next = pc + d.width as usize;
-        let r = |x: u32| base.saturating_add(x as usize);
-        let v = match d.op {
-            Op::NOP => return Some(next),
-            Op::MOV => self.stack.get(r(d.b_u))?.clone(),
-            Op::LOADK => proto.consts.get(d.b_u as usize)?.clone(),
-            Op::LOADNULL => Value::Null,
-            Op::LOADBOOL => Value::Bool(d.b_u != 0),
-            Op::LOADINT => Value::Int(i64::from(d.b_s)),
-            Op::ADD | Op::SUB | Op::MUL | Op::DIV | Op::MOD | Op::EQ | Op::LT | Op::LE => {
-                let l = self.stack.get(r(d.b_u))?;
-                let rv = self.stack.get(r(d.c))?;
-                fast_compare(op_of(d.op), l, rv)?
-            }
-            Op::ADDK | Op::SUBK | Op::MULK | Op::DIVK | Op::MODK | Op::EQK | Op::LTK | Op::LEK => {
-                let l = self.stack.get(r(d.b_u))?;
-                let k = proto.consts.get(d.c as usize)?;
-                fast_compare(op_of(d.op), l, k)?
-            }
-            Op::NOT => Value::Bool(!self.stack.get(r(d.b_u))?.truthy()),
-            Op::EQJ | Op::NEJ | Op::LTJ | Op::LEJ => {
-                let op = match d.op {
-                    Op::EQJ => BinOp::Eq,
-                    Op::NEJ => BinOp::Ne,
-                    Op::LTJ => BinOp::Lt,
-                    _ => BinOp::Le,
-                };
-                let l = self.stack.get(r(d.a))?;
-                let rv = self.stack.get(r(d.b_u))?;
-                let Value::Bool(t) = fast_compare(op, l, rv)? else {
-                    return None;
-                };
-                return if t { fast_jump(pc, d.c_s) } else { Some(next) };
-            }
-            Op::JMP | Op::LOOP => return fast_jump(pc, d.b_s),
-            Op::TEST | Op::TESTN => {
-                let truthy = self.stack.get(r(d.a))?.truthy();
-                return if truthy == (d.op == Op::TEST) {
-                    fast_jump(pc, d.b_s)
-                } else {
-                    Some(next)
-                };
-            }
-            Op::STEPS => {
-                let n = u64::from(d.b_u);
-                let i = &*self.interp;
-                if i.max_steps != 0 && i.steps.saturating_add(n) > i.max_steps {
-                    return None;
-                }
-                self.set_nest(d.a);
-                self.interp.steps += n;
-                return Some(next);
-            }
-            Op::FORLOOP => {
-                let (Value::Int(cur), Value::Int(limit), Value::Int(step)) = (
-                    self.stack.get(r(d.a))?,
-                    self.stack.get(r(d.a + 1))?,
-                    self.stack.get(r(d.a + 2))?,
-                ) else {
-                    return None;
-                };
-                let (cur, limit, step) = (*cur, *limit, *step);
-                let target = fast_jump(pc, d.b_s)?;
-                if self.stack.len() <= r(d.a + 3) {
-                    return None;
-                }
-                let more =
-                    cur.checked_add(step)
-                        .filter(|n| if step > 0 { *n < limit } else { *n > limit });
-                return match more {
-                    Some(n) => {
-                        *self.stack.get_mut(r(d.a))? = Value::Int(n);
-                        *self.stack.get_mut(r(d.a + 3))? = Value::Int(n);
-                        Some(target)
-                    }
-                    None => Some(next),
-                };
-            }
-            Op::GETUP | Op::CELLGET => self
-                .frame_upvals()
-                .get(d.b_u as usize)?
-                .try_borrow()
-                .ok()?
-                .clone(),
-            Op::GETINDEX => {
-                let obj = self.stack.get(r(d.b_u))?;
-                let idx = self.stack.get(r(d.c))?;
-                let v = match (obj, idx) {
-                    (Value::List(list), Value::Int(i)) => {
-                        let at = usize::try_from(*i).ok()?;
-                        list.try_borrow().ok()?.get(at)?.clone()
-                    }
-                    (Value::Map(map), Value::Str(key)) => {
-                        map.try_borrow().ok()?.get(&**key)?.clone()
-                    }
-                    _ => return None,
-                };
-                *self.stack.get_mut(r(d.a))? = v;
-                return Some(past_nops(proto, next, 1));
-            }
-            Op::GETFIELD => {
-                let Value::Map(map) = self.stack.get(r(d.b_u))? else {
-                    return None;
-                };
-                let Value::Str(name) = proto.consts.get(d.c as usize)? else {
-                    return None;
-                };
-                let map = map.try_borrow().ok()?;
-                let i = field_index(&map, name, proto.hints.get(pc)?)?;
-                let v = map.get_index(i)?.1.clone();
-                v
-            }
-            Op::SETFIELD => {
-                let Value::Map(map) = self.stack.get(r(d.a))? else {
-                    return None;
-                };
-                let Value::Str(name) = proto.consts.get(d.b_u as usize)? else {
-                    return None;
-                };
-                let v = self.stack.get(r(d.c))?.clone();
-                let mut map = map.try_borrow_mut().ok()?;
-                let i = field_index(&map, name, proto.hints.get(pc)?)?;
-                let old = std::mem::replace(map.get_index_mut(i)?.1, v);
-                drop(map);
-                drop(old);
-                return Some(next);
-            }
-            Op::SETINDEX => {
-                let (Value::List(list), Value::Int(i)) =
-                    (self.stack.get(r(d.a))?, self.stack.get(r(d.b_u))?)
-                else {
-                    return None;
-                };
-                let at = usize::try_from(*i).ok()?;
-                let v = self.stack.get(r(d.c))?.clone();
-                let mut list = list.try_borrow_mut().ok()?;
-                let slot = list.get_mut(at)?;
-                let old = std::mem::replace(slot, v);
-                drop(list);
-                drop(old);
-                return Some(past_nops(proto, next, 2));
-            }
-            _ => return None,
-        };
-        *self.stack.get_mut(r(d.a))? = v;
-        Some(next)
     }
 
     /// Run one instruction. The groups are functions of their own, so the
@@ -2201,12 +1972,7 @@ impl Machine<'_> {
     /// depth (the sum over the frames) in step.
     fn set_nest(&mut self, nest: u32) {
         if let Some(f) = self.frames.last_mut() {
-            if f.nest == nest && self.interp.loop_depth >= nest {
-                return;
-            }
-            let depth = self.interp.loop_depth.saturating_sub(f.nest);
-            self.interp.loop_depth = depth.saturating_add(nest);
-            f.nest = nest;
+            nest_frame(&mut self.interp.loop_depth, f, nest);
         }
     }
 
@@ -3188,6 +2954,425 @@ fn operate(op: BinOp, l: Value, r: Value, span: Span) -> Result<Value, Fault> {
     }
 }
 
+/// How many registers from a frame's base the fast loop takes as one
+/// [`Window`]: a one-word instruction names registers below 256 (each
+/// number a byte) and `forloop` reaches `R(A+3)`, so every register such
+/// an instruction names is in it, and the remainder by this power of two
+/// is the register number itself, which the compiler sees is in range.
+const REG_WINDOW: usize = 512;
+
+/// The registers of the running frame from its base, when the stack holds
+/// [`REG_WINDOW`] of them there.
+type Window = [Value; REG_WINDOW];
+
+/// The registers of the running frame, `R(0)` on, as the fast loop reads
+/// and writes them: a [`Window`], or the stack from the frame's base.
+/// The verifier proved every register number of the function below its
+/// register count, and the frame's registers are in the stack before it
+/// runs; what is checked here is only what the form cannot show.
+trait FrameRegs {
+    /// Indexed with no check: runs one-word instructions only.
+    const BYTE_INDEXED: bool;
+    fn reg(&self, x: u32) -> Option<&Value>;
+    fn reg_mut(&mut self, x: u32) -> Option<&mut Value>;
+    /// `R(first..first+n)`.
+    fn regs(&self, first: u32, n: usize) -> Option<&[Value]>;
+}
+
+impl FrameRegs for Window {
+    const BYTE_INDEXED: bool = true;
+    #[inline(always)]
+    fn reg(&self, x: u32) -> Option<&Value> {
+        debug_assert!((x as usize) < REG_WINDOW);
+        self.get(x as usize % REG_WINDOW)
+    }
+    #[inline(always)]
+    fn reg_mut(&mut self, x: u32) -> Option<&mut Value> {
+        debug_assert!((x as usize) < REG_WINDOW);
+        self.get_mut(x as usize % REG_WINDOW)
+    }
+    #[inline(always)]
+    fn regs(&self, first: u32, n: usize) -> Option<&[Value]> {
+        let first = first as usize;
+        self.get(first..first.saturating_add(n))
+    }
+}
+
+impl FrameRegs for [Value] {
+    const BYTE_INDEXED: bool = false;
+    #[inline(always)]
+    fn reg(&self, x: u32) -> Option<&Value> {
+        self.get(x as usize)
+    }
+    #[inline(always)]
+    fn reg_mut(&mut self, x: u32) -> Option<&mut Value> {
+        self.get_mut(x as usize)
+    }
+    #[inline(always)]
+    fn regs(&self, first: u32, n: usize) -> Option<&[Value]> {
+        let first = first as usize;
+        self.get(first..first.saturating_add(n))
+    }
+}
+
+/// Where a run of the fast loop stopped.
+enum Stop {
+    /// At this pc: an instruction the fast path does not run here (the
+    /// general path runs it from the start), or no instruction at all.
+    Here(usize),
+    /// At a two-word instruction, on registers indexed with no check.
+    Wide(usize),
+    /// A builtin called at this pc raised.
+    Raised(usize, Fault),
+}
+
+/// The fast loop over `regs` from `pc`, until an instruction it does not
+/// run here.
+#[inline(always)]
+fn fast_run<R: FrameRegs + ?Sized>(
+    regs: &mut R,
+    interp: &mut Interp,
+    frame: &mut Frame,
+    proto: &Proto,
+    mut pc: usize,
+    upvals: &[Cell],
+) -> Stop {
+    loop {
+        let Some(Some(d)) = proto.code.get(pc) else {
+            return Stop::Here(pc);
+        };
+        if R::BYTE_INDEXED && d.wide {
+            return Stop::Wide(pc);
+        }
+        #[cfg(feature = "bench-stats")]
+        let timer = stats::start(d.op);
+        let done = fast_one(regs, interp, frame, proto, d, upvals);
+        #[cfg(feature = "bench-stats")]
+        stats::stop(timer);
+        match done {
+            Some(Ok(next)) => pc = next,
+            Some(Err(e)) => return Stop::Raised(pc, e),
+            None => return Stop::Here(pc),
+        }
+    }
+}
+
+/// One instruction on the fast path: the first tier here, the second
+/// ([`fast_call`]) for what the first does not run. `None` when neither
+/// ran it, having changed nothing.
+#[inline(always)]
+fn fast_one<R: FrameRegs + ?Sized>(
+    regs: &mut R,
+    interp: &mut Interp,
+    frame: &mut Frame,
+    proto: &Proto,
+    d: &DecodedInstr,
+    upvals: &[Cell],
+) -> Option<Result<usize, Fault>> {
+    match fast(regs, interp, frame, proto, d, upvals) {
+        Some(next) => Some(Ok(next)),
+        None => fast_call(regs, interp, proto, d),
+    }
+}
+
+/// The common cases of the hot instructions in a frame whose registers
+/// carry no cell: the next pc when `d` ran here, `None` when it did not
+/// and changed nothing, so the general path runs it from the start and
+/// raises its error, if any, with the tree-walker's code and position.
+#[inline(always)]
+fn fast<R: FrameRegs + ?Sized>(
+    regs: &mut R,
+    interp: &mut Interp,
+    frame: &mut Frame,
+    proto: &Proto,
+    d: &DecodedInstr,
+    upvals: &[Cell],
+) -> Option<usize> {
+    let pc = d.pc as usize;
+    let next = pc + d.width as usize;
+    let v = match d.op {
+        Op::NOP => return Some(next),
+        Op::MOV => regs.reg(d.b_u)?.clone(),
+        Op::LOADK => proto.consts.get(d.b_u as usize)?.clone(),
+        Op::LOADNULL => Value::Null,
+        Op::LOADBOOL => Value::Bool(d.b_u != 0),
+        Op::LOADINT => Value::Int(i64::from(d.b_s)),
+        // Each operator where its opcode is matched, as `op_arith` does
+        // in Lua: two ints, two floats, or an int and a float (which
+        // `binary` computes as two floats), and `None` for the rest
+        // (overflow, a zero divisor, a NaN in an ordering, any other
+        // type), which the general path runs with `binary`.
+        Op::ADD => num_add(regs.reg(d.b_u)?, regs.reg(d.c)?)?,
+        Op::SUB => num_sub(regs.reg(d.b_u)?, regs.reg(d.c)?)?,
+        Op::MUL => num_mul(regs.reg(d.b_u)?, regs.reg(d.c)?)?,
+        Op::DIV => num_div(regs.reg(d.b_u)?, regs.reg(d.c)?)?,
+        Op::MOD => num_mod(regs.reg(d.b_u)?, regs.reg(d.c)?)?,
+        Op::EQ => Value::Bool(cmp_eq(regs.reg(d.b_u)?, regs.reg(d.c)?)),
+        Op::LT => Value::Bool(cmp_lt(regs.reg(d.b_u)?, regs.reg(d.c)?)?),
+        Op::LE => Value::Bool(cmp_le(regs.reg(d.b_u)?, regs.reg(d.c)?)?),
+        Op::ADDK => num_add(regs.reg(d.b_u)?, proto.consts.get(d.c as usize)?)?,
+        Op::SUBK => num_sub(regs.reg(d.b_u)?, proto.consts.get(d.c as usize)?)?,
+        Op::MULK => num_mul(regs.reg(d.b_u)?, proto.consts.get(d.c as usize)?)?,
+        Op::DIVK => num_div(regs.reg(d.b_u)?, proto.consts.get(d.c as usize)?)?,
+        Op::MODK => num_mod(regs.reg(d.b_u)?, proto.consts.get(d.c as usize)?)?,
+        Op::EQK => Value::Bool(cmp_eq(regs.reg(d.b_u)?, proto.consts.get(d.c as usize)?)),
+        Op::LTK => Value::Bool(cmp_lt(regs.reg(d.b_u)?, proto.consts.get(d.c as usize)?)?),
+        Op::LEK => Value::Bool(cmp_le(regs.reg(d.b_u)?, proto.consts.get(d.c as usize)?)?),
+        Op::NOT => Value::Bool(!regs.reg(d.b_u)?.truthy()),
+        Op::EQJ | Op::NEJ | Op::LTJ | Op::LEJ => {
+            let (l, rv) = (regs.reg(d.a)?, regs.reg(d.b_u)?);
+            let t = match d.op {
+                Op::EQJ => cmp_eq(l, rv),
+                Op::NEJ => !cmp_eq(l, rv),
+                Op::LTJ => cmp_lt(l, rv)?,
+                _ => cmp_le(l, rv)?,
+            };
+            return if t { fast_jump(pc, d.c_s) } else { Some(next) };
+        }
+        Op::JMP | Op::LOOP => return fast_jump(pc, d.b_s),
+        Op::TEST | Op::TESTN => {
+            let truthy = regs.reg(d.a)?.truthy();
+            return if truthy == (d.op == Op::TEST) {
+                fast_jump(pc, d.b_s)
+            } else {
+                Some(next)
+            };
+        }
+        Op::STEPS => {
+            let n = u64::from(d.b_u);
+            if interp.max_steps != 0 && interp.steps.saturating_add(n) > interp.max_steps {
+                return None;
+            }
+            nest_frame(&mut interp.loop_depth, frame, d.a);
+            interp.steps += n;
+            return Some(next);
+        }
+        Op::FORLOOP => {
+            let (Value::Int(cur), Value::Int(limit), Value::Int(step)) =
+                (regs.reg(d.a)?, regs.reg(d.a + 1)?, regs.reg(d.a + 2)?)
+            else {
+                return None;
+            };
+            let (cur, limit, step) = (*cur, *limit, *step);
+            let target = fast_jump(pc, d.b_s)?;
+            regs.reg(d.a + 3)?;
+            let more = cur
+                .checked_add(step)
+                .filter(|n| if step > 0 { *n < limit } else { *n > limit });
+            return match more {
+                Some(n) => {
+                    overwrite(regs.reg_mut(d.a)?, Value::Int(n));
+                    overwrite(regs.reg_mut(d.a + 3)?, Value::Int(n));
+                    Some(target)
+                }
+                None => Some(next),
+            };
+        }
+        Op::GETUP | Op::CELLGET => upvals.get(d.b_u as usize)?.try_borrow().ok()?.clone(),
+        Op::GETINDEX => {
+            let obj = regs.reg(d.b_u)?;
+            let idx = regs.reg(d.c)?;
+            let v = match (obj, idx) {
+                (Value::List(list), Value::Int(i)) => {
+                    let at = usize::try_from(*i).ok()?;
+                    list.try_borrow().ok()?.get(at)?.clone()
+                }
+                (Value::Map(map), Value::Str(key)) => map.try_borrow().ok()?.get(&**key)?.clone(),
+                _ => return None,
+            };
+            overwrite(regs.reg_mut(d.a)?, v);
+            return Some(past_nops(proto, next, 1));
+        }
+        Op::GETFIELD => {
+            let Value::Map(map) = regs.reg(d.b_u)? else {
+                return None;
+            };
+            let Value::Str(name) = proto.consts.get(d.c as usize)? else {
+                return None;
+            };
+            let map = map.try_borrow().ok()?;
+            let i = field_index(&map, name, proto.hints.get(pc)?)?;
+            let v = map.get_index(i)?.1.clone();
+            v
+        }
+        Op::SETFIELD => {
+            let Value::Map(map) = regs.reg(d.a)? else {
+                return None;
+            };
+            let Value::Str(name) = proto.consts.get(d.b_u as usize)? else {
+                return None;
+            };
+            let v = regs.reg(d.c)?.clone();
+            let mut map = map.try_borrow_mut().ok()?;
+            let i = field_index(&map, name, proto.hints.get(pc)?)?;
+            let old = std::mem::replace(map.get_index_mut(i)?.1, v);
+            drop(map);
+            drop(old);
+            return Some(next);
+        }
+        Op::SETINDEX => {
+            let (Value::List(list), Value::Int(i)) = (regs.reg(d.a)?, regs.reg(d.b_u)?) else {
+                return None;
+            };
+            let at = usize::try_from(*i).ok()?;
+            let v = regs.reg(d.c)?.clone();
+            let mut list = list.try_borrow_mut().ok()?;
+            let slot = list.get_mut(at)?;
+            let old = std::mem::replace(slot, v);
+            drop(list);
+            drop(old);
+            return Some(past_nops(proto, next, 2));
+        }
+        _ => return None,
+    };
+    overwrite(regs.reg_mut(d.a)?, v);
+    Some(next)
+}
+
+/// The fast loop's second tier, for a frame whose registers carry no
+/// cell: the calls of builtins that cannot call back into the VM
+/// (`callb`, and `callm` on a site whose cache holds the receiver's
+/// type), `interp`, string `+`, and the list and map builders and
+/// stores. `None` when `d` is not one of them or not its common case,
+/// having changed nothing, so the general path runs it from the start; a
+/// builtin's error comes back as the general path raises it. A builtin
+/// that cannot call back runs no script code, so it neither reads nor
+/// moves the step count or the loop depth.
+#[inline(never)]
+fn fast_call<R: FrameRegs + ?Sized>(
+    regs: &mut R,
+    interp: &mut Interp,
+    proto: &Proto,
+    d: &DecodedInstr,
+) -> Option<Result<usize, Fault>> {
+    let pc = d.pc as usize;
+    let next = pc + d.width as usize;
+    let v = match d.op {
+        Op::CALLB => {
+            let b = *crate::stdlib::builtin_catalogue().get(d.b_u as usize)?;
+            if b.calls_back {
+                return None;
+            }
+            // `R(A)`, where the result goes, then the arguments.
+            let args = regs.regs(d.a, (d.c as usize).saturating_add(1))?.get(1..)?;
+            let span = span_of(proto, pc);
+            match interp.call_builtin(b, args, span) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e.into())),
+            }
+        }
+        Op::CALLM => {
+            let argv = regs.regs(d.a, (d.c as usize).saturating_add(1))?;
+            let recv = argv.first()?;
+            let b = crate::stdlib::method_at(recv, proto.hints.get(pc)?.get())?;
+            if b.calls_back || !b.arity_ok(argv.len()) {
+                return None;
+            }
+            if let Value::Map(map) = recv {
+                // A function the map holds under the name is called
+                // instead: the general path's case.
+                let Value::Str(name) = proto.consts.get(d.b_u as usize)? else {
+                    return None;
+                };
+                let held = map
+                    .try_borrow()
+                    .ok()?
+                    .get(&**name)
+                    .is_some_and(|f| matches!(f, Value::Func(_) | Value::Builtin(_)));
+                if held {
+                    return None;
+                }
+            }
+            let span = span_of(proto, pc);
+            match (b.func)(interp, argv, span) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e.or_at(span).into())),
+            }
+        }
+        Op::INTERP => interpolate(regs.regs(d.b_u, (d.c as usize).saturating_add(1))?),
+        // String `+`: the operator's own result, made in one block.
+        Op::ADD => {
+            let (Value::Str(l), Value::Str(rv)) = (regs.reg(d.b_u)?, regs.reg(d.c)?) else {
+                return None;
+            };
+            crate::value::build_str(|out| {
+                out.reserve(l.len() + rv.len());
+                out.push_str(l);
+                out.push_str(rv);
+            })
+        }
+        Op::NEWLIST => Value::list(Vec::with_capacity(d.b_u as usize)),
+        Op::NEWMAP => Value::map(IndexMap::with_capacity(d.b_u as usize)),
+        Op::APPENDLIST => {
+            let v = regs.reg(d.b_u)?.clone();
+            let Value::List(list) = regs.reg(d.a)? else {
+                return None;
+            };
+            list.try_borrow_mut().ok()?.push(v);
+            return Some(Ok(next));
+        }
+        Op::INSERTMAP => {
+            let Value::Str(key) = regs.reg(d.b_u)? else {
+                return None;
+            };
+            let v = regs.reg(d.c)?.clone();
+            let Value::Map(map) = regs.reg(d.a)? else {
+                return None;
+            };
+            let old = map.try_borrow_mut().ok()?.insert(key.to_string(), v);
+            drop(old);
+            return Some(Ok(next));
+        }
+        Op::SETINDEX => {
+            let (Value::Map(map), Value::Str(key)) = (regs.reg(d.a)?, regs.reg(d.b_u)?) else {
+                return None;
+            };
+            let v = regs.reg(d.c)?.clone();
+            let mut map = map.try_borrow_mut().ok()?;
+            // A key already there keeps its place (as `insert` does)
+            // and needs no `String` made for it.
+            let old = match map.get_mut(&**key) {
+                Some(slot) => Some(std::mem::replace(slot, v)),
+                None => map.insert(key.to_string(), v),
+            };
+            drop(map);
+            drop(old);
+            return Some(Ok(past_nops(proto, next, 2)));
+        }
+        _ => return None,
+    };
+    // The register exists: each arm above read it or its window.
+    if let Some(slot) = regs.reg_mut(d.a) {
+        overwrite(slot, v);
+    }
+    Some(Ok(next))
+}
+
+/// `*slot = v`, without the call that drops the old value when it owns
+/// nothing (null, a bool, an int, a float: one test of its kind).
+#[inline(always)]
+fn overwrite(slot: &mut Value, v: Value) {
+    if matches!(
+        slot,
+        Value::Null | Value::Bool(_) | Value::Int(_) | Value::Float(_)
+    ) {
+        std::mem::forget(std::mem::replace(slot, v));
+    } else {
+        *slot = v;
+    }
+}
+
+/// Set a frame's loop nesting to `nest`, keeping the interpreter's loop
+/// depth (`depth`, the sum over the frames) in step.
+#[inline(always)]
+fn nest_frame(depth: &mut u32, f: &mut Frame, nest: u32) {
+    if f.nest == nest && *depth >= nest {
+        return;
+    }
+    *depth = depth.saturating_sub(f.nest).saturating_add(nest);
+    f.nest = nest;
+}
+
 /// A jump's target in the fast path: `None` (the general path raises the
 /// error) before the first instruction.
 #[inline(always)]
@@ -3195,20 +3380,122 @@ fn fast_jump(pc: usize, offset: i32) -> Option<usize> {
     usize::try_from((pc as i64) + 1 + i64::from(offset)).ok()
 }
 
-/// [`fast_binary`], and the comparisons `binary` gives for other operands
-/// without an error: `==` and `!=` of any two values (`equals`, as
-/// `binary` computes them) and `<`, `<=` of two strings.
+/// An int and a float, in either order, as the two floats `binary`
+/// computes them as (`Value::as_f64`): `None` for any other pair.
 #[inline(always)]
-fn fast_compare(op: BinOp, l: &Value, r: &Value) -> Option<Value> {
-    if let Some(v) = fast_binary(op, l, r) {
-        return Some(v);
-    }
-    match (op, l, r) {
-        (BinOp::Eq, _, _) => Some(Value::Bool(l.equals(r))),
-        (BinOp::Ne, _, _) => Some(Value::Bool(!l.equals(r))),
-        (BinOp::Lt, Value::Str(a), Value::Str(b)) => Some(Value::Bool(a < b)),
-        (BinOp::Le, Value::Str(a), Value::Str(b)) => Some(Value::Bool(a <= b)),
+fn mixed(l: &Value, r: &Value) -> Option<(f64, f64)> {
+    match (l, r) {
+        (Value::Int(a), Value::Float(b)) => Some((*a as f64, *b)),
+        (Value::Float(a), Value::Int(b)) => Some((*a, *b as f64)),
         _ => None,
+    }
+}
+
+/// `l + r` on numbers, as `binary` gives it: `None` on overflow and for
+/// any operand that is not a number (strings and lists included).
+#[inline(always)]
+fn num_add(l: &Value, r: &Value) -> Option<Value> {
+    match (l, r) {
+        (Value::Int(a), Value::Int(b)) => a.checked_add(*b).map(Value::Int),
+        (Value::Float(a), Value::Float(b)) => Some(Value::Float(a + b)),
+        _ => mixed(l, r).map(|(a, b)| Value::Float(a + b)),
+    }
+}
+
+/// `l - r` on numbers, as `binary` gives it.
+#[inline(always)]
+fn num_sub(l: &Value, r: &Value) -> Option<Value> {
+    match (l, r) {
+        (Value::Int(a), Value::Int(b)) => a.checked_sub(*b).map(Value::Int),
+        (Value::Float(a), Value::Float(b)) => Some(Value::Float(a - b)),
+        _ => mixed(l, r).map(|(a, b)| Value::Float(a - b)),
+    }
+}
+
+/// `l * r` on numbers, as `binary` gives it.
+#[inline(always)]
+fn num_mul(l: &Value, r: &Value) -> Option<Value> {
+    match (l, r) {
+        (Value::Int(a), Value::Int(b)) => a.checked_mul(*b).map(Value::Int),
+        (Value::Float(a), Value::Float(b)) => Some(Value::Float(a * b)),
+        _ => mixed(l, r).map(|(a, b)| Value::Float(a * b)),
+    }
+}
+
+/// `l / r` on numbers, as `binary` gives it: an int when two ints divide
+/// exactly, else the floats' quotient; `None` for a zero divisor and for
+/// `i64::MIN / -1`.
+#[inline(always)]
+fn num_div(l: &Value, r: &Value) -> Option<Value> {
+    let (a, b) = match (l, r) {
+        (Value::Int(a), Value::Int(b)) => {
+            if *b == 0 || (*a == i64::MIN && *b == -1) {
+                return None;
+            }
+            if a % b == 0 {
+                return Some(Value::Int(a / b));
+            }
+            (*a as f64, *b as f64)
+        }
+        (Value::Float(a), Value::Float(b)) => (*a, *b),
+        _ => mixed(l, r)?,
+    };
+    (b != 0.0).then(|| Value::Float(a / b))
+}
+
+/// `l % r` on numbers, as `binary` gives it: `None` for a zero divisor.
+#[inline(always)]
+fn num_mod(l: &Value, r: &Value) -> Option<Value> {
+    let (a, b) = match (l, r) {
+        (Value::Int(a), Value::Int(b)) => {
+            return (*b != 0).then(|| Value::Int(a.wrapping_rem(*b)));
+        }
+        (Value::Float(a), Value::Float(b)) => (*a, *b),
+        _ => mixed(l, r)?,
+    };
+    (b != 0.0).then(|| Value::Float(a % b))
+}
+
+/// `l == r` for any two values (`Value::equals`, as `binary` computes it).
+#[inline(always)]
+fn cmp_eq(l: &Value, r: &Value) -> bool {
+    match (l, r) {
+        (Value::Int(a), Value::Int(b)) => a == b,
+        (Value::Float(a), Value::Float(b)) => a == b,
+        _ => l.equals(r),
+    }
+}
+
+/// The order of two numbers or two strings, as `binary` gives it: `None`
+/// for a NaN and for any other pair.
+#[inline(always)]
+fn order(l: &Value, r: &Value) -> Option<std::cmp::Ordering> {
+    match (l, r) {
+        (Value::Int(a), Value::Int(b)) => Some(a.cmp(b)),
+        (Value::Float(a), Value::Float(b)) => a.partial_cmp(b),
+        (Value::Str(a), Value::Str(b)) => Some(a.cmp(b)),
+        _ => {
+            let (a, b) = mixed(l, r)?;
+            a.partial_cmp(&b)
+        }
+    }
+}
+
+/// `l < r`, as `binary` gives it.
+#[inline(always)]
+fn cmp_lt(l: &Value, r: &Value) -> Option<bool> {
+    match (l, r) {
+        (Value::Int(a), Value::Int(b)) => Some(a < b),
+        _ => order(l, r).map(std::cmp::Ordering::is_lt),
+    }
+}
+
+/// `l <= r`, as `binary` gives it.
+#[inline(always)]
+fn cmp_le(l: &Value, r: &Value) -> Option<bool> {
+    match (l, r) {
+        (Value::Int(a), Value::Int(b)) => Some(a <= b),
+        _ => order(l, r).map(std::cmp::Ordering::is_le),
     }
 }
 

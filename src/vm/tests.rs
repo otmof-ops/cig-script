@@ -6251,3 +6251,184 @@ fn the_depth_limit_is_caught_by_the_try_of_the_frame_that_calls() {
     eprintln!("caught at {out}");
     assert!(out.trim().parse::<u32>().is_ok_and(|n| n > 3000), "{out}");
 }
+
+// ----- the fast loop's own operators, writes and registers --------------------------
+
+/// The same value: the same kind and, for a float, the same bits (so a
+/// NaN equals itself and `-0.0` is not `0.0`).
+fn same_value(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Null, Value::Null) => true,
+        (Value::Bool(x), Value::Bool(y)) => x == y,
+        (Value::Int(x), Value::Int(y)) => x == y,
+        (Value::Float(x), Value::Float(y)) => x.to_bits() == y.to_bits(),
+        (Value::Str(x), Value::Str(y)) => x == y,
+        _ => false,
+    }
+}
+
+#[test]
+fn the_fast_operators_give_binarys_value_or_leave_it_to_binary() {
+    let values = [
+        Value::Int(0),
+        Value::Int(1),
+        Value::Int(-1),
+        Value::Int(7),
+        Value::Int(-7),
+        Value::Int(3),
+        Value::Int(i64::MAX),
+        Value::Int(i64::MIN),
+        Value::Int(1 << 53),
+        Value::Float(0.0),
+        Value::Float(-0.0),
+        Value::Float(2.5),
+        Value::Float(-3.0),
+        Value::Float(f64::NAN),
+        Value::Float(f64::INFINITY),
+        Value::Float(1e300),
+        Value::str("a"),
+        Value::str("b"),
+        Value::Bool(true),
+        Value::Null,
+        Value::list(vec![Value::Int(1)]),
+    ];
+    let span = Span::default();
+    let mut fast_ints = 0;
+    for l in &values {
+        for r in &values {
+            let numbers = l.as_f64().is_some() && r.as_f64().is_some();
+            for (op, fast) in [
+                (BinOp::Add, num_add(l, r)),
+                (BinOp::Sub, num_sub(l, r)),
+                (BinOp::Mul, num_mul(l, r)),
+                (BinOp::Div, num_div(l, r)),
+                (BinOp::Rem, num_mod(l, r)),
+                (BinOp::Eq, Some(Value::Bool(cmp_eq(l, r)))),
+                (BinOp::Ne, Some(Value::Bool(!cmp_eq(l, r)))),
+                (BinOp::Lt, cmp_lt(l, r).map(Value::Bool)),
+                (BinOp::Le, cmp_le(l, r).map(Value::Bool)),
+            ] {
+                let general = binary(op, l.clone(), r.clone(), span);
+                match (&fast, &general) {
+                    // Here: exactly `binary`'s value.
+                    (Some(v), Ok(g)) => assert!(
+                        same_value(v, g),
+                        "{} {op:?} {}: fast {} binary {}",
+                        l.repr(),
+                        r.repr(),
+                        v.repr(),
+                        g.repr()
+                    ),
+                    (Some(v), Err(e)) => panic!(
+                        "{} {op:?} {}: fast {} where binary raises {}",
+                        l.repr(),
+                        r.repr(),
+                        v.repr(),
+                        e.code
+                    ),
+                    // Left to the general path: never a value two numbers
+                    // have, other than a string `+` or `*`, which the
+                    // second tier and `binary` make.
+                    (None, Ok(g)) => assert!(
+                        !numbers || matches!(g, Value::Str(_)),
+                        "{} {op:?} {}: two numbers left to the general path ({})",
+                        l.repr(),
+                        r.repr(),
+                        g.repr()
+                    ),
+                    (None, Err(_)) => {}
+                }
+                if fast.is_some() && matches!((l, r), (Value::Int(_), Value::Int(_))) {
+                    fast_ints += 1;
+                }
+            }
+        }
+    }
+    assert!(fast_ints > 500, "the int pairs run here: {fast_ints}");
+}
+
+#[test]
+fn int_division_and_mixed_numbers_run_on_the_fast_path_with_binarys_values() {
+    let run2 = |op, a, b| exec_with(&binop_module(op), vec![a, b]).unwrap().repr();
+    assert_eq!(run2(Op::DIV, Value::Int(12), Value::Int(4)), "3");
+    assert_eq!(run2(Op::DIV, Value::Int(7), Value::Int(2)), "3.5");
+    assert_eq!(run2(Op::DIV, Value::Float(1.0), Value::Int(4)), "0.25");
+    assert_eq!(run2(Op::ADD, Value::Int(1), Value::Float(0.5)), "1.5");
+    assert_eq!(run2(Op::MUL, Value::Float(0.5), Value::Int(3)), "1.5");
+    assert_eq!(run2(Op::MOD, Value::Float(7.5), Value::Int(2)), "1.5");
+    assert_eq!(run2(Op::LT, Value::Int(1), Value::Float(1.5)), "true");
+    assert_eq!(run2(Op::LE, Value::Float(2.0), Value::Int(2)), "true");
+    assert_eq!(run2(Op::EQ, Value::Int(2), Value::Float(2.0)), "true");
+    let e = exec_with(
+        &binop_module(Op::DIV),
+        vec![Value::Float(1.0), Value::Int(0)],
+    )
+    .err()
+    .expect("an error");
+    assert_eq!((e.code, e.message.as_str()), ("E502", "division by zero"));
+    assert_eq!(at_pc(&e), Some(0));
+    let e = exec_with(
+        &binop_module(Op::LT),
+        vec![Value::Float(f64::NAN), Value::Int(1)],
+    )
+    .err()
+    .expect("an error");
+    assert_eq!(e.message, "cannot order a NaN");
+}
+
+#[test]
+fn a_register_write_drops_the_old_value_only_when_it_owns_something() {
+    let list = Rc::new(RefCell::new(vec![Value::Int(1)]));
+    let mut slot = Value::List(Rc::clone(&list));
+    assert_eq!(Rc::strong_count(&list), 2);
+    overwrite(&mut slot, Value::Int(5));
+    assert_eq!(Rc::strong_count(&list), 1, "the list held was dropped");
+    assert!(matches!(slot, Value::Int(5)));
+    overwrite(&mut slot, Value::List(Rc::clone(&list)));
+    assert_eq!(Rc::strong_count(&list), 2);
+    for old in [
+        Value::Null,
+        Value::Bool(true),
+        Value::Int(1),
+        Value::Float(1.0),
+    ] {
+        let mut slot = old;
+        overwrite(&mut slot, Value::str("new"));
+        assert_eq!(slot.repr(), "\"new\"");
+    }
+}
+
+/// `forloop` over `0..n` adding the running value to `R(5)`, inside one
+/// function of `regs` registers, the window at `R(a)`.
+fn sum_loop(regs: u32, a: u8, n: i16) -> Module {
+    let f = main_fn(
+        regs,
+        vec![
+            Instr::asbx(Op::LOADINT, a, 0),
+            Instr::asbx(Op::LOADINT, a + 1, n),
+            Instr::asbx(Op::LOADINT, a + 2, 1),
+            Instr::asbx(Op::LOADINT, 5, 0),
+            Instr::asbx(Op::FORPREP, a, 3),
+            Instr::abx(Op::STEPS, 1, 1),
+            abc(Op::ADD, 5, 5, a),
+            Instr::asbx(Op::FORLOOP, a, -3),
+            ret(5),
+        ],
+    );
+    module(f)
+}
+
+#[test]
+fn the_fast_loop_reaches_the_last_registers_a_byte_names() {
+    // `forloop`'s `R(A+3)` is register 256, past what a byte names.
+    assert_eq!(ok(&sum_loop(257, 253, 10)), "45");
+    assert_eq!(ok(&sum_loop(12, 8, 10)), "45");
+    let mut i = interp();
+    i.set_max_steps(7);
+    let e = run(&mut i, &program(&sum_loop(257, 253, 10)))
+        .err()
+        .expect("an error");
+    assert_eq!(e.code, "E515");
+    assert_eq!(i.steps, 8, "the step that went over is counted");
+    assert_eq!(i.loop_depth, 0, "the loop depth is given back");
+}
