@@ -126,8 +126,8 @@ pub fn label_for(v: &Value, index: usize) -> String {
     match v {
         Value::Func(f) => f
             .name
-            .clone()
-            .unwrap_or_else(|| format!("step {}", index + 1)),
+            .as_deref()
+            .map_or_else(|| format!("step {}", index + 1), str::to_string),
         Value::Builtin(b) => b.name.to_string(),
         Value::Chain(c) => c.name.clone(),
         _ => format!("step {}", index + 1),
@@ -203,7 +203,7 @@ fn run_chain_inner(
             let result = match &step.value {
                 Value::Chain(inner) => run_chain(i, inner, opts, span, depth + 1),
                 Value::Func(f) => {
-                    let args = if f.params.is_empty() {
+                    let args = if f.arity() == 0 {
                         vec![]
                     } else {
                         vec![prev.clone()]

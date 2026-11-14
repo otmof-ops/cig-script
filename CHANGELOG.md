@@ -5,6 +5,47 @@ project follows semantic versioning.
 
 ## Unreleased
 
+- **A call, a return and a callback cost the VM a third less (cig-script#230
+  step 3, #235; `docs/BYTECODE.md`).** A call of a compiled function, its
+  return and a tail call change frames in the VM's frame loop instead of
+  going through the general instruction path; the callee is tested where
+  it lies instead of being copied out; a frame's record is 64 bytes that
+  own nothing (was 136, with two lists and a shared pointer to drop), the
+  tries and burns a frame opens kept on two lists of the machine; a
+  closure's captured variables are collected in one allocation and its
+  name is shared by every closure of that function; and the callbacks of
+  a builtin (`xs.map(f)`, a sort key) reuse one set of the VM's registers
+  that the interpreter keeps between them, instead of allocating three
+  vectors per element. Machine instructions a call and its return: 1,200
+  to 781 (the interpreter's: 951); making and calling a closure: 2,820 to
+  2,310; a callback: 1,734 to 1,037. On cig's `bench/compute` the VM
+  executes 23% fewer instructions on `fib`, 18% fewer on `closures`, 17%
+  fewer on `lists` and 15% fewer on `trees`. A level of a builtin calling
+  back into compiled code takes 3,744 bytes of native stack (was 3,824).
+  Errors, their positions and the step and depth limits are unchanged.
+- **Methods, string building and list and map building cost a fraction of
+  what they did, on both engines (cig-script#235 tricks 6 and 7, #230 step
+  4; `docs/BYTECODE.md`).** A method is found by its name with a `match`,
+  not by scanning its type's table, and gets its receiver and arguments as
+  they are, with no vector built for them (the tree-walker still builds one
+  past three arguments); each method call in a compiled program remembers
+  the method it found and calls it directly while the receiver's type
+  stays the same, in a function with no captured variables, for a method
+  that cannot call back into the script. A string built by interpolation,
+  `+` or `join` is written into one buffer and made with one copy; numbers are
+  written without the formatting machinery. On the VM, builtin calls that
+  cannot call back into the script, interpolation, list and map literals,
+  map stores and string `+` no longer leave its fast loop. Measured in
+  machine instructions per operation (tree-walker, then VM, before and
+  after): `"item-${i}"` 1,209 to 636 and 2,198 to 745; `xs.push(i)` 1,408
+  to 638 and 1,741 to 425; `xs.len()` 630 to 418 and 947 to 271;
+  `m.has("k")` 2,334 to 933 and 2,352 to 471; `m[key] = i` on the VM
+  1,350 to 277; `[null, null]` on the VM 1,117 to 633; `{a: i, b: 2}` on
+  the VM 2,788 to 2,153. On `bench/compute` the VM now executes fewer
+  instructions than the tree-walker on `strings`, `regex-ish`, `maps`,
+  `words` and `json`, and `strings` runs in 101M instructions instead of
+  300M.
+
 ## 1.22.0 — 2026-11-14
 
 The bytecode VM and its format: a compiled program can carry bytecode

@@ -49,10 +49,23 @@ pub struct ChainStep {
 
 /// A script-defined function (`pull` or `pack`).
 pub struct Function {
-    pub name: Option<String>,
+    pub name: Option<Rc<str>>,
+    /// The parameters' names. A compiled function has none: its arity is
+    /// its own ([`Function::arity`]).
     pub params: Vec<String>,
     pub body: FnBody,
     pub closure: Env,
+}
+
+impl Function {
+    /// How many arguments the function takes.
+    #[inline]
+    pub fn arity(&self) -> usize {
+        match &self.body {
+            FnBody::Compiled(cf) => cf.arity,
+            _ => self.params.len(),
+        }
+    }
 }
 
 pub enum FnBody {
@@ -90,12 +103,29 @@ pub struct Builtin {
     /// `None` means variadic.
     pub max_args: Option<usize>,
     pub func: BuiltinFn,
+    /// It can call a script function (a callback such as `map`'s, a chain's
+    /// steps, a pass's work), and so run the VM again inside the call. The
+    /// VM's fast loop calls only builtins without it.
+    pub calls_back: bool,
 }
 
 impl Builtin {
+    /// The same builtin, marked as one that can call a script function.
+    pub const fn calling_back(self) -> Builtin {
+        Builtin {
+            calls_back: true,
+            ..self
+        }
+    }
+
+    /// `n` arguments are within the builtin's arity.
+    #[inline]
+    pub fn arity_ok(&self, n: usize) -> bool {
+        n >= self.min_args && self.max_args.is_none_or(|m| n <= m)
+    }
+
     pub fn check_arity(&self, n: usize, span: Span) -> Result<(), Diagnostic> {
-        let ok = n >= self.min_args && self.max_args.is_none_or(|m| n <= m);
-        if ok {
+        if self.arity_ok(n) {
             return Ok(());
         }
         let expected = match (self.min_args, self.max_args) {
@@ -238,9 +268,32 @@ impl Value {
     /// How `exhale` and string interpolation show a value: strings raw,
     /// everything else as its literal form.
     pub fn display(&self) -> String {
+        let mut out = String::new();
+        self.write_display(&mut out);
+        out
+    }
+
+    /// [`Value::display`], appended to `out`: a string's text is copied
+    /// once, straight into `out`, and an int is written without
+    /// `core::fmt`.
+    #[inline]
+    pub fn write_display(&self, out: &mut String) {
         match self {
-            Value::Str(s) => s.to_string(),
-            other => other.repr(),
+            Value::Str(s) => out.push_str(s),
+            Value::Int(i) => push_int(out, *i),
+            other => other.write_repr(out, 0),
+        }
+    }
+
+    /// About how many bytes [`Value::write_display`] writes: exact for a
+    /// string, the most an int can take, and a guess for the rest. A
+    /// buffer sized by it is grown at most once for a scalar.
+    #[inline]
+    pub fn display_len_hint(&self) -> usize {
+        match self {
+            Value::Str(s) => s.len(),
+            Value::Int(_) => 20,
+            _ => 8,
         }
     }
 
@@ -264,9 +317,7 @@ impl Value {
         match self {
             Value::Null => out.push_str("null"),
             Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
-            Value::Int(i) => {
-                let _ = write!(out, "{i}");
-            }
+            Value::Int(i) => push_int(out, *i),
             Value::Float(f) => out.push_str(&format_float(*f)),
             Value::Str(s) => write_quoted(out, s),
             Value::List(l) => {
@@ -313,6 +364,77 @@ impl Value {
             }
         }
     }
+}
+
+/// `i` in decimal, appended to `out`: what `write!(out, "{i}")` writes,
+/// without going through `core::fmt`.
+#[inline]
+pub fn push_int(out: &mut String, i: i64) {
+    let mut digits = [0u8; 20];
+    let mut at = digits.len();
+    let mut n = i.unsigned_abs();
+    loop {
+        at -= 1;
+        // `n % 10` is below 10, so the digit is ASCII.
+        digits[at] = b'0' + (n % 10) as u8;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    if i < 0 {
+        out.push('-');
+    }
+    for &d in &digits[at..] {
+        out.push(char::from(d));
+    }
+}
+
+thread_local! {
+    /// The buffer [`build_str`] writes into: kept between strings, so
+    /// building one allocates only the string itself.
+    static SCRATCH: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+}
+
+/// Longest string [`build_str`] keeps its buffer for: past it the buffer
+/// is given back, so one long string does not stay allocated.
+const SCRATCH_KEEP: usize = 64 * 1024;
+
+/// A string value built by `write`, in one block: `write` appends to an
+/// empty buffer the thread keeps (a fresh one when that buffer is in use
+/// further up the stack), and the value is made from it with one copy.
+/// What `luaL_Buffer` is to Lua: no `String` is made and dropped per
+/// string built.
+pub fn build_str(write: impl FnOnce(&mut String)) -> Value {
+    match try_build_str(|out| {
+        write(out);
+        Ok::<(), std::convert::Infallible>(())
+    }) {
+        Ok(v) => v,
+        Err(never) => match never {},
+    }
+}
+
+/// [`build_str`] for a writer that can fail: its error comes back and no
+/// value is made.
+pub fn try_build_str<E>(write: impl FnOnce(&mut String) -> Result<(), E>) -> Result<Value, E> {
+    SCRATCH.with(|cell| match cell.try_borrow_mut() {
+        Ok(mut buf) => {
+            buf.clear();
+            let done = write(&mut buf);
+            let v = done.map(|()| Value::str(buf.as_str()));
+            if buf.capacity() > SCRATCH_KEEP {
+                *buf = String::new();
+            }
+            v
+        }
+        // In use further up the stack: a buffer of its own.
+        Err(_) => {
+            let mut own = String::new();
+            write(&mut own)?;
+            Ok(Value::str(own))
+        }
+    })
 }
 
 pub fn format_float(f: f64) -> String {
@@ -526,5 +648,56 @@ mod tests {
         assert!(!Value::list(vec![]).truthy());
         assert!(Value::str("x").truthy());
         assert!(!Value::Null.truthy());
+    }
+}
+
+#[cfg(test)]
+mod writer_tests {
+    use super::*;
+
+    #[test]
+    fn push_int_writes_what_display_writes() {
+        let mut probe = vec![
+            0,
+            1,
+            -1,
+            9,
+            10,
+            -10,
+            99,
+            100,
+            i64::MAX,
+            i64::MIN,
+            i64::MIN + 1,
+        ];
+        let mut x: i64 = 7;
+        for _ in 0..200 {
+            x = x
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            probe.push(x);
+            probe.push(x >> 33);
+        }
+        for i in probe {
+            let mut out = String::from("k");
+            push_int(&mut out, i);
+            assert_eq!(out, format!("k{i}"));
+            assert_eq!(Value::Int(i).display(), i.to_string());
+            assert_eq!(Value::Int(i).repr(), i.to_string());
+        }
+    }
+
+    #[test]
+    fn build_str_inside_build_str_gets_its_own_buffer() {
+        let v = build_str(|out| {
+            out.push_str("ab");
+            let inner = build_str(|o| o.push_str("cd"));
+            inner.write_display(out);
+            out.push_str("ef");
+        });
+        assert_eq!(v.display(), "abcdef");
+        let big = build_str(|out| out.push_str(&"x".repeat(SCRATCH_KEEP + 1)));
+        assert_eq!(big.display().len(), SCRATCH_KEEP + 1);
+        assert_eq!(build_str(|out| out.push_str("after")).display(), "after");
     }
 }

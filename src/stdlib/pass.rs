@@ -23,9 +23,9 @@ use cig_pass::{Action, IssueError, Network, Pass};
 use indexmap::IndexMap;
 
 pub const TABLE: &[Builtin] = &[
-    b("pass.issue", Effect::Read, 3, Some(4), issue),
+    b("pass.issue", Effect::Read, 3, Some(4), issue).calling_back(),
     b("pass.find", Effect::Read, 2, Some(3), find),
-    b("pass.memo", Effect::Read, 3, Some(4), memo),
+    b("pass.memo", Effect::Read, 3, Some(4), memo).calling_back(),
     b("pass.check", Effect::Read, 1, Some(2), check),
     b("pass.narrow", Effect::Pure, 2, Some(2), narrow),
     b("pass.spend", Effect::Read, 1, Some(2), spend),

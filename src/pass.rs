@@ -854,7 +854,7 @@ fn feed(h: &mut blake3::Hasher, v: &crate::value::Value, depth: usize) -> Option
         Value::Func(f) => {
             h.update(b"F");
             h.update(f.name.as_deref().unwrap_or("pack").as_bytes());
-            h.update(&(f.params.len() as u64).to_le_bytes());
+            h.update(&(f.arity() as u64).to_le_bytes());
         }
         Value::Builtin(b) => {
             h.update(b"B");

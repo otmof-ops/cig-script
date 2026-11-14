@@ -905,6 +905,174 @@ fn a_tail_calls_frame_moves_its_arguments_down_and_starts_null() {
     assert_eq!(ok(&tail_module(4)), "null");
 }
 
+// ----- a call and a return at Lua's price (cig-script#230 step 3, #235) -------------------
+
+#[test]
+fn a_frame_record_is_small_and_owns_nothing() {
+    assert!(
+        std::mem::size_of::<Frame>() <= 64,
+        "{} bytes",
+        std::mem::size_of::<Frame>()
+    );
+    assert!(!std::mem::needs_drop::<Frame>());
+}
+
+#[test]
+fn a_tail_call_switches_the_frames_upvalues() {
+    // a(g): reads its upvalue (10), then tail-calls g(). b(): its upvalue
+    // (20). p(g): captures nothing, tail-calls g(). q(): 5.
+    let mut a = child_fn(
+        "a",
+        1,
+        3,
+        vec![
+            abc(Op::GETUP, 1, 0, 0),
+            abc(Op::MOV, 2, 0, 0),
+            abc(Op::TAILCALL, 2, 0, 0),
+        ],
+    );
+    a.upvalues = vec![captures(UpvalKind::ParentLocal, 0)];
+    let mut b = child_fn("b", 0, 1, vec![abc(Op::GETUP, 0, 0, 0), ret(0)]);
+    b.upvalues = vec![captures(UpvalKind::ParentLocal, 1)];
+    let p = child_fn(
+        "p",
+        1,
+        2,
+        vec![abc(Op::MOV, 1, 0, 0), abc(Op::TAILCALL, 1, 0, 0)],
+    );
+    let q = child_fn("q", 0, 1, vec![Instr::asbx(Op::LOADINT, 0, 5), ret(0)]);
+    let run_with = |code: Vec<Instr>| {
+        let mut head = vec![
+            Instr::asbx(Op::LOADINT, 0, 10),
+            Instr::asbx(Op::LOADINT, 1, 20),
+        ];
+        head.extend(code);
+        let mut f = main_fn(7, head);
+        f.children = vec![a.clone(), b.clone(), p.clone(), q.clone()];
+        ok(&module(f))
+    };
+    // A closure with upvalues tail-calls another: the callee reads its own.
+    let call = |callee: u16, arg: u16| {
+        vec![
+            Instr::abx(Op::CLOSURE, 4, callee),
+            Instr::abx(Op::CLOSURE, 5, arg),
+            abc(Op::CALL, 4, 1, 0),
+        ]
+    };
+    let mut code = call(0, 1);
+    code.push(ret(4));
+    assert_eq!(run_with(code), "20");
+    // A function without upvalues tail-calls one with them.
+    let mut code = call(2, 1);
+    code.push(ret(4));
+    assert_eq!(run_with(code), "20");
+    // One with upvalues tail-calls one without; a later call still reads
+    // its own.
+    let mut code = call(0, 3);
+    code.extend([
+        Instr::abx(Op::CLOSURE, 5, 1),
+        abc(Op::CALL, 5, 0, 0),
+        abc(Op::ADD, 4, 4, 5),
+        ret(4),
+    ]);
+    assert_eq!(run_with(code), "25");
+}
+
+#[test]
+fn a_compiled_closure_carries_its_arity_and_label_without_parameter_names() {
+    // Two closures of one function share its label.
+    let mut f2 = main_fn(
+        3,
+        vec![
+            Instr::abx(Op::CLOSURE, 1, 0),
+            Instr::abx(Op::CLOSURE, 2, 0),
+            abc(Op::NEWLIST, 0, 2, 0),
+            abc(Op::APPENDLIST, 0, 1, 0),
+            abc(Op::APPENDLIST, 0, 2, 0),
+            ret(0),
+        ],
+    );
+    f2.children = vec![add_fn()];
+    let Value::List(xs) = exec(&module(f2)).unwrap() else {
+        panic!("not a list")
+    };
+    let xs = xs.borrow();
+    let (Value::Func(g), Value::Func(h)) = (&xs[0], &xs[1]) else {
+        panic!("not functions")
+    };
+    assert!(g.params.is_empty());
+    assert_eq!(g.arity(), 2);
+    assert_eq!(xs[0].repr(), "<pull add>");
+    let (Some(gn), Some(hn)) = (&g.name, &h.name) else {
+        panic!("no names")
+    };
+    assert!(Rc::ptr_eq(gn, hn));
+    // Called from outside the VM with the wrong count: the interpreter's
+    // E401, worded from the arity.
+    let mut i = interp();
+    let Err(e) = i.call(&xs[0], vec![Value::Int(1)], Span::new(0, 1, 3, 4)) else {
+        panic!("called with one argument")
+    };
+    assert_eq!(
+        (e.code, e.message.as_str()),
+        ("E401", "add expects 2 arguments, got 1")
+    );
+    assert_eq!(
+        i.call(&xs[0], vec![Value::Int(1), Value::Int(2)], Span::default())
+            .unwrap()
+            .repr(),
+        "3"
+    );
+}
+
+/// `[1, 2, 3].map(pack(x) { y = <R1 as it starts>; R1 = x; [cellnew R1]; snuff y })`.
+fn map_reads_a_fresh_register(cell: bool) -> Module {
+    let mut code = vec![abc(Op::MOV, 2, 1, 0), abc(Op::MOV, 1, 0, 0)];
+    if cell {
+        code.push(abc(Op::CELLNEW, 1, 0, 0));
+    }
+    code.push(ret(2));
+    let mut lambda = child_fn("", 1, 3, code);
+    lambda.kind = FuncKind::Lambda;
+    let mut c = Asm::default();
+    let map = c.s("map") as u8;
+    c.op(Op::NEWLIST, 0, 3, 0);
+    for n in 1..=3 {
+        c.i(Instr::asbx(Op::LOADINT, 1, n))
+            .op(Op::APPENDLIST, 0, 1, 0);
+    }
+    c.i(Instr::abx(Op::CLOSURE, 1, 0))
+        .op(Op::CALLM, 0, map, 1)
+        .i(ret(0));
+    let mut main = c.finish("", 0, 2);
+    main.children = vec![lambda];
+    module(main)
+}
+
+#[test]
+fn callbacks_reuse_one_set_of_registers_and_carry_nothing_over() {
+    for cell in [false, true] {
+        let m = map_reads_a_fresh_register(cell);
+        let mut i = interp();
+        let got = run(&mut i, &program(&m)).unwrap();
+        // Each callback's R1 starts null, never the last callback's value
+        // or its cell.
+        assert_eq!(got.repr(), "[null, null, null]", "cell: {cell}");
+        // The set the run gave back holds no value, cell, frame or try.
+        let kept = i.vm_regs.as_ref().expect("a kept set");
+        assert!(kept.stack.is_empty() && kept.cells.is_empty());
+        assert!(kept.frames.is_empty() && kept.tries.is_empty());
+        assert!(kept.burns.is_empty() && kept.upvals.is_empty());
+        assert!(kept.stack.capacity() > 0);
+        // A second run takes it and gives it back.
+        assert_eq!(
+            run(&mut i, &program(&m)).unwrap().repr(),
+            "[null, null, null]"
+        );
+        assert!(i.vm_regs.is_some());
+    }
+}
+
 #[test]
 fn a_tail_call_of_a_builtin_returns_its_value() {
     let mut f = main_fn(2, vec![abc(Op::TAILCALL, 0, 1, 0)]);
@@ -3865,6 +4033,7 @@ fn mark_value() -> Value {
         min_args: 0,
         max_args: Some(0),
         func: mark,
+        calls_back: false,
     }))
 }
 
@@ -5531,4 +5700,554 @@ fn the_start_checks_every_functions_upvalues_and_the_top_level() {
         e.message,
         "the program's bytecode does not read: bytecode integrity hash does not match"
     );
+}
+
+// ----- the fast loop's calls, and the method cache ------------------------------------------
+
+/// `for r in rs { try { exhale <call on r> } ashtray e { exhale e.kind, e.message } }`,
+/// with the call at one site, so its second turn runs from the site's
+/// cache (`callm`) or the fast loop (`callb`). The try covers the call
+/// alone: an error raised in the fast loop is caught only when the frame's
+/// pc is the call's.
+fn calls_in_a_loop(call: impl FnOnce(&mut Asm)) -> Module {
+    let mut a = Asm::default();
+    a.i(steps(1, 0))
+        .op(Op::MOV, 1, 0, 0)
+        .op(Op::ITERPREP, 1, 0, 0);
+    a.label("next").jump(Op::ITERNEXT, 1, "done");
+    // The move runs in the fast loop between `try.enter` (the general
+    // path, which leaves the frame's pc at the move) and the try's range.
+    a.i(steps(1, 1))
+        .try_enter(0)
+        .op(Op::MOV, 5, 4, 0)
+        .op(Op::MOV, 6, 4, 0)
+        .label("s");
+    call(&mut a);
+    a.op(Op::EXHALE, 5, 1, 0).try_leave().label("e");
+    a.jump(Op::JMP, 0, "after");
+    a.label("catch")
+        .getfield(7, 6, "kind")
+        .getfield(8, 6, "message")
+        .op(Op::EXHALE, 7, 2, 0)
+        .try_leave();
+    a.label("after").jump(Op::LOOP, 0, "next");
+    a.label("done")
+        .i(steps(0, 0))
+        .op(Op::LOADNULL, 0, 0, 0)
+        .i(ret(0));
+    a.handler("s", "e", "catch", 6, None);
+    let mut f = a.finish("", 0, 12);
+    f.arity = 1;
+    module(f)
+}
+
+fn same_calls_in_a_loop(call_src: &str, rs: Value, call: impl FnOnce(&mut Asm)) {
+    let src = format!(
+        "for r in rs {{\n  try {{\n    exhale {call_src}\n  }} ashtray e {{\n    exhale e.kind, e.message\n  }}\n}}\n"
+    );
+    let copy = |v: &Value| match v {
+        Value::List(l) => Value::list(
+            l.borrow()
+                .iter()
+                .map(|x| match x {
+                    Value::List(i) => Value::list(i.borrow().clone()),
+                    Value::Map(m) => Value::map(m.borrow().clone()),
+                    other => other.clone(),
+                })
+                .collect(),
+        ),
+        other => other.clone(),
+    };
+    let (want, e) = walker_run(&src, &[("rs", copy(&rs))]);
+    assert!(e.is_none(), "{src}: {:?}", e.map(|e| e.message));
+    let (got, r) = vm_run(&calls_in_a_loop(call), vec![rs]);
+    assert!(r.is_ok(), "{src}: {:?}", r.err().map(|e| e.message));
+    assert_eq!(got, want, "{src}");
+}
+
+fn builtin_value(name: &str) -> Value {
+    Value::Builtin(Rc::new(
+        *crate::stdlib::builtin_catalogue()[catalogue_index(name)],
+    ))
+}
+
+#[test]
+fn callm_from_the_site_cache_is_the_interpreters_call() {
+    let s = Value::str;
+    let list = |xs: Vec<Value>| Value::list(xs);
+    let map = |kv: Vec<(&str, Value)>| {
+        Value::map(kv.into_iter().map(|(k, v)| (k.to_string(), v)).collect())
+    };
+    // (receivers, the method and its constant arguments)
+    let cases: Vec<(Value, &str, Vec<Constant>)> = vec![
+        // The receiver's type changes under one site: each turn its own method.
+        (
+            list(vec![
+                s("ab"),
+                list(vec![Value::Int(1)]),
+                map(vec![("a", Value::Int(1))]),
+                s("abc"),
+            ]),
+            "len",
+            vec![],
+        ),
+        // A method that changes its receiver, twice from the cache.
+        (
+            list(vec![
+                list(vec![]),
+                list(vec![Value::Int(1)]),
+                list(vec![Value::Int(2)]),
+            ]),
+            "push",
+            vec![Constant::Int(9)],
+        ),
+        // The method's own error, raised from the cache: caught at the call.
+        (list(vec![s("12"), s("x"), s("7")]), "to_int", vec![]),
+        // An arity error on every turn, the second from a filled cache.
+        (
+            list(vec![list(vec![]), list(vec![])]),
+            "push",
+            vec![Constant::Int(1), Constant::Int(2)],
+        ),
+        (list(vec![s("a"), s("b")]), "upper", vec![Constant::Int(1)]),
+        // A map holding a function under the method's name, after the
+        // site cached the map method `has`: the function is called.
+        (
+            list(vec![
+                map(vec![("a", Value::Int(1))]),
+                map(vec![("has", builtin_value("len"))]),
+                map(vec![("b", Value::Int(1))]),
+            ]),
+            "has",
+            vec![Constant::Str("abc".into())],
+        ),
+        // A type with no methods after one that has them; a module.
+        (
+            list(vec![s("x"), Value::Int(1), Value::Null, s("y")]),
+            "upper",
+            vec![],
+        ),
+        (
+            list(vec![s("x"), crate::stdlib::prelude()[0].1.clone()]),
+            "len",
+            vec![],
+        ),
+        // A method that calls back: never from the fast loop.
+        (
+            list(vec![
+                list(vec![Value::Int(1), Value::Int(2)]),
+                list(vec![Value::Int(3)]),
+            ]),
+            "map",
+            vec![],
+        ),
+    ];
+    for (rs, name, args) in cases {
+        let shown: Vec<String> = args
+            .iter()
+            .map(|c| match c {
+                Constant::Int(i) => i.to_string(),
+                Constant::Str(s) => format!("\"{s}\""),
+                _ => unreachable!(),
+            })
+            .collect();
+        let (call_src, fn_arg) = if name == "map" {
+            ("r.map(str)".to_string(), true)
+        } else {
+            (format!("r.{name}({})", shown.join(", ")), false)
+        };
+        same_calls_in_a_loop(&call_src, rs, |a| {
+            for (i, c) in args.iter().enumerate() {
+                a.loadk(6 + i as u8, c.clone());
+            }
+            let mut n = args.len() as u8;
+            if fn_arg {
+                // `str` as a value: a name of the prelude.
+                let g = a.s("str");
+                a.i(Instr::abx(Op::LOADG, 6, g));
+                n = 1;
+            }
+            let k = a.s(name) as u8;
+            a.op(Op::CALLM, 5, k, n);
+        });
+    }
+}
+
+#[test]
+fn callb_in_the_fast_loop_raises_where_the_general_path_does() {
+    let int = catalogue_index("int") as u8;
+    let rs = Value::list(vec![Value::str("12"), Value::str("x"), Value::Float(2.5)]);
+    same_calls_in_a_loop("int(r)", rs, |a| {
+        a.op(Op::CALLB, 5, int, 1);
+    });
+}
+
+#[test]
+fn interp_writes_every_part_as_display_does() {
+    let parts = printable_values();
+    let n = parts.len();
+    let mut code = vec![abc(Op::INTERP, n as u8, 0, (n - 1) as u8), ret(n as u8)];
+    // Twice: the scratch buffer is reused, and a nested build gets its own.
+    code.insert(1, abc(Op::INTERP, n as u8, 0, (n - 1) as u8));
+    let mut f = main_fn(n as u32 + 1, code);
+    f.arity = n as u16;
+    let want: String = parts.iter().map(Value::display).collect();
+    let (_, r) = vm_run(&module(f), parts);
+    match r {
+        Ok(Value::Str(s)) => assert_eq!(&*s, want),
+        other => panic!("{:?}", other.map(|v| v.repr()).map_err(|e| e.message)),
+    }
+}
+
+#[test]
+fn map_stores_and_literals_in_the_fast_loop_keep_the_maps_order() {
+    let src = "roll m = {b: 1, a: 2}\nm[\"a\"] = 3\nm[\"c\"] = 4\nm[\"b\"] = 5\nexhale m\n";
+    let (want, e) = walker_run(src, &[]);
+    assert!(e.is_none());
+    let mut a = Asm::default();
+    a.op(Op::NEWMAP, 0, 2, 0)
+        .loadk(1, Constant::Str("b".into()))
+        .i(Instr::asbx(Op::LOADINT, 2, 1))
+        .op(Op::INSERTMAP, 0, 1, 2)
+        .loadk(1, Constant::Str("a".into()))
+        .i(Instr::asbx(Op::LOADINT, 2, 2))
+        .op(Op::INSERTMAP, 0, 1, 2);
+    for (k, v) in [("a", 3), ("c", 4), ("b", 5)] {
+        a.loadk(1, Constant::Str(k.into()))
+            .i(Instr::asbx(Op::LOADINT, 2, v))
+            .op(Op::SETINDEX, 0, 1, 2)
+            .op(Op::NOP, 0, 0, 0)
+            .op(Op::NOP, 0, 0, 0);
+    }
+    a.op(Op::EXHALE, 0, 1, 0).i(ret(0));
+    let (got, r) = vm_run(&module(a.finish("", 0, 3)), vec![]);
+    assert!(r.is_ok(), "{:?}", r.err().map(|e| e.message));
+    assert_eq!(got, want);
+    assert_eq!(got, "{b: 5, a: 3, c: 4}\n");
+}
+
+#[test]
+fn the_tree_walkers_interpolation_nests_and_stops_on_an_error() {
+    let src = "try {\n  exhale \"a${1 / 0}\"\n} ashtray e {\n  exhale \"caught\"\n}\nexhale \"a${\"b${1 + 1}c\"}d${[1, \"x\"]}e${-9223372036854775807 - 1}\"\n";
+    let (out, e) = walker_run(src, &[]);
+    assert!(e.is_none(), "{:?}", e.map(|e| e.message));
+    assert_eq!(out, "caught\nab2cd[1, \"x\"]e-9223372036854775808\n");
+}
+
+// ----- the fast tier and the method cache, against the tree-walker on changing receivers -----
+
+#[test]
+fn the_fast_tier_matches_the_walker_on_changing_receivers() {
+    let s = Value::str;
+    let list = |xs: Vec<Value>| Value::list(xs);
+    let map = |kv: Vec<(&str, Value)>| {
+        Value::map(kv.into_iter().map(|(k, v)| (k.to_string(), v)).collect())
+    };
+    // A method whose argument is its receiver, twice from the cache.
+    same_calls_in_a_loop(
+        "r.push(r)",
+        list(vec![list(vec![Value::Int(1)]), list(vec![Value::Int(2)])]),
+        |a| {
+            let k = a.s("push") as u8;
+            a.op(Op::CALLM, 5, k, 1);
+        },
+    );
+    // The same name on two types at different rows, and types without it.
+    same_calls_in_a_loop(
+        "r.contains(\"a\")",
+        list(vec![
+            list(vec![Value::Int(1), s("a")]),
+            s("abc"),
+            list(vec![s("b")]),
+            s("xa"),
+            Value::Int(3),
+            map(vec![("a", Value::Int(1))]),
+            s("zz"),
+        ]),
+        |a| {
+            a.loadk(6, Constant::Str("a".into()));
+            let k = a.s("contains") as u8;
+            a.op(Op::CALLM, 5, k, 1);
+        },
+    );
+    // A map holding a non-function under the method's name.
+    same_calls_in_a_loop(
+        "r.len()",
+        list(vec![
+            map(vec![("len", Value::Int(5))]),
+            map(vec![("len", Value::Int(6))]),
+            s("ab"),
+        ]),
+        |a| {
+            let k = a.s("len") as u8;
+            a.op(Op::CALLM, 5, k, 0);
+        },
+    );
+    // The method's own type error after a hit.
+    same_calls_in_a_loop(
+        "r.get(\"a\")",
+        list(vec![
+            map(vec![("a", Value::Int(1))]),
+            list(vec![s("x")]),
+            map(vec![("a", Value::Int(2))]),
+        ]),
+        |a| {
+            a.loadk(6, Constant::Str("a".into()));
+            let k = a.s("get") as u8;
+            a.op(Op::CALLM, 5, k, 1);
+        },
+    );
+    // String `+` from the second tier, and its fall-backs.
+    same_calls_in_a_loop(
+        "r + r",
+        list(vec![
+            s("a"),
+            s("bc"),
+            Value::Int(1),
+            Value::Float(2.5),
+            s(""),
+            Value::Null,
+        ]),
+        |a| {
+            a.op(Op::ADD, 5, 5, 6);
+        },
+    );
+    // `interp` of a cyclic list and of strings inside containers.
+    same_calls_in_a_loop(
+        "\"${r}|${r}\"",
+        list(vec![
+            list(vec![s("q\"x"), Value::Int(i64::MIN), Value::Float(-0.0)]),
+            map(vec![("a b", s("é")), ("n", Value::Null)]),
+            Value::Int(i64::MAX),
+        ]),
+        |a| {
+            a.loadk(7, Constant::Str("|".into()));
+            a.op(Op::MOV, 8, 6, 0);
+            a.op(Op::INTERP, 5, 6, 2);
+        },
+    );
+}
+
+#[test]
+fn the_walkers_interpolation_is_reentered_through_calls() {
+    let src = "pull f(x) {\n  snuff \"<${x}>\"\n}\npull g(x) {\n  try {\n    snuff \"${x}${1 / 0}\"\n  } ashtray e {\n    snuff \"E${x}\"\n  }\n}\nexhale \"a${f(\"b${f(1)}\")}c${g(2)}d${f(g(3))}e${[f(4), g(5)].join(\"${f(6)}\")}\"\nexhale \"after\"\n";
+    let (out, e) = walker_run(src, &[]);
+    assert!(e.is_none(), "{:?}", e.map(|e| e.message));
+    assert_eq!(out, "a<b<1>>cE2d<E3>e<4><6>E5\nafter\n");
+}
+
+// ----- tries, a finally and callbacks across frames -----------------------------------------
+
+/// `pull g(n) { try { cough "boom" } finally { exhale "gf" } }`.
+fn raises_through_its_own_finally() -> BcFunction {
+    let r = RESERVED_U32;
+    let mut g = Asm::default();
+    g.try_enter(0)
+        .label("s")
+        .loadk(1, Constant::Str("boom".into()))
+        .op(Op::THROW, 1, 0, 0);
+    g.try_leave().label("e").jump(Op::JMP, 0, "end");
+    g.label("fin").exhale_str(1, "gf").try_leave();
+    g.label("end").op(Op::LOADNULL, 1, 0, 0).i(ret(1));
+    g.handler("s", "e", "fin", r, Some("fin"));
+    g.finish("g", 1, 2)
+}
+
+#[test]
+fn a_callees_try_passes_its_error_to_the_callers_catch_each_turn() {
+    let src = "pull g(n) {\n  try {\n    cough \"boom\"\n  } finally {\n    exhale \"gf\"\n  }\n}\nroll i = 0\nwhile i < 2 {\n  i = i + 1\n  try {\n    g(i)\n  } ashtray e {\n    exhale e.message\n  }\n}\nexhale \"end\"\n";
+    let mut a = Asm::default();
+    a.children.push(raises_through_its_own_finally());
+    a.i(Instr::abx(Op::CLOSURE, 0, 0))
+        .i(Instr::asbx(Op::LOADINT, 1, 0))
+        .i(steps(1, 0));
+    a.label("top")
+        .i(Instr::asbx(Op::LOADINT, 2, 2))
+        .op(Op::LT, 3, 1, 2);
+    a.jump(Op::TESTN, 3, "out").i(steps(1, 1)).addk(1, 1, 1);
+    a.try_enter(0).label("s");
+    a.op(Op::MOV, 3, 0, 0)
+        .op(Op::MOV, 4, 1, 0)
+        .op(Op::CALL, 3, 1, 0);
+    a.try_leave().label("e").jump(Op::JMP, 0, "cont");
+    a.label("catch").getfield(3, 2, "message");
+    a.op(Op::EXHALE, 3, 1, 0)
+        .try_leave()
+        .jump(Op::JMP, 0, "cont");
+    a.label("cont").jump(Op::LOOP, 0, "top");
+    a.label("out").i(steps(0, 0)).exhale_str(2, "end");
+    a.op(Op::LOADNULL, 2, 0, 0).i(ret(2));
+    a.handler("s", "e", "catch", 2, None);
+    assert_eq!(
+        agree(src, &module(a.finish("", 0, 5))),
+        "gf\nboom\ngf\nboom\nend\n"
+    );
+}
+
+#[test]
+fn a_call_in_a_finally_leaves_the_pending_error_to_the_caller() {
+    let src = "pull h() {\n  snuff 7\n}\npull g(f) {\n  try {\n    cough \"x\"\n  } finally {\n    exhale f()\n  }\n}\ntry {\n  g(h)\n} ashtray e {\n  exhale e.message\n}\nexhale \"end\"\n";
+    let r = RESERVED_U32;
+    let h = child_fn("h", 0, 1, vec![Instr::asbx(Op::LOADINT, 0, 7), ret(0)]);
+    let mut g = Asm::default();
+    g.try_enter(0)
+        .label("s")
+        .loadk(1, Constant::Str("x".into()))
+        .op(Op::THROW, 1, 0, 0);
+    g.try_leave().label("e").jump(Op::JMP, 0, "end");
+    g.label("fin")
+        .op(Op::MOV, 1, 0, 0)
+        .op(Op::CALL, 1, 0, 0)
+        .op(Op::EXHALE, 1, 1, 0)
+        .try_leave();
+    g.label("end").op(Op::LOADNULL, 1, 0, 0).i(ret(1));
+    g.handler("s", "e", "fin", r, Some("fin"));
+    let g = g.finish("g", 1, 3);
+    let mut a = Asm {
+        children: vec![h, g],
+        ..Default::default()
+    };
+    a.i(Instr::abx(Op::CLOSURE, 0, 0))
+        .i(Instr::abx(Op::CLOSURE, 1, 1));
+    a.try_enter(0).label("s");
+    a.op(Op::MOV, 2, 1, 0)
+        .op(Op::MOV, 3, 0, 0)
+        .op(Op::CALL, 2, 1, 0);
+    a.try_leave().label("e").jump(Op::JMP, 0, "after");
+    a.label("catch").getfield(3, 2, "message");
+    a.op(Op::EXHALE, 3, 1, 0).try_leave();
+    a.label("after").exhale_str(2, "end");
+    a.op(Op::LOADNULL, 2, 0, 0).i(ret(2));
+    a.handler("s", "e", "catch", 2, None);
+    assert_eq!(agree(src, &module(a.finish("", 0, 4))), "7\nx\nend\n");
+}
+
+/// `pack(x) => 10 / x`.
+fn ten_over() -> BcFunction {
+    let mut l = child_fn(
+        "",
+        1,
+        2,
+        vec![
+            Instr::asbx(Op::LOADINT, 1, 10),
+            abc(Op::DIV, 1, 1, 0),
+            ret(1),
+        ],
+    );
+    l.kind = FuncKind::Lambda;
+    l
+}
+
+/// `R(at) = [[xs[0]], [xs[1]], ..]` (nested) or `[xs[0], xs[1], ..]`.
+fn list_of(a: &mut Asm, at: u8, xs: &[i16], nested: bool) {
+    a.op(Op::NEWLIST, at, xs.len() as u8, 0);
+    for &x in xs {
+        if nested {
+            a.op(Op::NEWLIST, at + 1, 1, 0)
+                .i(Instr::asbx(Op::LOADINT, at + 2, x))
+                .op(Op::APPENDLIST, at + 1, at + 2, 0);
+        } else {
+            a.i(Instr::asbx(Op::LOADINT, at + 1, x));
+        }
+        a.op(Op::APPENDLIST, at, at + 1, 0);
+    }
+}
+
+#[test]
+fn a_callback_that_raises_leaves_the_next_callbacks_clean() {
+    // Flat: the callback raises, the caller catches, the next map reuses
+    // the kept registers.
+    let src = "roll g = pack(x) => 10 / x\ntry {\n  exhale [1, 0].map(g)\n} ashtray e {\n  exhale e.message\n}\nexhale [1, 2].map(g)\n";
+    let mut a = Asm::default();
+    let map = a.s("map") as u8;
+    a.children.push(ten_over());
+    a.i(Instr::abx(Op::CLOSURE, 0, 0));
+    a.try_enter(0).label("s");
+    list_of(&mut a, 1, &[1, 0], false);
+    a.op(Op::MOV, 2, 0, 0)
+        .op(Op::CALLM, 1, map, 1)
+        .op(Op::EXHALE, 1, 1, 0);
+    a.try_leave().label("e").jump(Op::JMP, 0, "after");
+    a.label("catch").getfield(2, 1, "message");
+    a.op(Op::EXHALE, 2, 1, 0).try_leave();
+    a.label("after");
+    list_of(&mut a, 1, &[1, 2], false);
+    a.op(Op::MOV, 2, 0, 0)
+        .op(Op::CALLM, 1, map, 1)
+        .op(Op::EXHALE, 1, 1, 0);
+    a.op(Op::LOADNULL, 1, 0, 0).i(ret(1));
+    a.handler("s", "e", "catch", 1, None);
+    let out = agree(src, &module(a.finish("", 0, 4)));
+    assert_eq!(out.lines().count(), 2, "{out}");
+
+    // Nested: a callback maps with a callback of its own, which raises.
+    let src = "roll g = pack(x) => 10 / x\ntry {\n  exhale [[1], [0]].map(pack(xs) => xs.map(g))\n} ashtray e {\n  exhale e.message\n}\nexhale [[1], [2]].map(pack(xs) => xs.map(g))\n";
+    let mut outer = Asm::default();
+    let omap = outer.s("map") as u8;
+    outer
+        .op(Op::MOV, 1, 0, 0)
+        .op(Op::GETUP, 2, 0, 0)
+        .op(Op::CALLM, 1, omap, 1)
+        .i(ret(1));
+    let mut outer = outer.finish("o", 1, 3);
+    outer.kind = FuncKind::Lambda;
+    outer.name = String::new();
+    outer.upvalues = vec![captures(UpvalKind::ParentLocal, 0)];
+    let mut a = Asm::default();
+    let map = a.s("map") as u8;
+    a.children = vec![ten_over(), outer];
+    a.i(Instr::abx(Op::CLOSURE, 0, 0))
+        .i(Instr::abx(Op::CLOSURE, 1, 1));
+    a.try_enter(0).label("s");
+    list_of(&mut a, 2, &[1, 0], true);
+    a.op(Op::MOV, 3, 1, 0)
+        .op(Op::CALLM, 2, map, 1)
+        .op(Op::EXHALE, 2, 1, 0);
+    a.try_leave().label("e").jump(Op::JMP, 0, "after");
+    a.label("catch").getfield(3, 2, "message");
+    a.op(Op::EXHALE, 3, 1, 0).try_leave();
+    a.label("after");
+    list_of(&mut a, 2, &[1, 2], true);
+    a.op(Op::MOV, 3, 1, 0)
+        .op(Op::CALLM, 2, map, 1)
+        .op(Op::EXHALE, 2, 1, 0);
+    a.op(Op::LOADNULL, 2, 0, 0).i(ret(2));
+    a.handler("s", "e", "catch", 2, None);
+    let out = agree(src, &module(a.finish("", 0, 5)));
+    assert_eq!(out.lines().count(), 2, "{out}");
+}
+
+#[test]
+fn the_depth_limit_is_caught_by_the_try_of_the_frame_that_calls() {
+    // Each level opens a try around its call: E506 is raised at the call
+    // in the deepest frame and caught there, with every outer frame's try
+    // still open on the machine's stack.
+    let src = "pull f(g, n) {\n  try {\n    snuff g(g, n + 1)\n  } ashtray e {\n    snuff n\n  }\n}\nexhale f(f, 0)\n";
+    let mut f = Asm::default();
+    f.try_enter(0).label("s");
+    f.op(Op::MOV, 2, 0, 0).op(Op::MOV, 3, 0, 0).addk(4, 1, 1);
+    f.at(span_of(src, "g(g, n + 1)"))
+        .op(Op::CALL, 2, 2, 0)
+        .try_leave();
+    f.label("e").i(ret(2));
+    f.label("catch").try_leave().i(ret(1));
+    f.handler("s", "e", "catch", 5, None);
+    let f = f.finish("f", 2, 6);
+    let mut a = Asm::default();
+    a.children.push(f);
+    a.i(Instr::abx(Op::CLOSURE, 0, 0))
+        .op(Op::MOV, 1, 0, 0)
+        .op(Op::MOV, 2, 0, 0)
+        .i(Instr::asbx(Op::LOADINT, 3, 0));
+    a.op(Op::CALL, 1, 2, 0).op(Op::EXHALE, 1, 1, 0);
+    a.op(Op::LOADNULL, 1, 0, 0).i(ret(1));
+    let m = module(a.finish("", 0, 4));
+    let out = std::thread::Builder::new()
+        .stack_size(1 << 30)
+        .spawn(move || agree(src, &m))
+        .expect("thread")
+        .join()
+        .expect("joined");
+    eprintln!("caught at {out}");
+    assert!(out.trim().parse::<u32>().is_ok_and(|n| n > 3000), "{out}");
 }

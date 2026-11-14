@@ -262,8 +262,10 @@ impl Funcs {
 /// module is opened (its upvalues against its parent's counts, the one
 /// verifier rule that looks across functions).
 struct Head {
-    name: String,
-    lambda: bool,
+    /// The name a closure of it carries (`<pull name>`): `None` for a
+    /// lambda or a function without a name. Made once, shared by every
+    /// closure.
+    label: Option<Rc<str>>,
     arity: usize,
     /// What each upvalue captures from the function that makes the closure.
     upvalues: Vec<UpvalDesc>,
@@ -277,7 +279,9 @@ struct Proto {
     plain: bool,
     /// Per pc, the field cache of a `getfield` or `setfield` there: the
     /// position its key last had in the map, as the tree-walker keeps one
-    /// per field expression.
+    /// per field expression. At a `callm`, the method cache: the
+    /// receiver's type and the builtin method it resolved to
+    /// ([`crate::stdlib::method_slot`]; 0 before the first call).
     hints: Vec<std::cell::Cell<u32>>,
     reg_count: usize,
     arity: usize,
@@ -373,6 +377,9 @@ type Cell = Rc<RefCell<Value>>;
 pub struct CompiledFn {
     program: Rc<Program>,
     index: usize,
+    /// The function's parameter count: its arity, which the function
+    /// value carries no parameter names for.
+    pub(crate) arity: usize,
     /// The cells the closure captured, one per upvalue.
     upvals: Rc<[Cell]>,
 }
@@ -469,8 +476,7 @@ pub fn open(bytes: Vec<u8>) -> Result<Rc<Program>, Diagnostic> {
             .ok_or_else(|| broken("a function outside its directory", Span::default()))?;
         verify_upvalues(i, &h.upvalues, place.parent).map_err(|e| refusal(&e))?;
         heads.push(Head {
-            name: h.name,
-            lambda: h.kind == FuncKind::Lambda,
+            label: label(&h.name, h.kind),
             arity: h.arity as usize,
             upvalues: h.upvalues,
         });
@@ -573,6 +579,12 @@ impl Known {
     }
 }
 
+/// The name a closure of a function carries: none for a lambda or an
+/// empty name.
+fn label(name: &str, kind: FuncKind) -> Option<Rc<str>> {
+    (kind != FuncKind::Lambda && !name.is_empty()).then(|| Rc::from(name))
+}
+
 /// Append `f` and then its children, recursively, in the verifier's
 /// pre-order. The verifier bounds the nesting at 64 levels.
 fn flatten(
@@ -591,8 +603,7 @@ fn flatten(
         }
     };
     heads.push(Head {
-        name: f.name.clone(),
-        lambda: f.kind == FuncKind::Lambda,
+        label: label(&f.name, f.kind),
         arity: f.arity as usize,
         upvalues: f.upvalues.clone(),
     });
@@ -798,47 +809,57 @@ fn run_frame(
             proto.arity
         )));
     }
+    let regs = interp.vm_regs.take().unwrap_or_default();
     let mut m = Machine {
         interp,
-        stack: Vec::new(),
-        cells: Vec::new(),
-        frames: Vec::new(),
+        stack: regs.stack,
+        cells: regs.cells,
+        frames: regs.frames,
+        tries: regs.tries,
+        burns: regs.burns,
+        upvals: regs.upvals,
     };
     let first = proto.spans.first().copied().unwrap_or_default();
-    m.grow_to(proto.reg_count, first).map_err(|e| *e)?;
-    for (slot, a) in m.stack.iter_mut().zip(args) {
-        *slot = a;
-    }
-    m.frames.push(Frame {
-        func: index,
-        pc: 0,
-        site: 0,
-        base: 0,
-        ret: None,
-        held_calls: 0,
-        nest: 0,
-        held_nest: 0,
-        upvals,
-        tries: Vec::new(),
-        burns: Vec::new(),
-    });
-    let result = m.exec(program);
-    // Whatever stopped the run, the interpreter's depth and loop counters
-    // go back to what they were, as the tree-walker's do on its way out.
-    while let Some(f) = m.frames.pop() {
-        m.release(&f);
-    }
+    let result = match m.grow_to(proto.reg_count, first) {
+        Ok(()) => {
+            for (slot, a) in m.stack.iter_mut().zip(args) {
+                *slot = a;
+            }
+            let up = if upvals.is_empty() {
+                NO_UPVALS
+            } else {
+                m.upvals.push(upvals);
+                0
+            };
+            let mut entry = Frame::new(index, 0, 0, up, 0, 0);
+            entry.held_calls = 0;
+            m.frames.push(entry);
+            let result = m.exec(program);
+            // Whatever stopped the run, the interpreter's depth and loop
+            // counters go back to what they were, as the tree-walker's do
+            // on its way out.
+            while let Some(f) = m.frames.pop() {
+                m.release(&f);
+            }
+            result
+        }
+        Err(e) => Err(e),
+    };
+    m.give_back();
     result.map_err(|e| *e)
 }
 
-/// Where a call's result goes in the caller: the absolute register of
-/// `R(A)` and how many registers after it the call row also covers.
-#[derive(Clone, Copy)]
-struct Ret {
-    reg: usize,
-    extra: usize,
-}
+/// `Frame::up` of a frame whose closure captured nothing.
+const NO_UPVALS: u32 = u32::MAX;
 
+/// One call's record, 64 bytes, owning nothing: ending a frame drops
+/// nothing. The tries and burns a frame opens are on the machine's two
+/// stacks from `tries` and `burns` up, and its closure's upvalues, when it
+/// has any, are `Machine::upvals[up]`. Its result goes to the caller's
+/// `R(A)`, the register just below `base` (the frame starts at the
+/// caller's `R(A+1)`); the machine's first frame returns out of the VM
+/// instead.
+#[derive(Clone, Copy)]
 struct Frame {
     func: usize,
     pc: usize,
@@ -848,20 +869,40 @@ struct Frame {
     site: usize,
     /// The frame's `R(0)` in the register stack.
     base: usize,
-    ret: Option<Ret>,
+    /// How many registers after `R(A)` the call's result row covers (`C`).
+    extra: u32,
     /// Calls this frame holds on the interpreter's depth count: its own
     /// call, and each tail call that replaced a frame in it.
-    held_calls: usize,
+    held_calls: u32,
     /// The frame's loop nesting now, as its last `steps` set it.
     nest: u32,
     /// Loop nesting held for frames a tail call replaced.
     held_nest: u32,
-    /// The running closure's upvalues.
-    upvals: Rc<[Cell]>,
-    /// The tries open in this frame, innermost last.
-    tries: Vec<Open>,
-    /// The burns open in this frame, innermost last.
-    burns: Vec<OpenBurn>,
+    /// Its closure's upvalues in `Machine::upvals`, or [`NO_UPVALS`].
+    up: u32,
+    /// Where its open tries begin in `Machine::tries`.
+    tries: u32,
+    /// Where its open burns begin in `Machine::burns`.
+    burns: u32,
+}
+
+impl Frame {
+    /// A frame of function `func` at `base`, with nothing open yet.
+    fn new(func: usize, base: usize, extra: u32, up: u32, tries: usize, burns: usize) -> Frame {
+        Frame {
+            func,
+            pc: 0,
+            site: 0,
+            base,
+            extra,
+            held_calls: 1,
+            nest: 0,
+            held_nest: 0,
+            up,
+            tries: tries as u32,
+            burns: burns as u32,
+        }
+    }
 }
 
 /// A burn the frame has entered and not yet left.
@@ -926,7 +967,33 @@ struct Machine<'i> {
     /// length. A register with a cell reads and writes the cell.
     cells: Vec<Option<Cell>>,
     frames: Vec<Frame>,
+    /// The tries open in every frame, frame after frame, innermost last.
+    tries: Vec<Open>,
+    /// The burns open in every frame, frame after frame, innermost last.
+    burns: Vec<OpenBurn>,
+    /// The upvalues of each frame whose closure captured any.
+    upvals: Vec<Rc<[Cell]>>,
 }
+
+/// A machine's vectors between two runs. The interpreter keeps one set
+/// ([`Interp::vm_regs`]): a run takes it when it starts and gives it back,
+/// emptied, when it ends, so a builtin's callbacks (`xs.map(f)`) reuse
+/// one set of allocations instead of making three per element. A run
+/// inside a run (a callback inside a callback) finds none there and makes
+/// its own: two live machines never share one.
+#[derive(Default)]
+pub(crate) struct Regs {
+    stack: Vec<Value>,
+    cells: Vec<Option<Cell>>,
+    frames: Vec<Frame>,
+    tries: Vec<Open>,
+    burns: Vec<OpenBurn>,
+    upvals: Vec<Rc<[Cell]>>,
+}
+
+/// The most registers a kept set holds room for: a run that grew its stack
+/// past this gives its vectors back to the allocator instead.
+const KEPT_REGISTERS: usize = 1 << 14;
 
 /// What an instruction did to the flow.
 enum Flow {
@@ -968,19 +1035,92 @@ impl Machine<'_> {
         }
     }
 
+    /// The run is over: every vector emptied (each register's value and
+    /// cell dropped here, as a machine of its own dropped them) and given
+    /// back to the interpreter for the next run, unless the stack grew
+    /// past [`KEPT_REGISTERS`].
+    fn give_back(self) {
+        let Machine {
+            interp,
+            mut stack,
+            mut cells,
+            mut frames,
+            mut tries,
+            mut burns,
+            mut upvals,
+        } = self;
+        stack.clear();
+        cells.clear();
+        frames.clear();
+        tries.clear();
+        burns.clear();
+        upvals.clear();
+        if stack.capacity() <= KEPT_REGISTERS {
+            interp.vm_regs = Some(Regs {
+                stack,
+                cells,
+                frames,
+                tries,
+                burns,
+                upvals,
+            });
+        }
+    }
+
+    /// A frame ends (it returned, an error left it, or the run stopped):
+    /// what it opened and what it holds on the interpreter's counts go.
+    #[inline]
     fn release(&mut self, f: &Frame) {
-        // Burns still open here were left by an internal error: given back
-        // as an error leaves them, with nothing recorded.
-        for b in f.burns.iter().rev() {
+        if self.burns.len() > f.burns as usize {
+            self.release_burns(f.burns as usize);
+        }
+        if self.tries.len() > f.tries as usize {
+            self.tries.truncate(f.tries as usize);
+        }
+        if f.up != NO_UPVALS {
+            self.upvals.truncate(f.up as usize);
+        }
+        let held = f.nest.saturating_add(f.held_nest);
+        if held != 0 {
+            self.interp.loop_depth = self.interp.loop_depth.saturating_sub(held);
+        }
+        for _ in 0..f.held_calls {
+            self.interp.leave_call();
+        }
+    }
+
+    /// Burns still open in a frame that ends were left by an internal
+    /// error: given back as an error leaves them, with nothing recorded.
+    #[cold]
+    fn release_burns(&mut self, from: usize) {
+        while self.burns.len() > from {
+            let Some(b) = self.burns.pop() else { break };
             if b.comp.as_ref().is_some_and(|c| c.open) {
                 self.interp.compensate_close();
             }
             self.interp.burn_close(b.unlit);
         }
-        let held = f.nest.saturating_add(f.held_nest);
-        self.interp.loop_depth = self.interp.loop_depth.saturating_sub(held);
-        for _ in 0..f.held_calls {
-            self.interp.leave_call();
+    }
+
+    /// The tries open in the current frame.
+    fn frame_tries(&self) -> usize {
+        let from = self.frames.last().map_or(0, |f| f.tries as usize);
+        self.tries.len().saturating_sub(from)
+    }
+
+    /// The burns open in the current frame.
+    fn frame_burns(&self) -> usize {
+        let from = self.frames.last().map_or(0, |f| f.burns as usize);
+        self.burns.len().saturating_sub(from)
+    }
+
+    /// The current frame's closure's upvalues (none when it captured
+    /// nothing).
+    #[inline(always)]
+    fn frame_upvals(&self) -> &[Cell] {
+        match self.frames.last() {
+            Some(f) if f.up != NO_UPVALS => self.upvals.get(f.up as usize).map_or(&[], |u| u),
+            _ => &[],
         }
     }
 
@@ -1043,24 +1183,41 @@ impl Machine<'_> {
 
     /// The current frame's upvalue `u`.
     fn upval(&self, u: u32, span: Span) -> Result<Cell, Fault> {
-        self.frames
-            .last()
-            .and_then(|f| f.upvals.get(u as usize))
+        self.frame_upvals()
+            .get(u as usize)
             .cloned()
             .ok_or_else(|| broken("an upvalue past the closure's", span).into())
     }
 
-    /// The cell a new closure's upvalue `d` captures in the frame at `base`.
-    fn capture(&mut self, base: usize, d: &UpvalDesc, span: Span) -> Result<Cell, Fault> {
+    /// Whether every upvalue in `ds` can be captured in the frame at
+    /// `base`: its register is in the stack, or its upvalue in the
+    /// closure's list.
+    fn can_capture(&self, base: usize, ds: &[UpvalDesc]) -> bool {
+        let ups = self.frame_upvals().len();
+        ds.iter().all(|d| match d.kind {
+            UpvalKind::ParentLocal => base.saturating_add(usize::from(d.index)) < self.stack.len(),
+            UpvalKind::ParentUpvalue => usize::from(d.index) < ups,
+        })
+    }
+
+    /// The cell a new closure's upvalue `d` captures in the frame at
+    /// `base`, which [`Machine::can_capture`] said it can.
+    fn capture(&self, base: usize, d: &UpvalDesc) -> Cell {
         match d.kind {
             UpvalKind::ParentLocal => {
                 let i = base.saturating_add(usize::from(d.index));
                 if let Some(Some(cell)) = self.cells.get(i) {
-                    return Ok(Rc::clone(cell));
+                    return Rc::clone(cell);
                 }
-                Ok(Rc::new(RefCell::new(self.get_abs(i, span)?)))
+                Rc::new(RefCell::new(
+                    self.stack.get(i).cloned().unwrap_or(Value::Null),
+                ))
             }
-            UpvalKind::ParentUpvalue => self.upval(u32::from(d.index), span),
+            UpvalKind::ParentUpvalue => self
+                .frame_upvals()
+                .get(usize::from(d.index))
+                .cloned()
+                .unwrap_or_else(|| Rc::new(RefCell::new(Value::Null))),
         }
     }
 
@@ -1080,15 +1237,48 @@ impl Machine<'_> {
     /// pc is kept current after each one, which is where an error raised
     /// by the next is offered to the tries.
     fn run_frame_code(&mut self, program: &Rc<Program>) -> Result<Option<Value>, Fault> {
-        let (mut pc, mut base, mut upvals, mut proto) = self.top(program)?;
+        let (mut pc, mut base, mut proto) = self.top(program)?;
         loop {
             if proto.plain {
-                pc = self.run_fast(proto, pc, base, &upvals);
+                pc = self.run_fast(proto, pc, base)?;
             }
             let Some(Some(d)) = proto.code.get(pc) else {
                 let span = proto.spans.get(pc).copied().unwrap_or_default();
                 return Err(broken("a pc that starts no instruction", span).into());
             };
+            // A call of a compiled function of this program, a return and
+            // a tail call switch frames here, without `step`: the frame's
+            // pc is written when it is left (at a call) or when an error
+            // leaves the instruction, and the position is looked up only
+            // for an error.
+            let switched = match d.op {
+                Op::CALL => self
+                    .call_here(program, proto, d, base)
+                    .map(|c| c.then_some(None)),
+                Op::RET => self.ret_here(proto, d, base).map(Some),
+                Op::TAILCALL => self
+                    .tail_here(program, proto, d, base)
+                    .map(|c| c.then_some(None)),
+                _ => Ok(None),
+            };
+            match switched {
+                Ok(None) => {}
+                Ok(Some(Some(v))) => return Ok(Some(v)),
+                Ok(Some(None)) => {
+                    (pc, base, proto) = self.top(program)?;
+                    continue;
+                }
+                Err(e) => {
+                    // `ret_here` places its own error (the frame may be
+                    // gone by then).
+                    if d.op != Op::RET {
+                        if let Some(f) = self.frames.last_mut() {
+                            f.pc = pc;
+                        }
+                    }
+                    return Err(e);
+                }
+            }
             #[cfg(feature = "bench-stats")]
             let timer = stats::start(d.op);
             // The general path: the frame's pc is where an error from this
@@ -1113,51 +1303,201 @@ impl Machine<'_> {
                     if let Some(v) = self.ret(program, v, span)? {
                         return Ok(Some(v));
                     }
-                    (pc, base, upvals, proto) = self.top(program)?;
+                    (pc, base, proto) = self.top(program)?;
                 }
-                Flow::Switched => (pc, base, upvals, proto) = self.top(program)?,
+                Flow::Switched => (pc, base, proto) = self.top(program)?,
             }
         }
     }
 
     /// The frame's instructions from `pc` for as long as the fast path
     /// runs them: the pc of the first one it does not run (or of no
-    /// instruction at all). A function of its own, never inlined: the
-    /// fast path's frame holds every arm's locals, and it must not be on
-    /// the stack while the general path runs a call. A builtin that calls
-    /// back into the VM then costs `run_frame_code`, `step` and the
-    /// group, as it did before there was a fast path, which is what keeps
-    /// a level of re-entry no deeper than the tree-walker's.
+    /// instruction at all), or the error a builtin it called raised. A
+    /// function of its own, never inlined: the fast path's frame holds
+    /// every arm's locals, and it must not be on the stack while the
+    /// general path runs a call. A builtin that calls back into the VM
+    /// (`Builtin::calls_back`) is therefore never called here: it costs
+    /// `run_frame_code`, `step` and the group, as it did before there was
+    /// a fast path, which is what keeps a level of re-entry no deeper than
+    /// the tree-walker's.
     #[inline(never)]
-    fn run_fast(&mut self, proto: &Proto, mut pc: usize, base: usize, upvals: &[Cell]) -> usize {
+    fn run_fast(&mut self, proto: &Proto, mut pc: usize, base: usize) -> Result<usize, Fault> {
         while let Some(Some(d)) = proto.code.get(pc) {
             #[cfg(feature = "bench-stats")]
             let timer = stats::start(d.op);
-            let Some(next) = self.fast(proto, d, base, upvals) else {
-                break;
+            let next = match self.fast(proto, d, base) {
+                Some(next) => next,
+                None => match self.fast_call(proto, d, base) {
+                    Some(Ok(next)) => next,
+                    Some(Err(e)) => {
+                        // As on the general path: the frame's pc is where
+                        // the error is offered to the tries.
+                        if let Some(f) = self.frames.last_mut() {
+                            f.pc = pc;
+                        }
+                        #[cfg(feature = "bench-stats")]
+                        stats::stop(timer);
+                        return Err(e);
+                    }
+                    None => break,
+                },
             };
             #[cfg(feature = "bench-stats")]
             stats::stop(timer);
             pc = next;
         }
-        pc
+        Ok(pc)
     }
 
-    /// The frame on top: its pc, its base, its upvalues and its function.
-    #[allow(clippy::type_complexity)]
-    fn top<'p>(
-        &self,
-        program: &'p Program,
-    ) -> Result<(usize, usize, Rc<[Cell]>, &'p Proto), Fault> {
-        let (fi, pc, base, upvals) = match self.frames.last() {
-            Some(f) => (f.func, f.pc, f.base, Rc::clone(&f.upvals)),
+    /// The fast loop's second tier, for a frame whose registers carry no
+    /// cell: the calls of builtins that cannot call back into the VM
+    /// (`callb`, and `callm` on a site whose cache holds the receiver's
+    /// type), `interp`, string `+`, and the list and map builders and
+    /// stores. `None`
+    /// when `d` is not one of them or not its common case, having changed
+    /// nothing, so the general path runs it from the start; a builtin's
+    /// error comes back as the general path raises it.
+    #[inline(never)]
+    fn fast_call(
+        &mut self,
+        proto: &Proto,
+        d: &DecodedInstr,
+        base: usize,
+    ) -> Option<Result<usize, Fault>> {
+        let pc = d.pc as usize;
+        let next = pc + d.width as usize;
+        let r = |x: u32| base.saturating_add(x as usize);
+        let v = match d.op {
+            Op::CALLB => {
+                let b = *crate::stdlib::builtin_catalogue().get(d.b_u as usize)?;
+                if b.calls_back {
+                    return None;
+                }
+                // `R(A)`, where the result goes, then the arguments.
+                let start = r(d.a);
+                let args = self
+                    .stack
+                    .get(start..start.saturating_add(d.c as usize).saturating_add(1))?
+                    .get(1..)?;
+                let span = span_of(proto, pc);
+                match self.interp.call_builtin(b, args, span) {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(e.into())),
+                }
+            }
+            Op::CALLM => {
+                let start = r(d.a);
+                let argv = self
+                    .stack
+                    .get(start..start.saturating_add(d.c as usize).saturating_add(1))?;
+                let recv = argv.first()?;
+                let b = crate::stdlib::method_at(recv, proto.hints.get(pc)?.get())?;
+                if b.calls_back || !b.arity_ok(argv.len()) {
+                    return None;
+                }
+                if let Value::Map(map) = recv {
+                    // A function the map holds under the name is called
+                    // instead: the general path's case.
+                    let Value::Str(name) = proto.consts.get(d.b_u as usize)? else {
+                        return None;
+                    };
+                    let held = map
+                        .try_borrow()
+                        .ok()?
+                        .get(&**name)
+                        .is_some_and(|f| matches!(f, Value::Func(_) | Value::Builtin(_)));
+                    if held {
+                        return None;
+                    }
+                }
+                let span = span_of(proto, pc);
+                match (b.func)(self.interp, argv, span) {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(e.or_at(span).into())),
+                }
+            }
+            Op::INTERP => {
+                let first = r(d.b_u);
+                let parts = self
+                    .stack
+                    .get(first..first.saturating_add(d.c as usize).saturating_add(1))?;
+                interpolate(parts)
+            }
+            // String `+`: the operator's own result, made in one block.
+            Op::ADD => {
+                let (Value::Str(l), Value::Str(rv)) =
+                    (self.stack.get(r(d.b_u))?, self.stack.get(r(d.c))?)
+                else {
+                    return None;
+                };
+                crate::value::build_str(|out| {
+                    out.reserve(l.len() + rv.len());
+                    out.push_str(l);
+                    out.push_str(rv);
+                })
+            }
+            Op::NEWLIST => Value::list(Vec::with_capacity(d.b_u as usize)),
+            Op::NEWMAP => Value::map(IndexMap::with_capacity(d.b_u as usize)),
+            Op::APPENDLIST => {
+                let v = self.stack.get(r(d.b_u))?.clone();
+                let Value::List(list) = self.stack.get(r(d.a))? else {
+                    return None;
+                };
+                list.try_borrow_mut().ok()?.push(v);
+                return Some(Ok(next));
+            }
+            Op::INSERTMAP => {
+                let Value::Str(key) = self.stack.get(r(d.b_u))? else {
+                    return None;
+                };
+                let v = self.stack.get(r(d.c))?.clone();
+                let Value::Map(map) = self.stack.get(r(d.a))? else {
+                    return None;
+                };
+                let old = map.try_borrow_mut().ok()?.insert(key.to_string(), v);
+                drop(old);
+                return Some(Ok(next));
+            }
+            Op::SETINDEX => {
+                let (Value::Map(map), Value::Str(key)) =
+                    (self.stack.get(r(d.a))?, self.stack.get(r(d.b_u))?)
+                else {
+                    return None;
+                };
+                let v = self.stack.get(r(d.c))?.clone();
+                let mut map = map.try_borrow_mut().ok()?;
+                // A key already there keeps its place (as `insert` does)
+                // and needs no `String` made for it.
+                let old = match map.get_mut(&**key) {
+                    Some(slot) => Some(std::mem::replace(slot, v)),
+                    None => map.insert(key.to_string(), v),
+                };
+                drop(map);
+                drop(old);
+                return Some(Ok(past_nops(proto, next, 2)));
+            }
+            _ => return None,
+        };
+        // The register exists: each arm above read it or its window.
+        if let Some(slot) = self.stack.get_mut(r(d.a)) {
+            *slot = v;
+        }
+        Some(Ok(next))
+    }
+
+    /// The frame on top: its pc, its base and its function. An
+    /// instruction that reads an upvalue takes it from the frame.
+    #[inline]
+    fn top<'p>(&self, program: &'p Program) -> Result<(usize, usize, &'p Proto), Fault> {
+        let (fi, pc, base) = match self.frames.last() {
+            Some(f) => (f.func, f.pc, f.base),
             None => return Err(broken("an empty call stack", Span::default()).into()),
         };
         let proto = program
             .funcs
             .get(fi)
             .ok_or_else(|| broken("no such function", Span::default()))?;
-        Ok((pc, base, upvals, proto))
+        Ok((pc, base, proto))
     }
 
     /// The common cases of the hot instructions in a frame whose registers
@@ -1165,13 +1505,7 @@ impl Machine<'_> {
     /// and changed nothing, so the general path runs it from the start and
     /// raises its error, if any, with the tree-walker's code and position.
     #[inline(always)]
-    fn fast(
-        &mut self,
-        proto: &Proto,
-        d: &DecodedInstr,
-        base: usize,
-        upvals: &[Cell],
-    ) -> Option<usize> {
+    fn fast(&mut self, proto: &Proto, d: &DecodedInstr, base: usize) -> Option<usize> {
         let pc = d.pc as usize;
         let next = pc + d.width as usize;
         let r = |x: u32| base.saturating_add(x as usize);
@@ -1251,7 +1585,12 @@ impl Machine<'_> {
                     None => Some(next),
                 };
             }
-            Op::GETUP | Op::CELLGET => upvals.get(d.b_u as usize)?.try_borrow().ok()?.clone(),
+            Op::GETUP | Op::CELLGET => self
+                .frame_upvals()
+                .get(d.b_u as usize)?
+                .try_borrow()
+                .ok()?
+                .clone(),
             Op::GETINDEX => {
                 let obj = self.stack.get(r(d.b_u))?;
                 let idx = self.stack.get(r(d.c))?;
@@ -1489,25 +1828,18 @@ impl Machine<'_> {
         let next = pc + d.width as usize;
         match d.op {
             Op::CALL => {
-                let callee = self.get(base, d.a, span)?;
-                let ret = Ret {
-                    reg: base.saturating_add(d.a as usize),
-                    extra: d.c as usize,
-                };
-                if let Some((f, cf)) = compiled(&callee, program) {
-                    let first = base.saturating_add(d.a as usize + 1);
-                    let caller = (!proto.plain).then(|| base.saturating_add(proto.reg_count));
-                    self.push(program, f, cf, first, d.b_u as usize, ret, caller, span)?;
-                    let caller = self.frames.len().checked_sub(2);
-                    if let Some(caller) = caller.and_then(|i| self.frames.get_mut(i)) {
-                        caller.pc = next;
-                        caller.site = pc;
-                    }
+                // `run_frame_code` has made a frame for a compiled callee
+                // of this program already; this is every other callee.
+                if self.call_here(program, proto, d, base)? {
                     return Ok(Flow::Switched);
                 }
+                let callee = self.get(base, d.a, span)?;
                 let args = self.window(base, d.a + 1, d.b_u, span)?;
                 let v = self.interp.call(&callee, args, span)?;
-                self.write_result(ret, v, span)?;
+                let reg = base.saturating_add(d.a as usize);
+                if !self.write_result(reg, d.c, v) {
+                    return Err(broken("a result register past its frame", span).into());
+                }
             }
             Op::CALLB => {
                 let b = crate::stdlib::builtin_catalogue()
@@ -1537,21 +1869,37 @@ impl Machine<'_> {
                 return Ok(Flow::Return(v));
             }
             Op::TAILCALL => {
-                let callee = self.get(base, d.a, span)?;
-                if let Some((f, cf)) = compiled(&callee, program) {
-                    let first = base.saturating_add(d.a as usize + 1);
-                    self.replace(program, proto, f, cf, first, d.b_u as usize, span)?;
+                if self.tail_here(program, proto, d, base)? {
                     return Ok(Flow::Switched);
                 }
+                let callee = self.get(base, d.a, span)?;
                 let args = self.window(base, d.a + 1, d.b_u, span)?;
                 let v = self.interp.call(&callee, args, span)?;
                 return Ok(Flow::Return(v));
             }
             Op::CALLM => {
-                let recv = self.get(base, d.a, span)?;
                 let name = name(proto, d.b_u, span)?;
-                let args = self.window(base, d.a + 1, d.c, span)?;
-                let v = self.interp.call_method(recv, &name, args, span)?;
+                // The receiver and its arguments, `R(A)` onwards: the
+                // layout a method takes, read in place when no register
+                // of it carries a cell (a callback runs in a VM of its
+                // own, so nothing writes these registers during the call).
+                let start = base.saturating_add(d.a as usize);
+                let n = (d.c as usize).saturating_add(1);
+                let v = match in_place(&self.stack, &self.cells, start, n) {
+                    Some(argv) => {
+                        if let (Some(recv), Some(hint)) = (argv.first(), proto.hints.get(pc)) {
+                            // The site's cache, for the fast loop's next call.
+                            if let Some(slot) = crate::stdlib::method_slot(recv, &name) {
+                                hint.set(slot);
+                            }
+                        }
+                        self.interp.call_method(argv, &name, span)?
+                    }
+                    None => {
+                        let argv = self.window(base, d.a, d.c.saturating_add(1), span)?;
+                        self.interp.call_method(&argv, &name, span)?
+                    }
+                };
                 self.set(base, d.a, v, span)?;
             }
             Op::CLOSURE => {
@@ -1564,18 +1912,26 @@ impl Machine<'_> {
                     .heads
                     .get(child)
                     .ok_or_else(|| broken("no such function", span))?;
-                let mut upvals = Vec::with_capacity(target.upvalues.len());
-                for u in &target.upvalues {
-                    upvals.push(self.capture(base, u, span)?);
+                if !self.can_capture(base, &target.upvalues) {
+                    return Err(broken("a capture past its frame", span).into());
                 }
-                let name = (!target.lambda && !target.name.is_empty()).then(|| target.name.clone());
+                // The upvalue list in one allocation (an exact-size
+                // iterator), the name shared with the function's head, and
+                // no parameter names: a compiled function's arity is its
+                // own (`Function::arity`).
+                let upvals: Rc<[Cell]> = target
+                    .upvalues
+                    .iter()
+                    .map(|u| self.capture(base, u))
+                    .collect();
                 let f = Function {
-                    name,
-                    params: vec![String::new(); target.arity],
+                    name: target.label.clone(),
+                    params: Vec::new(),
                     body: FnBody::Compiled(CompiledFn {
                         program: Rc::clone(program),
                         index: child,
-                        upvals: Rc::from(upvals),
+                        arity: target.arity,
+                        upvals,
                     }),
                     closure: self.interp.globals.clone(),
                 };
@@ -1627,12 +1983,13 @@ impl Machine<'_> {
                 self.interp.write_exhaled(line)?;
             }
             Op::INTERP => {
-                let parts = self.window(base, d.b_u, d.c + 1, span)?;
-                let mut s = String::new();
-                for v in &parts {
-                    s.push_str(&v.display());
-                }
-                self.set(base, d.a, Value::str(s), span)?;
+                let first = base.saturating_add(d.b_u as usize);
+                let n = (d.c as usize).saturating_add(1);
+                let s = match in_place(&self.stack, &self.cells, first, n) {
+                    Some(parts) => interpolate(parts),
+                    None => interpolate(&self.window(base, d.b_u, d.c.saturating_add(1), span)?),
+                };
+                self.set(base, d.a, s, span)?;
             }
 
             _ => return Err(broken("an instruction sent to the wrong group", span).into()),
@@ -1775,8 +2132,7 @@ impl Machine<'_> {
             Op::GETINDEX => {
                 let obj = self.get(base, d.b_u, span)?;
                 let idx = self.get(base, d.c, span)?;
-                let at = part_spans(proto, next, 1, span);
-                let idx_span = at.first().copied().unwrap_or(span);
+                let idx_span = part_span(proto, next, 0, span);
                 let v = self.interp.index(obj, idx, span, idx_span)?;
                 self.set(base, d.a, v, span)?;
                 return Ok(Flow::Next(past_nops(proto, next, 1)));
@@ -1785,9 +2141,8 @@ impl Machine<'_> {
                 let obj = self.get(base, d.a, span)?;
                 let idx = self.get(base, d.b_u, span)?;
                 let v = self.get(base, d.c, span)?;
-                let at = part_spans(proto, next, 2, span);
-                let idx_span = at.first().copied().unwrap_or(span);
-                let obj_span = at.get(1).copied().unwrap_or(span);
+                let idx_span = part_span(proto, next, 0, span);
+                let obj_span = part_span(proto, next, 1, span);
                 set_index(&obj, &idx, v, span, idx_span, obj_span)?;
                 return Ok(Flow::Next(past_nops(proto, next, 2)));
             }
@@ -1809,17 +2164,21 @@ impl Machine<'_> {
         match d.op {
             Op::TRY_ENTER => {
                 let handler = d.b_u as usize;
-                if let Some(f) = self.frames.last_mut() {
+                if let Some(f) = self.frames.last().copied() {
                     // Entering a try again (a loop around it) ends the
                     // earlier entry and everything opened inside it.
-                    if let Some(at) = f.tries.iter().position(|o| o.handler == handler) {
-                        f.tries.truncate(at);
+                    let from = f.tries as usize;
+                    let again = self
+                        .tries
+                        .get(from..)
+                        .and_then(|own| own.iter().position(|o| o.handler == handler));
+                    if let Some(at) = again {
+                        self.tries.truncate(from + at);
                     }
-                    let nest = f.nest;
-                    let burns = f.burns.len();
-                    f.tries.push(Open {
+                    let burns = self.frame_burns();
+                    self.tries.push(Open {
                         handler,
-                        nest,
+                        nest: f.nest,
                         burns,
                         stage: Stage::Body,
                         pending: Pending::Next(next),
@@ -1864,16 +2223,18 @@ impl Machine<'_> {
         next: usize,
         span: Span,
     ) -> Result<Flow, Fault> {
-        let Some(open) = self.frames.last_mut().and_then(|f| f.tries.pop()) else {
+        let open = match self.frame_tries() {
+            0 => None,
+            _ => self.tries.pop(),
+        };
+        let Some(open) = open else {
             return Err(misuse(d.op, "found no open try in its frame", span).into());
         };
         // Out of the burns opened inside the try first, as `break`,
         // `continue` and `snuff` leave them in the tree-walker; their own
         // error is raised inside the try.
         if let Err(e) = self.close_burns(open.burns, true) {
-            if let Some(f) = self.frames.last_mut() {
-                f.tries.push(open);
-            }
+            self.tries.push(open);
             return Err(e);
         }
         if d.a != 0 {
@@ -1903,8 +2264,8 @@ impl Machine<'_> {
         open.pending = pending;
         open.payload = self.interp.cough_payload.take();
         let nest = open.nest;
-        if let Some(f) = self.frames.last_mut() {
-            f.tries.push(open);
+        if !self.frames.is_empty() {
+            self.tries.push(open);
         }
         self.set_nest(nest);
         h.finally_pc as usize
@@ -1922,7 +2283,7 @@ impl Machine<'_> {
                 return Err(e.into());
             };
             let pc = at.unwrap_or(frame.pc);
-            let entry = frame.ret.is_none();
+            let entry = self.frames.len() == 1;
             let Some(proto) = program.funcs.get(frame.func) else {
                 return Err(e.into());
             };
@@ -1953,11 +2314,14 @@ impl Machine<'_> {
     ) -> Result<Option<Diagnostic>, Fault> {
         let span = e.span.unwrap_or_default();
         loop {
-            let Some(frame) = self.frames.last_mut() else {
+            let Some(base) = self.frames.last().map(|f| f.base) else {
                 return Ok(Some(e));
             };
-            let base = frame.base;
-            let Some(open) = frame.tries.pop() else {
+            let open = match self.frame_tries() {
+                0 => None,
+                _ => self.tries.pop(),
+            };
+            let Some(open) = open else {
                 return Ok(Some(e));
             };
             let Some(h) = proto.handlers.get(open.handler) else {
@@ -1978,11 +2342,11 @@ impl Machine<'_> {
                     }
                     let nest = open.nest;
                     let to = h.handler_pc as usize;
+                    self.tries.push(Open {
+                        stage: Stage::Catch,
+                        ..open
+                    });
                     if let Some(f) = self.frames.last_mut() {
-                        f.tries.push(Open {
-                            stage: Stage::Catch,
-                            ..open
-                        });
                         f.pc = to;
                     }
                     self.set_nest(nest);
@@ -2003,41 +2367,132 @@ impl Machine<'_> {
         }
     }
 
-    /// A call of a compiled function: arity, depth, then a new frame that
-    /// starts at `first`, the caller's `R(A+1)`: its first `n` registers
-    /// are the arguments where they are, nothing is copied, and the rest
-    /// of its registers are set to null. `caller` is the end of the
-    /// caller's registers when its function makes cells: its cells from
-    /// `first` up are gone (an argument's value is read out of its cell),
-    /// as `docs/BYTECODE.md` says of what a call leaves undefined.
+    /// `call A, B, C` when `R(A)` holds a compiled function of this
+    /// program: arity, depth, then a new frame that starts at the caller's
+    /// `R(A+1)` ([`Machine::push`]). The callee is tested where it lies;
+    /// only its upvalue list, when it has one, is counted once more.
+    /// `false` when `R(A)` holds anything else, with nothing changed.
+    #[inline]
+    fn call_here(
+        &mut self,
+        program: &Rc<Program>,
+        proto: &Proto,
+        d: &DecodedInstr,
+        base: usize,
+    ) -> Result<bool, Fault> {
+        let at = base.saturating_add(d.a as usize);
+        let Some((index, upvals)) = self.callee(program, proto, at) else {
+            return Ok(false);
+        };
+        let n = d.b_u as usize;
+        let target = self.target(program, index, at, n, proto, d.pc)?;
+        let caller = (!proto.plain).then(|| base.saturating_add(proto.reg_count));
+        let first = at.saturating_add(1);
+        self.push(target, index, upvals, first, n, d.c, caller, proto, d.pc)?;
+        // The caller goes on after the call; an error from the callee is
+        // offered to its tries at the call.
+        let k = self.frames.len().saturating_sub(2);
+        if let Some(c) = self.frames.get_mut(k) {
+            let pc = d.pc as usize;
+            c.pc = pc + d.width as usize;
+            c.site = pc;
+        }
+        Ok(true)
+    }
+
+    /// What a call needs of `R(at)` when it holds a compiled function of
+    /// this program: its index and its upvalue list (`None` when it
+    /// captured nothing). A register of a plain frame carries no cell.
+    #[inline(always)]
+    fn callee(
+        &self,
+        program: &Rc<Program>,
+        proto: &Proto,
+        at: usize,
+    ) -> Option<(usize, Option<Rc<[Cell]>>)> {
+        if !proto.plain {
+            if let Some(Some(cell)) = self.cells.get(at) {
+                return compiled_parts(&cell.borrow(), program);
+            }
+        }
+        compiled_parts(self.stack.get(at)?, program)
+    }
+
+    /// The function a call of `R(at)` enters, made ready at its first
+    /// entry, with its arity checked against the call's `n` arguments
+    /// (`E401`, worded from the function value).
     #[allow(clippy::too_many_arguments)]
+    fn target<'p>(
+        &self,
+        program: &'p Program,
+        index: usize,
+        at: usize,
+        n: usize,
+        proto: &Proto,
+        pc: u32,
+    ) -> Result<&'p Proto, Fault> {
+        let target = match program.funcs.get(index) {
+            Some(t) => t,
+            None => {
+                let span = span_at(proto, pc);
+                program.ready(index, span)?;
+                program
+                    .funcs
+                    .get(index)
+                    .ok_or_else(|| broken("no such function", span))?
+            }
+        };
+        if n != target.arity {
+            return Err(self.arity_error(at, n, span_at(proto, pc)));
+        }
+        Ok(target)
+    }
+
+    /// `E401` for the function in `R(at)` called with `n` arguments.
+    #[cold]
+    #[inline(never)]
+    fn arity_error(&self, at: usize, n: usize, span: Span) -> Fault {
+        match self.get_abs(at, span) {
+            Ok(Value::Func(f)) => arity_mismatch(&f, n, span).into(),
+            Ok(_) => broken("a callee that is not a function", span).into(),
+            Err(e) => e,
+        }
+    }
+
+    /// A new frame of `target` (function `index`, its closure's upvalues
+    /// `upvals`) that starts at `first`, the caller's `R(A+1)`: its first
+    /// `n` registers are the arguments where they are, nothing is copied,
+    /// and the rest of its registers are set to null. `caller` is the end
+    /// of the caller's registers when its function makes cells: its cells
+    /// from `first` up are gone (an argument's value is read out of its
+    /// cell), as `docs/BYTECODE.md` says of what a call leaves undefined.
+    /// The depth (`E506`) and the stack's growth (`E514`) are checked
+    /// first, at the call's position (`pc` of `proto`).
+    #[allow(clippy::too_many_arguments)]
+    #[inline]
     fn push(
         &mut self,
-        program: &Program,
-        f: &Function,
-        cf: &CompiledFn,
+        target: &Proto,
+        index: usize,
+        upvals: Option<Rc<[Cell]>>,
         first: usize,
         n: usize,
-        ret: Ret,
+        extra: u32,
         caller: Option<usize>,
-        span: Span,
+        proto: &Proto,
+        pc: u32,
     ) -> Result<(), Fault> {
-        let index = cf.index;
-        program.ready(index, span)?;
-        let target = program
-            .funcs
-            .get(index)
-            .ok_or_else(|| broken("no such function", span))?;
-        if n != target.arity {
-            return Err(arity_mismatch(f, n, span).into());
+        if let Err(e) = self.interp.enter_call(Span::default()) {
+            return Err(e.at(span_at(proto, pc)).into());
         }
-        self.interp.enter_call(span)?;
         let base = first;
         let params = base.saturating_add(n);
         let end = base.saturating_add(target.reg_count);
-        if let Err(e) = self.grow_to(end, span) {
-            self.interp.leave_call();
-            return Err(e);
+        if end > self.stack.len() {
+            if let Err(e) = self.grow_to(end, span_at(proto, pc)) {
+                self.interp.leave_call();
+                return Err(e);
+            }
         }
         if let Some(caller_end) = caller {
             for i in base..params {
@@ -2052,19 +2507,16 @@ impl Machine<'_> {
         if let Some(regs) = self.stack.get_mut(params..end) {
             regs.fill(Value::Null);
         }
-        self.frames.push(Frame {
-            func: index,
-            pc: 0,
-            site: 0,
-            base,
-            ret: Some(ret),
-            held_calls: 1,
-            nest: 0,
-            held_nest: 0,
-            upvals: Rc::clone(&cf.upvals),
-            tries: Vec::new(),
-            burns: Vec::new(),
-        });
+        let up = match upvals {
+            Some(u) => {
+                self.upvals.push(u);
+                (self.upvals.len() - 1) as u32
+            }
+            None => NO_UPVALS,
+        };
+        let (tries, burns) = (self.tries.len(), self.burns.len());
+        self.frames
+            .push(Frame::new(index, base, extra, up, tries, burns));
         Ok(())
     }
 
@@ -2075,51 +2527,77 @@ impl Machine<'_> {
         }
     }
 
-    /// A tail call of a compiled function: the frame is reused, and keeps
-    /// holding the depth and loop nesting of the frame it replaces, so the
-    /// interpreter's counts are the ones a plain call would leave. The
-    /// arguments, `first..first+n` of the frame, move down to its `R(0..n)`
-    /// (each register is read before one below it is written over), and
-    /// the rest of the new function's registers are set to null.
-    #[allow(clippy::too_many_arguments)]
-    fn replace(
+    /// `tailcall A, B` when `R(A)` holds a compiled function of this
+    /// program: the frame is reused, and keeps holding the depth and loop
+    /// nesting of the frame it replaces, so the interpreter's counts are
+    /// the ones a plain call would leave. The arguments, `R(A+1..A+1+B)`,
+    /// move down to the frame's `R(0..B)` (each register is read before
+    /// one below it is written over), and the rest of the new function's
+    /// registers are set to null. `false` when `R(A)` holds anything else,
+    /// with nothing changed.
+    fn tail_here(
         &mut self,
-        program: &Program,
+        program: &Rc<Program>,
         proto: &Proto,
-        f: &Function,
-        cf: &CompiledFn,
-        first: usize,
-        n: usize,
-        span: Span,
-    ) -> Result<(), Fault> {
-        let index = cf.index;
-        program.ready(index, span)?;
-        let target = program
-            .funcs
-            .get(index)
-            .ok_or_else(|| broken("no such function", span))?;
-        if n != target.arity {
-            return Err(arity_mismatch(f, n, span).into());
-        }
+        d: &DecodedInstr,
+        base: usize,
+    ) -> Result<bool, Fault> {
+        let at = base.saturating_add(d.a as usize);
+        let Some((index, upvals)) = self.callee(program, proto, at) else {
+            return Ok(false);
+        };
+        let n = d.b_u as usize;
+        let target = self.target(program, index, at, n, proto, d.pc)?;
         // The replaced function ends: its burns close as a `snuff` leaves them.
         self.close_burns(0, true)?;
-        self.interp.enter_call(span)?;
-        let base = match self.frames.last_mut() {
-            Some(frame) => {
-                frame.held_calls += 1;
-                frame.held_nest = frame.held_nest.saturating_add(frame.nest);
-                frame.nest = 0;
-                frame.func = index;
-                frame.pc = 0;
-                frame.upvals = Rc::clone(&cf.upvals);
-                // The replaced function's tries end with it.
-                frame.tries.clear();
-                frame.base
-            }
-            None => return Err(broken("an empty call stack", span).into()),
+        if let Err(e) = self.interp.enter_call(Span::default()) {
+            return Err(e.at(span_at(proto, d.pc)).into());
+        }
+        let Some(frame) = self.frames.last_mut() else {
+            return Err(broken("an empty call stack", span_at(proto, d.pc)).into());
         };
+        frame.held_calls += 1;
+        frame.held_nest = frame.held_nest.saturating_add(frame.nest);
+        frame.nest = 0;
+        frame.func = index;
+        frame.pc = 0;
+        let (tries, old) = (frame.tries as usize, frame.up);
+        // The replaced function's tries end with it, and its upvalues.
+        self.tries.truncate(tries);
+        let up = match (old, upvals) {
+            (NO_UPVALS, None) => NO_UPVALS,
+            (NO_UPVALS, Some(u)) => {
+                self.upvals.push(u);
+                (self.upvals.len() - 1) as u32
+            }
+            (old, Some(u)) => {
+                if let Some(slot) = self.upvals.get_mut(old as usize) {
+                    *slot = u;
+                }
+                old
+            }
+            (old, None) => {
+                self.upvals.truncate(old as usize);
+                NO_UPVALS
+            }
+        };
+        if let Some(frame) = self.frames.last_mut() {
+            frame.up = up;
+        }
+        let first = at.saturating_add(1);
         for k in 0..n {
-            let v = self.get_abs(first.saturating_add(k), span)?;
+            let from = first.saturating_add(k);
+            let v = if proto.plain {
+                // Read once and never again: the frame starts over it.
+                match self.stack.get_mut(from) {
+                    Some(slot) => std::mem::replace(slot, Value::Null),
+                    None => {
+                        return Err(broken("a register past its frame", span_at(proto, d.pc)).into())
+                    }
+                }
+            } else {
+                self.get_abs(from, span_at(proto, d.pc))?
+            };
             if let Some(slot) = self.stack.get_mut(base.saturating_add(k)) {
                 *slot = v;
             }
@@ -2129,15 +2607,76 @@ impl Machine<'_> {
         }
         let params = base.saturating_add(n);
         let end = base.saturating_add(target.reg_count);
-        self.grow_to(end, span)?;
+        if end > self.stack.len() {
+            self.grow_to(end, span_at(proto, d.pc))?;
+        }
         if let Some(regs) = self.stack.get_mut(params..end) {
             regs.fill(Value::Null);
         }
-        Ok(())
+        Ok(true)
     }
 
-    /// Leave the current frame with `v`. `Some(v)` when it was the entry
-    /// frame: the run is over.
+    /// `ret A`: leave the current frame with `R(A)`. `Some(v)` when it was
+    /// the machine's first frame: the run is over. An error closing the
+    /// frame's burns is raised in the frame, at the `ret`.
+    #[inline]
+    fn ret_here(
+        &mut self,
+        proto: &Proto,
+        d: &DecodedInstr,
+        base: usize,
+    ) -> Result<Option<Value>, Fault> {
+        // `snuff` out of a burn: each burn is left as completed first, and
+        // an error recording one is raised here, in the frame.
+        if self.frame_burns() != 0 {
+            if let Err(e) = self.close_burns(0, true) {
+                if let Some(f) = self.frames.last_mut() {
+                    f.pc = d.pc as usize;
+                }
+                return Err(e);
+            }
+        }
+        let i = base.saturating_add(d.a as usize);
+        let carried = match proto.plain {
+            true => None,
+            false => self
+                .cells
+                .get(i)
+                .and_then(|c| c.as_ref().map(|c| c.borrow().clone())),
+        };
+        let v = match carried {
+            Some(v) => v,
+            // The frame ends here, and no register of it is read again
+            // before a write: the value is moved out, not copied.
+            None => match self.stack.get_mut(i) {
+                Some(slot) => std::mem::replace(slot, Value::Null),
+                None => {
+                    if let Some(f) = self.frames.last_mut() {
+                        f.pc = d.pc as usize;
+                    }
+                    return Err(broken("a register past its frame", span_at(proto, d.pc)).into());
+                }
+            },
+        };
+        let Some(frame) = self.frames.pop() else {
+            return Err(broken("an empty call stack", span_at(proto, d.pc)).into());
+        };
+        self.release(&frame);
+        if !proto.plain {
+            self.forget_cells(frame.base, frame.base.saturating_add(proto.reg_count));
+        }
+        if self.frames.is_empty() {
+            return Ok(Some(v));
+        }
+        if !self.write_result(frame.base.saturating_sub(1), frame.extra, v) {
+            return Err(broken("a result register past its frame", span_at(proto, d.pc)).into());
+        }
+        Ok(None)
+    }
+
+    /// Leave the current frame with `v` (a tail call of what is not a
+    /// compiled function). `Some(v)` when it was the entry frame: the run
+    /// is over.
     fn ret(&mut self, program: &Program, v: Value, span: Span) -> Result<Option<Value>, Fault> {
         // `snuff` out of a burn: each burn is left as completed first, and
         // an error recording one is raised here, in the frame.
@@ -2148,27 +2687,41 @@ impl Machine<'_> {
             .ok_or_else(|| broken("an empty call stack", span))?;
         self.release(&frame);
         self.end_cells(program, &frame);
-        match frame.ret {
-            None => Ok(Some(v)),
-            Some(ret) => {
-                self.write_result(ret, v, span)?;
-                Ok(None)
-            }
+        if self.frames.is_empty() {
+            return Ok(Some(v));
         }
-    }
-
-    /// A call's result: `R(A)` is the value; the rest of the row's result
-    /// window, `R(A+1..A+C+1)`, is null (a CigScript call has one result).
-    fn write_result(&mut self, ret: Ret, v: Value, span: Span) -> Result<(), Fault> {
-        let end = ret.reg.saturating_add(ret.extra).saturating_add(1);
-        if end > self.stack.len() {
+        if !self.write_result(frame.base.saturating_sub(1), frame.extra, v) {
             return Err(broken("a result register past its frame", span).into());
         }
-        let mut v = Some(v);
-        for i in ret.reg..end {
-            self.set_abs(i, v.take().unwrap_or(Value::Null), span)?;
+        Ok(None)
+    }
+
+    /// A call's result: `R(A)` (the absolute register `reg`) is the value;
+    /// the rest of the row's result window, `R(A+1..A+C+1)`, is null (a
+    /// CigScript call has one result). `false`, with nothing written, when
+    /// the row is past the stack.
+    #[inline]
+    fn write_result(&mut self, reg: usize, extra: u32, v: Value) -> bool {
+        let end = reg.saturating_add(extra as usize).saturating_add(1);
+        if end > self.stack.len() {
+            return false;
         }
-        Ok(())
+        self.store(reg, v);
+        for i in reg.saturating_add(1)..end {
+            self.store(i, Value::Null);
+        }
+        true
+    }
+
+    /// `R = v` at absolute register `i`, inside the stack: into its cell
+    /// when it carries one.
+    #[inline(always)]
+    fn store(&mut self, i: usize, v: Value) {
+        if let Some(Some(cell)) = self.cells.get(i) {
+            *cell.borrow_mut() = v;
+        } else if let Some(slot) = self.stack.get_mut(i) {
+            *slot = v;
+        }
     }
 }
 
@@ -2200,11 +2753,10 @@ impl Machine<'_> {
                         Some(burn_label(&v, at.first().copied().unwrap_or(span))?)
                     }
                 };
-                let frame = self
-                    .frames
-                    .last_mut()
-                    .ok_or_else(|| broken("an empty call stack", span))?;
-                frame.burns.push(OpenBurn {
+                if self.frames.is_empty() {
+                    return Err(broken("an empty call stack", span).into());
+                }
+                self.burns.push(OpenBurn {
                     unlit,
                     label,
                     span,
@@ -2220,10 +2772,10 @@ impl Machine<'_> {
                     Some(_) => Some(self.get(base, d.a, span)?),
                     None => None,
                 };
-                let burn = self
-                    .frames
-                    .last_mut()
-                    .and_then(|f| f.burns.last_mut())
+                let open = self.frame_burns() != 0;
+                let burn = open
+                    .then(|| self.burns.last_mut())
+                    .flatten()
                     .ok_or_else(|| misuse(d.op, "found no open burn in its frame", span))?;
                 // An unlit burn changes nothing, so the tree-walker records
                 // no compensation for one.
@@ -2248,10 +2800,10 @@ impl Machine<'_> {
                 }
             }
             Op::COMP_LEAVE => {
-                let burn = self
-                    .frames
-                    .last_mut()
-                    .and_then(|f| f.burns.last_mut())
+                let open = self.frame_burns() != 0;
+                let burn = open
+                    .then(|| self.burns.last_mut())
+                    .flatten()
                     .ok_or_else(|| misuse(d.op, "found no open burn in its frame", span))?;
                 if !burn.unlit {
                     let comp = burn.comp.as_mut().filter(|c| c.open).ok_or_else(|| {
@@ -2262,11 +2814,12 @@ impl Machine<'_> {
                 }
             }
             Op::BURN_LEAVE => {
-                let burn = self
-                    .frames
-                    .last_mut()
-                    .and_then(|f| f.burns.pop())
-                    .ok_or_else(|| misuse(d.op, "found no open burn in its frame", span))?;
+                let burn = match self.frame_burns() {
+                    0 => None,
+                    _ => self.burns.pop(),
+                };
+                let burn =
+                    burn.ok_or_else(|| misuse(d.op, "found no open burn in its frame", span))?;
                 self.close_burn(burn, true)?;
             }
             Op::BURN_OP => {
@@ -2277,7 +2830,7 @@ impl Machine<'_> {
                     .copied()
                     .flatten()
                     .ok_or_else(|| broken("a burn.op callee that did not load", span))?;
-                let in_own_burn = self.frames.last().is_some_and(|f| !f.burns.is_empty());
+                let in_own_burn = self.frame_burns() != 0;
                 if !in_own_burn && !proto.requires_burn {
                     return Err(outside_burn(b.name, span).into());
                 }
@@ -2358,7 +2911,7 @@ impl Machine<'_> {
     /// own E753.
     fn pack_place(&self, span: Span) -> Result<(), Fault> {
         use crate::check::{pack_misplaced, PackPlace};
-        let top = matches!(self.frames.as_slice(), [f] if f.func == 0 && f.tries.is_empty());
+        let top = matches!(self.frames.as_slice(), [f] if f.func == 0) && self.tries.is_empty();
         let kernel = &self.interp.kernel;
         if !top || self.interp.in_burn() {
             return Err(pack_misplaced(PackPlace::InBlock, span).into());
@@ -2409,9 +2962,9 @@ impl Machine<'_> {
     /// first error stops it; the burns left open close as it unwinds.
     fn close_burns(&mut self, keep: usize, completed: bool) -> Result<(), Fault> {
         loop {
-            let b = match self.frames.last_mut() {
-                Some(f) if f.burns.len() > keep => f.burns.pop(),
-                _ => None,
+            let b = match self.frame_burns() > keep {
+                true => self.burns.pop(),
+                false => None,
             };
             match b {
                 Some(b) => self.close_burn(b, completed)?,
@@ -2479,6 +3032,65 @@ impl Machine<'_> {
     }
 }
 
+/// The position of part `i` of the instruction ending at `next` (an
+/// index's, an object's): the line row of the `i`-th `nop` right after
+/// the instruction when the run of `nop`s reaches it, else the
+/// instruction's own. [`part_spans`]'s rule, for one part and with
+/// nothing allocated.
+fn part_span(proto: &Proto, next: usize, i: usize, span: Span) -> Span {
+    let all_nops = (0..=i).all(
+        |k| matches!(proto.code.get(next.saturating_add(k)), Some(Some(d)) if d.op == Op::NOP),
+    );
+    if !all_nops {
+        return span;
+    }
+    proto
+        .spans
+        .get(next.saturating_add(i))
+        .copied()
+        .unwrap_or(span)
+}
+
+/// The position of the instruction at `pc` (the function's first token's
+/// when the line table gives none), as the general path takes it.
+#[inline]
+fn span_of(proto: &Proto, pc: usize) -> Span {
+    proto.spans.get(pc).copied().unwrap_or_default()
+}
+
+/// `R(start..start+n)` read in place: `None` when a register of it
+/// carries a cell (or it runs past the stack), so the caller reads it
+/// through the cells.
+#[inline]
+fn in_place<'s>(
+    stack: &'s [Value],
+    cells: &[Option<Cell>],
+    start: usize,
+    n: usize,
+) -> Option<&'s [Value]> {
+    let end = start.saturating_add(n);
+    let plain = cells
+        .get(start..end)
+        .is_some_and(|c| c.iter().all(Option::is_none));
+    if !plain {
+        return None;
+    }
+    stack.get(start..end)
+}
+
+/// `interp`'s string: every part written into one buffer in place, a
+/// literal piece and a string's text copied once, an int without
+/// `core::fmt`, and the value made from the buffer with one copy.
+#[inline]
+fn interpolate(parts: &[Value]) -> Value {
+    crate::value::build_str(|out| {
+        out.reserve(parts.iter().map(Value::display_len_hint).sum());
+        for v in parts {
+            v.write_display(out);
+        }
+    })
+}
+
 /// The positions of the `n` parts of the instruction ending at `next`
 /// (`pack`'s roots, `chain.make`'s steps): part `i` takes the line row of
 /// the `i`-th `nop` right after the instruction, when the run of `nop`s
@@ -2503,6 +3115,25 @@ fn name(proto: &Proto, i: u32, span: Span) -> Result<Rc<str>, Fault> {
         Some(Value::Str(s)) => Ok(Rc::clone(s)),
         _ => Err(broken("a name that is not a string constant", span).into()),
     }
+}
+
+/// The source position of `pc` in `proto`, looked up when an error is
+/// built.
+#[cold]
+#[inline(never)]
+fn span_at(proto: &Proto, pc: u32) -> Span {
+    proto.spans.get(pc as usize).copied().unwrap_or_default()
+}
+
+/// A compiled function of this program in `v`: its index and its upvalue
+/// list (`None` when it captured nothing).
+#[inline(always)]
+fn compiled_parts(v: &Value, program: &Rc<Program>) -> Option<(usize, Option<Rc<[Cell]>>)> {
+    let (_, cf) = compiled(v, program)?;
+    Some((
+        cf.index,
+        (!cf.upvals.is_empty()).then(|| Rc::clone(&cf.upvals)),
+    ))
 }
 
 /// The callee as a compiled function of this program, when it is one.

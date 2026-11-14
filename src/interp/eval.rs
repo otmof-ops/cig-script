@@ -132,7 +132,7 @@ impl Interp {
         for stmt in stmts {
             if let Stmt::Pull(decl) = stmt {
                 let func = Value::Func(Rc::new(Function {
-                    name: Some(decl.name.clone()),
+                    name: Some(Rc::from(decl.name.as_str())),
                     params: decl.params.clone(),
                     body: FnBody::Block(decl.body.clone()),
                     closure: env.clone(),
@@ -611,7 +611,7 @@ impl Interp {
                 if let Value::Func(func) = &f {
                     // A compiled function takes its arguments as values, not
                     // a scope: it goes the general way, to `call_function`.
-                    if func.params.len() == args.len() && !matches!(func.body, FnBody::Compiled(_))
+                    if !matches!(func.body, FnBody::Compiled(_)) && func.params.len() == args.len()
                     {
                         // The arguments go straight into the callee's frame:
                         // no list, no allocation (cig-script#146).
@@ -649,14 +649,17 @@ impl Interp {
                 self.index(obj, idx, span, index.span)
             }
             ExprKind::Str(pieces) => {
-                let mut s = String::new();
-                for piece in pieces {
-                    match piece {
-                        StrPiece::Lit(l) => s.push_str(l),
-                        StrPiece::Expr(e) => s.push_str(&self.eval(e, env)?.display()),
+                // One buffer, each part written into it in place, and the
+                // value made from it with one copy.
+                crate::value::try_build_str(|s| {
+                    for piece in pieces {
+                        match piece {
+                            StrPiece::Lit(l) => s.push_str(l),
+                            StrPiece::Expr(e) => self.eval(e, env)?.write_display(s),
+                        }
                     }
-                }
-                Ok(Value::str(s))
+                    Ok(())
+                })
             }
             ExprKind::List(items) => {
                 let mut out = Vec::with_capacity(items.len());
@@ -694,11 +697,22 @@ impl Interp {
                 if *safe && recv.is_null() {
                     return Ok(Value::Null);
                 }
-                let mut argv = Vec::with_capacity(args.len());
+                // The receiver is argument 0, as a method takes it; up to
+                // three arguments are held on the stack, not in a vector.
+                let n = args.len() + 1;
+                if n <= 4 {
+                    let mut argv = [recv, Value::Null, Value::Null, Value::Null];
+                    for (slot, a) in argv.iter_mut().skip(1).zip(args) {
+                        *slot = self.eval(a, env)?;
+                    }
+                    return self.call_method(&argv[..n], name, span);
+                }
+                let mut argv = Vec::with_capacity(n);
+                argv.push(recv);
                 for a in args {
                     argv.push(self.eval(a, env)?);
                 }
-                self.call_method(recv, name, argv, span)
+                self.call_method(&argv, name, span)
             }
             ExprKind::Lambda { params, body } => Ok(Value::Func(Rc::new(Function {
                 name: None,
@@ -731,12 +745,13 @@ impl Interp {
                         if *safe && recv.is_null() {
                             return Ok(Value::Null);
                         }
-                        let mut argv = Vec::with_capacity(args.len() + 1);
+                        let mut argv = Vec::with_capacity(args.len() + 2);
+                        argv.push(recv);
                         argv.push(piped);
                         for a in args {
                             argv.push(self.eval(a, env)?);
                         }
-                        self.call_method(recv, name, argv, span)
+                        self.call_method(&argv, name, span)
                     }
                     _ => {
                         let f = self.eval(rhs, env)?;
@@ -903,7 +918,7 @@ impl Interp {
 
     #[inline(never)]
     fn call_function(&mut self, func: &Rc<Function>, args: Vec<Value>, span: Span) -> Eval {
-        if args.len() != func.params.len() {
+        if args.len() != func.arity() {
             return Err(arity_mismatch(func, args.len(), span));
         }
         if let FnBody::Compiled(cf) = &func.body {
@@ -957,32 +972,33 @@ impl Interp {
         self.call_depth -= 1;
     }
 
+    /// `recv.name(args)`, with `argv` the receiver and then the arguments
+    /// (the layout a method takes, so a builtin method gets `argv` as it
+    /// is: no second vector is built).
     #[inline(never)]
-    pub(crate) fn call_method(
-        &mut self,
-        recv: Value,
-        name: &str,
-        args: Vec<Value>,
-        span: Span,
-    ) -> Eval {
+    pub(crate) fn call_method(&mut self, argv: &[Value], name: &str, span: Span) -> Eval {
+        let (recv, args) = match argv.split_first() {
+            Some((recv, args)) => (recv, args),
+            None => (&Value::Null, argv),
+        };
         // A map holding a function under that key is called as a plain function.
-        if let Value::Map(map) = &recv {
-            let f = map.borrow().get(name).cloned();
-            if let Some(f @ (Value::Func(_) | Value::Builtin(_))) = f {
-                return self.call(&f, args, span);
+        if let Value::Map(map) = recv {
+            let f = match map.borrow().get(name) {
+                Some(f @ (Value::Func(_) | Value::Builtin(_))) => Some(f.clone()),
+                _ => None,
+            };
+            if let Some(f) = f {
+                return self.call(&f, args.to_vec(), span);
             }
         }
-        if let Value::Module(m) = &recv {
+        if let Value::Module(m) = recv {
             return match m.items.get(name) {
-                Some(f) => self.call(f, args, span),
+                Some(f) => self.call(f, args.to_vec(), span),
                 None => self.member(recv.clone(), name, false, span),
             };
         }
-        match crate::stdlib::method(&recv, name) {
+        match crate::stdlib::method(recv, name) {
             Some(b) => {
-                let mut argv = Vec::with_capacity(args.len() + 1);
-                argv.push(recv);
-                argv.extend(args);
                 b.check_arity(argv.len(), span).map_err(|d| {
                     // Report arity without the implicit receiver.
                     Diagnostic::new(
@@ -994,13 +1010,13 @@ impl Interp {
                     )
                     .at(span)
                 })?;
-                (b.func)(self, &argv, span).map_err(|e| e.or_at(span))
+                (b.func)(self, argv, span).map_err(|e| e.or_at(span))
             }
             None => {
                 let mut d = type_error(format!("{} has no method `{name}`", recv.type_name()))
                     .code("E404")
                     .at(span);
-                if let Some(s) = closest(name, crate::stdlib::method_names(&recv)) {
+                if let Some(s) = closest(name, crate::stdlib::method_names(recv)) {
                     d = d.with_hint(format!("did you mean `.{s}()`?"));
                 }
                 Err(d)
@@ -1111,7 +1127,7 @@ pub(crate) fn exhale_part(line: &mut String, i: usize, v: &Value) {
     if i > 0 {
         line.push(' ');
     }
-    line.push_str(&v.display());
+    v.write_display(line);
 }
 
 impl Interp {
@@ -1249,8 +1265,8 @@ pub(crate) fn arity_mismatch(func: &Function, got: usize, span: Span) -> Diagnos
     let name = func.name.as_deref().unwrap_or("this pack");
     type_error(format!(
         "{name} expects {} argument{}, got {}",
-        func.params.len(),
-        if func.params.len() == 1 { "" } else { "s" },
+        func.arity(),
+        if func.arity() == 1 { "" } else { "s" },
         got
     ))
     .code("E401")

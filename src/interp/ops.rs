@@ -33,7 +33,11 @@ pub(crate) fn binary(op: BinOp, l: Value, r: Value, span: Span) -> Eval {
                 .checked_add(*b)
                 .map(Int)
                 .ok_or_else(|| runtime("integer overflow in `+`").code("E503").at(span)),
-            (Str(a), Str(b)) => Ok(Value::str(format!("{a}{b}"))),
+            // One block: both texts copied once into the new string.
+            (Str(a), Str(b)) => Ok(crate::value::build_str(|out| {
+                out.push_str(a);
+                out.push_str(b);
+            })),
             (List(a), List(b)) => {
                 let mut v = a.borrow().clone();
                 v.extend(b.borrow().iter().cloned());

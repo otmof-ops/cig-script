@@ -750,12 +750,29 @@ open. A lowering writes to them.
   null. `tailcall` reuses the frame, and still counts one call of
   depth and keeps the replaced frame's loop nesting until the chain
   returns, so `E506` and `E515` read as they would after a plain call.
+  A frame's record holds no value and owns nothing: the callee is read
+  where it lies in `R(A)` (the register below the frame, where its result
+  goes), the tries and burns a frame opens are kept on two lists of the
+  machine from where that frame's begin, and the upvalues of a closure
+  that captured any on a third, so a call and a return move a small
+  record and drop nothing of it. `call` of a compiled function, `ret`
+  and `tailcall` change frames in the frame loop itself; an instruction's
+  position is looked up only when it raises an error.
 - **`closure`** makes a function value (`<pull name>`, or `<pack>` for a
-  lambda), a value like any other: the tree-walker and a builtin's
+  lambda) with its upvalue list in one allocation and the name every
+  closure of that function shares (its arity is the function's; it carries
+  no parameter names), a value like any other: the tree-walker and a builtin's
   callback (`xs.map(f)`, a sort key) call a compiled function, and the
   VM calls an interpreted one, each with the other's arity (`E401`) and
   depth (`E506`) rules. A callback into a compiled function runs in a
-  VM of its own until it returns. A call from compiled code to compiled
+  VM of its own until it returns. The interpreter keeps one set of a
+  VM's vectors (registers, cells, frames, tries, burns, upvalues) between
+  runs: a callback takes it when it starts and gives it back emptied when
+  it ends, so the callbacks of `xs.map(f)` allocate none of them. Its
+  registers start null, as a new machine's do, and a callback inside a
+  callback finds the set taken and makes its own: two live machines never
+  share one. A set whose registers grew past 16,384 is given back to the
+  allocator instead. A call from compiled code to compiled
   code of the same program takes no Rust stack (the VM's frames are a
   list); a callback level takes some, no more than the tree-walker
   takes for the same recursion, so `E506`'s 4000 levels fit in the
@@ -796,11 +813,35 @@ open. A lowering writes to them.
   with its errors (`E504`, `E505`, `E404`, `E405`, the type errors and
   their hints) at the instruction's position. `getfield` is `.name`,
   not `?.name`. `insertmap` takes a key as a map literal does (a string,
-  or an int as its digits). There are no inline caches yet.
+  or an int as its digits). `getfield` and `setfield` keep, per site,
+  the position their key last had in the map, as the tree-walker keeps
+  one per field expression; the position is only a guess, checked
+  against the key at it.
+- **`callm A, K, C`** calls method `K[B]` on `R(A)` with the arguments
+  `R(A+1..A+C+1)`: the registers `R(A..A+C+1)` are the receiver and then
+  the arguments, the layout a method takes, and a builtin method gets
+  them in place: no vector is built for them on the VM, nor in the
+  tree-walker for up to three arguments. A vector is still built in the
+  tree-walker for more than three arguments and for the pipe form, and on
+  both engines when a map holds a function under the method's name or the
+  receiver is a module (the arguments are copied into the call of that
+  function). A method is found by its name with a `match` per
+  receiver type, never by scanning a table, and each `callm` site keeps
+  the receiver type and the method it found last. When the next call's
+  receiver is of that type, the method is called without its name being
+  looked at; when it is not, the method is found again and the site
+  keeps the new one. A map receiver that holds a function under the
+  method's name calls that function, checked on every call, cache or
+  not; a module receiver calls its member. Errors (`E404` and its hint,
+  the arity message without the receiver, the method's own) are the
+  interpreter's, at the instruction.
 - **`exhale A, B`** writes `R(A..A+B)` through the interpreter's writer
   (a space between values, a newline after, `E513` when the reader has
   gone), and `interp A, B, C` joins `R(B..B+C+1)` as string
-  interpolation shows each part. Each value is shown when the
+  interpolation shows each part. `interp` reads its parts in place and
+  writes each one straight into one buffer (a string's text copied once,
+  an int written digit by digit), and the string value is made from that
+  buffer with one copy: one allocation for the whole string. Each value is shown when the
   instruction runs, after every part was evaluated; the tree-walker
   shows each value as soon as it is evaluated, so a lowering whose
   later parts can change an earlier part's list or map turns each part
@@ -812,6 +853,26 @@ open. A lowering writes to them.
   of the same name does not hide it: the lowering uses `loadg` only for
   a name that resolves to the prelude. `args` before the script's
   arguments are set is the interpreter's `E501`.
+- **The fast loop.** A frame whose function has no `cellnew` (so no
+  register of it carries a cell) runs in a loop that reads and writes
+  registers directly. It runs the moves, constants, arithmetic and
+  compares on numbers, jumps, `steps`, `forloop`, `getup`/`cellget`,
+  reads of a list item, a map key or a field, stores into a list item
+  or a field, and, in a second tier, `newlist`, `appendlist`, `newmap`,
+  `insertmap` with a string key, `setindex` on a map with a string key,
+  `interp`, `add` of two strings, and `callb` and `callm` of a builtin that cannot call a
+  script function (every builtin except `map`, `filter`, `reduce`,
+  `each`, `any`, `all`, `find`, `sort_by`, `light`, `pass.issue` and
+  `pass.memo`; for `callm`, only when the site's method fits the
+  receiver's type). Anything else, or an uncommon case of these (a
+  wrong type, a register held by another borrow, an arity error), the
+  loop does not run: it changes nothing and leaves the instruction to
+  the general path, which runs it from the start with its error. A
+  builtin's own error raised in the loop is raised as the general path
+  raises it, at the call, with the frame's pc on the call for the
+  tries. A builtin that can call a script function always takes the
+  general path: the fast loop's Rust frame is never on the stack while
+  the VM runs again inside a call.
 - **Errors and handlers.** Each frame keeps the tries it has opened and
   not left, innermost last. `try.enter H` opens handler `H` in its body
   and records the frame's loop nesting; opening `H` again (a loop around
@@ -1023,7 +1084,7 @@ table carries it as the `bytecode` section's version.
 - the step-budget counter's exact encoding (this crate declares the
   `STEPS` instruction and its position rules; the VM owns the
   counter);
-- inline-cache slots on `GETFIELD`/`SETFIELD`;
+- inline-cache slots on `GETFIELD`/`SETFIELD` and `CALLM`;
 - the builtin catalogue (bound of `callb`'s index) and the burn-op
   catalogue (`vm::BURN_OP_KINDS`, the bound of `burn.op`'s kind, and
   `vm::burn_op_kind`, the builtins of each kind);
