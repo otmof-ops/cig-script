@@ -1114,16 +1114,6 @@ impl Machine<'_> {
         self.burns.len().saturating_sub(from)
     }
 
-    /// The current frame's closure's upvalue list, counted once more, when
-    /// it has one: what the fast path reads upvalues from.
-    #[inline(always)]
-    fn frame_upvals_rc(&self) -> Option<Rc<[Cell]>> {
-        match self.frames.last() {
-            Some(f) if f.up != NO_UPVALS => self.upvals.get(f.up as usize).cloned(),
-            _ => None,
-        }
-    }
-
     /// The current frame's closure's upvalues (none when it captured
     /// nothing).
     #[inline(always)]
@@ -1248,12 +1238,9 @@ impl Machine<'_> {
     /// by the next is offered to the tries.
     fn run_frame_code(&mut self, program: &Rc<Program>) -> Result<Option<Value>, Fault> {
         let (mut pc, mut base, mut proto) = self.top(program)?;
-        // The fast path reads upvalues from a slice: the frame's list, held
-        // here (a count, not a copy) only while a frame that has one runs.
-        let mut ups = self.frame_upvals_rc();
         loop {
             if proto.plain {
-                pc = self.run_fast(proto, pc, base, ups.as_deref().unwrap_or(&[]))?;
+                pc = self.run_fast(proto, pc, base)?;
             }
             let Some(Some(d)) = proto.code.get(pc) else {
                 let span = proto.spans.get(pc).copied().unwrap_or_default();
@@ -1279,7 +1266,6 @@ impl Machine<'_> {
                 Ok(Some(Some(v))) => return Ok(Some(v)),
                 Ok(Some(None)) => {
                     (pc, base, proto) = self.top(program)?;
-                    ups = self.frame_upvals_rc();
                     continue;
                 }
                 Err(e) => {
@@ -1318,12 +1304,8 @@ impl Machine<'_> {
                         return Ok(Some(v));
                     }
                     (pc, base, proto) = self.top(program)?;
-                    ups = self.frame_upvals_rc();
                 }
-                Flow::Switched => {
-                    (pc, base, proto) = self.top(program)?;
-                    ups = self.frame_upvals_rc();
-                }
+                Flow::Switched => (pc, base, proto) = self.top(program)?,
             }
         }
     }
@@ -1339,17 +1321,11 @@ impl Machine<'_> {
     /// a fast path, which is what keeps a level of re-entry no deeper than
     /// the tree-walker's.
     #[inline(never)]
-    fn run_fast(
-        &mut self,
-        proto: &Proto,
-        mut pc: usize,
-        base: usize,
-        upvals: &[Cell],
-    ) -> Result<usize, Fault> {
+    fn run_fast(&mut self, proto: &Proto, mut pc: usize, base: usize) -> Result<usize, Fault> {
         while let Some(Some(d)) = proto.code.get(pc) {
             #[cfg(feature = "bench-stats")]
             let timer = stats::start(d.op);
-            let next = match self.fast(proto, d, base, upvals) {
+            let next = match self.fast(proto, d, base) {
                 Some(next) => next,
                 None => match self.fast_call(proto, d, base) {
                     Some(Ok(next)) => next,
@@ -1529,13 +1505,7 @@ impl Machine<'_> {
     /// and changed nothing, so the general path runs it from the start and
     /// raises its error, if any, with the tree-walker's code and position.
     #[inline(always)]
-    fn fast(
-        &mut self,
-        proto: &Proto,
-        d: &DecodedInstr,
-        base: usize,
-        upvals: &[Cell],
-    ) -> Option<usize> {
+    fn fast(&mut self, proto: &Proto, d: &DecodedInstr, base: usize) -> Option<usize> {
         let pc = d.pc as usize;
         let next = pc + d.width as usize;
         let r = |x: u32| base.saturating_add(x as usize);
@@ -1615,7 +1585,12 @@ impl Machine<'_> {
                     None => Some(next),
                 };
             }
-            Op::GETUP | Op::CELLGET => upvals.get(d.b_u as usize)?.try_borrow().ok()?.clone(),
+            Op::GETUP | Op::CELLGET => self
+                .frame_upvals()
+                .get(d.b_u as usize)?
+                .try_borrow()
+                .ok()?
+                .clone(),
             Op::GETINDEX => {
                 let obj = self.stack.get(r(d.b_u))?;
                 let idx = self.stack.get(r(d.c))?;
