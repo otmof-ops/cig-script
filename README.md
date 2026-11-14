@@ -286,7 +286,7 @@ ciginstaller doctor --tools  # `cig doctor` runs this
 ```
 
 Every release asset carries a build attestation from this repository's release
-workflow: `gh attestation verify cig-v1.21.0-linux-x86_64 -R otmof-ops/cig-script`
+workflow: `gh attestation verify cig-v1.22.0-linux-x86_64 -R otmof-ops/cig-script`
 checks it, and the installer checks it itself when `gh` is installed; the
 checksum is the floor without it. The Linux assets
 are static musl builds (any glibc, Alpine, Android under Termux); there are
@@ -633,7 +633,7 @@ gated. [docs/BENCH.md](docs/BENCH.md) lists the cases and what each number is.
 
 ## Status
 
-1.21.0 is the current release (2026-11-12). Release assets are built by the
+1.22.0 is the current release (2026-11-14). Release assets are built by the
 pipeline in [.github/workflows/ci.yml](.github/workflows/ci.yml) for Linux
 on x86_64, aarch64 and armv7 (static musl, so they run on any glibc, on
 Alpine, and under Termux), macOS on Apple Silicon and Intel, Windows on
