@@ -625,6 +625,7 @@ gated. [docs/BENCH.md](docs/BENCH.md) lists the cases and what each number is.
 - [docs/SCIENCE.md](docs/SCIENCE.md): CigScript in the lab.
 - [docs/BENCH.md](docs/BENCH.md): `cig bench` and the `bench/bench.toml` manifest: samples in batches, medians, p10 to p90, CV and peak RSS; cig's own suite and the kernel measures.
 - [docs/FINDINGS.md](docs/FINDINGS.md): the measurements behind the numbers the other documents quote, so each figure can be checked by running the same thing again.
+- [docs/research/](docs/research/README.md): what cig took, adapted or rejected from other languages' implementations, one file per language, with the measurement behind each decision. [lua.md](docs/research/lua.md) holds the first study.
 - [docs/STDLIB.md](docs/STDLIB.md): every function with its arity and effect (generated).
 - [docs/ERRORS.md](docs/ERRORS.md): every error code, its kind of no, what to type next, its causes (generated from the registry).
 - [docs/DESIGN.md](docs/DESIGN.md): why it looks like this, the tone, what came before, and the roadmap.
