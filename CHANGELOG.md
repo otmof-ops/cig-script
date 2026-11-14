@@ -5,6 +5,24 @@ project follows semantic versioning.
 
 ## Unreleased
 
+- **A call, a return and a callback cost the VM a third less (cig-script#230
+  step 3, #235; `docs/BYTECODE.md`).** A call of a compiled function, its
+  return and a tail call change frames in the VM's frame loop instead of
+  going through the general instruction path; the callee is tested where
+  it lies instead of being copied out; a frame's record is 64 bytes that
+  own nothing (was 136, with two lists and a shared pointer to drop), the
+  tries and burns a frame opens kept on two lists of the machine; a
+  closure's captured variables are collected in one allocation and its
+  name is shared by every closure of that function; and the callbacks of
+  a builtin (`xs.map(f)`, a sort key) reuse one set of the VM's registers
+  that the interpreter keeps between them, instead of allocating three
+  vectors per element. Machine instructions a call and its return: 1,200
+  to 781 (the interpreter's: 951); making and calling a closure: 2,820 to
+  2,310; a callback: 1,734 to 1,037. On cig's `bench/compute` the VM
+  executes 23% fewer instructions on `fib`, 18% fewer on `closures`, 17%
+  fewer on `lists` and 15% fewer on `trees`. A level of a builtin calling
+  back into compiled code takes 3,744 bytes of native stack (was 3,824).
+  Errors, their positions and the step and depth limits are unchanged.
 - **Methods, string building and list and map building cost a fraction of
   what they did, on both engines (cig-script#235 tricks 6 and 7, #230 step
   4; `docs/BYTECODE.md`).** A method is found by its name with a `match`,

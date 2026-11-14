@@ -132,7 +132,7 @@ impl Interp {
         for stmt in stmts {
             if let Stmt::Pull(decl) = stmt {
                 let func = Value::Func(Rc::new(Function {
-                    name: Some(decl.name.clone()),
+                    name: Some(Rc::from(decl.name.as_str())),
                     params: decl.params.clone(),
                     body: FnBody::Block(decl.body.clone()),
                     closure: env.clone(),
@@ -611,7 +611,7 @@ impl Interp {
                 if let Value::Func(func) = &f {
                     // A compiled function takes its arguments as values, not
                     // a scope: it goes the general way, to `call_function`.
-                    if func.params.len() == args.len() && !matches!(func.body, FnBody::Compiled(_))
+                    if !matches!(func.body, FnBody::Compiled(_)) && func.params.len() == args.len()
                     {
                         // The arguments go straight into the callee's frame:
                         // no list, no allocation (cig-script#146).
@@ -918,7 +918,7 @@ impl Interp {
 
     #[inline(never)]
     fn call_function(&mut self, func: &Rc<Function>, args: Vec<Value>, span: Span) -> Eval {
-        if args.len() != func.params.len() {
+        if args.len() != func.arity() {
             return Err(arity_mismatch(func, args.len(), span));
         }
         if let FnBody::Compiled(cf) = &func.body {
@@ -1265,8 +1265,8 @@ pub(crate) fn arity_mismatch(func: &Function, got: usize, span: Span) -> Diagnos
     let name = func.name.as_deref().unwrap_or("this pack");
     type_error(format!(
         "{name} expects {} argument{}, got {}",
-        func.params.len(),
-        if func.params.len() == 1 { "" } else { "s" },
+        func.arity(),
+        if func.arity() == 1 { "" } else { "s" },
         got
     ))
     .code("E401")

@@ -750,12 +750,29 @@ open. A lowering writes to them.
   null. `tailcall` reuses the frame, and still counts one call of
   depth and keeps the replaced frame's loop nesting until the chain
   returns, so `E506` and `E515` read as they would after a plain call.
+  A frame's record holds no value and owns nothing: the callee is read
+  where it lies in `R(A)` (the register below the frame, where its result
+  goes), the tries and burns a frame opens are kept on two lists of the
+  machine from where that frame's begin, and the upvalues of a closure
+  that captured any on a third, so a call and a return move a small
+  record and drop nothing of it. `call` of a compiled function, `ret`
+  and `tailcall` change frames in the frame loop itself; an instruction's
+  position is looked up only when it raises an error.
 - **`closure`** makes a function value (`<pull name>`, or `<pack>` for a
-  lambda), a value like any other: the tree-walker and a builtin's
+  lambda) with its upvalue list in one allocation and the name every
+  closure of that function shares (its arity is the function's; it carries
+  no parameter names), a value like any other: the tree-walker and a builtin's
   callback (`xs.map(f)`, a sort key) call a compiled function, and the
   VM calls an interpreted one, each with the other's arity (`E401`) and
   depth (`E506`) rules. A callback into a compiled function runs in a
-  VM of its own until it returns. A call from compiled code to compiled
+  VM of its own until it returns. The interpreter keeps one set of a
+  VM's vectors (registers, cells, frames, tries, burns, upvalues) between
+  runs: a callback takes it when it starts and gives it back emptied when
+  it ends, so the callbacks of `xs.map(f)` allocate none of them. Its
+  registers start null, as a new machine's do, and a callback inside a
+  callback finds the set taken and makes its own: two live machines never
+  share one. A set whose registers grew past 16,384 is given back to the
+  allocator instead. A call from compiled code to compiled
   code of the same program takes no Rust stack (the VM's frames are a
   list); a callback level takes some, no more than the tree-walker
   takes for the same recursion, so `E506`'s 4000 levels fit in the

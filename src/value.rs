@@ -49,10 +49,23 @@ pub struct ChainStep {
 
 /// A script-defined function (`pull` or `pack`).
 pub struct Function {
-    pub name: Option<String>,
+    pub name: Option<Rc<str>>,
+    /// The parameters' names. A compiled function has none: its arity is
+    /// its own ([`Function::arity`]).
     pub params: Vec<String>,
     pub body: FnBody,
     pub closure: Env,
+}
+
+impl Function {
+    /// How many arguments the function takes.
+    #[inline]
+    pub fn arity(&self) -> usize {
+        match &self.body {
+            FnBody::Compiled(cf) => cf.arity,
+            _ => self.params.len(),
+        }
+    }
 }
 
 pub enum FnBody {

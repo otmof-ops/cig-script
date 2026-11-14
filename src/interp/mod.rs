@@ -54,6 +54,9 @@ pub struct Interp {
     pub(crate) recs: Vec<record::RecFrame>,
     /// The script's own file, recorded by a pass that depends on its code.
     pub script_path: Option<std::path::PathBuf>,
+    /// The bytecode VM's register vectors, kept between two runs of it
+    /// (each callback from a builtin into a compiled function is one).
+    pub(crate) vm_regs: Option<crate::vm::Regs>,
 }
 
 /// E701: `name` changes the world outside every burn block. The
@@ -101,6 +104,7 @@ impl Interp {
             chain_stack: Vec::new(),
             recs: Vec::new(),
             script_path: None,
+            vm_regs: None,
         }
     }
 

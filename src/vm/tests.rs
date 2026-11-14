@@ -905,6 +905,174 @@ fn a_tail_calls_frame_moves_its_arguments_down_and_starts_null() {
     assert_eq!(ok(&tail_module(4)), "null");
 }
 
+// ----- a call and a return at Lua's price (cig-script#230 step 3, #235) -------------------
+
+#[test]
+fn a_frame_record_is_small_and_owns_nothing() {
+    assert!(
+        std::mem::size_of::<Frame>() <= 64,
+        "{} bytes",
+        std::mem::size_of::<Frame>()
+    );
+    assert!(!std::mem::needs_drop::<Frame>());
+}
+
+#[test]
+fn a_tail_call_switches_the_frames_upvalues() {
+    // a(g): reads its upvalue (10), then tail-calls g(). b(): its upvalue
+    // (20). p(g): captures nothing, tail-calls g(). q(): 5.
+    let mut a = child_fn(
+        "a",
+        1,
+        3,
+        vec![
+            abc(Op::GETUP, 1, 0, 0),
+            abc(Op::MOV, 2, 0, 0),
+            abc(Op::TAILCALL, 2, 0, 0),
+        ],
+    );
+    a.upvalues = vec![captures(UpvalKind::ParentLocal, 0)];
+    let mut b = child_fn("b", 0, 1, vec![abc(Op::GETUP, 0, 0, 0), ret(0)]);
+    b.upvalues = vec![captures(UpvalKind::ParentLocal, 1)];
+    let p = child_fn(
+        "p",
+        1,
+        2,
+        vec![abc(Op::MOV, 1, 0, 0), abc(Op::TAILCALL, 1, 0, 0)],
+    );
+    let q = child_fn("q", 0, 1, vec![Instr::asbx(Op::LOADINT, 0, 5), ret(0)]);
+    let run_with = |code: Vec<Instr>| {
+        let mut head = vec![
+            Instr::asbx(Op::LOADINT, 0, 10),
+            Instr::asbx(Op::LOADINT, 1, 20),
+        ];
+        head.extend(code);
+        let mut f = main_fn(7, head);
+        f.children = vec![a.clone(), b.clone(), p.clone(), q.clone()];
+        ok(&module(f))
+    };
+    // A closure with upvalues tail-calls another: the callee reads its own.
+    let call = |callee: u16, arg: u16| {
+        vec![
+            Instr::abx(Op::CLOSURE, 4, callee),
+            Instr::abx(Op::CLOSURE, 5, arg),
+            abc(Op::CALL, 4, 1, 0),
+        ]
+    };
+    let mut code = call(0, 1);
+    code.push(ret(4));
+    assert_eq!(run_with(code), "20");
+    // A function without upvalues tail-calls one with them.
+    let mut code = call(2, 1);
+    code.push(ret(4));
+    assert_eq!(run_with(code), "20");
+    // One with upvalues tail-calls one without; a later call still reads
+    // its own.
+    let mut code = call(0, 3);
+    code.extend([
+        Instr::abx(Op::CLOSURE, 5, 1),
+        abc(Op::CALL, 5, 0, 0),
+        abc(Op::ADD, 4, 4, 5),
+        ret(4),
+    ]);
+    assert_eq!(run_with(code), "25");
+}
+
+#[test]
+fn a_compiled_closure_carries_its_arity_and_label_without_parameter_names() {
+    // Two closures of one function share its label.
+    let mut f2 = main_fn(
+        3,
+        vec![
+            Instr::abx(Op::CLOSURE, 1, 0),
+            Instr::abx(Op::CLOSURE, 2, 0),
+            abc(Op::NEWLIST, 0, 2, 0),
+            abc(Op::APPENDLIST, 0, 1, 0),
+            abc(Op::APPENDLIST, 0, 2, 0),
+            ret(0),
+        ],
+    );
+    f2.children = vec![add_fn()];
+    let Value::List(xs) = exec(&module(f2)).unwrap() else {
+        panic!("not a list")
+    };
+    let xs = xs.borrow();
+    let (Value::Func(g), Value::Func(h)) = (&xs[0], &xs[1]) else {
+        panic!("not functions")
+    };
+    assert!(g.params.is_empty());
+    assert_eq!(g.arity(), 2);
+    assert_eq!(xs[0].repr(), "<pull add>");
+    let (Some(gn), Some(hn)) = (&g.name, &h.name) else {
+        panic!("no names")
+    };
+    assert!(Rc::ptr_eq(gn, hn));
+    // Called from outside the VM with the wrong count: the interpreter's
+    // E401, worded from the arity.
+    let mut i = interp();
+    let Err(e) = i.call(&xs[0], vec![Value::Int(1)], Span::new(0, 1, 3, 4)) else {
+        panic!("called with one argument")
+    };
+    assert_eq!(
+        (e.code, e.message.as_str()),
+        ("E401", "add expects 2 arguments, got 1")
+    );
+    assert_eq!(
+        i.call(&xs[0], vec![Value::Int(1), Value::Int(2)], Span::default())
+            .unwrap()
+            .repr(),
+        "3"
+    );
+}
+
+/// `[1, 2, 3].map(pack(x) { y = <R1 as it starts>; R1 = x; [cellnew R1]; snuff y })`.
+fn map_reads_a_fresh_register(cell: bool) -> Module {
+    let mut code = vec![abc(Op::MOV, 2, 1, 0), abc(Op::MOV, 1, 0, 0)];
+    if cell {
+        code.push(abc(Op::CELLNEW, 1, 0, 0));
+    }
+    code.push(ret(2));
+    let mut lambda = child_fn("", 1, 3, code);
+    lambda.kind = FuncKind::Lambda;
+    let mut c = Asm::default();
+    let map = c.s("map") as u8;
+    c.op(Op::NEWLIST, 0, 3, 0);
+    for n in 1..=3 {
+        c.i(Instr::asbx(Op::LOADINT, 1, n))
+            .op(Op::APPENDLIST, 0, 1, 0);
+    }
+    c.i(Instr::abx(Op::CLOSURE, 1, 0))
+        .op(Op::CALLM, 0, map, 1)
+        .i(ret(0));
+    let mut main = c.finish("", 0, 2);
+    main.children = vec![lambda];
+    module(main)
+}
+
+#[test]
+fn callbacks_reuse_one_set_of_registers_and_carry_nothing_over() {
+    for cell in [false, true] {
+        let m = map_reads_a_fresh_register(cell);
+        let mut i = interp();
+        let got = run(&mut i, &program(&m)).unwrap();
+        // Each callback's R1 starts null, never the last callback's value
+        // or its cell.
+        assert_eq!(got.repr(), "[null, null, null]", "cell: {cell}");
+        // The set the run gave back holds no value, cell, frame or try.
+        let kept = i.vm_regs.as_ref().expect("a kept set");
+        assert!(kept.stack.is_empty() && kept.cells.is_empty());
+        assert!(kept.frames.is_empty() && kept.tries.is_empty());
+        assert!(kept.burns.is_empty() && kept.upvals.is_empty());
+        assert!(kept.stack.capacity() > 0);
+        // A second run takes it and gives it back.
+        assert_eq!(
+            run(&mut i, &program(&m)).unwrap().repr(),
+            "[null, null, null]"
+        );
+        assert!(i.vm_regs.is_some());
+    }
+}
+
 #[test]
 fn a_tail_call_of_a_builtin_returns_its_value() {
     let mut f = main_fn(2, vec![abc(Op::TAILCALL, 0, 1, 0)]);

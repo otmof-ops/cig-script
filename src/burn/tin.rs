@@ -96,8 +96,8 @@ pub fn read_packed(pack: &Path, sha256: &str) -> io::Result<Vec<u8>> {
 /// one read against the recipe's two opens and a JSON parse. Chunking
 /// starts paying for itself when a file is large enough for several
 /// chunks to survive an edit; the threshold sits at the smallest size
-/// the bench measured as better chunked (see w10f notes for the 64 KiB
-/// / 256 KiB / 1 MiB sweep). Old runs chunked under 1 MiB still restore:
+/// the bench measured as better chunked (a sweep of 64 KiB, 256 KiB and
+/// 1 MiB). Old runs chunked under 1 MiB still restore:
 /// `materialize` reads either form.
 pub const CHUNK_FILE_MIN: u64 = 2 * 1024 * 1024;
 /// FastCDC's bounds for one chunk: 16 KiB at least, 64 KiB on average,
