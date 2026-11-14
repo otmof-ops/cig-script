@@ -5,6 +5,28 @@ project follows semantic versioning.
 
 ## Unreleased
 
+## 1.24.0 — 2026-11-14
+
+Short runs cost what they do, and a compiled program runs as fast as the
+interpreter. A run that burns nothing no longer makes its record durable:
+seven `fsync`s to none, which was most of what a compiled hello, `cigo
+--version` or an allowed call of cigo's agent hook spent (a compiled
+hello 14.6 to 1.8 ms with the home on a disk). The record is made durable
+at the run's first burn, and a run that burns is exactly as durable as
+before; what a power cut can now leave for a run that changed nothing is
+in `docs/BURN.md`. A program compiled at stage `a` resolves its names and
+runs within 1% of `cig run` (it ran up to 1.65 times its instructions).
+The bytecode VM's own instruction costs less on loops over numbers and
+indexes. A program's output, errors and their positions, its journal and
+every step budget are as before (#213, #230, #235).
+
+Timed as it ships (the release build, whole processes, cig's
+`bench/compute`, programs that burn nothing as dry runs, one machine): a
+stage `b` program takes 1.37 times Lua 5.4.9's time at the geometric mean
+(1.49 in 1.23.0), with `spectral` at 0.61 of 1.23.0's time, `loop` 0.76
+and `mandel` 0.77; it is faster than `cig run` on all 21 compute
+programs, 1.48x at the median.
+
 - **The VM's own instruction costs less on loops over numbers and indexes
   (cig-script#230 step 7, #235; `docs/BYTECODE.md`).** The fast loop takes
   the frame's registers once instead of checking and offsetting every
