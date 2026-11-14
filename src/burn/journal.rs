@@ -3449,6 +3449,27 @@ mod tests {
         assert_eq!(k.journal().len(), 1);
     }
 
+    /// A refused flush before a `reads: true` hop leaves nothing of the hop
+    /// behind: the hop never ran, and its folder would read as one whose
+    /// hop started.
+    #[test]
+    fn a_refused_flush_before_a_reads_hop_leaves_no_hops_folder() {
+        use super::super::{Kernel, Mode};
+        let _home = scratch_home();
+        let tmp = tempfile::tempdir().unwrap();
+        let run_dir = tmp.path().join("20260101T000000-abcdef");
+        fs::create_dir_all(&run_dir).unwrap();
+        // No run.json: the flush the hop owes cannot be made.
+        let mut k = Kernel::new_run(Mode::Run, run_dir.clone()).unwrap();
+        assert!(k.before_unjournaled_hop().is_err());
+        assert!(!run_dir.join("hops").exists());
+        assert!(super::super::runs::changed_nothing_on_disk(&run_dir));
+        // A folder that was there before the call is not taken away.
+        fs::create_dir_all(run_dir.join("hops")).unwrap();
+        assert!(k.before_unjournaled_hop().is_err());
+        assert!(run_dir.join("hops").is_dir());
+    }
+
     /// A run id that names a folder whose journal already has lines (an id
     /// that came round again) is still a new run: its record, saved
     /// without a flush, is flushed by its first burn.

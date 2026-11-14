@@ -2485,10 +2485,24 @@ impl Kernel {
                 .code("E702")
                 .with_hint("free space or fix permissions under ~/.cigscript (CIGSCRIPT_HOME), then run again; nothing was changed")
         };
-        if let Some(dir) = self.journal.run_dir() {
-            std::fs::create_dir_all(dir.join("hops")).map_err(refused)?;
-        }
-        self.journal.make_durable().map_err(refused)
+        // `hops/` is made here only when it was not there, and a refused
+        // flush takes it away again: a run whose hop never started must not
+        // be read, after a power cut, as one whose hop did.
+        let made = match self.journal.run_dir() {
+            Some(dir) => {
+                let hops = dir.join("hops");
+                let made = !hops.exists();
+                std::fs::create_dir_all(&hops).map_err(refused)?;
+                made.then_some(hops)
+            }
+            None => None,
+        };
+        self.journal.make_durable().map_err(|e| {
+            if let Some(hops) = &made {
+                let _ = std::fs::remove_dir(hops);
+            }
+            refused(e)
+        })
     }
 
     /// The ghost filesystem, when this is a dry-run.
