@@ -2760,6 +2760,58 @@ fn floats_stay_floats_past_sixteen_digits_and_int_refuses_what_does_not_fit() {
     assert!(err.contains("E503"), "{err}");
 }
 
+/// A run that is not checked (`--no-check`, as a compiled program's) still
+/// resolves its names, in a `resolve` phase of its own and with nothing
+/// said; a script `check` would refuse runs as it did before, its error at
+/// run time.
+#[test]
+fn an_unchecked_run_resolves_its_names_and_says_nothing() {
+    let sb = Sandbox::new();
+    sb.write(
+        "s.cig",
+        "roll t = 0\npull add(n) {\n  t = t + n\n  snuff t\n}\nfor i in 0..5 {\n  add(i)\n}\nexhale t\n",
+    );
+    let phases = |args: &[&str]| -> (String, Vec<String>) {
+        let out = sb.cig(args);
+        assert!(out.status.success(), "{args:?}: {out:?}");
+        let err = String::from_utf8_lossy(&out.stderr).to_string();
+        let phases = err
+            .lines()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .filter_map(|v| v["phase"].as_str().map(str::to_string))
+            .collect();
+        (String::from_utf8_lossy(&out.stdout).to_string(), phases)
+    };
+    let (out, unchecked) = phases(&["run", "--no-check", "--timings", "s.cig"]);
+    assert_eq!(out.trim(), "10");
+    assert!(unchecked.iter().any(|p| p == "resolve"), "{unchecked:?}");
+    assert!(!unchecked.iter().any(|p| p == "check"), "{unchecked:?}");
+    let (out, checked) = phases(&["run", "--timings", "s.cig"]);
+    assert_eq!(out.trim(), "10");
+    assert!(checked.iter().any(|p| p == "check"), "{checked:?}");
+    assert!(!checked.iter().any(|p| p == "resolve"), "{checked:?}");
+    // No diagnostic: a check warning (a shell built at run time, E308) is
+    // not given by the unchecked run.
+    sb.write(
+        "w.cig",
+        "pull sh(c) {\n  snuff proc.run(\"sh\", [\"-c\", c])\n}\nexhale 1\n",
+    );
+    let out = sb.cig(&["run", "w.cig"]);
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("E308"),
+        "{out:?}"
+    );
+    let out = sb.cig(&["run", "--no-check", "w.cig"]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success() && !err.contains("E308"), "{out:?}");
+    sb.write("s.cig", "exhale 1\nexhale nope\n");
+    let err = sb.run_err(&["run", "--no-check", "s.cig"], 1);
+    assert!(
+        err.contains("unknown name `nope`") && err.contains("E501"),
+        "{err}"
+    );
+}
+
 #[test]
 fn a_redeclaration_at_run_time_is_a_check_error_and_args_is_shadowable() {
     let sb = Sandbox::new();

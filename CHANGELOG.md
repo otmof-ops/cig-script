@@ -5,6 +5,39 @@ project follows semantic versioning.
 
 ## Unreleased
 
+- **The VM's own instruction costs less on loops over numbers and indexes
+  (cig-script#230 step 7, #235; `docs/BYTECODE.md`).** The fast loop takes
+  the frame's registers once instead of checking and offsetting every
+  register number at every read and write; each arithmetic and comparison
+  instruction handles its numbers where it is matched instead of going
+  through two more dispatches, and `/` of two ints and arithmetic mixing
+  an int and a float no longer leave the fast loop; and overwriting a
+  register that held a number, a bool or null no longer calls the code
+  that drops a value. A turn of the plain counting loop takes 332 machine
+  instructions (was 392). On cig's `bench/compute` the VM executes 37%
+  fewer instructions on `spectral`, 27% fewer on `loop`, 26% fewer on
+  `mandel`, 18% fewer on `deltablue`, 10% fewer on `fannkuch`, 9% fewer on
+  `nbody`, 8% fewer on `dispatch`, 6% fewer on `richards` and 5% fewer on
+  `sieve`, and none more. Values, errors, their positions and every step
+  budget are unchanged. A `bench-stats` build's opcode table
+  (`CIG_VM_STATS=1`) now counts every instruction once: a call, a return
+  and a tail call between compiled functions were not counted at all
+  since 1.23.0.
+- **A compiled program runs its script as fast as `cig run` does
+  (cig-script#213; `docs/PROGRAMS.md`).** A program compiled at stage `a`,
+  and `--interp` on a stage `b` one, skip the check (it ran when the program
+  was compiled), and the check is also what tells the tree-walker where each
+  name lives, so such a program looked every name up by name at every read:
+  up to 1.65 times the machine instructions of `cig run` on the same script
+  (mandel), 1.52 (fannkuch), 1.41 (nbody). Its names are now resolved by
+  the check's own walk with its diagnostics off: the top level before the
+  first line, each function's body the first time it is called. The seven
+  programs counted now run within 1% of `cig run` both ways, and cigo's
+  start (`--version`) gains 2.3 million instructions of its 369 million
+  (resolving it all at the start cost 21.6 million, about 7 ms). Nothing is
+  reported, and a name the walk cannot place is looked up by name as
+  before. `cig run --no-check` resolves the same way, and the run's timings
+  name the step `resolve`.
 - **A run that burns nothing flushes nothing to the disk (`docs/BURN.md`,
   "When a run's record is durable").** A run still writes its record when it
   starts and when it ends, and `cig runs` lists it while it runs and after;
