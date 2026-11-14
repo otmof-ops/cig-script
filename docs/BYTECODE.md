@@ -873,6 +873,20 @@ open. A lowering writes to them.
   tries. A builtin that can call a script function always takes the
   general path: the fast loop's Rust frame is never on the stack while
   the VM runs again inside a call.
+
+  The loop takes the frame's registers once, not at every instruction:
+  a run's machine keeps 512 registers in the stack from the running
+  frame's base, which a one-word instruction's register numbers (a byte
+  each; `forloop` reaches `A+3`) index with no check, since the verifier
+  has proved every register number below the function's `reg_count`. A
+  two-word (`wide`) instruction, and every instruction of a builtin's
+  callback (whose machine starts empty each time), reads the registers
+  with a check. Each arithmetic and comparison opcode handles two ints,
+  two floats, and an int with a float (which `interp::ops` computes as
+  two floats) where it is matched, `/` of two ints included; overflow, a
+  zero divisor, a NaN in an ordering and any other type take the
+  general path. A register that held a null, a bool, an int or a float
+  is overwritten without the call that drops a value.
 - **Errors and handlers.** Each frame keeps the tries it has opened and
   not left, innermost last. `try.enter H` opens handler `H` in its body
   and records the frame's loop nesting; opening `H` again (a loop around
