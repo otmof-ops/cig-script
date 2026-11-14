@@ -13,7 +13,7 @@
 # suite and appends one JSON line to `history/cig.<series>.jsonl` on the
 # `bench-history` branch (`cig bench history --series btrfs hello`). cig-script
 # is public, so these minutes cost nothing; heavy suites run nightly and pull
-# requests run the fast ones (DECISIONS 11).
+# requests run the fast ones.
 #
 # What fails a night: a case whose output is WRONG, a kernel case that does not
 # restore the exact bytes (both are `correctness`). The timings, the disk

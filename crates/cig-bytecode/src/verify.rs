@@ -225,6 +225,7 @@ fn check_function(f: &Function, place: Place) -> Result<Vec<Option<DecodedInstr>
     verify_burn_rows(func, f, &pcs, &code)?;
     verify_termination(func, &pcs, &code)?;
     verify_charged_cycles(func, f, &code)?;
+    verify_reads_after_calls(func, f, &code)?;
 
     Ok(code)
 }
@@ -1098,6 +1099,563 @@ fn verify_charged_cycles(
         func,
         pc: lowest as u32,
     })
+}
+
+/// The registers an instruction reads, whichever way it goes on: pushed
+/// onto `out` (cleared first). `f` is the instruction's function (a
+/// `closure` reads the registers its child captures, a `burn.enter` its
+/// register label, a `comp.enter` its state register when it names one).
+fn reads(d: &DecodedInstr, f: &Function, out: &mut Vec<u32>) {
+    out.clear();
+    let (a, b, c) = (d.a, d.b_u, d.c);
+    let range = |out: &mut Vec<u32>, first: u32, n: u32| out.extend(first..first.saturating_add(n));
+    match d.op {
+        Op::MOV | Op::NEG | Op::NOT | Op::TESTSET | Op::GETFIELD => out.push(b),
+        Op::ADD
+        | Op::SUB
+        | Op::MUL
+        | Op::DIV
+        | Op::MOD
+        | Op::POW
+        | Op::EQ
+        | Op::LT
+        | Op::LE
+        | Op::GETINDEX => out.extend([b, c]),
+        Op::ADDK
+        | Op::SUBK
+        | Op::MULK
+        | Op::DIVK
+        | Op::MODK
+        | Op::POWK
+        | Op::EQK
+        | Op::LTK
+        | Op::LEK => out.push(b),
+        Op::EQJ | Op::NEJ | Op::LTJ | Op::LEJ | Op::APPENDLIST => out.extend([a, b]),
+        Op::TEST | Op::TESTN | Op::RET | Op::THROW | Op::CELLNEW | Op::ITERPREP => out.push(a),
+        Op::FORPREP | Op::FORLOOP => range(out, a, 3),
+        Op::ITERNEXT => range(out, a.saturating_add(1), 2),
+        Op::SETFIELD => out.extend([a, c]),
+        Op::SETINDEX | Op::INSERTMAP => out.extend([a, b, c]),
+        Op::INTERP => range(out, b, c.saturating_add(1)),
+        Op::CALL | Op::TAILCALL => range(out, a, b.saturating_add(1)),
+        Op::CALLB => range(out, a.saturating_add(1), c),
+        Op::CALLM => range(out, a, c.saturating_add(1)),
+        Op::SETUP | Op::CELLSET => out.push(b),
+        Op::CLOSURE => {
+            if let Some(child) = f.children.get(b as usize) {
+                for u in &child.upvalues {
+                    if u.kind == UpvalKind::ParentLocal {
+                        out.push(u32::from(u.index));
+                    }
+                }
+            }
+        }
+        Op::BURN_ENTER => {
+            if let Some(RegionLabel::Reg(r)) = f.regions.get(b as usize).map(|g| g.label) {
+                out.push(r);
+            }
+        }
+        Op::BURN_OP => {
+            let argc = if d.wide { c >> 8 } else { c >> 4 };
+            range(out, a.saturating_add(1), argc);
+        }
+        Op::COMP_ENTER => {
+            if matches!(f.constants.get(c as usize), Some(Constant::Str(n)) if !n.is_empty()) {
+                out.push(a);
+            }
+        }
+        Op::PACK | Op::EXHALE => range(out, a, b),
+        Op::CHAIN_MAKE => range(out, a.saturating_add(1), b),
+        _ => {}
+    }
+}
+
+/// The register an instruction writes on every way on but its jump, if
+/// any: `R(A)` for the instructions that make a value there.
+fn writes_a(op: Op) -> bool {
+    matches!(
+        op,
+        Op::MOV
+            | Op::LOADK
+            | Op::LOADNULL
+            | Op::LOADBOOL
+            | Op::LOADINT
+            | Op::LOADG
+            | Op::ADD
+            | Op::SUB
+            | Op::MUL
+            | Op::DIV
+            | Op::MOD
+            | Op::POW
+            | Op::NEG
+            | Op::ADDK
+            | Op::SUBK
+            | Op::MULK
+            | Op::DIVK
+            | Op::MODK
+            | Op::POWK
+            | Op::EQ
+            | Op::LT
+            | Op::LE
+            | Op::NOT
+            | Op::EQK
+            | Op::LTK
+            | Op::LEK
+            | Op::NEWLIST
+            | Op::NEWMAP
+            | Op::GETFIELD
+            | Op::GETINDEX
+            | Op::INTERP
+            | Op::CALLB
+            | Op::CALLM
+            | Op::CLOSURE
+            | Op::GETUP
+            | Op::CELLGET
+            | Op::BURN_OP
+            | Op::CHAIN_MAKE
+    )
+}
+
+/// A try the run has open at a pc, as the VM keeps it: the handler, the
+/// stage, and for a finally what goes on when it ends.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct OpenTry {
+    handler: u32,
+    stage: u8,
+    /// For a finally: the pc it goes on at, or [`RAISE`].
+    pending: u32,
+}
+
+const BODY: u8 = 0;
+const CATCH: u8 = 1;
+const FINALLY: u8 = 2;
+/// A finally's pending: raise its error again.
+const RAISE: u32 = u32::MAX;
+
+/// The registers that may be undefined at a pc, from `lo` up: one bit
+/// each.
+type Undef = Vec<u64>;
+
+/// A hasher for the pass's small integer keys: the standard one's
+/// SipHash showed in cigo's verify profile.
+#[derive(Default)]
+struct Mix(u64);
+
+impl core::hash::Hasher for Mix {
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.write_u64(u64::from(b));
+        }
+    }
+    fn write_u32(&mut self, x: u32) {
+        self.write_u64(u64::from(x));
+    }
+    fn write_u64(&mut self, x: u64) {
+        self.0 = (self.0.rotate_left(5) ^ x).wrapping_mul(0x517c_c1b7_2722_0a95);
+    }
+    fn write_usize(&mut self, x: usize) {
+        self.write_u64(x as u64);
+    }
+    fn finish(&self) -> u64 {
+        self.0
+    }
+}
+
+type MixMap<K, V> = std::collections::HashMap<K, V, core::hash::BuildHasherDefault<Mix>>;
+
+struct Reads<'f> {
+    f: &'f Function,
+    lo: u32,
+    /// The open tries each state is under, by number.
+    stacks: Vec<Vec<OpenTry>>,
+    stack_of: MixMap<Vec<OpenTry>, u32>,
+    /// A state per (pc, stack) the run reaches.
+    state_of: MixMap<(u32, u32), usize>,
+    states: Vec<(u32, u32, Undef)>,
+    queued: Vec<bool>,
+    work: Vec<usize>,
+    words: usize,
+}
+
+impl Reads<'_> {
+    fn stack(&mut self, s: Vec<OpenTry>) -> u32 {
+        if let Some(&i) = self.stack_of.get(&s) {
+            return i;
+        }
+        let i = self.stacks.len() as u32;
+        self.stacks.push(s.clone());
+        self.stack_of.insert(s, i);
+        i
+    }
+
+    /// Join `u` into the state at `(pc, stack)`, queueing it if it grew.
+    fn flow(&mut self, pc: u32, stack: u32, u: &Undef) {
+        let i = match self.state_of.get(&(pc, stack)) {
+            Some(&i) => {
+                let mut grew = false;
+                for (w, x) in self.states[i].2.iter_mut().zip(u) {
+                    let y = *w | x;
+                    grew |= y != *w;
+                    *w = y;
+                }
+                if !grew {
+                    return;
+                }
+                i
+            }
+            None => {
+                let i = self.states.len();
+                self.states.push((pc, stack, u.clone()));
+                self.state_of.insert((pc, stack), i);
+                self.queued.push(false);
+                i
+            }
+        };
+        if !self.queued[i] {
+            self.queued[i] = true;
+            self.work.push(i);
+        }
+    }
+
+    fn set(&self, u: &mut Undef, r: u32) {
+        if r >= self.lo {
+            let i = (r - self.lo) as usize;
+            if let Some(w) = u.get_mut(i / 64) {
+                *w |= 1 << (i % 64);
+            }
+        }
+    }
+
+    fn clear(&self, u: &mut Undef, r: u32) {
+        if r >= self.lo {
+            let i = (r - self.lo) as usize;
+            if let Some(w) = u.get_mut(i / 64) {
+                *w &= !(1 << (i % 64));
+            }
+        }
+    }
+
+    fn has(&self, u: &Undef, r: u32) -> bool {
+        r >= self.lo && {
+            let i = (r - self.lo) as usize;
+            u.get(i / 64).is_some_and(|w| w & (1 << (i % 64)) != 0)
+        }
+    }
+
+    /// An error raised at `pc` under `stack`, offered to the open tries
+    /// innermost first exactly as the VM's `offer` does: the states it
+    /// can go on in. Both ways of a catch are taken (with `exit()` asked
+    /// for, a catch takes nothing).
+    fn raise(&mut self, pc: u32, stack: u32, u: &Undef) {
+        let mut open = self.stacks[stack as usize].clone();
+        while let Some(t) = open.pop() {
+            let Some(h) = self.f.handlers.get(t.handler as usize) else {
+                return;
+            };
+            let in_range = (h.pc_start..h.pc_end).contains(&pc);
+            let catches = h.handler_pc != h.finally_pc;
+            let finally = h.finally_pc != RESERVED_U32;
+            if t.stage == BODY && !in_range {
+                continue;
+            }
+            if t.stage == BODY && catches {
+                let mut caught = u.clone();
+                if h.catch_reg != RESERVED_U32 {
+                    self.clear(&mut caught, h.catch_reg);
+                }
+                let mut s = open.clone();
+                s.push(OpenTry { stage: CATCH, ..t });
+                let s = self.stack(s);
+                self.flow(h.handler_pc, s, &caught);
+            }
+            if (t.stage == BODY || t.stage == CATCH) && finally {
+                let mut s = open.clone();
+                s.push(OpenTry {
+                    stage: FINALLY,
+                    pending: RAISE,
+                    ..t
+                });
+                let s = self.stack(s);
+                self.flow(h.finally_pc, s, u);
+                return;
+            }
+        }
+    }
+}
+
+/// `read-before-write`: no instruction reads a register a `call` left
+/// undefined. After `call A, B, C` the callee's frame started at
+/// `R(A+1)`, so every register from `R(A+C+1)` up holds nothing the run
+/// may read until an instruction writes it (the result row
+/// `R(A..A+C+1)` is written by the call). The rule follows every way a
+/// run can go, the VM's tries included: an error offered to a catch or
+/// a finally (from a call, with the callee's frame having run), a
+/// `try.leave` into its finally, and a finally's end back to the pc its
+/// `try.leave` goes on at. It is a forward pass to a fixed point over
+/// (pc, open tries) states, linear in practice.
+fn verify_reads_after_calls(
+    func: u32,
+    f: &Function,
+    code: &[Option<DecodedInstr>],
+) -> Result<(), VerifyError> {
+    let n = f.instrs.len();
+    let mut lo = u32::MAX;
+    for d in code.iter().flatten() {
+        if d.op == Op::CALL {
+            lo = lo.min(d.a.saturating_add(d.c).saturating_add(1));
+        }
+    }
+    // No call, or none that leaves a register of the frame undefined.
+    if lo >= f.reg_count {
+        return Ok(());
+    }
+    let words = ((f.reg_count - lo) as usize).div_ceil(64);
+    let mut r = Reads {
+        f,
+        lo,
+        stacks: Vec::new(),
+        stack_of: MixMap::default(),
+        state_of: MixMap::default(),
+        states: Vec::new(),
+        queued: Vec::new(),
+        work: Vec::new(),
+        words,
+    };
+    // A state is kept at the start of each block: pc 0, every jump's
+    // target, a handler's pcs and the pc after any instruction that is not
+    // `straight` (it branches, ends, or changes the open tries). Inside a
+    // block one state is carried along.
+    let straight = |op: Op| {
+        !matches!(
+            op,
+            Op::RET
+                | Op::TAILCALL
+                | Op::THROW
+                | Op::JMP
+                | Op::LOOP
+                | Op::TESTSET
+                | Op::EQJ
+                | Op::NEJ
+                | Op::LTJ
+                | Op::LEJ
+                | Op::TEST
+                | Op::TESTN
+                | Op::FORPREP
+                | Op::FORLOOP
+                | Op::ITERPREP
+                | Op::ITERNEXT
+                | Op::TRY_ENTER
+                | Op::TRY_LEAVE
+        )
+    };
+    let mut leader = vec![false; n + 1];
+    leader[0] = true;
+    for d in code.iter().flatten() {
+        let info = d.op.info();
+        for (kind, off) in [(info.b, d.b_s), (info.c, d.c_s)] {
+            if kind == OperandKind::Jump {
+                if let Some(t) = usize::try_from(i64::from(d.pc) + 1 + i64::from(off))
+                    .ok()
+                    .and_then(|t| leader.get_mut(t))
+                {
+                    *t = true;
+                }
+            }
+        }
+        if !straight(d.op) {
+            if let Some(t) = leader.get_mut((d.pc + d.width) as usize) {
+                *t = true;
+            }
+        }
+    }
+    for h in &f.handlers {
+        for t in [h.handler_pc, h.finally_pc] {
+            if let Some(t) = leader.get_mut(t as usize) {
+                *t = true;
+            }
+        }
+    }
+    let none = r.stack(Vec::new());
+    r.flow(0, none, &vec![0; words]);
+    let mut read = Vec::new();
+    while let Some(i) = r.work.pop() {
+        r.queued[i] = false;
+        let (mut pc, stack) = (r.states[i].0, r.states[i].1);
+        let mut u = r.states[i].2.clone();
+        let tried = stack != none;
+        let d = loop {
+            let Some(Some(d)) = code.get(pc as usize).copied() else {
+                break None;
+            };
+            reads(&d, f, &mut read);
+            if let Some(&reg) = read.iter().find(|&&x| r.has(&u, x)) {
+                return Err(read_after_call(func, code, pc, reg));
+            }
+            if !straight(d.op) {
+                break Some(d);
+            }
+            if d.op == Op::CALL {
+                let first = d.a.saturating_add(d.c).saturating_add(1).max(lo);
+                for x in first..f.reg_count {
+                    r.set(&mut u, x);
+                }
+                if tried {
+                    r.raise(pc, stack, &u);
+                }
+                for x in d.a..=d.a.saturating_add(d.c) {
+                    r.clear(&mut u, x);
+                }
+            } else {
+                if tried {
+                    r.raise(pc, stack, &u);
+                }
+                if writes_a(d.op) {
+                    r.clear(&mut u, d.a);
+                }
+            }
+            pc += d.width;
+            if leader.get(pc as usize).copied().unwrap_or(true) {
+                r.flow(pc, stack, &u);
+                break None;
+            }
+        };
+        let Some(d) = d else {
+            continue;
+        };
+        let next = pc + d.width;
+        let jump = |off: i32| u32::try_from(i64::from(pc) + 1 + i64::from(off)).ok();
+        let a = d.a;
+        // Any instruction may raise (a call's error comes with the callee's
+        // frame having run: the straight walk above).
+        if tried {
+            r.raise(pc, stack, &u);
+        }
+        let mut on = u;
+        match d.op {
+            Op::RET | Op::TAILCALL | Op::THROW => {}
+            Op::JMP | Op::LOOP => {
+                if let Some(t) = jump(d.b_s) {
+                    r.flow(t, stack, &on);
+                }
+            }
+            Op::TESTSET => {
+                if let Some(t) = jump(d.c_s) {
+                    r.flow(t, stack, &on);
+                }
+                r.clear(&mut on, a);
+                r.flow(next, stack, &on);
+            }
+            Op::EQJ | Op::NEJ | Op::LTJ | Op::LEJ => {
+                if let Some(t) = jump(d.c_s) {
+                    r.flow(t, stack, &on);
+                }
+                r.flow(next, stack, &on);
+            }
+            Op::TEST | Op::TESTN => {
+                if let Some(t) = jump(d.b_s) {
+                    r.flow(t, stack, &on);
+                }
+                r.flow(next, stack, &on);
+            }
+            Op::FORPREP => {
+                if let Some(t) = jump(d.b_s) {
+                    r.flow(t, stack, &on);
+                }
+                r.clear(&mut on, a.saturating_add(3));
+                r.flow(next, stack, &on);
+            }
+            Op::FORLOOP => {
+                r.flow(next, stack, &on);
+                r.clear(&mut on, a);
+                r.clear(&mut on, a.saturating_add(3));
+                if let Some(t) = jump(d.b_s) {
+                    r.flow(t, stack, &on);
+                }
+            }
+            Op::ITERPREP => {
+                r.clear(&mut on, a.saturating_add(1));
+                r.clear(&mut on, a.saturating_add(2));
+                r.flow(next, stack, &on);
+            }
+            Op::ITERNEXT => {
+                if let Some(t) = jump(d.b_s) {
+                    r.flow(t, stack, &on);
+                }
+                r.clear(&mut on, a.saturating_add(2));
+                r.clear(&mut on, a.saturating_add(3));
+                r.flow(next, stack, &on);
+            }
+            Op::TRY_ENTER => {
+                let mut s = r.stacks[stack as usize].clone();
+                if let Some(at) = s.iter().position(|t| t.handler == d.b_u) {
+                    s.truncate(at);
+                }
+                s.push(OpenTry {
+                    handler: d.b_u,
+                    stage: BODY,
+                    pending: RAISE,
+                });
+                let s = r.stack(s);
+                r.flow(next, s, &on);
+            }
+            Op::TRY_LEAVE => {
+                let mut s = r.stacks[stack as usize].clone();
+                let Some(t) = s.pop() else {
+                    continue;
+                };
+                let h = f.handlers.get(t.handler as usize);
+                if a != 0 {
+                    let s = r.stack(s);
+                    r.flow(next, s, &on);
+                } else if t.stage == FINALLY {
+                    if t.pending == RAISE {
+                        let s = r.stack(s);
+                        r.raise(pc, s, &on);
+                    } else {
+                        let s = r.stack(s);
+                        r.flow(t.pending, s, &on);
+                    }
+                } else if let Some(h) = h.filter(|h| h.finally_pc != RESERVED_U32) {
+                    s.push(OpenTry {
+                        stage: FINALLY,
+                        pending: next,
+                        ..t
+                    });
+                    let s = r.stack(s);
+                    r.flow(h.finally_pc, s, &on);
+                } else {
+                    let s = r.stack(s);
+                    r.flow(next, s, &on);
+                }
+            }
+            _ => r.flow(next, stack, &on),
+        }
+    }
+    debug_assert!(r.states.iter().all(|s| s.2.len() == r.words));
+    Ok(())
+}
+
+/// The refusal of a read of `reg` at `pc`, naming a call that leaves it
+/// undefined: the last one before the read, else the last one.
+fn read_after_call(func: u32, code: &[Option<DecodedInstr>], pc: u32, reg: u32) -> VerifyError {
+    let calls = || {
+        code.iter()
+            .flatten()
+            .filter(move |c| c.op == Op::CALL && c.a.saturating_add(c.c) < reg)
+            .map(|c| c.pc)
+    };
+    let at = calls()
+        .filter(|&c| c < pc)
+        .max()
+        .or_else(|| calls().max())
+        .unwrap_or(pc);
+    VerifyError::ReadBeforeWrite {
+        func,
+        pc,
+        reg,
+        why: "after-call",
+        at,
+    }
 }
 
 #[cfg(test)]

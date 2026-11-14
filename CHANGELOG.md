@@ -5,6 +5,19 @@ project follows semantic versioning.
 
 ## Unreleased
 
+- **A call costs no argument copy and no stack resize (cig-script#230
+  step 3, cig-compile#31; `docs/BYTECODE.md`).** A callee's frame starts at
+  the caller's `R(A+1)`: its parameters are the arguments where they are,
+  and the register stack grows only when a frame needs more and is not
+  shrunk on return. The format now says what a call leaves: after `call
+  A, B, C` the registers past its result row hold nothing a run may read
+  before writing it, and a cell there is gone. The verifier holds every
+  module to it with a new rule, `read-before-write`, which follows every
+  way a run can go, the tries included, and names the read, the register
+  and the call. On cig's `bench/compute` the VM executes about 10% fewer
+  instructions on `fib` and `dispatch`, 7% fewer on `trees` and
+  `spectral` and 5% fewer on `closures`; `fib` goes from 0.97x to 1.10x
+  the interpreter's speed.
 - **A stage `b` program reads, verifies and loads a function the first time
   it enters it** (cig-script#230, cig-compile#71; `docs/BYTECODE.md`, "How
   the VM reads it"; `docs/PROGRAMS.md`). A start checks the whole module's

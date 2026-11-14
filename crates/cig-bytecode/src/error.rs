@@ -506,6 +506,23 @@ pub enum VerifyError {
         /// The lowest pc on the cycle.
         pc: u32,
     },
+    /// An instruction reads a register no run may read there: on some
+    /// way to it, the register's value is undefined and nothing writes it
+    /// first. The one case is a `CALL`'s: after `call A, B, C` every
+    /// register past its result row (`R(A+C+1)` and up) is undefined,
+    /// because the callee's frame starts at `R(A+1)`.
+    ReadBeforeWrite {
+        /// The function.
+        func: u32,
+        /// The pc of the read.
+        pc: u32,
+        /// The register read.
+        reg: u32,
+        /// Which case left it undefined, in one word: `after-call`.
+        why: &'static str,
+        /// The pc of the instruction that left it undefined.
+        at: u32,
+    },
     /// The function nesting exceeded the verifier's maximum depth.
     /// The parser enforces the same limit on the wire.
     NestedTooDeep {
@@ -547,6 +564,7 @@ impl VerifyError {
             VerifyError::FrameTooLarge { .. } => "frame-too-large",
             VerifyError::UpvalueCaptureOutOfRange { .. } => "upvalue-capture-out-of-range",
             VerifyError::UnchargedCycle { .. } => "uncharged-cycle",
+            VerifyError::ReadBeforeWrite { .. } => "read-before-write",
             VerifyError::NestedTooDeep { .. } => "nested-too-deep",
         }
     }
@@ -579,7 +597,8 @@ impl VerifyError {
             | VerifyError::EmptyFunction { func }
             | VerifyError::FrameTooLarge { func, .. }
             | VerifyError::UpvalueCaptureOutOfRange { func, .. }
-            | VerifyError::UnchargedCycle { func, .. } => Some(*func),
+            | VerifyError::UnchargedCycle { func, .. }
+            | VerifyError::ReadBeforeWrite { func, .. } => Some(*func),
             VerifyError::NestedTooDeep { .. } => None,
         }
     }
@@ -602,7 +621,8 @@ impl VerifyError {
             | VerifyError::WideDangling { pc, .. }
             | VerifyError::BadOpcode { pc, .. }
             | VerifyError::MidPairReference { pc, .. }
-            | VerifyError::UnchargedCycle { pc, .. } => Some(*pc),
+            | VerifyError::UnchargedCycle { pc, .. }
+            | VerifyError::ReadBeforeWrite { pc, .. } => Some(*pc),
             _ => None,
         }
     }
@@ -611,6 +631,19 @@ impl VerifyError {
 impl fmt::Display for VerifyError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let rule = self.rule();
+        if let VerifyError::ReadBeforeWrite {
+            func,
+            pc,
+            reg,
+            why,
+            at,
+        } = self
+        {
+            return write!(
+                f,
+                "{rule} at fn{func}+{pc}: R{reg} is undefined ({why} at fn{func}+{at})"
+            );
+        }
         match (self.func(), self.pc()) {
             (Some(func), Some(pc)) => write!(f, "{rule} at fn{func}+{pc}"),
             (Some(func), None) => write!(f, "{rule} in fn{func}"),
