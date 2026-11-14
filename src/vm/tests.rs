@@ -6432,3 +6432,291 @@ fn the_fast_loop_reaches_the_last_registers_a_byte_names() {
     assert_eq!(i.steps, 8, "the step that went over is counted");
     assert_eq!(i.loop_depth, 0, "the loop depth is given back");
 }
+
+// ----- review: the fast operators over a grid of edge values -----------------------
+
+/// A value or an error, floats by their bits: two outcomes are the same
+/// only when the kind, the bits, or the code, message and span are.
+fn exact_outcome(r: &Result<Value, Diagnostic>) -> String {
+    match r {
+        Ok(Value::Float(f)) => format!("float {:#x}", f.to_bits()),
+        Ok(v) => format!("{} {}", v.type_name(), v.repr()),
+        Err(e) => format!("{} {:?} {} {:?}", e.code, e.kind, e.message, e.span),
+    }
+}
+
+fn edge_grid() -> Vec<Value> {
+    let mut v: Vec<Value> = [
+        0i64,
+        1,
+        -1,
+        2,
+        -2,
+        3,
+        -3,
+        7,
+        -7,
+        i64::MAX,
+        i64::MIN,
+        i64::MIN + 1,
+        i64::MAX - 1,
+        1 << 53,
+        (1 << 53) + 1,
+        -(1 << 53) - 1,
+        1 << 62,
+        -(1 << 62),
+        4_611_686_018_427_387_904 + 1,
+    ]
+    .into_iter()
+    .map(Value::Int)
+    .collect();
+    v.extend(
+        [
+            0.0f64,
+            -0.0,
+            1.0,
+            -1.0,
+            0.5,
+            2.5,
+            -3.0,
+            7.0,
+            f64::NAN,
+            -f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            1e300,
+            -1e300,
+            f64::MIN_POSITIVE,
+            5e-324,
+            9_007_199_254_740_992.0,
+            9_007_199_254_740_994.0,
+            9_223_372_036_854_775_808.0,
+            -9_223_372_036_854_775_808.0,
+        ]
+        .into_iter()
+        .map(Value::Float),
+    );
+    v.extend([
+        Value::Null,
+        Value::Bool(true),
+        Value::Bool(false),
+        Value::str(""),
+        Value::str("a"),
+        Value::str("b"),
+        Value::list(vec![Value::Int(1)]),
+        Value::map(IndexMap::new()),
+    ]);
+    v
+}
+
+fn as_constant(v: &Value) -> Option<Constant> {
+    match v {
+        Value::Bool(b) => Some(Constant::Bool(*b)),
+        Value::Int(i) => Some(Constant::Int(*i)),
+        Value::Float(f) => Some(Constant::Float(*f)),
+        Value::Str(s) => Some(Constant::Str(s.to_string())),
+        _ => None,
+    }
+}
+
+#[test]
+fn every_fast_operator_form_equals_binary_bit_for_bit_over_an_edge_grid() {
+    let span = Span::new(0, 3, 1, 2); // the line row of pc 0
+    let grid = edge_grid();
+    let mut compared = 0u32;
+    let mut failures = Vec::new();
+    let binops = [
+        (Op::ADD, Op::ADDK, BinOp::Add),
+        (Op::SUB, Op::SUBK, BinOp::Sub),
+        (Op::MUL, Op::MULK, BinOp::Mul),
+        (Op::DIV, Op::DIVK, BinOp::Div),
+        (Op::MOD, Op::MODK, BinOp::Rem),
+        (Op::EQ, Op::EQK, BinOp::Eq),
+        (Op::LT, Op::LTK, BinOp::Lt),
+        (Op::LE, Op::LEK, BinOp::Le),
+    ];
+    for (op, kop, bin) in binops {
+        let m = binop_module(op);
+        for l in &grid {
+            for r in &grid {
+                let vm = exact_outcome(&exec_with(&m, vec![l.clone(), r.clone()]));
+                let shared = exact_outcome(&binary(bin, l.clone(), r.clone(), span));
+                if vm != shared {
+                    failures.push(format!(
+                        "{op} {} {}: vm {vm} binary {shared}",
+                        l.repr(),
+                        r.repr()
+                    ));
+                }
+                compared += 1;
+                if let Some(k) = as_constant(r) {
+                    let mk = binopk_module(kop, k);
+                    let vm = exact_outcome(&exec_with(&mk, vec![l.clone()]));
+                    if vm != shared {
+                        failures.push(format!(
+                            "{kop} {} {}: vm {vm} binary {shared}",
+                            l.repr(),
+                            r.repr()
+                        ));
+                    }
+                    compared += 1;
+                }
+            }
+        }
+    }
+    for (op, bin) in [
+        (Op::EQJ, BinOp::Eq),
+        (Op::NEJ, BinOp::Ne),
+        (Op::LTJ, BinOp::Lt),
+        (Op::LEJ, BinOp::Le),
+    ] {
+        let m = jump_module(abc(op, 0, 1, 2));
+        for l in &grid {
+            for r in &grid {
+                let vm = exact_outcome(&exec_with(&m, vec![l.clone(), r.clone()]));
+                let shared = exact_outcome(
+                    &binary(bin, l.clone(), r.clone(), span)
+                        .map(|v| Value::Int(i64::from(v.truthy()))),
+                );
+                if vm != shared {
+                    failures.push(format!(
+                        "{op} {} {}: vm {vm} binary {shared}",
+                        l.repr(),
+                        r.repr()
+                    ));
+                }
+                compared += 1;
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} of {compared}:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+    assert!(compared > 30_000, "{compared}");
+}
+
+/// One instruction on the fast path, on a `Window` and on the checked
+/// slice: the same answer and the same registers after it.
+#[test]
+fn the_window_and_the_checked_slice_run_every_fast_operator_alike() {
+    let grid = edge_grid();
+    let ops = [
+        Op::ADD,
+        Op::SUB,
+        Op::MUL,
+        Op::DIV,
+        Op::MOD,
+        Op::EQ,
+        Op::LT,
+        Op::LE,
+        Op::MOV,
+        Op::NOT,
+        Op::GETINDEX,
+    ];
+    let mut compared = 0u32;
+    for op in ops {
+        let prog = program(&binop_module(op));
+        prog.ready(0, Span::default()).expect("ready");
+        let proto = prog.funcs.get(0).expect("loaded");
+        let d = proto.code[0].expect("an instruction");
+        for l in &grid {
+            for r in &grid {
+                let mut w: Box<Window> = Box::new(std::array::from_fn(|_| Value::Null));
+                let mut s = vec![Value::Null; 3];
+                for regs in [&mut w[..3], &mut s[..]] {
+                    regs[0] = l.clone();
+                    regs[1] = r.clone();
+                }
+                let mut i1 = interp();
+                let mut i2 = interp();
+                let mut f1 = Frame::new(0, 0, 0, NO_UPVALS, 0, 0);
+                let mut f2 = Frame::new(0, 0, 0, NO_UPVALS, 0, 0);
+                let a = fast_one(&mut *w, &mut i1, &mut f1, proto, &d, &[]);
+                let b = fast_one(&mut s[..], &mut i2, &mut f2, proto, &d, &[]);
+                let show = |x: &Option<Result<usize, Fault>>| match x {
+                    None => "none".to_string(),
+                    Some(Ok(n)) => format!("next {n}"),
+                    Some(Err(e)) => format!("err {}", e.message),
+                };
+                assert_eq!(show(&a), show(&b), "{op} {} {}", l.repr(), r.repr());
+                assert_eq!(
+                    exact_outcome(&Ok(w[2].clone())),
+                    exact_outcome(&Ok(s[2].clone())),
+                    "{op} {} {}",
+                    l.repr(),
+                    r.repr()
+                );
+                compared += 1;
+            }
+        }
+    }
+    assert!(compared > 5_000, "{compared}");
+}
+
+/// `CIG_VM_STATS` counts each instruction a run executes once: two wide
+/// instructions the fast loop runs, one it leaves to the general path,
+/// and the return.
+#[cfg(feature = "bench-stats")]
+#[test]
+#[ignore = "the switch is read once for the process: run alone, by exact name"]
+fn vm_stats_count_each_executed_instruction_once() {
+    std::env::set_var("CIG_VM_STATS", "1");
+    let err = Buf::default();
+    let mut i = interp();
+    i.err = Box::new(err.clone());
+    let f = main_fn(
+        260,
+        vec![
+            wide_prefix(1, 0),
+            Instr::asbx(Op::LOADINT, 2, 4), // R(258) = 4
+            wide_prefix(0, 0x0001),
+            abc(Op::MOV, 0, 2, 0), // R(0) = R(258)
+            abc(Op::NEG, 1, 0, 0),
+            ret(1),
+        ],
+    );
+    run_script(&mut i, &program(&module(f))).expect("runs");
+    let text = err.text();
+    let count = |name: &str| {
+        text.lines()
+            .find_map(|l| {
+                let mut w = l.split_whitespace();
+                (w.next() == Some(name)).then(|| w.next().and_then(|c| c.parse::<u64>().ok()))
+            })
+            .flatten()
+            .unwrap_or(0)
+    };
+    let got = ["loadint", "mov", "neg", "ret"].map(|n| (n, count(n)));
+    assert_eq!(
+        got,
+        [("loadint", 1), ("mov", 1), ("neg", 1), ("ret", 1)],
+        "{text}"
+    );
+}
+
+/// Under an allocation ceiling too low for the window, the fast loop runs
+/// on the checked registers and the run ends as it does with the window;
+/// a frame over the ceiling is still refused at its entry with `E514`.
+#[test]
+#[ignore = "sets the process's allocation ceiling: run alone, by exact name"]
+fn a_ceiling_below_the_window_runs_the_checked_registers_alike() {
+    let size = std::mem::size_of::<Value>();
+    std::env::set_var("CIG_MAX_ALLOC", (100 * size).to_string());
+    assert_eq!(
+        crate::value::max_alloc(),
+        100 * size,
+        "set before first use"
+    );
+    assert_eq!(ok(&sum_loop(12, 8, 10)), "45");
+    let mut i = interp();
+    i.set_max_steps(7);
+    let e = run(&mut i, &program(&sum_loop(12, 8, 10)))
+        .err()
+        .expect("an error");
+    assert_eq!((e.code, i.steps, i.loop_depth), ("E515", 8, 0));
+    let e = err(&sum_loop(257, 253, 10));
+    assert_eq!(e.code, "E514", "{}", e.message);
+}

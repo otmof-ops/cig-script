@@ -19,7 +19,10 @@ project follows semantic versioning.
   `mandel`, 18% fewer on `deltablue`, 10% fewer on `fannkuch`, 9% fewer on
   `nbody`, 8% fewer on `dispatch`, 6% fewer on `richards` and 5% fewer on
   `sieve`, and none more. Values, errors, their positions and every step
-  budget are unchanged.
+  budget are unchanged. A `bench-stats` build's opcode table
+  (`CIG_VM_STATS=1`) now counts every instruction once: a call, a return
+  and a tail call between compiled functions were not counted at all
+  since 1.23.0.
 
 ## 1.23.0 — 2026-11-14
 

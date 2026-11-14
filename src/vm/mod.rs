@@ -1267,6 +1267,9 @@ impl Machine<'_> {
             // pc is written when it is left (at a call) or when an error
             // leaves the instruction, and the position is looked up only
             // for an error.
+            #[cfg(feature = "bench-stats")]
+            let timer =
+                matches!(d.op, Op::CALL | Op::RET | Op::TAILCALL).then(|| stats::start(d.op));
             let switched = match d.op {
                 Op::CALL => self
                     .call_here(program, proto, d, base)
@@ -1277,6 +1280,11 @@ impl Machine<'_> {
                     .map(|c| c.then_some(None)),
                 _ => Ok(None),
             };
+            // One left to the general path (`Ok(None)`) is counted there.
+            #[cfg(feature = "bench-stats")]
+            if let (Some(timer), false) = (timer, matches!(switched, Ok(None))) {
+                stats::stop(timer);
+            }
             match switched {
                 Ok(None) => {}
                 Ok(Some(Some(v))) => return Ok(Some(v)),
@@ -1348,8 +1356,13 @@ impl Machine<'_> {
         let end = base.saturating_add(REG_WINDOW);
         if self.window && self.stack.len() < end {
             // Once for each new depth a run reaches. Refused (the ceiling
-            // on the registers' memory), the checked registers serve.
-            let _ = self.grow_to(end, Span::default());
+            // on the registers' memory), the checked registers serve, and
+            // the machine stops asking: every later entry would be
+            // refused the same way, at the price of an error built and
+            // dropped each time.
+            if self.grow_to(end, Span::default()).is_err() {
+                self.window = false;
+            }
         }
         let Machine {
             interp,
@@ -1392,7 +1405,14 @@ impl Machine<'_> {
                     else {
                         return Ok(at);
                     };
-                    match fast_one(regs, interp, frame, proto, d, upvals) {
+                    #[cfg(feature = "bench-stats")]
+                    let timer = stats::start(d.op);
+                    let done = fast_one(regs, interp, frame, proto, d, upvals);
+                    #[cfg(feature = "bench-stats")]
+                    if done.is_some() {
+                        stats::stop(timer);
+                    }
+                    match done {
                         Some(Ok(next)) => pc = next,
                         Some(Err(e)) => {
                             frame.pc = at;
@@ -3047,8 +3067,11 @@ fn fast_run<R: FrameRegs + ?Sized>(
         #[cfg(feature = "bench-stats")]
         let timer = stats::start(d.op);
         let done = fast_one(regs, interp, frame, proto, d, upvals);
+        // An instruction left to the general path is counted there, once.
         #[cfg(feature = "bench-stats")]
-        stats::stop(timer);
+        if done.is_some() {
+            stats::stop(timer);
+        }
         match done {
             Some(Ok(next)) => pc = next,
             Some(Err(e)) => return Stop::Raised(pc, e),
