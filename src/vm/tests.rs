@@ -6035,3 +6035,219 @@ fn the_walkers_interpolation_is_reentered_through_calls() {
     assert!(e.is_none(), "{:?}", e.map(|e| e.message));
     assert_eq!(out, "a<b<1>>cE2d<E3>e<4><6>E5\nafter\n");
 }
+
+// ----- tries, a finally and callbacks across frames -----------------------------------------
+
+/// `pull g(n) { try { cough "boom" } finally { exhale "gf" } }`.
+fn raises_through_its_own_finally() -> BcFunction {
+    let r = RESERVED_U32;
+    let mut g = Asm::default();
+    g.try_enter(0)
+        .label("s")
+        .loadk(1, Constant::Str("boom".into()))
+        .op(Op::THROW, 1, 0, 0);
+    g.try_leave().label("e").jump(Op::JMP, 0, "end");
+    g.label("fin").exhale_str(1, "gf").try_leave();
+    g.label("end").op(Op::LOADNULL, 1, 0, 0).i(ret(1));
+    g.handler("s", "e", "fin", r, Some("fin"));
+    g.finish("g", 1, 2)
+}
+
+#[test]
+fn a_callees_try_passes_its_error_to_the_callers_catch_each_turn() {
+    let src = "pull g(n) {\n  try {\n    cough \"boom\"\n  } finally {\n    exhale \"gf\"\n  }\n}\nroll i = 0\nwhile i < 2 {\n  i = i + 1\n  try {\n    g(i)\n  } ashtray e {\n    exhale e.message\n  }\n}\nexhale \"end\"\n";
+    let mut a = Asm::default();
+    a.children.push(raises_through_its_own_finally());
+    a.i(Instr::abx(Op::CLOSURE, 0, 0))
+        .i(Instr::asbx(Op::LOADINT, 1, 0))
+        .i(steps(1, 0));
+    a.label("top")
+        .i(Instr::asbx(Op::LOADINT, 2, 2))
+        .op(Op::LT, 3, 1, 2);
+    a.jump(Op::TESTN, 3, "out").i(steps(1, 1)).addk(1, 1, 1);
+    a.try_enter(0).label("s");
+    a.op(Op::MOV, 3, 0, 0)
+        .op(Op::MOV, 4, 1, 0)
+        .op(Op::CALL, 3, 1, 0);
+    a.try_leave().label("e").jump(Op::JMP, 0, "cont");
+    a.label("catch").getfield(3, 2, "message");
+    a.op(Op::EXHALE, 3, 1, 0)
+        .try_leave()
+        .jump(Op::JMP, 0, "cont");
+    a.label("cont").jump(Op::LOOP, 0, "top");
+    a.label("out").i(steps(0, 0)).exhale_str(2, "end");
+    a.op(Op::LOADNULL, 2, 0, 0).i(ret(2));
+    a.handler("s", "e", "catch", 2, None);
+    assert_eq!(
+        agree(src, &module(a.finish("", 0, 5))),
+        "gf\nboom\ngf\nboom\nend\n"
+    );
+}
+
+#[test]
+fn a_call_in_a_finally_leaves_the_pending_error_to_the_caller() {
+    let src = "pull h() {\n  snuff 7\n}\npull g(f) {\n  try {\n    cough \"x\"\n  } finally {\n    exhale f()\n  }\n}\ntry {\n  g(h)\n} ashtray e {\n  exhale e.message\n}\nexhale \"end\"\n";
+    let r = RESERVED_U32;
+    let h = child_fn("h", 0, 1, vec![Instr::asbx(Op::LOADINT, 0, 7), ret(0)]);
+    let mut g = Asm::default();
+    g.try_enter(0)
+        .label("s")
+        .loadk(1, Constant::Str("x".into()))
+        .op(Op::THROW, 1, 0, 0);
+    g.try_leave().label("e").jump(Op::JMP, 0, "end");
+    g.label("fin")
+        .op(Op::MOV, 1, 0, 0)
+        .op(Op::CALL, 1, 0, 0)
+        .op(Op::EXHALE, 1, 1, 0)
+        .try_leave();
+    g.label("end").op(Op::LOADNULL, 1, 0, 0).i(ret(1));
+    g.handler("s", "e", "fin", r, Some("fin"));
+    let g = g.finish("g", 1, 3);
+    let mut a = Asm {
+        children: vec![h, g],
+        ..Default::default()
+    };
+    a.i(Instr::abx(Op::CLOSURE, 0, 0))
+        .i(Instr::abx(Op::CLOSURE, 1, 1));
+    a.try_enter(0).label("s");
+    a.op(Op::MOV, 2, 1, 0)
+        .op(Op::MOV, 3, 0, 0)
+        .op(Op::CALL, 2, 1, 0);
+    a.try_leave().label("e").jump(Op::JMP, 0, "after");
+    a.label("catch").getfield(3, 2, "message");
+    a.op(Op::EXHALE, 3, 1, 0).try_leave();
+    a.label("after").exhale_str(2, "end");
+    a.op(Op::LOADNULL, 2, 0, 0).i(ret(2));
+    a.handler("s", "e", "catch", 2, None);
+    assert_eq!(agree(src, &module(a.finish("", 0, 4))), "7\nx\nend\n");
+}
+
+/// `pack(x) => 10 / x`.
+fn ten_over() -> BcFunction {
+    let mut l = child_fn(
+        "",
+        1,
+        2,
+        vec![
+            Instr::asbx(Op::LOADINT, 1, 10),
+            abc(Op::DIV, 1, 1, 0),
+            ret(1),
+        ],
+    );
+    l.kind = FuncKind::Lambda;
+    l
+}
+
+/// `R(at) = [[xs[0]], [xs[1]], ..]` (nested) or `[xs[0], xs[1], ..]`.
+fn list_of(a: &mut Asm, at: u8, xs: &[i16], nested: bool) {
+    a.op(Op::NEWLIST, at, xs.len() as u8, 0);
+    for &x in xs {
+        if nested {
+            a.op(Op::NEWLIST, at + 1, 1, 0)
+                .i(Instr::asbx(Op::LOADINT, at + 2, x))
+                .op(Op::APPENDLIST, at + 1, at + 2, 0);
+        } else {
+            a.i(Instr::asbx(Op::LOADINT, at + 1, x));
+        }
+        a.op(Op::APPENDLIST, at, at + 1, 0);
+    }
+}
+
+#[test]
+fn a_callback_that_raises_leaves_the_next_callbacks_clean() {
+    // Flat: the callback raises, the caller catches, the next map reuses
+    // the kept registers.
+    let src = "roll g = pack(x) => 10 / x\ntry {\n  exhale [1, 0].map(g)\n} ashtray e {\n  exhale e.message\n}\nexhale [1, 2].map(g)\n";
+    let mut a = Asm::default();
+    let map = a.s("map") as u8;
+    a.children.push(ten_over());
+    a.i(Instr::abx(Op::CLOSURE, 0, 0));
+    a.try_enter(0).label("s");
+    list_of(&mut a, 1, &[1, 0], false);
+    a.op(Op::MOV, 2, 0, 0)
+        .op(Op::CALLM, 1, map, 1)
+        .op(Op::EXHALE, 1, 1, 0);
+    a.try_leave().label("e").jump(Op::JMP, 0, "after");
+    a.label("catch").getfield(2, 1, "message");
+    a.op(Op::EXHALE, 2, 1, 0).try_leave();
+    a.label("after");
+    list_of(&mut a, 1, &[1, 2], false);
+    a.op(Op::MOV, 2, 0, 0)
+        .op(Op::CALLM, 1, map, 1)
+        .op(Op::EXHALE, 1, 1, 0);
+    a.op(Op::LOADNULL, 1, 0, 0).i(ret(1));
+    a.handler("s", "e", "catch", 1, None);
+    let out = agree(src, &module(a.finish("", 0, 4)));
+    assert_eq!(out.lines().count(), 2, "{out}");
+
+    // Nested: a callback maps with a callback of its own, which raises.
+    let src = "roll g = pack(x) => 10 / x\ntry {\n  exhale [[1], [0]].map(pack(xs) => xs.map(g))\n} ashtray e {\n  exhale e.message\n}\nexhale [[1], [2]].map(pack(xs) => xs.map(g))\n";
+    let mut outer = Asm::default();
+    let omap = outer.s("map") as u8;
+    outer
+        .op(Op::MOV, 1, 0, 0)
+        .op(Op::GETUP, 2, 0, 0)
+        .op(Op::CALLM, 1, omap, 1)
+        .i(ret(1));
+    let mut outer = outer.finish("o", 1, 3);
+    outer.kind = FuncKind::Lambda;
+    outer.name = String::new();
+    outer.upvalues = vec![captures(UpvalKind::ParentLocal, 0)];
+    let mut a = Asm::default();
+    let map = a.s("map") as u8;
+    a.children = vec![ten_over(), outer];
+    a.i(Instr::abx(Op::CLOSURE, 0, 0))
+        .i(Instr::abx(Op::CLOSURE, 1, 1));
+    a.try_enter(0).label("s");
+    list_of(&mut a, 2, &[1, 0], true);
+    a.op(Op::MOV, 3, 1, 0)
+        .op(Op::CALLM, 2, map, 1)
+        .op(Op::EXHALE, 2, 1, 0);
+    a.try_leave().label("e").jump(Op::JMP, 0, "after");
+    a.label("catch").getfield(3, 2, "message");
+    a.op(Op::EXHALE, 3, 1, 0).try_leave();
+    a.label("after");
+    list_of(&mut a, 2, &[1, 2], true);
+    a.op(Op::MOV, 3, 1, 0)
+        .op(Op::CALLM, 2, map, 1)
+        .op(Op::EXHALE, 2, 1, 0);
+    a.op(Op::LOADNULL, 2, 0, 0).i(ret(2));
+    a.handler("s", "e", "catch", 2, None);
+    let out = agree(src, &module(a.finish("", 0, 5)));
+    assert_eq!(out.lines().count(), 2, "{out}");
+}
+
+#[test]
+fn the_depth_limit_is_caught_by_the_try_of_the_frame_that_calls() {
+    // Each level opens a try around its call: E506 is raised at the call
+    // in the deepest frame and caught there, with every outer frame's try
+    // still open on the machine's stack.
+    let src = "pull f(g, n) {\n  try {\n    snuff g(g, n + 1)\n  } ashtray e {\n    snuff n\n  }\n}\nexhale f(f, 0)\n";
+    let mut f = Asm::default();
+    f.try_enter(0).label("s");
+    f.op(Op::MOV, 2, 0, 0).op(Op::MOV, 3, 0, 0).addk(4, 1, 1);
+    f.at(span_of(src, "g(g, n + 1)"))
+        .op(Op::CALL, 2, 2, 0)
+        .try_leave();
+    f.label("e").i(ret(2));
+    f.label("catch").try_leave().i(ret(1));
+    f.handler("s", "e", "catch", 5, None);
+    let f = f.finish("f", 2, 6);
+    let mut a = Asm::default();
+    a.children.push(f);
+    a.i(Instr::abx(Op::CLOSURE, 0, 0))
+        .op(Op::MOV, 1, 0, 0)
+        .op(Op::MOV, 2, 0, 0)
+        .i(Instr::asbx(Op::LOADINT, 3, 0));
+    a.op(Op::CALL, 1, 2, 0).op(Op::EXHALE, 1, 1, 0);
+    a.op(Op::LOADNULL, 1, 0, 0).i(ret(1));
+    let m = module(a.finish("", 0, 4));
+    let out = std::thread::Builder::new()
+        .stack_size(1 << 30)
+        .spawn(move || agree(src, &m))
+        .expect("thread")
+        .join()
+        .expect("joined");
+    eprintln!("caught at {out}");
+    assert!(out.trim().parse::<u32>().is_ok_and(|n| n > 3000), "{out}");
+}
