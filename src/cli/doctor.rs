@@ -1116,7 +1116,12 @@ pub fn rediagnose(ctx: &Ctx, id: &str) -> i32 {
         .and_then(|v| v.get("file"))
         .and_then(|f| f.as_str())
         .map(str::to_string);
-    if rec.is_interrupted() {
+    // A run that stopped before its first burn has nothing to put back:
+    // it is not a run interrupted mid-burn.
+    let stopped_quiet = rec.is_interrupted()
+        && rec.burns == 0
+        && crate::burn::runs::changed_nothing_on_disk(&rec.dir());
+    if rec.is_interrupted() && !stopped_quiet {
         diag = Some(
             Diagnostic::new(
                 Kind::Burn,
@@ -1158,7 +1163,11 @@ pub fn rediagnose(ctx: &Ctx, id: &str) -> i32 {
     let Some(d) = diag else {
         outln!(
             "{}",
-            ctx.dim("finished without a diagnostic; nothing to diagnose")
+            ctx.dim(if stopped_quiet {
+                "stopped before it burned anything; nothing to put back, nothing to diagnose"
+            } else {
+                "finished without a diagnostic; nothing to diagnose"
+            })
         );
         return exit::OK;
     };

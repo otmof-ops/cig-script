@@ -296,6 +296,54 @@ impl RunRecord {
         Ok(())
     }
 
+    /// `save` without a flush: for the record of a run that has burned
+    /// nothing. Written whole and renamed into place, as `save` does, so a
+    /// process that dies never leaves a torn record; but not flushed, and
+    /// its line in the run index not flushed either. `cig runs` lists the
+    /// run as soon as this returns. The run's first burn flushes all of it
+    /// (`Journal::open_new_run`), before anything of the burn happens. A
+    /// power cut before that can lose the record, keep an older one (the
+    /// run then reads as `interrupted`), or leave it empty or torn: the run
+    /// burned nothing, and `cig runs` says so (`RunRecord::unreadable`).
+    pub fn save_unsynced(&self) -> io::Result<()> {
+        let dir = self.dir();
+        fs::create_dir_all(&dir)?;
+        let json = serde_json::to_string_pretty(self)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let tmp = dir.join("run.json.tmp");
+        fs::write(&tmp, json)?;
+        fs::rename(tmp, dir.join("run.json"))?;
+        super::runs_index::upsert_unsynced(self);
+        Ok(())
+    }
+
+    /// The record for a run folder whose `run.json` is there but cannot be
+    /// read. A folder whose journal holds no line is a run that never
+    /// burned: its record was not flushed yet when the system stopped (a
+    /// power cut, a crash of the system), since a run's first burn flushes
+    /// the record before its journal's first line. It is listed as
+    /// `interrupted`, with nothing burned, not as damage. A folder with
+    /// journal lines is `damaged`, as before: its record was durable, so
+    /// something changed it.
+    pub fn unreadable(id: &str, dir: &Path, e: &io::Error) -> Self {
+        let mut rec = Self::damaged(id, e);
+        rec.loaded_from = Some(dir.to_path_buf());
+        // Only a record that is there and does not parse is one the system
+        // may not have finished writing; a record that cannot be read for
+        // another reason (permissions, a folder in its place) is damage.
+        let unfinished = matches!(
+            e.kind(),
+            io::ErrorKind::InvalidData | io::ErrorKind::UnexpectedEof
+        );
+        if unfinished && changed_nothing_on_disk(dir) {
+            rec.status = "interrupted".to_string();
+            rec.error = Some(format!(
+                "the run burned nothing, and its record was not written to the disk before the system stopped (run.json: {e})"
+            ));
+        }
+        rec
+    }
+
     pub fn finish(&mut self, status: &str, error: Option<String>) {
         self.finished =
             Some(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
@@ -337,6 +385,26 @@ impl RunRecord {
     /// The version that wrote this record, for handing the run back to it.
     pub fn written_by(&self) -> Option<crate::update::Version> {
         crate::update::Version::parse(&self.version)
+    }
+}
+
+/// What a run folder can show of a run that changed nothing: no journal
+/// line, and no hop started (`hops/`, made and flushed before a hop that is
+/// journaled only after it runs, `reads: true`). A run that burned or
+/// started such a hop has one or the other on the disk before its effect.
+pub(crate) fn changed_nothing_on_disk(dir: &Path) -> bool {
+    journal_has_no_line(dir) && !dir.join("hops").exists()
+}
+
+/// The run's folder holds no journal line: no `journal.jsonl` and no
+/// compressed one, or a plain one with nothing but blank space in it.
+pub(crate) fn journal_has_no_line(dir: &Path) -> bool {
+    if dir.join(super::pack::JOURNAL_ZST).exists() {
+        return false;
+    }
+    match fs::read(dir.join(super::pack::JOURNAL)) {
+        Ok(bytes) => bytes.iter().all(|b| b.is_ascii_whitespace()),
+        Err(e) => e.kind() == io::ErrorKind::NotFound,
     }
 }
 
@@ -686,6 +754,84 @@ pub fn find(id_or_prefix: &str) -> io::Result<Option<RunRecord>> {
 mod tests {
     use super::*;
     use std::sync::atomic::Ordering;
+
+    #[test]
+    fn an_unreadable_record_with_no_journal_line_is_interrupted_not_damaged() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("20260101T000000-abcdef");
+        fs::create_dir_all(&dir).unwrap();
+        let e = io::Error::new(io::ErrorKind::InvalidData, "EOF while parsing");
+        // No journal at all, then an empty one: a run that never burned.
+        let r = RunRecord::unreadable("20260101T000000-abcdef", &dir, &e);
+        assert_eq!(r.status, "interrupted");
+        assert_eq!(r.burns, 0);
+        assert!(r.error.as_deref().unwrap().contains("burned nothing"));
+        fs::write(dir.join("journal.jsonl"), "").unwrap();
+        let r = RunRecord::unreadable("20260101T000000-abcdef", &dir, &e);
+        assert_eq!(r.status, "interrupted");
+        // A journal with a line: the record was durable, so it is damage.
+        fs::write(dir.join("journal.jsonl"), "{\"format\":2}\n").unwrap();
+        let r = RunRecord::unreadable("20260101T000000-abcdef", &dir, &e);
+        assert_eq!(r.status, "damaged");
+        fs::remove_file(dir.join("journal.jsonl")).unwrap();
+        fs::write(dir.join("journal.jsonl.zst"), b"x").unwrap();
+        let r = RunRecord::unreadable("20260101T000000-abcdef", &dir, &e);
+        assert_eq!(r.status, "damaged");
+        assert_eq!(r.loaded_from.as_deref(), Some(dir.as_path()));
+        // No journal line, but a hop started: not a run that changed nothing.
+        fs::remove_file(dir.join("journal.jsonl.zst")).unwrap();
+        fs::create_dir_all(dir.join("hops")).unwrap();
+        let r = RunRecord::unreadable("20260101T000000-abcdef", &dir, &e);
+        assert_eq!(r.status, "damaged");
+        fs::remove_dir(dir.join("hops")).unwrap();
+        // A record that cannot be read for another reason is damage too.
+        let denied = io::Error::new(io::ErrorKind::PermissionDenied, "denied");
+        let r = RunRecord::unreadable("20260101T000000-abcdef", &dir, &denied);
+        assert_eq!(r.status, "damaged");
+        let r = RunRecord::unreadable("20260101T000000-abcdef", &dir, &e);
+        assert_eq!(r.status, "interrupted");
+    }
+
+    /// A quiet run's index lines are written unflushed, but any other
+    /// flush of the index file (another run's first burn or end, a
+    /// compaction, `--pin`) makes them durable. A power cut that then keeps
+    /// the record written at the start leaves an index line its record did
+    /// not keep: the default table does not show it, and the full listing
+    /// reads the record.
+    #[test]
+    fn the_fast_table_does_not_believe_an_index_line_its_record_did_not_keep() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _g = crate::burn::test_env_lock();
+        let old = std::env::var_os("CIGSCRIPT_HOME");
+        std::env::set_var("CIGSCRIPT_HOME", tmp.path().join("home"));
+        let mut r = RunRecord::begin(Path::new("q.cig"), "exhale 1", &[], "run");
+        r.pid = Some(2_147_483_647);
+        r.pid_started = None;
+        r.save_unsynced().unwrap();
+        let start_bytes = fs::read(r.dir().join("run.json")).unwrap();
+        // The table believes a line its record matches.
+        let table = super::super::runs_index::list_recent(50).expect("index trusted");
+        assert_eq!(table[0].id, r.id);
+        r.finish("ok", None);
+        r.save_unsynced().unwrap();
+        // Another process's flush of the index carries this run's lines.
+        super::super::runs_index::sync_index().unwrap();
+        // The power cut keeps the start's record (the rename was lost).
+        fs::write(r.dir().join("run.json"), &start_bytes).unwrap();
+        assert!(
+            super::super::runs_index::list_recent(50).is_none(),
+            "the default table falls back to the full listing"
+        );
+        let full = super::super::runs_index::list().unwrap();
+        assert_eq!(
+            full[0].status, "interrupted",
+            "the record says it never finished"
+        );
+        match old {
+            Some(v) => std::env::set_var("CIGSCRIPT_HOME", v),
+            None => std::env::remove_var("CIGSCRIPT_HOME"),
+        }
+    }
 
     fn rec(n: usize, sha: &str, status: &str) -> RunRecord {
         let id = format!("20260101T{:06}-{:06x}", n, n);

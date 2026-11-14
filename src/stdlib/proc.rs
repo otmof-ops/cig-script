@@ -2705,6 +2705,9 @@ fn hop_run(
         if !i.burning(name, s)? {
             return Ok(None);
         }
+        // Nothing is journaled before it runs, so its record is made
+        // durable now, as a burn's would be, before the watch and the child.
+        i.kernel.before_unjournaled_hop().map_err(|d| d.at(s))?;
     } else if i.effect(name, op, s)? == Decision::Simulate {
         return Ok(None);
     }

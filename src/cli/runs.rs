@@ -38,7 +38,7 @@ pub fn runs(
         };
     }
     // The default table (#149): the newest 50 off the end of the index,
-    // no stat and no copy per run. `--all`, `--json`, an id and `--verify`
+    // one stat and no copy per run. `--all`, `--json`, an id and `--verify`
     // want every run and take the full list below, which also reconciles
     // the index when the runs folder no longer fits it.
     let (recent, total) = if id.is_none() && !verify && !show_all && !ctx.json {
@@ -2370,6 +2370,24 @@ pub fn unburn(ctx: &Ctx, id: &str, dry_run: bool, force: bool, accept_unsigned: 
         Ok(j) => j,
         Err(e) if e.kind() == std::io::ErrorKind::Unsupported || rec.status == "newer" => {
             return hand_back(ctx, &rec, &e);
+        }
+        // No journal, and a record that names no burn and no chain head: the
+        // run stopped before its first burn, which is what makes the journal
+        // and the record durable, and the system stopped before its folder
+        // reached the disk whole.
+        Err(e)
+            if e.kind() == std::io::ErrorKind::NotFound
+                && !crate::burn::pack::journal_exists(&rec.dir())
+                && crate::burn::runs::changed_nothing_on_disk(&rec.dir())
+                && rec.journal_head.is_none()
+                && rec.burns == 0
+                && rec.status != "damaged" =>
+        {
+            eprintln!(
+                "{} has no journal and its record names no burn: it stopped before its first burn; there is nothing to unburn",
+                rec.id
+            );
+            return exit::OK;
         }
         Err(e) => {
             eprintln!(

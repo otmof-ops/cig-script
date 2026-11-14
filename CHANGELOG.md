@@ -5,6 +5,23 @@ project follows semantic versioning.
 
 ## Unreleased
 
+- **A run that burns nothing flushes nothing to the disk (`docs/BURN.md`,
+  "When a run's record is durable").** A run still writes its record when it
+  starts and when it ends, and `cig runs` lists it while it runs and after;
+  what changed is when the record is made durable: at the run's first burn,
+  before anything of that burn happens, or before a `reads: true` hop starts
+  (it is journaled only after it runs), in the order the start used to flush
+  it, and not before. A run that burns nothing (a compiled hello, cigo's
+  allowed agent-hook call, `--version`) made seven `fsync`s and now makes
+  none. A run that burns is exactly as durable as before from its first burn
+  on. After a power cut or an operating-system crash, a run that burned
+  nothing may be missing from `cig runs` or listed `interrupted` with no
+  burns; a record of such a run that is empty or cut short is listed
+  `interrupted`, "burned nothing", not `damaged`; `cig unburn` of such a run
+  with no journal says there is nothing to unburn; `cig doctor <id>` of an
+  interrupted run with no burns says it stopped before it burned anything
+  instead of `E706`.
+
 ## 1.23.0 — 2026-11-14
 
 Calls at a fraction of their cost. A method is found without a scan of

@@ -215,11 +215,7 @@ pub fn list() -> io::Result<Vec<RunRecord>> {
                     rec.loaded_from = Some(dir.clone());
                     rec
                 }
-                Err(e) => {
-                    let mut rec = RunRecord::damaged(&id, &e);
-                    rec.loaded_from = Some(dir.clone());
-                    rec
-                }
+                Err(e) => RunRecord::unreadable(&id, &dir, &e),
             }
         };
         // A still-running record whose process has died flips to
@@ -326,21 +322,49 @@ fn read_index_as_map() -> io::Result<std::collections::HashMap<String, CachedEnt
 /// is compacted in place when it has grown past a cheap size heuristic
 /// (#178): `lines > 2 × live + 256`.
 pub fn upsert(rec: &RunRecord) {
+    upsert_with(rec, true);
+}
+
+/// `upsert` without the flush, for the record of a run that has burned
+/// nothing yet (`RunRecord::save_unsynced`). The line is written under the
+/// lock as every line is; it reaches the disk with the next flush of the
+/// index (`sync_index`, which the run's first burn calls) or when the
+/// system writes it back. A power cut before then can lose it or leave the
+/// file ending mid-line: both are a cache miss, and the index is rebuilt
+/// from the run folders.
+pub fn upsert_unsynced(rec: &RunRecord) {
+    upsert_with(rec, false);
+}
+
+/// Flush the index file to the disk: what an unflushed `upsert_unsynced`
+/// left is made durable. A missing index has nothing to flush.
+pub fn sync_index() -> io::Result<()> {
+    match fs::OpenOptions::new().append(true).open(path()) {
+        Ok(f) => f.sync_all(),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+fn upsert_with(rec: &RunRecord, sync: bool) {
     let dir = rec
         .loaded_from
         .clone()
         .unwrap_or_else(|| runs_dir().join(&rec.id));
     let pinned = dir.join(crate::burn::runs::PIN_FILE).exists();
     let (mtime_ns, size) = stat_run_json(&dir).unwrap_or((0, 0));
-    if let Err(e) = append(&Line::Set {
-        pinned,
-        mtime_ns,
-        size,
-        boxed: dir.join("box").exists(),
-        dir_mtime_ns: 0,
-        dir_nlink: 0,
-        rec: Box::new(rec.clone()),
-    }) {
+    if let Err(e) = append_with(
+        &Line::Set {
+            pinned,
+            mtime_ns,
+            size,
+            boxed: dir.join("box").exists(),
+            dir_mtime_ns: 0,
+            dir_nlink: 0,
+            rec: Box::new(rec.clone()),
+        },
+        sync,
+    ) {
         eprintln!("note: could not update the runs index: {e}");
     }
     let _ = compact_if_grown();
@@ -419,11 +443,12 @@ pub fn rebuild_from_folders() -> io::Result<usize> {
                 rec.loaded_from = Some(dir.clone());
                 out.push(rec);
             }
-            Err(_) => {
+            Err(e) if e.kind() == io::ErrorKind::Unsupported => {
                 let mut rec = RunRecord::damaged(&id, &io::Error::other("run.json"));
                 rec.loaded_from = Some(dir.clone());
                 out.push(rec);
             }
+            Err(e) => out.push(RunRecord::unreadable(&id, &dir, &e)),
         }
     }
     out.sort_by(|a, b| b.started.cmp(&a.started).then_with(|| b.id.cmp(&a.id)));
@@ -652,8 +677,9 @@ pub fn last_good_candidates<T>(
 
 /// The newest `n` runs straight off the end of the index (#149): the lines
 /// are read backward, the first line met for an id is its latest, a later
-/// `rm` hides the id, and only the lines kept are parsed. No stat and no
-/// copy of a record that is not shown. `None` when the index cannot stand
+/// `rm` hides the id, and only the lines kept are parsed. One `stat` of
+/// each shown run's `run.json`, to hold the row to its record, and no copy
+/// of a record that is not shown. `None` when the index cannot stand
 /// in for the folder (see `trusted_text`): the caller lists the folder,
 /// which also brings the index level.
 pub fn list_recent(n: usize) -> Option<Vec<RunRecord>> {
@@ -679,18 +705,40 @@ pub fn list_recent(n: usize) -> Option<Vec<RunRecord>> {
             break;
         }
     }
-    let mut out: Vec<RunRecord> = Vec::with_capacity(kept.len());
+    let mut out: Vec<(RunRecord, u64, u64)> = Vec::with_capacity(kept.len());
     for raw in kept {
-        let Ok(Line::Set { rec, .. }) = serde_json::from_str::<Line>(raw) else {
+        let Ok(Line::Set {
+            rec,
+            mtime_ns,
+            size,
+            ..
+        }) = serde_json::from_str::<Line>(raw)
+        else {
             return None;
         };
         let mut rec = *rec;
         rec.loaded_from = Some(runs_dir().join(&rec.id));
-        out.push(rec);
+        out.push((rec, mtime_ns, size));
     }
-    out.sort_by(|a, b| b.started.cmp(&a.started).then_with(|| b.id.cmp(&a.id)));
+    out.sort_by(|a, b| {
+        b.0.started
+            .cmp(&a.0.started)
+            .then_with(|| b.0.id.cmp(&a.0.id))
+    });
     out.truncate(n);
-    Some(out)
+    // A row is shown only as its record on the disk still is: the line
+    // was written with the record's (mtime, size), and a run's index line
+    // can reach the disk with another run's flush while its record does
+    // not (a run that burns nothing flushes neither). One `stat` per row
+    // shown; any difference, or a record that cannot be stat'ed, sends the
+    // caller to the full listing, which reads the record.
+    for (rec, mtime_ns, size) in &out {
+        let dir = rec.loaded_from.as_deref()?;
+        if *mtime_ns == 0 || stat_run_json(dir) != Some((*mtime_ns, *size)) {
+            return None;
+        }
+    }
+    Some(out.into_iter().map(|(rec, _, _)| rec).collect())
 }
 
 /// The runs flagged as possibly holding box layers, or `None` when the
@@ -722,6 +770,11 @@ pub fn boxed_runs() -> Option<Vec<String>> {
 
 /// Append one line under the exclusive index lock, fsync, release.
 fn append(line: &Line) -> io::Result<()> {
+    append_with(line, true)
+}
+
+/// `append`, with the fsync only when `sync` says.
+fn append_with(line: &Line, sync: bool) -> io::Result<()> {
     let mut line = line.clone();
     let p = path();
     let home = home_dir();
@@ -763,7 +816,9 @@ fn append(line: &Line) -> io::Result<()> {
         serde_json::to_string(&line).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     f.write_all(text.as_bytes())?;
     f.write_all(b"\n")?;
-    f.sync_all()?;
+    if sync {
+        f.sync_all()?;
+    }
     Ok(())
 }
 

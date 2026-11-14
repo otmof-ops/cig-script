@@ -591,10 +591,14 @@ fn run_source_inner(
             .unwrap_or_default());
         record.program = Some(v);
     }
+    // The record is written now, so `cig runs` lists the run while it
+    // runs, but not flushed: a run that burns nothing makes nothing
+    // durable. The first burn flushes the record, the run's folder and the
+    // index before anything else it does (`Kernel::new_run`).
     let run_dir = if args.dry_run {
         None
     } else {
-        if let Err(e) = record.save() {
+        if let Err(e) = record.save_unsynced() {
             eprintln!(
                 "{} cannot create the run record under {}: {e}",
                 ctx.red("error[E802 usage]:"),
@@ -606,7 +610,11 @@ fn run_source_inner(
         }
         Some(record.dir())
     };
-    let kernel = match Kernel::new(mode, run_dir) {
+    let kernel = match run_dir {
+        Some(dir) => Kernel::new_run(mode, dir),
+        None => Kernel::new(mode, None),
+    };
+    let kernel = match kernel {
         Ok(k) => k,
         Err(d) => {
             report(ctx, &d, Some(&name), None);
@@ -770,7 +778,17 @@ fn run_source_inner(
                 );
             }
         }
-        if let Err(e) = record.save() {
+        // A run that burned is finished durably, as it always was; one that
+        // burned nothing is finished as it began, unflushed.
+        let durable = interp.kernel.journal().record_durable();
+        let save = |r: &RunRecord| {
+            if durable {
+                r.save()
+            } else {
+                r.save_unsynced()
+            }
+        };
+        if let Err(e) = save(&record) {
             eprintln!(
                 "{} could not finish the run record: {e}",
                 ctx.yellow("warning:")
@@ -847,7 +865,7 @@ fn run_source_inner(
                     "failed_on": current.to_string(),
                     "rolled_back_ops": interp.kernel.journal().len(),
                 }));
-                let _ = record.save();
+                let _ = save(&record);
                 humidor::touch(last);
                 let argv: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
                 let fallback = match humidor::dispatch(bin, &argv) {
