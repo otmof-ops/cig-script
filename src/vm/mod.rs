@@ -24,13 +24,17 @@
 //! interpreted one through the interpreter, and the interpreter (a builtin's
 //! callback, the tree-walker) calls a compiled one through [`call_compiled`].
 //!
-//! A [`Program`] is the module decoded once, at load, into a per-pc table
-//! through [`cig_bytecode::instr::walk`] (which goes through the crate's
-//! one decoder), with each function's constants made into values and each
-//! pc's source position read from its line table. Loading also checks
-//! what the verifier cannot know: every `callb` index against the builtin
-//! catalogue, every `loadg` name against the prelude and every `burn.op`
-//! kind against the burn-op catalogue, each refused with E1050.
+//! A [`Program`] holds each function decoded once into a per-pc table
+//! (the table the verifier's rules read, through the crate's one decoder),
+//! with its constants made into values and its line rows made into
+//! positions. [`load`] does that for every function of a parsed module;
+//! [`open`], a compiled program's start, does it for the top level and
+//! leaves every other function to its first entry (`Program::ready`), so
+//! that no function runs before the verifier accepted it and no function
+//! a run does not enter is read. Loading also checks what the verifier
+//! cannot know: every `callb` index against the builtin catalogue, every
+//! `loadg` name against the prelude and every `burn.op` kind against the
+//! burn-op catalogue, each refused with E1050.
 //!
 //! Captured variables live in cells. A register can carry a cell (after
 //! `cellnew`): every read of that register reads the cell and every write
@@ -82,13 +86,14 @@ use crate::interp::{
 use crate::syntax::ast::BinOp;
 use crate::syntax::span::Span;
 use crate::value::{Builtin, FnBody, Function, Value};
-use cig_bytecode::instr::walk;
 use cig_bytecode::{
-    Constant, DecodedInstr, FuncKind, Function as BcFunction, HandlerEntry, LineEntry, Op,
-    RegionLabel, SpanBase, UpvalDesc, UpvalKind, Verified, VerifyError, RESERVED_U32,
+    decode_table, verify_function, verify_upvalues, Constant, DecodedInstr, FuncKind,
+    Function as BcFunction, HandlerEntry, LineEntry, Op, ParseError, Reader, RegionLabel, SpanBase,
+    UpvalDesc, UpvalKind, Verified, VerifyError, RESERVED_U32,
 };
 use indexmap::IndexMap;
-use std::cell::RefCell;
+use std::cell::{OnceCell, RefCell};
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 #[cfg(test)]
@@ -220,19 +225,52 @@ pub const NOT_BUILT: [Op; 0] = [];
 const RECOMPILE_HINT: &str =
     "compile it again (cigcompile build), or fetch it again from where it came from";
 
-/// A loaded module: every function decoded once, ready to run.
+/// A loaded module. Each function is verified and decoded once, the first
+/// time a run enters it (`Program::ready`, from the four places a
+/// function is entered), or every one at once by [`load`].
 pub struct Program {
     /// The module's functions in the verifier's pre-order: 0 is the top
-    /// level, so `fn<i>` in an error names `funcs[i]`.
-    funcs: Vec<Proto>,
+    /// level, so `fn<i>` in an error names `funcs[i]`. A slot is filled
+    /// when its function has been verified and loaded.
+    funcs: Funcs,
+    /// Every function's name, kind, arity and upvalues: what `closure`
+    /// reads of the function it makes, which it does not enter.
+    heads: Vec<Head>,
+    /// The module a function is read from at its first entry; `None` when
+    /// [`load`] filled every slot.
+    reader: Option<Reader>,
+    /// What a function's operands may name beyond what the verifier
+    /// checks, looked up by name.
+    known: Known,
     /// The builtin behind `pow`/`powk`: `math.pow`, the language's only
     /// power operation.
     pow: Option<&'static Builtin>,
 }
 
+/// The loaded functions, by pre-order index.
+struct Funcs(Vec<OnceCell<Proto>>);
+
+impl Funcs {
+    /// Function `i`, if it has been verified and loaded. A frame only ever
+    /// runs a function `Program::ready` loaded.
+    fn get(&self, i: usize) -> Option<&Proto> {
+        self.0.get(i).and_then(OnceCell::get)
+    }
+}
+
+/// What `closure` reads of a function: checked for every function when the
+/// module is opened (its upvalues against its parent's counts, the one
+/// verifier rule that looks across functions).
+struct Head {
+    name: String,
+    lambda: bool,
+    arity: usize,
+    /// What each upvalue captures from the function that makes the closure.
+    upvalues: Vec<UpvalDesc>,
+}
+
 /// One function of a loaded module.
 struct Proto {
-    name: String,
     /// No register of a frame of it ever carries a cell: it has no
     /// `cellnew`, the only instruction that gives a register one. Its
     /// registers are read and written without looking at `cells`.
@@ -241,16 +279,13 @@ struct Proto {
     /// position its key last had in the map, as the tree-walker keeps one
     /// per field expression.
     hints: Vec<std::cell::Cell<u32>>,
-    lambda: bool,
     reg_count: usize,
     arity: usize,
-    /// What each upvalue captures from the function that makes the closure.
-    upvalues: Vec<UpvalDesc>,
     /// The decoded instruction at each first-word pc; `None` at the second
     /// word of a `WIDE` pair, which nothing may jump to.
     code: Vec<Option<DecodedInstr>>,
     /// The source position of each pc, from the line table.
-    spans: Vec<Span>,
+    spans: Spans,
     consts: Vec<Value>,
     /// Indices into [`Program::funcs`] of this function's children.
     children: Vec<usize>,
@@ -262,6 +297,50 @@ struct Proto {
     regions: Vec<Region>,
     /// For each constant a `burn.op` names as its callee, the builtin.
     effects: Vec<Option<&'static Builtin>>,
+}
+
+/// A function's source positions: one span per line row (the function's
+/// first token before them), and for each pc the row it falls under. A
+/// span is built once per row, not once per instruction word.
+struct Spans {
+    rows: Vec<Span>,
+    at: Vec<u32>,
+}
+
+impl Spans {
+    /// The source position of every pc: its own line row, else the
+    /// nearest row before it, else the function's first token. The rows
+    /// are strictly ascending (verified).
+    fn new(base: &SpanBase, lines: &[LineEntry], n: usize) -> Spans {
+        let mut rows = Vec::with_capacity(lines.len() + 1);
+        rows.push(Span::new(
+            base.byte_offset as usize,
+            base.byte_offset as usize,
+            base.line,
+            base.col,
+        ));
+        rows.extend(lines.iter().map(|row| row_span(base, row)));
+        let mut at = Vec::with_capacity(n);
+        let mut next = lines.iter().map(|row| row.pc as usize).peekable();
+        let mut current = 0u32;
+        for pc in 0..n {
+            while next.next_if(|&p| p <= pc).is_some() {
+                current += 1;
+            }
+            at.push(current);
+        }
+        Spans { rows, at }
+    }
+
+    /// The position of `pc`; `None` past the function.
+    fn get(&self, pc: usize) -> Option<&Span> {
+        self.at.get(pc).and_then(|&r| self.rows.get(r as usize))
+    }
+
+    /// The position of the function's first instruction.
+    fn first(&self) -> Option<&Span> {
+        self.get(0)
+    }
 }
 
 /// One burn region of a function.
@@ -344,20 +423,114 @@ fn broken(what: &str, span: Span) -> Diagnostic {
     internal(format!("the VM found {what} in a verified module")).at(span)
 }
 
+/// E1050 for a module whose bytes do not read, worded as a start words it.
+fn unreadable(e: &ParseError) -> Diagnostic {
+    usage(format!("the program's bytecode does not read: {e}"))
+        .code("E1050")
+        .with_hint(RECOMPILE_HINT)
+}
+
 /// Load a verified module: decode every function once and check what the
 /// verifier leaves to the VM (E1050 for an unknown builtin or burn-op
-/// kind).
+/// kind). Every function is loaded here, so the run enters none for the
+/// first time.
 pub fn load(v: Verified<'_>) -> Result<Rc<Program>, Diagnostic> {
-    let catalogue = crate::stdlib::builtin_catalogue();
-    let names = prelude_names();
-    let known = Known {
-        builtins: catalogue.len(),
-        prelude: &names,
-    };
+    let known = Known::new();
     let mut funcs = Vec::new();
-    flatten(&v.module().main, &mut funcs, &known)?;
-    let pow = catalogue.iter().copied().find(|b| b.name == "math.pow");
-    Ok(Rc::new(Program { funcs, pow }))
+    let mut heads = Vec::new();
+    flatten(&v.module().main, &mut funcs, &mut heads, &known)?;
+    Ok(Rc::new(Program {
+        funcs: Funcs(funcs.into_iter().map(OnceCell::from).collect()),
+        heads,
+        reader: None,
+        pow: known.pow(),
+        known,
+    }))
+}
+
+/// Open a module's bytes for a run (a stage `b` program's start). What is
+/// checked here, before the first instruction: everything [`Reader::open`]
+/// checks (the header, the BLAKE3 over every byte after it, the head, the
+/// string pool, the directory's offsets and lengths, the tree and its
+/// depth); every function's name, kind, flags and upvalue descriptors, and
+/// the upvalues against the parent's registers and upvalues
+/// ([`verify_upvalues`], the one rule that looks across functions); and the
+/// top level, read, verified and loaded. Every other function is read,
+/// verified and loaded by `Program::ready` the first time it is entered,
+/// before its first instruction runs.
+pub fn open(bytes: Vec<u8>) -> Result<Rc<Program>, Diagnostic> {
+    let reader = Reader::open(bytes).map_err(|e| unreadable(&e))?;
+    let n = reader.len();
+    let mut heads = Vec::with_capacity(n);
+    for i in 0..n as u32 {
+        let h = reader.head(i).map_err(|e| unreadable(&e))?;
+        let place = reader
+            .place(i)
+            .ok_or_else(|| broken("a function outside its directory", Span::default()))?;
+        verify_upvalues(i, &h.upvalues, place.parent).map_err(|e| refusal(&e))?;
+        heads.push(Head {
+            name: h.name,
+            lambda: h.kind == FuncKind::Lambda,
+            arity: h.arity as usize,
+            upvalues: h.upvalues,
+        });
+    }
+    let known = Known::new();
+    let program = Rc::new(Program {
+        funcs: Funcs((0..n).map(|_| OnceCell::new()).collect()),
+        heads,
+        reader: Some(reader),
+        pow: known.pow(),
+        known,
+    });
+    program.ready(0, Span::default())?;
+    Ok(program)
+}
+
+impl Program {
+    /// Make function `index` ready to run: nothing when it is loaded; at
+    /// its first entry, read its body, verify it ([`verify_function`]) and
+    /// load it, before its first instruction runs. A function that does
+    /// not read or does not verify is E1050, an error of the run raised at
+    /// `span` (the call), and stays unloaded: none of its instructions
+    /// ever run.
+    #[inline]
+    fn ready(&self, index: usize, span: Span) -> Result<(), Diagnostic> {
+        match self.funcs.0.get(index) {
+            Some(slot) if slot.get().is_some() => Ok(()),
+            Some(slot) => {
+                let proto = self.first_entry(index).map_err(|d| {
+                    if span == Span::default() {
+                        d
+                    } else {
+                        d.at(span)
+                    }
+                })?;
+                // `first_entry` enters no function, so the slot is still
+                // empty here.
+                let _ = slot.set(proto);
+                Ok(())
+            }
+            None => Err(broken("no such function", span)),
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn first_entry(&self, index: usize) -> Result<Proto, Diagnostic> {
+        let Some(reader) = &self.reader else {
+            return Err(broken("a function that was not loaded", Span::default()));
+        };
+        let i = index as u32;
+        let f = reader.function(i).map_err(|e| unreadable(&e))?;
+        let place = reader
+            .place(i)
+            .ok_or_else(|| broken("a function outside its directory", Span::default()))?;
+        let v = verify_function(&f, place).map_err(|e| refusal(&e))?;
+        let children = reader.children(i).iter().map(|&c| c as usize).collect();
+        let f = v.function();
+        build(f, index, v.into_code(), children, &self.known)
+    }
 }
 
 /// The names `loadg` may load: the interpreter's prelude (its global
@@ -371,17 +544,82 @@ pub fn prelude_names() -> Vec<&'static str> {
     names
 }
 
-/// What a module's operands may name beyond what the verifier checks.
-struct Known<'a> {
+/// What a module's operands may name beyond what the verifier checks:
+/// built once per program, each name found by a lookup.
+struct Known {
     builtins: usize,
-    prelude: &'a [&'static str],
+    prelude: HashSet<&'static str>,
+    /// The builtin catalogue by name (the first of a name, as a search
+    /// from the start finds it).
+    by_name: HashMap<&'static str, &'static Builtin>,
+}
+
+impl Known {
+    fn new() -> Known {
+        let catalogue = crate::stdlib::builtin_catalogue();
+        let mut by_name = HashMap::with_capacity(catalogue.len());
+        for b in catalogue.iter().copied() {
+            by_name.entry(b.name).or_insert(b);
+        }
+        Known {
+            builtins: catalogue.len(),
+            prelude: prelude_names().into_iter().collect(),
+            by_name,
+        }
+    }
+
+    fn pow(&self) -> Option<&'static Builtin> {
+        self.by_name.get("math.pow").copied()
+    }
 }
 
 /// Append `f` and then its children, recursively, in the verifier's
 /// pre-order. The verifier bounds the nesting at 64 levels.
-fn flatten(f: &BcFunction, out: &mut Vec<Proto>, known: &Known<'_>) -> Result<usize, Diagnostic> {
+fn flatten(
+    f: &BcFunction,
+    out: &mut Vec<Proto>,
+    heads: &mut Vec<Head>,
+    known: &Known,
+) -> Result<usize, Diagnostic> {
     let index = out.len();
-    let mut code: Vec<Option<DecodedInstr>> = vec![None; f.instrs.len()];
+    let code = match decode_table(&f.instrs) {
+        Ok((_, code)) => code,
+        Err(e) => {
+            return Err(internal(format!(
+                "the VM could not decode a verified function (fn{index}): {e:?}"
+            )))
+        }
+    };
+    heads.push(Head {
+        name: f.name.clone(),
+        lambda: f.kind == FuncKind::Lambda,
+        arity: f.arity as usize,
+        upvalues: f.upvalues.clone(),
+    });
+    let proto = build(f, index, code, Vec::new(), known)?;
+    out.push(proto);
+    let mut children = Vec::with_capacity(f.children.len());
+    for c in &f.children {
+        children.push(flatten(c, out, heads, known)?);
+    }
+    if let Some(p) = out.get_mut(index) {
+        p.children = children;
+    }
+    Ok(index)
+}
+
+/// Load one verified function from its decoded table: check what the
+/// verifier leaves to the VM (every `callb` index against the builtin
+/// catalogue, every `loadg` name against the prelude, every `burn.op`
+/// kind against the burn-op catalogue, each refused with E1050) and build
+/// its constants, regions and positions.
+fn build(
+    f: &BcFunction,
+    index: usize,
+    code: Vec<Option<DecodedInstr>>,
+    children: Vec<usize>,
+    known: &Known,
+) -> Result<Proto, Diagnostic> {
     let mut effects: Vec<Option<&'static Builtin>> = vec![None; f.constants.len()];
     let mut regions = Vec::with_capacity(f.regions.len());
     for r in &f.regions {
@@ -398,19 +636,15 @@ fn flatten(f: &BcFunction, out: &mut Vec<Proto>, known: &Known<'_>) -> Result<us
             label,
         });
     }
-    for d in walk(&f.instrs) {
-        let d = d.map_err(|e| {
-            internal(format!(
-                "the VM could not decode a verified function (fn{index}): {e:?}"
-            ))
-        })?;
+    let mut plain = true;
+    for d in code.iter().flatten() {
         match d.op {
             Op::CALLB if d.b_u as usize >= known.builtins => {
                 return Err(refused("unknown-builtin", index, d.pc));
             }
             Op::LOADG => {
                 let named = match f.constants.get(d.b_u as usize) {
-                    Some(Constant::Str(s)) => known.prelude.contains(&s.as_str()),
+                    Some(Constant::Str(s)) => known.prelude.contains(s.as_str()),
                     _ => false,
                 };
                 if !named {
@@ -420,10 +654,10 @@ fn flatten(f: &BcFunction, out: &mut Vec<Proto>, known: &Known<'_>) -> Result<us
             Op::BURN_OP => {
                 let kind = if d.wide { d.c & 0xFF } else { d.c & 0x0F };
                 let callee = match f.constants.get(d.b_u as usize) {
-                    Some(Constant::Str(s)) => crate::stdlib::builtin_catalogue()
-                        .iter()
+                    Some(Constant::Str(s)) => known
+                        .by_name
+                        .get(s.as_str())
                         .copied()
-                        .find(|b| b.name == s.as_str())
                         .filter(|b| burn_op_kind(b.name) == Some(kind as usize)),
                     _ => None,
                 };
@@ -434,41 +668,26 @@ fn flatten(f: &BcFunction, out: &mut Vec<Proto>, known: &Known<'_>) -> Result<us
                     *slot = Some(callee);
                 }
             }
+            Op::CELLNEW => plain = false,
             _ => {}
         }
-        if let Some(slot) = code.get_mut(d.pc as usize) {
-            *slot = Some(d);
-        }
     }
-    let plain = !code.iter().flatten().any(|d| d.op == Op::CELLNEW);
-    let proto = Proto {
-        name: f.name.clone(),
+    Ok(Proto {
         plain,
         hints: (0..f.instrs.len())
             .map(|_| std::cell::Cell::new(0))
             .collect(),
-        lambda: f.kind == FuncKind::Lambda,
         reg_count: f.reg_count as usize,
         arity: f.arity as usize,
-        upvalues: f.upvalues.clone(),
+        spans: Spans::new(&f.span_base, &f.lines, f.instrs.len()),
         code,
-        spans: spans(&f.span_base, &f.lines, f.instrs.len()),
         consts: f.constants.iter().map(constant).collect(),
-        children: Vec::new(),
+        children,
         handlers: f.handlers.clone(),
         requires_burn: f.requires_burn,
         regions,
         effects,
-    };
-    out.push(proto);
-    let mut children = Vec::with_capacity(f.children.len());
-    for c in &f.children {
-        children.push(flatten(c, out, known)?);
-    }
-    if let Some(p) = out.get_mut(index) {
-        p.children = children;
-    }
-    Ok(index)
+    })
 }
 
 fn constant(c: &Constant) -> Value {
@@ -478,32 +697,6 @@ fn constant(c: &Constant) -> Value {
         Constant::Float(f) => Value::Float(*f),
         Constant::Str(s) => Value::str(s),
     }
-}
-
-/// The source position of every pc: its own line row, else the nearest
-/// row before it, else the function's first token. The rows are strictly
-/// ascending (verified).
-fn spans(base: &SpanBase, lines: &[LineEntry], n: usize) -> Vec<Span> {
-    let first = Span::new(
-        base.byte_offset as usize,
-        base.byte_offset as usize,
-        base.line,
-        base.col,
-    );
-    let mut out = Vec::with_capacity(n);
-    let mut rows = lines.iter().peekable();
-    let mut current = first;
-    for pc in 0..n {
-        while let Some(row) = rows.peek() {
-            if row.pc as usize > pc {
-                break;
-            }
-            current = row_span(base, row);
-            rows.next();
-        }
-        out.push(current);
-    }
-    out
 }
 
 fn row_span(base: &SpanBase, row: &LineEntry) -> Span {
@@ -571,6 +764,7 @@ pub(crate) fn call_compiled(
     args: Vec<Value>,
     span: Span,
 ) -> Result<Value, Diagnostic> {
+    cf.program.ready(cf.index, span)?;
     let proto = cf
         .program
         .funcs
@@ -592,6 +786,7 @@ fn run_frame(
     upvals: Rc<[Cell]>,
     args: Vec<Value>,
 ) -> Result<Value, Diagnostic> {
+    program.ready(index, Span::default())?;
     let proto = program
         .funcs
         .get(index)
@@ -1350,7 +1545,7 @@ impl Machine<'_> {
                     .copied()
                     .ok_or_else(|| broken("a child function past the table", span))?;
                 let target = program
-                    .funcs
+                    .heads
                     .get(child)
                     .ok_or_else(|| broken("no such function", span))?;
                 let mut upvals = Vec::with_capacity(target.upvalues.len());
@@ -1807,6 +2002,7 @@ impl Machine<'_> {
         span: Span,
     ) -> Result<(), Fault> {
         let index = cf.index;
+        program.ready(index, span)?;
         let target = program
             .funcs
             .get(index)
@@ -1861,6 +2057,7 @@ impl Machine<'_> {
         span: Span,
     ) -> Result<(), Fault> {
         let index = cf.index;
+        program.ready(index, span)?;
         let target = program
             .funcs
             .get(index)

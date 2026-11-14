@@ -379,21 +379,16 @@ fn each_kind_of_region_label_round_trips() {
 }
 
 /// The bytes of `m` with the region table's first entry at `region`
-/// (class, label kind, label) replaced, and the integrity hash redone.
-fn with_region(m: &Module, region: [u8; 6]) -> Vec<u8> {
+/// (class, label kind, two zero bytes, label) replaced, and the
+/// integrity hash redone.
+fn with_region(m: &Module, region: [u8; 8]) -> Vec<u8> {
     let mut bytes = serialize_module(m);
-    let want = {
-        let mut w = Vec::new();
-        w.extend_from_slice(&1u32.to_le_bytes());
-        w.extend_from_slice(&[0, 2]);
-        w.extend_from_slice(&3u32.to_le_bytes());
-        w
-    };
+    let want = [0u8, 2, 0, 0, 3, 0, 0, 0];
     let at = bytes
         .windows(want.len())
         .position(|w| w == want.as_slice())
         .expect("the region table");
-    bytes[at + 4..at + 10].copy_from_slice(&region);
+    bytes[at..at + 8].copy_from_slice(&region);
     let hash = blake3::hash(&bytes[40..]);
     bytes[8..40].copy_from_slice(hash.as_bytes());
     bytes
@@ -402,12 +397,12 @@ fn with_region(m: &Module, region: [u8; 6]) -> Vec<u8> {
 #[test]
 fn a_region_label_has_one_encoding() {
     let m = burns(4, &[(0, RegionLabel::Reg(3))], &[], vec![ret(0)]);
-    let ok = with_region(&m, [0, 2, 3, 0, 0, 0]);
+    let ok = with_region(&m, [0, 2, 0, 0, 3, 0, 0, 0]);
     assert_eq!(parse_module(&ok).expect("parses"), m);
     for (region, tag) in [
-        ([0, 3, 0, 0, 0, 0], 3),          // no such kind
-        ([0, 0, 0, 0, 0, 0], 0),          // none, with an index
-        ([0, 0, 0xFF, 0xFF, 0xFF, 0], 0), // none, with an index
+        ([0, 3, 0, 0, 0, 0, 0, 0], 3),          // no such kind
+        ([0, 0, 0, 0, 0, 0, 0, 0], 0),          // none, with an index
+        ([0, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0], 0), // none, with an index
     ] {
         assert_eq!(
             parse_module(&with_region(&m, region)).unwrap_err(),
@@ -417,6 +412,18 @@ fn a_region_label_has_one_encoding() {
             }
         );
     }
+    // The two bytes between the label kind and the label are zero.
+    assert_eq!(
+        parse_module(&with_region(&m, [0, 2, 1, 0, 3, 0, 0, 0])).unwrap_err(),
+        ParseError::BadPadding {
+            at: "region padding",
+            offset: ok
+                .windows(8)
+                .position(|w| w == [0, 2, 0, 0, 3, 0, 0, 0])
+                .unwrap()
+                + 2
+        }
+    );
 }
 
 // ----- the disassembler ------------------------------------------------------------

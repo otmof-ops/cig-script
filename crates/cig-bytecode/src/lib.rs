@@ -37,7 +37,8 @@ pub mod verify;
 
 pub use error::{ParseError, VerifyError};
 pub use instr::{
-    decode, first_word_pcs, wide_prefix, DecodeError, DecodedInstr, FirstWordPcs, Instr,
+    decode, decode_table, first_word_pcs, wide_prefix, DecodeError, DecodedInstr, FirstWordPcs,
+    Instr,
 };
 pub use module::{
     BurnRegion, Constant, FuncKind, Function, HandlerEntry, LineEntry, Module, RegionLabel,
@@ -45,6 +46,9 @@ pub use module::{
     MAX_REG_COUNT, RESERVED_U32,
 };
 pub use opcode::{Op, OpInfo, OperandKind};
-pub use parse::parse_module;
+pub use parse::{parse_module, FunctionHead, Reader};
 pub use serialize::serialize_module;
-pub use verify::{verify_module, Verified};
+pub use verify::{
+    verify_function, verify_module, verify_upvalues, ParentCounts, Place, Verified,
+    VerifiedFunction,
+};

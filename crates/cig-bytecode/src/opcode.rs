@@ -494,4 +494,4 @@ fn info_for(op: Op) -> OpInfo {
 }
 
 /// The highest value of the format version this crate reads and writes.
-pub const FORMAT_VERSION_LATEST: u16 = 1;
+pub const FORMAT_VERSION_LATEST: u16 = 2;

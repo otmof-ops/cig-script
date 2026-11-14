@@ -5,6 +5,53 @@ project follows semantic versioning.
 
 ## Unreleased
 
+- **A stage `b` program reads, verifies and loads a function the first time
+  it enters it** (cig-script#230, cig-compile#71; `docs/BYTECODE.md`, "How
+  the VM reads it"; `docs/PROGRAMS.md`). A start checks the whole module's
+  hash, its head, string pool, directory and tree, every function's upvalues
+  against its parent's counts, and reads, verifies and loads the top level;
+  every other function is read, verified and loaded at its first call, before
+  its first instruction runs. A function that does not verify is `E1050` at
+  that call, an error of the run, so its burns roll back; none of its
+  instructions run. Damage is still refused before anything runs (the hash
+  covers every byte), and `CIG_VALIDATE=1` verifies every function at the
+  start. A function's instructions are decoded once, for the verifier's rules
+  and the loader together; a position is kept per line row instead of per
+  instruction; prelude names and burn-op callees are found by lookup; the
+  program is not taken apart on the way out. A compiled cig-orchestrator's
+  `--version` went from 36.8 ms to 12.3 ms on the test laptop (the
+  instructions it executes from 196M to 63M; the start before its first
+  instruction from 30 ms to 7.4 ms), and its agent hook from 39.5 ms to
+  15.4 ms. New: `cig_bytecode::Reader`,
+  `verify_function`, `verify_upvalues`, `decode_table`, `vm::open`. Tests:
+  `a_function_is_verified_when_it_is_first_entered` (`tests/programs.rs`),
+  and in `crates/cig-bytecode/tests/layout.rs` the reader and the
+  per-function verifier against `parse_module` and `verify_module` on 20,000
+  mutated modules.
+
+- **The bytecode module's layout 2: a directory of functions, read in
+  place** (cig-compile#31, cig-compile#71; `docs/BYTECODE.md`, "File
+  layout"). `FORMAT_VERSION` is 2. A module is now a head, a directory with
+  one 80-byte entry per function in pre-order (its parent, its children,
+  its counts, where its body and line rows are), the bodies with
+  fixed-width tables and 4-aligned code words that are read where they
+  lie, one string pool for every name and string constant, and the line
+  rows in a trailing region as delta-coded varints that a start does not
+  need. On cigo's module this takes 2,683,051 bytes to 1,587,575 (from
+  2.9 to 1.7 times the script's size; the line rows from 1,578,456 bytes
+  to 416,618), and parsing it takes about two thirds of the time. The
+  parser checks every offset, length, count, padding byte and the tree
+  against the one place the layout gives it, each refused by name
+  (`BadOffset`, `BadPadding`, `BadVarint`, `BadTree`, and the earlier
+  kinds), and builds the module without recursion; the parsed module
+  keeps its shape, so the verifier and the VM are unchanged. A version 1
+  module is refused (no release carried it). The format is not final
+  until a release carries it. `disasm::describe_layout` prints a
+  module's regions and directory. New tests in
+  `crates/cig-bytecode/tests/layout.rs` (damage to the directory, the
+  tree, the pool, the line region and the padding, each refused by the
+  hash and, rehashed, by name; random and mutated bytes never panic).
+
 - **The bytecode VM is about twice as fast as it was** (cig-compile#31 step 9,
   #230's steps 1 to 6 in part). Over the 25 programs of `bench/compute`, run in
   process against the tree-walker, the median moved from 0.37 to about 0.7 times

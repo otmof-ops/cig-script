@@ -6,133 +6,244 @@ it, the VM core runs it, CigCompile's lowering writes it, and future
 packages can rely on the rules below without reading the crate's code.
 See otmof-ops/cig-compile#31 for the stage-B issue.
 
-The format's version is `1`. A later reader opens an earlier module; an
-earlier reader refuses a later one with `E1050`.
+The format's version is `2` (layout 2: a directory of functions read in
+place). A reader opens exactly its own version and refuses any other with
+`E1050`; see "Versioning". No release has carried the format yet.
 
 ## File layout
 
-A module file is a header followed by a payload. Everything is
-little-endian.
+A module file is a header, a head, a directory with one fixed-width
+entry per function, the function bodies, one string pool, and the line
+region. Everything is little-endian. Every offset is from the module's
+first byte, so a module that starts at an aligned address (a program's
+`bytecode` section starts at a multiple of 16) keeps its bodies aligned.
+
+```text
+0      header        40 bytes
+40     head          32 bytes
+72     directory     80 bytes per function, in pre-order
+       bodies        each a multiple of 4 bytes, back to back
+       string pool   UTF-8, every name and string constant once
+       line region   each function's line rows, delta-coded, back to back
+```
+
+Each part has exactly one place: the parser computes where each region,
+body and line stream must start and how long it must be, and refuses any
+offset or length that differs (`ParseError::BadOffset`, naming the field
+and the function). Nothing lies between the parts and nothing follows the
+line region (`ParseError::TrailingBytes`). A module is at most 4 GiB.
 
 ### Header (40 bytes)
 
 | offset | size | field | notes |
 |--------|------|-------|-------|
 | 0 | 4 | magic | ASCII `CIGB` |
-| 4 | 2 | format version | `1` in this revision |
+| 4 | 2 | format version | `2` in this revision |
 | 6 | 2 | flags | none defined; `0` in this revision |
-| 8 | 32 | integrity hash | BLAKE3-256 of the payload |
+| 8 | 32 | integrity hash | BLAKE3-256 of every byte after the header |
 
 A file whose magic is not `CIGB` is refused as not a bytecode module
-(`ParseError::BadMagic`). A file whose version is higher than the
-reader's is refused (`ParseError::BadVersion`). A file whose flags are
+(`ParseError::BadMagic`). A file whose version is not the reader's is
+refused (`ParseError::BadVersion`). A file whose flags are
 not zero is refused (`ParseError::BadFlags`): no flag is defined, so a
 set one is never ignored. A file whose integrity hash does not match
 the hash of its payload is refused (`ParseError::BadIntegrity`).
 Together these leave no byte of a module unchecked: the magic, the
 version and the flags are compared, and the hash covers itself and
-every byte after the header. A program's start relies on this and
-checks its `bytecode` section by this hash alone (`docs/PROGRAMS.md`).
+every byte after the header (the head, the directory, the bodies and
+their padding, the pool and the line region). A program's start relies
+on this and checks its `bytecode` section by this hash alone
+(`docs/PROGRAMS.md`). The hash is checked before any other byte is read.
 
 ### Payload
 
-The payload is the module's `source_name`, then its one top-level
-function. Each function is self-contained (see "Per-function tables"
-below), so a function's bytes do not depend on anything above it in
-the module.
+The payload is everything after the header. It starts with the head:
 
-1. `source_name: str` — the source file name, or empty.
-2. `main: Function` — the top-level function. All other functions live
-   under it as children.
+| offset | size | field | rule |
+|--------|------|-------|------|
+| 40 | 4 | function count `n` | at least 1; `72 + 80 × n` within the file (`BadCount`, `functions`) |
+| 44 | 4 | source name: pool offset | the source file name, or empty (a string reference, below) |
+| 48 | 4 | source name: length | |
+| 52 | 4 | bodies offset | `72 + 80 × n` |
+| 56 | 4 | pool offset | the end of the last body |
+| 60 | 4 | pool length | |
+| 64 | 4 | line region offset | pool offset + pool length |
+| 68 | 4 | line region length | line region offset + length = the file's length |
 
-The parser refuses trailing bytes (`ParseError::TrailingBytes`).
+The head holds what the regions' positions already imply, so a reader
+finds each region with one read and no sum; the parser checks every one
+of them against the layout.
 
-A `str` is a `u32` length in bytes followed by that many UTF-8 bytes.
+**The directory** follows at offset 72: one 80-byte entry per function,
+in **pre-order** (a function, then each of its children's subtrees in
+order). A function's index in the directory is its `fn<i>`, the number
+the verifier's and the loader's errors give. Function 0 is the top level.
 
-A `[T]` is a `u32` count followed by that many `T`s.
+**A string reference** is a pool offset and a length (`u32` each). It is
+refused when it runs past the pool (`ParseError::BadIndex`, naming the
+reference: `source name`, `function name` or `string constant`) or when
+it starts or ends inside a UTF-8 character (`ParseError::BadString`). The
+pool as a whole is UTF-8 (`ParseError::BadString`, `string pool`, with the
+offset of the first byte that is not). The writer stores each distinct
+string once, in the order first used: the source name, then for each
+function in directory order its name and its string constants.
+
+**The line region** holds each function's line rows, in directory order,
+back to back; a function's directory entry gives its stream's offset (from
+the line region's start), its length in bytes and its row count. A start
+that does not need a position never reads it.
 
 ### Per-function tables (self-contained)
 
-Each function carries its own:
+Each function still owns its tables, and **operand indices never cross a
+function boundary**:
 
-- `constants: [Constant]` — the function's constant pool;
-- `regions: [BurnRegion]` — the function's burn-region table;
-- `handlers: [HandlerEntry]` — try/catch/finally regions;
-- `instrs: [Instr]` — the instruction stream;
-- `span_base: SpanBase` — the function's anchor for line rows;
-- `lines: [LineEntry]` — one row per instruction pc that can fault;
-- `region_rows: [RegionRow]` — pc-range to region id (into this
-  function's `regions`);
-- `children: [Function]` — the functions this one may `CLOSURE`
-  (indices are local to this function).
+- `constants` — the function's constant pool (`LOADK`, `GETFIELD`,
+  `SETFIELD`, `CALLM`, `BURN_OP` index it);
+- `regions` — the function's burn-region table;
+- `handlers` — try/catch/finally regions;
+- `instrs` — the instruction stream;
+- `span_base` — the function's anchor for line rows;
+- `lines` — one row per instruction pc that can fault;
+- `region_rows` — pc range to region id (into this function's
+  `regions`);
+- `children` — the functions this one may `CLOSURE`: `CLOSURE A, Bx`
+  names the child at `children[Bx]`, and the table holds that child's
+  directory index.
 
-`CLOSURE A, Bx` names the child at `children[Bx]`. A constant
-reference names `constants[idx]`. A region reference names
-`regions[idx]`. **Operand indices never cross a function boundary.**
-A function's bytes therefore depend on the function alone; adding a
-constant above it does not renumber anything inside it.
+Every table but the line rows is fixed-width and lies in the function's
+body, so its `k`th entry is read at `body + table offset + k × width`
+without reading the entries before it. The text of a string constant is
+in the module's pool; a function's bytes still change only when the
+function does, apart from where its strings and its body sit.
 
-### Constant
+### Function (the directory entry, 80 bytes)
 
-A tagged union.
+| offset | size | field | rule |
+|--------|------|-------|------|
+| 0 | 4 | name: pool offset | a string reference; empty for a lambda |
+| 4 | 4 | name: length | |
+| 8 | 4 | parent | its parent's directory index; `0xFFFF_FFFF` for function 0 |
+| 12 | 1 | kind | `0` main, `1` pull, `2` lambda (`BadTag`, `function kind`) |
+| 13 | 1 | requires_burn | `0` or `1` (`BadTag`, `requires_burn`) |
+| 14 | 2 | arity | parameter count |
+| 16 | 4 | reg_count | registers in the frame |
+| 20 | 4 | body offset | from the module's start: the bodies offset for function 0, the end of the body before for each later one |
+| 24 | 4 | body length | exactly what the counts below give, rounded up to a multiple of 4 |
+| 28 | 4 | instruction count | |
+| 32 | 4 | constant count | |
+| 36 | 4 | handler count | |
+| 40 | 4 | region-row count | |
+| 44 | 4 | region count | |
+| 48 | 4 | upvalue count | |
+| 52 | 4 | child count | |
+| 56 | 4 | line rows offset | from the line region's start: 0 for function 0, the end of the stream before for each later one |
+| 60 | 4 | line rows length | bytes |
+| 64 | 4 | line row count | at most a fifth of the length (`BadCount`, `lines`): a row is at least five bytes |
+| 68 | 12 | span_base | `(byte_offset, line, col)` of the first token, three `u32` |
 
-| tag | type | body |
-|-----|------|------|
-| `1` | `Bool` | `u8` (0 or 1) |
-| `2` | `Int` | `i64` little-endian |
-| `3` | `Float` | `u64` little-endian, treated as IEEE-754 bits (NaN payload round-trips) |
-| `4` | `Str` | `str` |
+**The tree.** The parser checks, before it builds any function, that the
+directory is one tree in pre-order (`ParseError::BadTree`, naming the rule
+and the function): function 0's parent is `0xFFFF_FFFF`; every later
+function's parent is an earlier function on the path from function 0 to
+the function just before it (`parent`, `pre-order`); each function's
+children table lists exactly the functions that name it as their parent,
+in increasing order (`child`, `child order`, and `child count` when a
+function is listed by none); a child index past the directory is
+`BadIndex`, `child`. No function is deeper than 64 below function 0
+(`ParseError::TooDeep`). The parser builds the tree without recursion.
 
-A `null` constant is not needed: `LOADNULL` loads null directly.
+**The body**, at the entry's body offset (always a multiple of 4), holds
+the tables in this order, each entry at its fixed width:
 
-### BurnRegion
+| part | width | each entry |
+|------|-------|------------|
+| instructions | 4 | the instruction word (see `Instr`); first, so the code words of a body are 4-aligned and read where they lie |
+| constant values | 8 | by the constant's tag: `Bool` 0 or 1, `Int` an `i64`, `Float` the `f64`'s bits, `Str` a string reference (pool offset in the low 32 bits, length in the high 32) |
+| handlers | 20 | `(u32 pc_start, u32 pc_end, u32 handler_pc, u32 catch_reg, u32 finally_pc)` |
+| region rows | 12 | `(u32 pc_start, u32 pc_end, u32 region)` |
+| children | 4 | the child's directory index |
+| regions | 8 | `(u8 class, u8 label kind, two zero bytes, u32 label)` |
+| upvalues | 4 | `(u8 kind, a zero byte, u16 index)` |
+| constant tags | 1 | `1` Bool, `2` Int, `3` Float, `4` Str |
+| padding | 0 to 3 | zero bytes, to a multiple of 4 |
 
-| field | type | notes |
-|-------|------|-------|
-| class | `u8` | `0` = normal, `1` = unlit |
-| label kind | `u8` | `0` = none, `1` = a string constant, `2` = a register |
-| label | `u32` | kind `1`: a constant index into this function's pool; kind `2`: a register of the frame, read when `burn.enter` runs; kind `0`: `0xFFFF_FFFF` |
+Every reserved byte and every padding byte is zero (`ParseError::BadPadding`,
+naming it). A constant tag outside 1 to 4 is `BadTag`, `constant`; a
+`Bool` value other than 0 or 1 is `BadTag`, `bool`.
 
-Six bytes an entry. A label of kind `0` with any other `label`, or an
-unknown kind, is refused by the parser (`ParseError::BadTag`, `region
-label kind`): each label has one encoding.
+**Line rows.** Each row is five LEB128 numbers (seven bits a byte, low
+bits first, the top bit set on every byte but the last; at most five
+bytes, in the shortest form):
 
-### Function
+1. `pc`, as a zigzag delta from the row before (0, -1, 1, -2 ... written
+   as 0, 1, 2, 3 ...);
+2. `span_off`, as a zigzag delta from the row before;
+3. `span_len`, as it is;
+4. `line_off`, as a zigzag delta from the row before;
+5. `col`, as it is.
 
-| field | type | notes |
-|-------|------|-------|
-| name | `str` | pretty name, empty for lambdas |
-| kind | `u8` | `0` main, `1` pull, `2` lambda |
-| reg_count | `u32` | number of registers in the frame |
-| arity | `u16` | parameter count |
-| requires_burn | `u8` | `0` or `1` |
-| upvalues | `[Upvalue]` | u16-count prefix |
-| constants | `[Constant]` | u32-count prefix |
-| regions | `[BurnRegion]` | u32-count prefix |
-| handlers | `[Handler]` | u32-count prefix |
-| instrs | `[Instr]` | u32-count prefix, each 32 bits |
-| span_base | 3 × `u32` | `(byte_offset, line, col)` of the first token |
-| lines | `[LineEntry]` | u32-count prefix |
-| region_rows | `[RegionRow]` | u32-count prefix |
-| children | `[Function]` | u32-count prefix; recursive |
+The first row's deltas are from zero. A number longer than five bytes,
+not in its shortest form, or whose field leaves `0..=u32::MAX`, is
+`ParseError::BadVarint`, naming the function and the offset. A stream must
+hold exactly its row count in exactly its length (`Truncated`, `line
+rows`, or `BadOffset`, `line rows length`).
 
-An `Upvalue` is `(u8 kind, u16 index)` where `kind` is `0`
-parent-local (parent's register) or `1` parent-upvalue (parent's
-upvalue).
+### What the fields mean
 
-A `Handler` is `(u32 pc_start, u32 pc_end, u32 handler_pc,
-u32 catch_reg, u32 finally_pc)`. `catch_reg` and `finally_pc` are
-`0xFFFF_FFFF` when absent. Every `pc` field must be a first-word pc
-(see Instructions below).
+- **Constants** are of four kinds; a float's bits are stored, so a NaN
+  payload round-trips. A `null` constant is not needed: `LOADNULL` loads
+  null directly. Rich values (lists, maps, closures) are built by
+  instructions.
+- **A burn region**: class `0` normal, `1` unlit; label kind `0` none
+  (its label must be `0xFFFF_FFFF`), `1` a string constant of this
+  function's pool (the label is its index), `2` a register of the frame,
+  read when `burn.enter` runs. A label of kind `0` with any other label,
+  or an unknown kind, is refused (`ParseError::BadTag`, `region label
+  kind`): each label has one encoding. A class above 1 is `BadTag`,
+  `region class`.
+- **An upvalue**: kind `0` parent-local (the index is a register of the
+  parent) or `1` parent-upvalue (an upvalue of the parent); any other kind
+  is `BadTag`, `upvalue kind`.
+- **A handler**: `catch_reg` and `finally_pc` are `0xFFFF_FFFF` when
+  absent. Every `pc` field must be a first-word pc (see Instructions
+  below).
+- **A line row**: at `pc` the running instruction came from the span
+  starting `span_off` bytes after `span_base.byte_offset`, `span_len`
+  bytes long, `line_off` lines below `span_base.line` (0 = same line), at
+  1-based column `col` (absolute, since columns reset).
+- **A region row**: every pc in `pc_start..pc_end` (half-open) belongs to
+  region `region` of this function, or to none when `region` is
+  `0xFFFF_FFFF`.
 
-A `LineEntry` is `(u32 pc, u32 span_off, u32 span_len, u32 line_off,
-u32 col)` where `span_off` is bytes from `span_base.byte_offset`,
-`line_off` is lines down from `span_base.line` (0 = same line) and
-`col` is 1-based (absolute, since columns reset).
+### Why these choices
 
-A `RegionRow` is `(u32 pc_start, u32 pc_end, u32 region)`. `region`
-is an index into this function's `regions`, or `0xFFFF_FFFF` to mark
-a pc range as outside every burn.
+- **A directory of fixed-width entries.** A loader finds any function's
+  body, its counts and its parent with one read at `72 + 80 × i`, without
+  parsing the functions before it. 80 bytes keep every field a plain
+  `u32` (or smaller, at its natural alignment); on a module of a thousand
+  functions the directory is 80 KB, under 6% of the bytes.
+- **Pre-order, with both the parent and the children table.** Pre-order
+  is the numbering the verifier and the loader already use (`fn<i>`). The
+  parent lets the verifier check a function's upvalues against its parent
+  without the parent's body; the children table turns `CLOSURE A, Bx` into
+  a directory index in one read. Both are stored and checked against each
+  other, so neither can disagree with the tree.
+- **4-byte alignment, instructions first.** A body starts at a multiple of
+  4 and its first table is the code words, so they are read where they lie
+  (`u32::from_le_bytes`, no `unsafe`, no copy into a staging buffer). The
+  8-byte constant values are read the same way at a 4-byte alignment.
+- **Constant values in 8 bytes, tags apart.** Every constant is read at
+  `k × 8` without decoding the ones before it; the one-byte tags sit after
+  the other tables so they cost no alignment padding.
+- **One string pool.** A string used in many functions (a key, a builtin
+  name) is stored once: on cigo, 16,619 string constants and 1,016 names
+  hold 7,946 distinct strings.
+- **Line rows in a region of their own, delta-coded.** The line table was
+  more than half of a module's bytes, and a run only reads it to place an
+  error. Most rows sit on the same line as the row before and a few bytes
+  after it, so deltas take one byte where `u32`s took four. A start never
+  has to touch the region.
 
 ### Instr
 
@@ -314,10 +425,15 @@ first-word pc.
 
 ## The verifier's rules
 
-The verifier runs on every module before the VM executes it. It
-returns the first failing rule as a `VerifyError`; the VM wraps the
-result as `E1050` with the text
-`the program's bytecode does not verify: <rule> at fn<i>+<pc>`.
+The verifier runs on every function before the VM executes any of its
+instructions: on the whole module at once (`verify_module`), or on one
+function at its place in the module (`verify_function`, with the counts
+it needs from its parent and its children taken from the directory; "How
+the VM reads it" says when a run does which). It returns the first
+failing rule as a `VerifyError`; the VM wraps the result as `E1050` with
+the text `the program's bytecode does not verify: <rule> at fn<i>+<pc>`.
+Each function's rules read one decode of its instructions, which the VM
+loads from.
 
 The rules (one bullet per `VerifyError` variant, matched by its
 `rule()` method):
@@ -477,8 +593,8 @@ refuses the module (or the call) with the interpreter's own error.
   `reg_count` greater than **65 536** (the widest register index is
   16 bits with a `WIDE` prefix), and refuses a module whose function
   nesting exceeds **64** levels. The parser enforces the same
-  nesting limit on the wire; a recursive reader would otherwise
-  overflow the stack.
+  nesting limit on the directory's parents (the parser does not
+  recurse, but the verifier, the VM and a module's drop walk the tree).
 - **Upvalue captures.** Every `UpvalDesc` in a child function is
   checked against the direct parent: a parent-local capture must
   index inside the parent's `reg_count`, a parent-upvalue capture
@@ -490,11 +606,42 @@ refuses the module (or the call) with the interpreter's own error.
 The VM core (`src/vm/`) settles these points the tables above leave
 open. A lowering writes to them.
 
-- **Only a verified module runs.** `verify_module` returns a
-  `Verified`, which nothing else can make, and `vm::load` takes only
-  that. `vm::refusal` words a `VerifyError` as the `E1050` above.
-- **Load-time checks.** Every function is decoded once, through
-  `crate::instr::decode`, into a table by pc. A `callb` index past the
+- **Only verified code runs: each function is verified before its
+  first instruction runs.** `verify_module` returns a `Verified` and
+  `verify_function` a `VerifiedFunction`, which nothing else can make;
+  `vm::load` takes only the first, and the VM loads a function only from
+  the second. `vm::refusal` words a `VerifyError` as the `E1050` above.
+- **When.** `vm::load` verifies and loads every function of a parsed
+  module before anything runs. A compiled program's start opens its
+  module with `vm::open` instead, which reads only what the start needs:
+  - at the start, before the first instruction: the header, the BLAKE3
+    over every byte after it, the head, the string pool (UTF-8 as a
+    whole), every directory entry's offsets and lengths, the tree and its
+    depth (`cig_bytecode::Reader::open`); every function's name, kind,
+    flags and upvalue descriptors, and its upvalues against its parent's
+    registers and upvalues (`verify_upvalues`: the one rule that reads
+    another function, checked for every function); and the top level,
+    read, verified and loaded;
+  - every other function the first time a run enters it (a call, a tail
+    call, a callback from a builtin), before its first instruction: its
+    body and line rows read with every check the parser makes of them,
+    every verifier rule at its place, then the load-time checks below.
+    A function that fails is `E1050` (`does not verify: <rule> at
+    fn<i>+<pc>`, or `does not read: <what>`), raised at the call as an
+    error of the run, so the run's burns roll back; it stays unloaded,
+    and none of its instructions ever run. `closure` makes a closure
+    without entering its function: it reads only the head checked at the
+    start;
+  - `CIG_VALIDATE=1` parses the whole module and verifies and loads every
+    function at the start, as `vm::load` does: a module any function of
+    which fails is refused before anything runs.
+
+  Damage is never deferred: the start checks the hash over every byte of
+  the module, so a changed byte anywhere is refused before the first
+  instruction. Only a module whose hash was recomputed after a change can
+  reach a refusal at a first call.
+- **Load-time checks.** Each function is decoded once, through
+  `crate::instr::decode`, into a table by pc (the verifier's table). A `callb` index past the
   builtin catalogue refuses the module with `E1050` (`unknown-builtin
   at fn<i>+<pc>`), and so do a `loadg` name the prelude does not have
   (`unknown-prelude-name`), a `burn.op` whose callee is not a builtin of
@@ -506,7 +653,8 @@ open. A lowering writes to them.
   the program was compiled against.
 - **Positions.** An error at a pc takes its position from the line
   row at that pc; a pc with no row takes the nearest row before it,
-  and a pc before every row takes `span_base`. A lowering gives a row
+  and a pc before every row takes `span_base`. The VM builds one
+  position per row, not one per instruction. A lowering gives a row
   to every pc whose error the interpreter positions differently from
   the instruction before it.
 - **The step budget.** `steps A, Bx` sets the frame's loop nesting to
@@ -778,13 +926,20 @@ open. A lowering writes to them.
 
 ## Versioning
 
-The format version lives in the file's header. The rule is simple:
+The format version lives in the file's header, and a program's section
+table carries it as the `bytecode` section's version.
 
-- The field increments only on a change that an earlier reader could
-  not interpret correctly.
-- A later reader opens an earlier module.
-- An earlier reader refuses a later one with `BadVersion`, surfaced
-  as `E1050`.
+- The field increments on any change to the layout or to what a field
+  means.
+- A reader opens exactly its own version and refuses every other with
+  `BadVersion`, surfaced as `E1050`. A program only runs on the cig that
+  wrote it, so a reader keeps no code for an earlier version.
+- Version 1 (each function nested inside its parent, its tables
+  count-prefixed, its strings inline and its line rows as five `u32` each)
+  was never carried by a release; this reader refuses it.
+- **The format is not final until a release carries it.** Until then a
+  change to it does not bump the version again; after the first release
+  that carries version 2, every change does.
 
 ## What is fixed, what the VM decides
 
@@ -794,9 +949,10 @@ The format version lives in the file's header. The rule is simple:
 - the instruction word is 4 bytes, little-endian, bit layout
   `op/A/B/C` or `op/A/Bx`;
 - the opcode table, including the discriminants, in `src/opcode.rs`;
-- the module layout (`source_name` + `main`), each function
-  self-contained with its own constants, children, regions,
-  handlers, instrs, span_base, lines and region_rows;
+- the module layout (header, head, directory in pre-order, bodies,
+  string pool, line region), each function with its own constants,
+  children, regions, handlers, instrs, span_base, lines and
+  region_rows, so an operand index never crosses a function;
 - every verifier rule named above;
 - one decoder (`crate::instr::decode`): no instruction is ever
   decoded any other way.
