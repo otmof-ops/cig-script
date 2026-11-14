@@ -20311,7 +20311,13 @@ fn a_run_that_burns_flushes_its_record_before_its_first_burn_in_the_old_order() 
         "one.cig",
         "burn {\n  fs.write_text(\"out.txt\", \"one\\n\")\n}\n",
     );
-    let Some(lines) = strace_run(&sb, "one.cig", "fsync,fdatasync,openat,rename,renameat2") else {
+    // `open` beside `openat`: a musl build opens a file with the older call
+    // where there is one (`?`: strace leaves it out where there is not).
+    let Some(lines) = strace_run(
+        &sb,
+        "one.cig",
+        "fsync,fdatasync,?open,openat,rename,renameat2",
+    ) else {
         return;
     };
     let runs = sb.runs();
@@ -20322,7 +20328,11 @@ fn a_run_that_burns_flushes_its_record_before_its_first_burn_in_the_old_order() 
     // The burn's effect: the file opened to be written.
     let effect = lines
         .iter()
-        .position(|l| l.contains("openat(") && l.contains("out.txt\"") && l.contains("O_CREAT"))
+        .position(|l| {
+            (l.contains("openat(") || l.contains(" open("))
+                && l.contains("out.txt\"")
+                && l.contains("O_CREAT")
+        })
         .unwrap_or_else(|| panic!("the burn's write was not traced:\n{}", lines.join("\n")));
     let before: Vec<String> = lines[..effect]
         .iter()
