@@ -1,6 +1,6 @@
 # Standard library reference
 
-Generated from `cig --json language` (CigScript 1.23.0) by `scripts/gen-stdlib-doc.py`. Do not edit by hand.
+Generated from `cig --json language` (CigScript 1.24.0) by `scripts/gen-stdlib-doc.py`. Do not edit by hand.
 
 Functions marked **burn** change the world and can only be called inside a `burn { }` block. `read` functions look at the world without changing it; `pure` functions touch nothing.
 
