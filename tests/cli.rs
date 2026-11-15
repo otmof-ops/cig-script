@@ -6083,10 +6083,8 @@ tagged('plain', open(real).read())
 
 /// `pass_reads:` gives the real file to one program and the decoy to
 /// every other process, each in the event log with the matching code.
-/// Two distinct binaries are copied into the sandbox so the test holds
-/// on merged-usr distros (where `/bin/cat` and `/usr/bin/cat` share one
-/// inode) and on Alpine (where `cat`, `head` and `sh` are all applets
-/// of busybox). `pass_reads` names the allowed program by the copy's
+/// Two programs of their own are copied into the sandbox (`two_readers`
+/// finds them), and `pass_reads` names the allowed one by its copy's
 /// absolute path.
 #[cfg(target_os = "linux")]
 #[test]
@@ -6095,47 +6093,24 @@ fn a_passed_read_reaches_only_its_program() {
         eprintln!("no SECCOMP_ADDFD_FLAG_SEND here (needs Linux 5.14+); skipped");
         return;
     }
-    let cat_src = which("cat").unwrap_or("/bin/cat".to_string());
-    let head_src = which("head").unwrap_or("/usr/bin/head".to_string());
     let sb = Sandbox::new();
     sb.write("p/keep.txt", "v1\n");
     let home = sb.path().to_path_buf();
     let rc = home.join(".npmrc");
     fs::write(&rc, b"//registry.npmjs.org/:_authToken=REAL-ONLY-FOR-NPM\n").unwrap();
-    // Copy two distinct binaries into the sandbox. A merged-usr
-    // `/bin/cat` symlink to `/usr/bin/cat` canonicalises to one file
-    // the `pass_reads` matcher sees as both; on Alpine `cat` and `head`
-    // both canonicalise to `busybox` and the matcher refuses it. The
-    // copy defeats both.
-    let allowed = sb.path().join("bin/allowed_reader");
-    let denied = sb.path().join("bin/denied_reader");
-    fs::create_dir_all(sb.path().join("bin")).unwrap();
-    let canon_cat = fs::canonicalize(&cat_src).unwrap_or_else(|_| cat_src.clone().into());
-    let canon_head = fs::canonicalize(&head_src).unwrap_or_else(|_| head_src.clone().into());
-    if canon_cat == canon_head
-        || canon_cat.file_name().and_then(|n| n.to_str()) == Some("busybox")
-        || canon_head.file_name().and_then(|n| n.to_str()) == Some("busybox")
-    {
-        eprintln!("cat and head share one binary here (merged-usr or busybox); skipped");
+    let bin = sb.path().join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    let Some([(allowed_s, allowed_args), (denied_s, denied_args)]) = two_readers(&bin) else {
+        eprintln!("no two programs here that still print a file as copies of their own; skipped");
         return;
-    }
-    fs::copy(&canon_cat, &allowed).unwrap();
-    fs::copy(&canon_head, &denied).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&allowed, fs::Permissions::from_mode(0o755)).unwrap();
-        fs::set_permissions(&denied, fs::Permissions::from_mode(0o755)).unwrap();
-    }
-    let allowed_s = allowed.to_string_lossy().into_owned();
-    let denied_s = denied.to_string_lossy().into_owned();
+    };
     sb.write(
         "p/probe.sh",
         &format!(
             "echo '== via allowed =='\n\
-             {allowed_s} \"$HOME/.npmrc\" 2>&1 || echo refused\n\
+             {allowed_s} {allowed_args} \"$HOME/.npmrc\" 2>&1 || echo refused\n\
              echo '== via denied =='\n\
-             {denied_s} -n1 \"$HOME/.npmrc\" 2>&1 || echo refused\n"
+             {denied_s} {denied_args} \"$HOME/.npmrc\" 2>&1 || echo refused\n"
         ),
     );
     sb.write(
@@ -6198,6 +6173,90 @@ fn which(name: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// Two programs that print a file, each a copy in `dir` under a name of
+/// its own (`allowed_reader`, then `denied_reader`), with what each takes
+/// before the file: for a test that needs one program allowed and
+/// another not.
+///
+/// `cat` and `head` are not two programs everywhere. On a merged-usr
+/// system `/bin/cat` and `/usr/bin/cat` are one file; on Alpine `cat`,
+/// `head` and `sh` are applets of busybox; on Ubuntu 26.04 the coreutils
+/// are one multicall binary. A copy of such a binary under another name
+/// is not `cat` any more (it picks its applet by the name it is run
+/// under), and `pass_reads` refuses a multicall binary by name anyway. So
+/// nothing is assumed: each candidate is copied, its copy is run on a
+/// file, and the first two that print it and are not one file are taken.
+/// `None` where fewer than two do.
+#[cfg(target_os = "linux")]
+fn two_readers(dir: &Path) -> Option<[(String, &'static str); 2]> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    // A program on PATH, and what it takes before a file to print it.
+    const CANDIDATES: [(&str, &str); 6] = [
+        ("cat", ""),
+        ("head", "-n1"),
+        ("sed", "-n p"),
+        ("grep", "-e ."),
+        ("awk", "1"),
+        ("tail", "-n1"),
+    ];
+    const ROLES: [&str; 2] = ["allowed_reader", "denied_reader"];
+    let sample = dir.join("sample.txt");
+    fs::write(&sample, "a line to print\n").ok()?;
+    let mut taken: Vec<(String, &'static str)> = Vec::new();
+    let mut files: Vec<(u64, u64)> = Vec::new();
+    for (name, args) in CANDIDATES {
+        let Some(real) = which(name).and_then(|p| fs::canonicalize(p).ok()) else {
+            continue;
+        };
+        let Ok(meta) = fs::metadata(&real) else {
+            continue;
+        };
+        let file = (meta.dev(), meta.ino());
+        if files.contains(&file) {
+            continue; // one file with a program already taken
+        }
+        let copy = dir.join(ROLES[taken.len()]);
+        let copied = fs::copy(&real, &copy).is_ok()
+            && fs::set_permissions(&copy, fs::Permissions::from_mode(0o755)).is_ok();
+        if !(copied && prints_a_file(&copy, args, &sample)) {
+            let _ = fs::remove_file(&copy);
+            continue;
+        }
+        files.push(file);
+        taken.push((copy.to_string_lossy().into_owned(), args));
+        if taken.len() == ROLES.len() {
+            let denied = taken.pop()?;
+            let allowed = taken.pop()?;
+            return Some([allowed, denied]);
+        }
+    }
+    None
+}
+
+/// Does `program args.. file` print the file? A program just written can
+/// be busy for a moment (another thread's child still holds the copy's
+/// descriptor until its own `exec`), so that one error is tried again.
+#[cfg(target_os = "linux")]
+fn prints_a_file(program: &Path, args: &str, file: &Path) -> bool {
+    for _ in 0..50 {
+        match Command::new(program)
+            .args(args.split_whitespace())
+            .arg(file)
+            .output()
+        {
+            Ok(o) => {
+                return o.status.success()
+                    && String::from_utf8_lossy(&o.stdout).contains("a line to print");
+            }
+            Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(_) => return false,
+        }
+    }
+    false
 }
 
 /// `network: "registry"`: the proxy lets `allow_hosts` through and
