@@ -15,6 +15,9 @@ Each file has one entry per design point, in four parts:
   numbers, or that it has not been tried yet;
 - the pinned tag and the files read.
 
+A study that reads a whole source tree also has an entry for each of its
+files: what the file is, and cig's verdict on it.
+
 ## The rules every study follows
 
 1. **Read the design, reimplement it in cig's terms, never paste code.**
@@ -53,3 +56,4 @@ to the source and the comparator it was measured against.
 | file | language | studied for |
 |---|---|---|
 | [lua.md](lua.md) | Lua 5.4 (and LuaJIT 2.1 for contrast) | #235 |
+| [luajit.md](luajit.md) | LuaJIT 2.1: the interpreter, the trace compiler, and every file of its `src/` | #243, Part 1 |
