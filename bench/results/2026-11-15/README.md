@@ -11,6 +11,8 @@ The raw data behind [`docs/BENCHMARKS-2026-11-15.md`](../../../docs/BENCHMARKS-2
 | `numbers.json` | every number, as `report.py` made it |
 | `paper.md.in`, `readme.md.in` | the templates of the paper and of the README's section |
 
+`inputs.tsv` holds the sha256 of each file as it ran. Two references' comments were reworded after the run, their code unchanged: `ref/nbody.js` and `ref/spectral.js` now say that JavaScript's `Math.round` takes no number of places (they said JavaScript has no rounding to a number of places, which `toFixed` does).
+
 Every number in the paper and the README section is made from `pass1/` and `pass2/` and checked by a second program written apart from the first:
 
 ```sh

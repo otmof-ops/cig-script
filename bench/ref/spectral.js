@@ -42,5 +42,5 @@ for (let i = 0; i < n; i++) {
   vbv += u[i] * v[i];
   vv += v[i] * v[i];
 }
-// math.round(x, 9): JavaScript has no rounding to a number of places.
+// math.round(x, 9): JavaScript's Math.round takes no number of places.
 console.log(Math.round(Math.sqrt(vbv / vv) * 1e9) / 1e9);

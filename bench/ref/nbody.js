@@ -62,7 +62,7 @@ for (const b of bodies) {
 bodies[0].vx = -px / SM;
 bodies[0].vy = -py / SM;
 bodies[0].vz = -pz / SM;
-// math.round(x, 9): JavaScript has no rounding to a number of places.
+// math.round(x, 9): JavaScript's Math.round takes no number of places.
 const round9 = (x) => Math.round(x * 1e9) / 1e9;
 console.log(round9(energy()));
 for (let s = 0; s < 20000; s++) {

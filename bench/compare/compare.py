@@ -31,8 +31,9 @@ How a number is made:
    checked run before the rounds, not timed.
 4. In each round every pair runs once, all pairs in an order drawn at random
    from a seeded generator (the seed is in `conditions.txt`), so a machine that
-   drifts, and cig's run history, which grows as cig runs, fall on every
-   program and every side alike.
+   drifts falls on every program and every side alike, and cig's run history,
+   which grows as cig runs and slows only cig's sides, falls on each of their
+   programs alike.
 5. Every sample is kept (`samples.tsv`, with the CPU time the process and its
    children used). The tables are made from that file by `report.py` and
    recomputed by `check.py`; none is written by hand.

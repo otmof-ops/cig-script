@@ -254,7 +254,7 @@ chain analysis: step 5/5 report ok (1 ms)
 
 ## How fast it is
 
-The same 25 programs written in CigScript, Lua, Python, JavaScript and Rust, timed side by side on one machine, every run's output checked. Every number here is made from the run's raw samples by a script and made again by a second one written apart from it ([the paper](docs/BENCHMARKS-2026-11-15.md)). A cell is cig's time divided by the other's over the 21 compute programs, so under 1 means cig is faster; in brackets, how many programs cig was faster, level and slower on:
+The 25 programs of `bench/compute`, written in CigScript and again in Python (all 25), JavaScript (24), Lua (21) and Rust (8), timed side by side on one machine, every run's output checked. Every number here is made from the run's raw samples by a script and made again by a second one written apart from it ([the paper](docs/BENCHMARKS-2026-11-15.md)). A cell is the geometric mean, over the compute programs both have (21 at most), of cig's median time divided by the other's, so under 1 means cig is faster; in brackets, how many of those programs cig was faster, level and slower on:
 
 | time ÷ theirs | Lua | LuaJIT `-joff` | LuaJIT | CPython | Node | Rust |
 |---|---:|---:|---:|---:|---:|---:|
@@ -265,8 +265,8 @@ The same 25 programs written in CigScript, Lua, Python, JavaScript and Rust, tim
 The rows: `cig run` is cig's interpreter; stage a and stage b are programs [cigcompile](https://github.com/otmof-ops/cig-compile) builds from the same script, the script on that interpreter and its bytecode on cig's VM.
 
 - **Compiled** with `cigcompile build --stage b`, which runs a script on cig's VM, cig takes 0.82 of CPython 3.13's time and 0.84 of Node 22's, and 0.52 of `cig run`'s own.
-- **It starts fast**: `hello` takes 5.8 ms with `cig run` and 3.7 ms compiled, against 13.5 ms for CPython and 27.2 ms for Node.
-- **Lua and LuaJIT are faster still**: a compiled cig program takes 1.97 times Lua 5.4's time and 5.20 times LuaJIT's. The VM work after them is [#243](https://github.com/otmof-ops/cig-script/issues/243).
+- **It starts faster than CPython and Node**: `hello` takes 5.8 ms with `cig run` and 3.7 ms compiled, against 13.5 ms for CPython and 27.2 ms for Node.
+- **Lua and LuaJIT are faster still**: a stage b program takes 1.97 times Lua 5.4's time and 5.20 times LuaJIT's. The VM work after them is [#243](https://github.com/otmof-ops/cig-script/issues/243).
 
 Whole processes, start-up included, on a 2018 laptop on battery. cig's times include a start-up cost that grows with its run history, which this run found ([#252](https://github.com/otmof-ops/cig-script/issues/252)).
 
