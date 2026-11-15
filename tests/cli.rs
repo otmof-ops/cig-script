@@ -22,6 +22,23 @@ fn cig_bin() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_cig")))
 }
 
+/// The static x86_64 build takes `memcpy` and `memmove` from
+/// `crates/cig-copy`: `build.rs` has the linker wrap the two names for the
+/// binary. The routines are in it, by the names the linker calls them by.
+#[cfg(all(target_arch = "x86_64", target_env = "musl"))]
+#[test]
+fn the_static_build_copies_with_its_own_routines() {
+    let bin = fs::read(env!("CARGO_BIN_EXE_cig")).unwrap();
+    for name in ["__wrap_memcpy", "__wrap_memmove"] {
+        let name = name.as_bytes();
+        assert!(
+            bin.windows(name.len()).any(|w| w == name),
+            "{} is not in the binary",
+            String::from_utf8_lossy(name)
+        );
+    }
+}
+
 struct Sandbox {
     dir: tempfile::TempDir,
 }

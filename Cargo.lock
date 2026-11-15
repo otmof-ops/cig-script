@@ -438,6 +438,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "cig-copy"
+version = "0.1.0"
+
+[[package]]
 name = "cig-pass"
 version = "0.1.0"
 dependencies = [
@@ -476,6 +480,7 @@ dependencies = [
  "chacha20poly1305",
  "chrono",
  "cig-bytecode",
+ "cig-copy",
  "cig-pass",
  "cig-vault",
  "clap",

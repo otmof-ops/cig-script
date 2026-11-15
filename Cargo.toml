@@ -12,7 +12,7 @@ categories = ["command-line-utilities", "development-tools"]
 default-run = "cig"
 
 [workspace]
-members = [".", "crates/cig-bytecode", "crates/cig-pass", "crates/cig-vault"]
+members = [".", "crates/cig-bytecode", "crates/cig-copy", "crates/cig-pass", "crates/cig-vault"]
 exclude = ["crates/cig-bytecode/fuzz", "crates/cig-pass/fuzz"]
 
 [lib]
@@ -62,6 +62,14 @@ cig-vault = { path = "crates/cig-vault", version = "0.1.0" }
 [target.'cfg(target_env = "musl")'.dependencies]
 mimalloc = { version = "0.1", default-features = false }
 
+# musl's `memcpy` on x86_64 is the string instruction, which costs tens of
+# cycles to start however little it copies (cig-script#243, step 0): 41% of
+# the tree-walker's cycles on `regex-ish`. The static x86_64 build takes
+# `memcpy` and `memmove` from this crate (`build.rs` has the linker wrap
+# them).
+[target.'cfg(all(target_arch = "x86_64", target_env = "musl"))'.dependencies]
+cig-copy = { path = "crates/cig-copy", version = "0.1.0" }
+
 [target.'cfg(windows)'.dependencies]
 # Job Objects: a hop's whole process tree ends with the hop on Windows.
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp", "Win32_Storage_FileSystem", "Win32_System_IO"] }
@@ -73,6 +81,13 @@ tempfile = "3"
 # A counting allocator for `cig bench --stats` and `cig run --stats` (#179).
 # Off by default and never on in a release.
 bench-stats = []
+
+# `crates/cig-copy` is `memcpy` itself in a static x86_64 build. Left
+# unoptimized, the compiler may call `memcpy` to move a temporary inside it,
+# and under the linker's wrap that is a call to the routine it is in. It is
+# built optimized in every profile, so no such call is left to make.
+[profile.dev.package.cig-copy]
+opt-level = 3
 
 [profile.release]
 codegen-units = 1

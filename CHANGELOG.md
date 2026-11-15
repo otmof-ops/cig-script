@@ -5,6 +5,32 @@ project follows semantic versioning.
 
 ## Unreleased
 
+- **The static x86_64 build copies with its own routines (#243, step 0).**
+  A release of cig for Linux is static on musl, whose `memcpy` on x86_64
+  is the string instruction: tens of cycles to start however little it
+  copies. cig copies little, often (about 720,000 small copies in a run
+  of `regex-ish`), and on the test machine `memcpy` was 41% of the
+  tree-walker's cycles on `regex-ish` and 24% on `strings`, where the
+  same code on glibc spends 9% and 13% in its copy. `crates/cig-copy` is
+  a `memcpy` and a `memmove` with no start-up cost: a size up to 128
+  bytes goes in loads that overlap, every one made before the first
+  store; a larger size 64 bytes at a time; from 2048 bytes a forward copy
+  uses `rep movsb` where the processor says it is fast. SSE2 only.
+  `build.rs` has the linker wrap the two names for the `cig` binary on
+  x86_64 musl, so the program, its allocator and the C library all call
+  them, and a build without them does not link. Measured on the test
+  machine (run `cs-copy-c1`; the 21 programs of `bench/compute`, 11
+  interleaved rounds, medians, every output right): **the tree-walker
+  takes 0.840 of its time at the geometric mean** (`regex-ish` 41.0 to
+  26.2 ms, `strings` 21.0 to 15.0, `json` 73.2 to 54.1, `maps` 41.1 to
+  31.6, `closures` 53.1 to 41.8, `fib` 62.7 to 50.9; no program slower),
+  **the VM 0.899** (`regex-ish` 33.2 to 19.8, `strings` 15.2 to 10.0,
+  `json` 68.1 to 52.4, `maps` 30.3 to 23.7; the compute programs within
+  3% either way). `memcpy` goes from 41% of `regex-ish`'s cycles to 10%.
+  Against the same tree built on glibc with mimalloc, the static build
+  is now at 0.979 and 0.951. Every other target keeps its C library's
+  routines.
+
 ## 1.24.0 — 2026-11-14
 
 Short runs cost what they do, and a compiled program runs as fast as the
