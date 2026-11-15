@@ -7,6 +7,23 @@
 #[global_allocator]
 static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+// musl's `memcpy` and `memmove` on x86_64 start slowly on the small sizes cig
+// copies most; the static x86_64 build takes both from `crates/cig-copy`
+// (cig-script#243, step 0). `build.rs` has the linker wrap the two names for
+// this binary. These two references are in the binary's own object, so the
+// linker has the routines whatever order it reads the crates in.
+#[cfg(all(target_arch = "x86_64", target_env = "musl"))]
+mod copy {
+    use core::ffi::c_void;
+
+    type Copy = unsafe extern "C" fn(*mut c_void, *const c_void, usize) -> *mut c_void;
+
+    #[used]
+    static MEMCPY: Copy = cig_copy::__wrap_memcpy;
+    #[used]
+    static MEMMOVE: Copy = cig_copy::__wrap_memmove;
+}
+
 // `--features bench-stats` wraps whichever allocator the platform uses in one
 // that counts, for `cig bench --stats` (#179). Off in releases.
 #[cfg(all(target_env = "musl", feature = "bench-stats"))]

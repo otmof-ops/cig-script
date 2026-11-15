@@ -1,0 +1,15 @@
+[package]
+name = "cig-copy"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+description = "cig-copy: memcpy and memmove for cig's static build on x86_64"
+license = "FSL-1.1-ALv2"
+repository = "https://github.com/otmof-ops/cig-script"
+readme = "README.md"
+keywords = ["memcpy", "musl"]
+categories = ["no-std"]
+
+[lib]
+name = "cig_copy"
+path = "src/lib.rs"
