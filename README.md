@@ -252,6 +252,24 @@ chain analysis: step 4/5 analyse ok (0 ms)
 chain analysis: step 5/5 report ok (1 ms)
 ```
 
+## How fast it is
+
+The same 25 programs written in CigScript, Lua, Python, JavaScript and Rust, timed side by side on one machine, every run's output checked. Every number here is made from the run's raw samples by a script and made again by a second one written apart from it ([the paper](docs/BENCHMARKS-2026-11-15.md)). A cell is cig's time divided by the other's over the 21 compute programs, so under 1 means cig is faster; in brackets, how many programs cig was faster, level and slower on:
+
+| time ÷ theirs | Lua | LuaJIT `-joff` | LuaJIT | CPython | Node | Rust |
+|---|---:|---:|---:|---:|---:|---:|
+| `cig run` | 4.03 (1/2/15) | 5.66 (1/0/17) | 10.6 (1/0/17) | 1.56 (4/0/17) | 1.65 (9/0/11) | 67.5 (0/0/6) |
+| stage a | 3.77 (3/1/14) | 5.30 (2/1/15) | 9.95 (2/0/16) | 1.44 (4/1/16) | 1.53 (9/0/11) | 63.4 (0/0/6) |
+| stage b | 1.97 (4/0/14) | 2.77 (3/0/15) | 5.20 (2/0/16) | 0.82 (12/2/7) | 0.84 (10/1/9) | 26.2 (0/0/6) |
+
+The rows: `cig run` is cig's interpreter; stage a and stage b are programs [cigcompile](https://github.com/otmof-ops/cig-compile) builds from the same script, the script on that interpreter and its bytecode on cig's VM.
+
+- **Compiled** with `cigcompile build --stage b`, which runs a script on cig's VM, cig takes 0.82 of CPython 3.13's time and 0.84 of Node 22's, and 0.52 of `cig run`'s own.
+- **It starts fast**: `hello` takes 5.8 ms with `cig run` and 3.7 ms compiled, against 13.5 ms for CPython and 27.2 ms for Node.
+- **Lua and LuaJIT are faster still**: a compiled cig program takes 1.97 times Lua 5.4's time and 5.20 times LuaJIT's. The VM work after them is [#243](https://github.com/otmof-ops/cig-script/issues/243).
+
+Whole processes, start-up included, on a 2018 laptop on battery. cig's times include a start-up cost that grows with its run history, which this run found ([#252](https://github.com/otmof-ops/cig-script/issues/252)).
+
 ## Install
 
 Every release ships static binaries for Linux (x86_64, aarch64, armv7),
@@ -608,6 +626,11 @@ cargo build --release && cig bench bench/bench.toml
 
 Medians, p10 to p90 and CV, never a mean alone; sizes are reported and not
 gated. [docs/BENCH.md](docs/BENCH.md) lists the cases and what each number is.
+
+Against other languages, [`bench/compare`](bench/compare/README.md) times the same
+programs on cig and written in Lua, Python, JavaScript and Rust ([`bench/ref`](bench/ref/)),
+every output checked, and makes every number of [the paper](docs/BENCHMARKS-2026-11-15.md)
+from the raw samples, checked by a second script written apart from the first.
 
 ## Documentation
 

@@ -1,0 +1,210 @@
+# Benchmarks, 2026-11-15: cig against Lua, LuaJIT, CPython, Node and Rust
+
+<!-- SPDX-License-Identifier: CC-BY-4.0 -->
+
+The 25 programs of [`bench/compute`](../bench/compute/), each written once in CigScript and once in Lua, Python and JavaScript (eight of them in Rust too), timed side by side on one machine. cig is measured as it is released: cig 1.24.0, and the programs cigcompile 0.5.0 builds from the same scripts. The others: Lua 5.4.9, LuaJIT 2.1, CPython 3.13.5, Node 22.23.5 and Rust 1.100.0.
+
+Every measured number below is made from the samples in [`bench/results/2026-11-15/`](../bench/results/2026-11-15/) by [`bench/compare/report.py`](../bench/compare/report.py), and made again by [`bench/compare/check.py`](../bench/compare/check.py), a second program written apart from the first to [the same definitions](../bench/compare/SPEC.md). The two agree on every number and every character of this file: none was typed by hand.
+
+## In short
+
+- **Compiled, cig runs the 21 compute programs in {{geomean.compute.stage-b.python}} of CPython 3.13's time**, {{inverse.compute.stage-b.python}} times as fast: a program `cigcompile build --stage b` makes runs its script's bytecode on cig's VM, and was faster than CPython on {{faster.compute.stage-b.python}} of the {{n.compute.stage-b.python}} programs, level on {{level.compute.stage-b.python}} and slower on {{slower.compute.stage-b.python}}. Against Node 22 it takes {{geomean.compute.stage-b.node}} of the time; Node takes {{median.hello.node}} ms just to start, and most of these programs finish soon after.
+- **The VM takes {{geomean.compute.stage-b.cig}} of the interpreter's time** ({{inverse.compute.stage-b.cig}} times as fast), faster on all {{n.compute.stage-b.cig}}. `cig run`, the tree-walking interpreter a script runs on today, takes {{geomean.compute.cig.python}} times CPython's time and {{geomean.compute.cig.node}} times Node's.
+- **Lua is faster.** A compiled cig program takes {{geomean.compute.stage-b.lua}} times Lua 5.4's time, {{geomean.compute.stage-b.luajit-off}} times LuaJIT's interpreter's and {{geomean.compute.stage-b.luajit}} times LuaJIT's with its compiler on; and {{geomean.compute.stage-b.rust}} times Rust's, on the {{n.compute.stage-b.rust}} programs Rust has. The VM work to close the gap to Lua is [#243](https://github.com/otmof-ops/cig-script/issues/243).
+- **cig starts fast**: `hello` takes {{median.hello.cig}} ms with `cig run` and {{median.hello.stage-b}} ms as a compiled program, where CPython takes {{median.hello.python}} ms and Node {{median.hello.node}} ms. Lua, LuaJIT and Rust start in about a millisecond.
+- **This run found that cig slows down as its run history grows** ([#252](https://github.com/otmof-ops/cig-script/issues/252)): every run reads the whole run index first. `hello` with `cig run` took {{median.pass1.hello.cig}} ms over the first pass, while cig's history grew from {{history.first.pass1}} to {{history.last.pass1}} runs, and {{median.pass2.hello.cig}} ms over the second ({{history.first.pass2}} to {{history.last.pass2}}). Every cig time here comes from that growing history, so cig's times, its start-up most of all, are slower than a new install's would be.
+
+## Against each language
+
+A cell is cig's time divided by the other language's: the geometric mean, over the programs both have, of the ratio of their median times. Under 1, cig took less time. In brackets: how many of those programs cig was faster on, level with (within 3%) and slower on; the three add up to the programs the cell covers.
+
+{{table:ratios-compute}}
+
+- **`cig run`** is cig's tree-walking interpreter, as `cig run script.cig` runs a script.
+- **A stage `a` program** is what `cigcompile build` makes by default: cig itself with the script inside it, run by the same interpreter.
+- **A stage `b` program** (`cigcompile build --stage b`) runs the script's bytecode on cig's VM.
+
+These are the {{programs.compute}} programs that are not start-up tests; start-up has [its own section](#start-up).
+
+## Every program
+
+The median time of each program on each side, in milliseconds, over {{rounds.pass1}} rounds in each of {{passes}} passes:
+
+{{table:medians}}
+
+From the 10th to the 90th percentile of the same samples:
+
+{{table:spread}}
+
+## Start-up
+
+{{table:ratios-start}}
+
+The four start-up programs, each side's time divided by the other's as above. Their median times are in [Every program](#every-program): `hello` takes {{median.hello.cig}} ms with `cig run`, {{median.hello.stage-b}} ms as a compiled program, {{median.hello.python}} ms with CPython, {{median.hello.node}} ms with Node, {{median.hello.lua}} ms with Lua, {{median.hello.luajit}} ms with LuaJIT and {{median.hello.rust}} ms as a Rust program. The harness itself, starting and reaping `true`, takes {{floor.pass1}} ms.
+
+`cig run` of `hello` in a new folder each time takes {{median.hello.cig-first}} ms.
+
+## The run record
+
+`cig run` keeps a record of every run, the journal `cig unburn` reads, and syncs it to disk before it exits: it is what makes a run undoable, and it is part of every `cig run` time above. A dry run (`--dry-run`) runs the same program and keeps no record. What the record costs, over the programs that have both:
+
+{{table:record}}
+
+Every program, cig's sides only:
+
+{{table:medians-cig}}
+
+And against the other languages with cig's sides as dry runs, the computation without the record:
+
+{{table:ratios-compute-dry}}
+
+## The programs in the other languages
+
+A comparison is only as fair as its programs. Each program in [`bench/ref`](../bench/ref/) is held to one rule: **the same program as its CigScript twin, statement for statement.**
+
+- The same algorithm, sizes, iteration counts and output.
+- Where the CigScript program does a step in a loop of its own, the reference loops too; where it calls a builtin (`join`, `split`, `replace`, `find`, `sort`, `slice`, `json.parse`, `csv.read`), the reference calls its language's standard library for that step.
+- The same data structures, as the language spells them: a list is a list (an array, a `Vec`); a map with named fields is a dict in Python, an object in JavaScript, a table in Lua and a struct in Rust; a map with computed keys is a dict, a `Map` or a table.
+- Written as that language's users write it: Python's code is in a `main()` (CPython runs a module's top level more slowly), Lua counts from 1, and Rust's sizes go through `black_box` so the compiler cannot fold the work away.
+
+**How the set was checked.** Three reviewers first read the references against their CigScript programs, each told to report what favors the other language as carefully as what favors cig. Of the 72 they read, 52 were the same work; 11 favored cig (Lua doing in script what cig does in a builtin, chiefly `json`, `json-deep` and `csv`; Python and Node importing modules `startup-10` never used) and 9 favored the other language (`fannkuch` and `sieve` in Python doing their loops as slice and list operations in C; `nbody` in Node and Rust keeping each body in an array of numbers where cig has a map with named fields). The 73rd, `nbody` in Python, was read afterwards and favored Python the same way. Each was rewritten to the rule above or, where the difference is the language's own (Python has to import `json`; Lua has no JSON or CSV), kept and stated below. The rewritten Python, Rust and JavaScript set was read again by two reviewers: 61 of 61 held to the rule. The rewritten Lua set and three idiomatic versions added afterwards were read by a third: 26 of 28 the same work, and of the two that favored cig, slightly, `lists` in Lua now sorts its list where it is, as a Lua programmer would. Every reference prints its program's `.expect` before it gets a time, as every cig run does.
+
+**Where the usual way to write a step is native code**, the idiomatic version is measured beside the translation, from [`bench/ref/idiom`](../bench/ref/idiom/): `fannkuch`, `sieve` and `words` in Python (slice assignment; a list repeat and `sum`; `collections.Counter`), `sieve`, `lists` and `maps` in JavaScript (`Array.fill`; an `Int32Array` sort; a plain object for the map) and `sieve` in Rust (`vec![true; n]` and an iterator count).
+
+{{table:idiom}}
+
+**What is still not the same, and stays so:**
+
+- **`strbuild`**: `s += "x"` is the same statement everywhere, and each language's own speed at it: CPython appends in place when `s` is a local, V8 builds a rope, Rust's `String` grows in place, Lua and cig copy.
+- **`csv`**: cig writes the file inside a `burn`, which journals it so the run can be undone; Python writes it plainly (the same bytes). Node and Lua have no CSV in their standard libraries and are not timed on it; Lua's has no JSON or hashing either, so `json`, `json-deep` and `startup-10` have no Lua version.
+- **`fannkuch` in Lua** copies its 8-item list with a loop where cig calls `slice`: the native alternative, `{unpack(t)}`, has a different name on Lua 5.4 and on LuaJIT, and the copy is a small part of the program next to its flips.
+- **Rust** has eight of the 25 programs, the eight cig-compile's benchmark set carries; the rest are not written yet. Its column is a measure of how far the others are from native code, over those eight.
+- **Rounding**: JavaScript has no rounding to a number of places, so `nbody` and `spectral` round with `Math.round(x * 1e9) / 1e9`, and Rust prints with `{:.9}`; every output is still byte for byte the `.expect` file.
+
+## Memory
+
+The peak resident memory of each program, in MB: the most the process held in memory at once, read as it exits (the median of every reading, three in each pass). It counts the pages of the program's own files with its allocations, so a big executable weighs in: cig's (about 16 MB, the whole runtime, which a compiled program carries too) and Node's. The machine runs transparent huge pages `always`, which rounds a heap up in 2 MiB steps.
+
+{{table:memory}}
+
+## How steady the numbers are
+
+The geometric means of the compute set, pass by pass:
+
+{{table:passes}}
+
+Each side, pass against pass and within each pass ("last third ÷ first third" compares the median of a pair's last third of rounds with its first; over 1, the side slowed down as the pass went on), and how many programs had a coefficient of variation over 5%:
+
+{{table:stability}}
+
+Two things moved during the run, and the table shows both:
+
+- **The machine.** On battery, and as hot as {{temp.max.pass1}} °C at a round's start, it ran the longer programs more slowly in the second pass than in the first, on every side: CPython's `nbody` took {{median.pass1.nbody.python}} ms over pass 1 and {{median.pass2.nbody.python}} over pass 2, a compiled cig program's {{median.pass1.nbody.stage-b}} and {{median.pass2.nbody.stage-b}}. The longer a program runs, the more it slows, and cig's run longest.
+- **cig's run history** ([#252](https://github.com/otmof-ops/cig-script/issues/252)). Every cig run reads the whole run index before it starts, and a real `cig run` reads it twice; the index gains a line or two with every run, and the history reached {{history.last.pass2}} runs by the last round. So cig's start-up grew through the run: `hello` took {{median.pass1.hello.cig}} ms with `cig run` over pass 1 and {{median.pass2.hello.cig}} ms over pass 2, {{median.pass1.hello.stage-b}} and {{median.pass2.hello.stage-b}} ms compiled. The other languages keep no history and moved little.
+
+The times above pool both passes, so they include both. The pairs whose medians in the two passes differ by more than 10%:
+
+{{table:moved}}
+
+## cig-script's own suite
+
+`cig bench bench/bench.toml` on cig 1.24.0 as released, between the two passes, as `cig bench` prints it (its JSON, with every sample, is in the results folder). Its compute rows are the same programs, timed by `cig bench`'s own harness, in a quiet stretch with no other language interleaved; its start-up rows run each program 20 times in a row. Each case runs in a scratch home of its own, with no run history but its own runs, which is why its start-up rows are faster than this paper's ([#252](https://github.com/otmof-ops/cig-script/issues/252)).
+
+**cig bench**: cig, cig 1.24.0 — Intel(R) Core(TM) i5-8265U CPU @ 1.60GHz, 8 cores, linux 7.2.11+parrot7.1-amd64, governor powersave
+
+| case | group | median ms | p10 to p90 ms | CV | RSS MB |
+|---|---|---:|---|---:|---:|
+| `hello` | start-up | 2.3 | 2.3 to 2.4 | 0.5% | 11.1 |
+| `startup-0` | start-up | 2.8~ | 2.3 to 5.6 | 35.5% | 11.1 |
+| `startup-1` | start-up | 5.6 | 5.6 to 5.6 | 0.2% | 11.1 |
+| `startup-10` | start-up | 5.8 | 5.8 to 5.8 | 0.3% | 11.1 |
+| `burn one write` | start-up | 6.3 | 6.2 to 6.4 | 1.0% | 11.1 |
+| `closures` | compute | 46.6 | 46.5 to 47.0 | 0.4% | 11.1 |
+| `csv` | compute | 45.5 | 45.2 to 45.9 | 0.5% | 33.5 |
+| `deltablue` | compute | 7.1 | 7.0 to 7.3 | 1.3% | 11.1 |
+| `dispatch` | compute | 71.8 | 70.3 to 72.0 | 0.9% | 11.1 |
+| `fannkuch` | compute | 298.6 | 296.6 to 299.9 | 0.4% | 11.1 |
+| `fib` | compute | 56.3 | 55.7 to 57.4 | 1.2% | 11.1 |
+| `json-deep` | compute | 4.6 | 4.6 to 4.7 | 0.9% | 11.1 |
+| `json` | compute | 73.5 | 71.6 to 73.8 | 1.3% | 65.9 |
+| `lists` | compute | 29.4 | 29.3 to 29.5 | 0.2% | 18.1 |
+| `loop` | compute | 63.6 | 63.5 to 63.6 | 0.0% | 11.1 |
+| `mandel` | compute | 404.1 | 392.3 to 404.2 | 1.1% | 11.1 |
+| `maps` | compute | 40.7 | 40.4 to 41.7 | 1.3% | 21.4 |
+| `nbody` | compute | 513.7 | 508.4 to 560.1 | 3.7% | 11.1 |
+| `regex-ish` | compute | 40.3 | 40.2 to 40.5 | 0.2% | 29.7 |
+| `richards` | compute | 21.9 | 21.7 to 22.0 | 0.4% | 11.1 |
+| `sieve` | compute | 173.2 | 169.9 to 174.1 | 1.1% | 43.3 |
+| `spectral` | compute | 224.7 | 220.1 to 229.1 | 1.4% | 11.1 |
+| `strbuild` | compute | 6.6 | 6.6 to 6.7 | 0.5% | 11.1 |
+| `strings` | compute | 23.1 | 23.0 to 23.2 | 0.3% | 22.9 |
+| `trees` | compute | 414.8 | 412.3 to 419.5 | 0.6% | 11.1 |
+| `words` | compute | 39.2 | 38.5 to 39.5 | 0.9% | 23.1 |
+| `burn small tree` | kernel | 7.6 | 7.6 to 7.8 | 1.1% | 11.1 |
+| `burn big tree` | kernel | 168.3 | 166.7 to 173.8 | 1.6% | 23.0 |
+| `unburn small tree` | kernel | 10.5 | 10.4 to 10.7 | 0.8% | 13.3 |
+| `unburn big tree` | kernel | 260.7~ | 253.5 to 294.8 | 5.7% | 22.1 |
+| `overwrite big file` | kernel | 580.7 | 578.3 to 581.3 | 0.2% | 125.6 |
+| `restore big file` | kernel | 697.1 | 693.9 to 735.5 | 2.3% | 53.8 |
+| `hop, 2,000 files unchanged` | kernel | 97.3 | 91.8 to 100.0 | 2.9% | 47.0 |
+
+| case | measure | value |
+|---|---|---:|
+| `burn small tree` | `tin-growth` | 0 B |
+| `burn small tree` | `disk-per-byte` | 4.80x |
+| `burn small tree` | `fsyncs-per-op` | 1.10 |
+| `burn big tree` | `tin-growth` | 0 B |
+| `burn big tree` | `disk-per-byte` | 1.04x |
+| `burn big tree` | `fsyncs-per-op` | 1.01 |
+| `unburn small tree` | `tin-growth` | 0 B |
+| `unburn small tree` | `fsyncs-per-op` | 0.09 |
+| `unburn big tree` | `tin-growth` | 0 B |
+| `unburn big tree` | `fsyncs-per-op` | 0.01 |
+| `overwrite big file` | `tin-growth` | 16.0 KiB |
+| `overwrite big file` | `disk-per-byte` | 0.00x |
+| `overwrite big file` | `fsyncs-per-op` | 15.00 |
+| `overwrite big file` | `file:$CIGSCRIPT_HOME/work/big.bin` | 32.0 MiB |
+| `restore big file` | `tin-growth` | 0 B |
+| `restore big file` | `fsyncs-per-op` | 138.00 |
+| `restore big file` | `file:$CIGSCRIPT_HOME/work/big.bin` | 32.0 MiB |
+| `hop, 2,000 files unchanged` | `tin-growth` | 0 B |
+| `hop, 2,000 files unchanged` | `fsyncs-per-op` | 12.00 |
+
+## How it was measured
+
+- **A whole process.** Each time is the wall time of one process, from just before it is started until it has exited and been reaped: the time a person waits. An interpreter's start-up is part of every number, as it is when you run a script; the four start-up programs show it alone. Starting and reaping a process costs the harness {{floor.pass1}} ms on this machine (`true`, the median of 50, in pass 1; {{floor.pass2}} in pass 2), and nothing is subtracted from any side. The harness waits on the process's pidfd, which wakes the moment it exits.
+- **Every run checked.** A run counts only if it exits 0, prints exactly the program's `.expect` file, byte for byte, and writes nothing to stderr but cig's own summary of a run (`burned 1 op (0 irreversible), run …` after `csv`'s burn, `dry-run plan: 0 ops` and `nothing was changed` after a dry run). A program and side that fails this once, in any round, gets no time at all. Failed pairs: {{failed.pass1}} in pass 1, {{failed.pass2}} in pass 2.
+- **Rounds in a random order.** A pass is {{rounds.pass1}} rounds. In each round every program runs once on every side, all {{pairs.pass1}} of them, in an order drawn from a seeded generator (the seeds are in the conditions below). So whatever drifts while a pass runs, the clock, the temperature, cig's own run history, falls on every program and every side alike. Each pair has one checked run before the rounds, not timed.
+- **Two passes.** The whole run was made twice, with cig-script's and cig-compile's own suites between the two. A time below is the median of a pair's samples over both passes ({{samples.pass1}} samples in pass 1, {{samples.pass2}} in pass 2); how far the passes agree is under [How steady the numbers are](#how-steady-the-numbers-are).
+- **A folder per program and side**, at the same path for every run, as a project is. The script is copied in once. Before each run the files the last run left there are removed (`csv` writes one), and when that changes the disk, the disk is synced before the clock starts, so no run pays for the harness's own writes.
+- **The run record is in the time.** `cig run` writes a run record (the journal `cig unburn` reads) and syncs it to disk: that is part of what running a script with cig costs, so it is in the headline. The same programs as dry runs (`--dry-run`, no record) are measured too; see [The run record](#the-run-record).
+- **cig as released**: the Linux assets of cig 1.24.0 and cigcompile 0.5.0, each held to its release's sha256 file before the run, and the programs cigcompile 0.5.0 builds from the same scripts on that cig. Every cig side runs with `CIG_SEAL_KEY=file`, `CIG_MAX_STEPS=0`, `CIG_REPORTS=never`, `CIG_DOCTOR=0` and `NO_COLOR=1`, the settings `cigcompile bench` uses; none makes a run that succeeds do less (the key for sealed secrets is kept in a file, as cig's own tests keep it; the step budget is off because some programs run past its ten million steps; the other two speak only when a run fails).
+- **The others as their users get them.** Lua 5.4.9 built from its source at the `v5.4.9` tag with the flags of the release makefile's `make linux` (`-O2`), and LuaJIT 2.1 (commit `63c8f1a`) with its own makefile's defaults, both by gcc 14.2; Node 22.23.5 as nodejs.org releases it (the Linux x64 binary, its sha256 the one the release's `SHASUMS256.txt` lists); CPython 3.13.5 as the distribution packages it (Debian's `3.13.5-2+deb13u5`); Rust 1.100.0 at `-C opt-level=3`, what `cargo build --release` uses. LuaJIT is measured twice: with its compiler off (`-joff`), which is its interpreter alone, and as it runs by default. Each binary's sha256 is in the conditions below.
+- **Nothing tuned.** No process is pinned to a core and nothing is warmed between rounds; the machine runs as it is set up, under its own lock, one job at a time, and the conditions below give its clock, governor, power profile and temperature.
+
+## Conditions
+
+{{table:conditions}}
+
+## Run it again
+
+```sh
+# one pass (every side whose tool is on PATH or named; a missing one is said and left out)
+python3 bench/compare/compare.py --out pass1 --seed 1 --rounds 31 \
+  --cig ./cig-v1.24.0-linux-x86_64 --cigcompile ./cigcompile-v0.5.0-linux-x86_64 \
+  --lua lua5.4 --luajit luajit --python python3 --node node --rustc rustc
+# this file's numbers, made and checked
+python3 bench/compare/report.py --pass bench/results/2026-11-15/pass1 --pass bench/results/2026-11-15/pass2 \
+  --numbers numbers.json --render bench/results/2026-11-15/paper.md.in docs/BENCHMARKS-2026-11-15.md
+python3 bench/compare/check.py --pass bench/results/2026-11-15/pass1 --pass bench/results/2026-11-15/pass2 \
+  --numbers numbers.json --render bench/results/2026-11-15/paper.md.in docs/BENCHMARKS-2026-11-15.md
+```
+
+## What this does not show
+
+- **One machine.** A 2018 laptop processor, on battery and on its everyday settings (the conditions are above). Another processor, another operating system or another power setting moves every number; the ratios move less than the times.
+- **Small programs, timed whole.** Most of these programs run for tens of milliseconds, so start-up is a large part of every time, and a language that starts slowly but runs fast (Node, whose start-up the `hello` row shows) is behind on whole-process time by its start-up alone. That is the time a script's user waits; it is not the speed of a long-running program, where a just-in-time compiler such as LuaJIT's or V8's has time to pay for itself.
+- **cig as it ships today.** cig 1.24.0 and cigcompile 0.5.0, both released. Work merged since (the static build's own copy routines, cig-script#251) and work in progress (profile-guided optimization, cig-script#243) are not in these numbers.
+- **The other languages as their users get them.** No other runtime was tuned or given flags beyond the defaults (Rust's `opt-level=3` is what `cargo build --release` uses). CPython is 3.13.5, the version the machine's distribution ships.
+- **Not every program in every language.** Rust has eight of the 25 programs; Lua has no `json`, `json-deep`, `csv` or `startup-10`; Node has no `csv`. The three counts beside each geometric mean add up to the programs it covers, and two cells with different counts are not over the same programs.
+- **Memory is the peak resident set**, read when the process exits: what the program held at most, its own allocations and the pages of its files together, so a program with a big executable starts with a big number.

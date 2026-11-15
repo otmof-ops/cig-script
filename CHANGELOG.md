@@ -5,6 +5,21 @@ project follows semantic versioning.
 
 ## Unreleased
 
+- **Benchmarks against other languages (`bench/compare`, `bench/ref`).** The
+  25 programs of `bench/compute` written again in Lua, Python, JavaScript
+  and (eight of them) Rust, each held to one rule, the same program
+  statement for statement, and read against its CigScript program by
+  independent reviewers three times; where a language's usual way to write
+  a step is native code, that version is in `bench/ref/idiom` and measured
+  beside the translation. `compare.py` times every program on every side,
+  every run's output checked byte for byte, each round in a random order;
+  `report.py` makes every number of a document from the raw samples and
+  `check.py`, written apart from it to the same definitions (`SPEC.md`),
+  makes them again. The first run, cig 1.24.0 and cigcompile 0.5.0 as
+  released, is `docs/BENCHMARKS-2026-11-15.md`, its raw data
+  `bench/results/2026-11-15/`, and the README's new "How fast it is". It
+  found that a run's start-up grows with cig's run history (#252).
+
 - **The static x86_64 build copies with its own routines (#243, step 0).**
   A release of cig for Linux is static on musl, whose `memcpy` on x86_64
   is the string instruction: tens of cycles to start however little it
