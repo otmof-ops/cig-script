@@ -270,9 +270,9 @@ The rows: `cig run` is cig's interpreter; stage a and stage b are programs [cigc
 
 Whole processes, start-up included, on a 2018 laptop on battery. cig's times include a start-up cost that grows with its run history, which this run found ([#252](https://github.com/otmof-ops/cig-script/issues/252)).
 
-**`cig run` can use the VM too** (`cig run --engine vm`, `CIG_ENGINE=vm`, or `cig config engine vm`): a script is lowered to bytecode once and its module kept in the tin. Measured on another machine with this change's own build, so cig against itself only ([the run](docs/ENGINES-2026-11-22.md)): with its module in the tin the VM takes 0.57 of the tree-walker's time over the 21 compute programs, faster on 19, level on 2 and slower on 0.
+**`cig run` can use the VM too** (`cig run --engine vm`, `CIG_ENGINE=vm`, or `cig config engine vm`): a script is lowered to bytecode once and its module kept in the tin. Measured on another machine with this change's own build, so cig against itself only ([the run](docs/ENGINES-2026-11-22.md)): with its module in the tin the VM takes 0.58 of the tree-walker's time over the 21 compute programs, faster on 18, level on 3 and slower on 0.
 
-From its second run on, cigo's 20,664-line script starts in 10.8 ms on the VM where the tree-walker takes 52.1. The first run of a script pays for the lowering: 8.2 ms against 2.9 for a 500-line script ([measured here](docs/ENGINES-FIRST-RUNS-2026-11-22.md)), which is why the tree-walker is still the default.
+From its second run on, cigo's 20,664-line script starts in 10.9 ms on the VM where the tree-walker takes 53.4. The first run of a script pays for the lowering: 8.2 ms against 2.6 for a 500-line script ([measured here](docs/ENGINES-FIRST-RUNS-2026-11-22.md)), which is why the tree-walker is still the default.
 ## Install
 
 Every release ships static binaries for Linux (x86_64, aarch64, armv7),
@@ -594,7 +594,7 @@ Add a row. The rules for reporting one are in
 | `cig pass list\|show\|verify\|narrow\|revoke\|export\|import\|log\|stats\|key\|gc` | passes: what was already checked, for exactly which inputs; `export` and `import` move a pass between machines; `key` prints this machine's allowed-signers line |
 | `cig tin [du]` | how many objects the tin holds and how many bytes (the default) |
 | `cig tin verify [--head]` | re-hash every object against its name, check every recipe, open every sealed object |
-| `cig tin gc` | remove every object no run in the history still refers to, and every lowered module nothing loads anymore |
+| `cig tin gc` | remove every object no run in the history still refers to, and the lowered modules another build of cig made or no run has loaded for about 30 days |
 | `cig tin head` | the ledger's head, one line, to keep elsewhere for `cig tin verify --head` |
 | `cig tin mac --label L FILE` / `cig tin keep --label L FILE` / `cig tin give --label L --name N` | a keyed MAC over a file, kept under a label; a sealed copy kept under a label and name; the kept copy on stdout |
 | `cig tin key export\|import` | back the tin's seal key up (passphrase-wrapped), or put a backed-up one in place |
@@ -611,9 +611,11 @@ ends is stopped with `E515` and its line; `0` disables it.
 `--engine vm|tree` (or `CIG_ENGINE`, or `cig config engine` for a default)
 chooses what runs a script: the tree-walker, or the bytecode VM. On the VM a
 script is lowered to bytecode once and its module kept in the tin, checked
-by a MAC under a key that never leaves this machine; the next run starts
-from it. Both engines print, burn, journal and fail the same way, held to
-each other by `tests/engines.rs`; a script the lowering does not take runs
+by a MAC under this machine's own key, which is kept in the keys directory;
+the next run starts from it. The two engines are held to each other:
+`tests/engines.rs` runs a corpus on both and compares what each run prints,
+how it ends, the files it leaves and its journal, and CI runs the rest of
+the suite a second time on the VM. A script the lowering does not take runs
 on the tree-walker, and `cig runs <id>` says which engine ran and why
 ([decision 0002](docs/decisions/0002-cig-run-on-the-vm.md)).
 `--json` on any command gives machine-readable output (diagnostics follow
