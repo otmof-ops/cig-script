@@ -3515,7 +3515,15 @@ fn walk_one<'a>(i: &'a Instr, f: &mut dyn FnMut(&'a Instr)) {
     }
 }
 
-/// The slot each hoisted pull's closure is declared into.
+/// The slot each hoisted pull's closure is declared into: the first
+/// declaration of the closure's value, which the lowering emits right
+/// after the closure, at the top of the pull's block.
+///
+/// Only the first. A pass may give the same value to a later declaration
+/// (`roll g = f`, once the read of `f` is propagated away), and that
+/// variable is not the pull's: it is declared after calls that are already
+/// lowered, and it may be assigned again. A direct call that read its
+/// function from there read an empty slot.
 fn pulls(b: &Block, closures: &mut HashMap<ValueId, FuncId>, out: &mut HashMap<FuncId, VarId>) {
     for i in &b.instrs {
         match (&i.kind, i.result) {
@@ -3524,7 +3532,7 @@ fn pulls(b: &Block, closures: &mut HashMap<ValueId, FuncId>, out: &mut HashMap<F
             }
             (Kind::Decl(var, v), _) => {
                 if let Some(f) = closures.get(v) {
-                    out.insert(*f, *var);
+                    out.entry(*f).or_insert(*var);
                 }
             }
             _ => {}

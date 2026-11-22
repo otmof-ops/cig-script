@@ -209,3 +209,26 @@ the script on the tree-walker and its record says why; `cigcompile build
 --stage b` refuses the build with the same text, and stage `a` builds it.
 `tests/lower_names.rs` holds each shape, and `tests/engines.rs` holds the
 two engines to each other on whole scripts.
+
+## A direct call reads the pull's own slot
+
+A call that names a `pull` is a direct call: the lowering knows the
+function, and the bytecode reads its closure from the slot the `pull` was
+declared into, at the top of its block. That slot is the first declaration
+of the closure's value, and only that one. A pass may give the same value
+to a later declaration (`roll g = f`, once the read of `f` is propagated
+away), and `g` is not the pull's slot: it is empty until its statement
+runs, and it may be assigned again.
+
+```cig
+pull o() {
+  pull f() { snuff 1 }
+  exhale f()                    # reads f's slot, not g's
+  roll g = f
+  g = pack() => 2
+  exhale [f(), g()]             # [1, 2]
+}
+```
+
+`tests/walker/resolve-alias.cig` and the `pull-aliased` programs of
+`tests/lower_bc.rs` hold it.

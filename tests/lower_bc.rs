@@ -586,6 +586,32 @@ fn corpus() -> Vec<(String, String)> {
         "prelude-shadowed",
         "roll len = 5\nexhale len\npull f(path) {\n  snuff path\n}\nexhale f(1)\n",
     );
+
+    // ----- a pull named again by a later declaration -----
+    // Once the read of the pull's name is propagated away, the alias is
+    // declared with the closure's own value. A direct call still reads the
+    // pull's slot: the alias's is empty until its statement runs, and may
+    // be assigned again after it (#254).
+    add(
+        "pull-aliased-after-a-call",
+        "pull o() {\n  pull f() {\n    snuff 1\n  }\n  exhale f()\n  roll g = f\n  exhale g()\n}\no()\no()\n",
+    );
+    add(
+        "pull-aliased-then-the-alias-assigned",
+        "pull o() {\n  pull f() {\n    snuff 1\n  }\n  roll g = f\n  g = pack() => 2\n  exhale [f(), g()]\n}\no()\no()\n",
+    );
+    add(
+        "pull-aliased-at-the-top",
+        "pull f() {\n  snuff 1\n}\nexhale f()\nstick g = f\nexhale [f(), g()]\n",
+    );
+    add(
+        "pull-aliased-in-an-inner-block",
+        "pull o() {\n  pull f() {\n    snuff 1\n  }\n  for n in [1, 2] {\n    stick g = f\n    exhale g() + f() + n\n  }\n  snuff f()\n}\nexhale o()\n",
+    );
+    add(
+        "pull-aliased-twice-and-kept",
+        "roll kept = []\npull o() {\n  pull f() {\n    snuff len(kept)\n  }\n  stick g = f\n  roll h = g\n  kept.push(h)\n  snuff [f(), g(), h()]\n}\nexhale o()\nexhale o()\nexhale kept.map(pack(k) => k())\n",
+    );
     c
 }
 
