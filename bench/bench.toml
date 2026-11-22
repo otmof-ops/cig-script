@@ -63,6 +63,16 @@ run    = ["cig", "run", "compute/startup-10.cig"]
 per    = 20
 expect = { exit = 0, stdout = "compute/startup-10.expect" }
 
+# A script of some length, where the others here are a line or two: what
+# parsing, checking and (on the VM, `--engine vm`) lowering 500 lines costs
+# a start. bench/compare measures it under each engine (#254).
+[[case]]
+name   = "lines-500"
+group  = "start-up"
+run    = ["cig", "run", "engines/lines-500.cig"]
+per    = 20
+expect = { exit = 0, stdout = "engines/lines-500.expect" }
+
 [[case]]
 name   = "burn one write"
 group  = "start-up"

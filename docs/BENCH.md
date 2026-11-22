@@ -281,7 +281,7 @@ request).
 
 | group | cases | what it measures |
 |---|---|---|
-| `start-up` | `hello`, `startup-0`, `startup-1`, `startup-10` | the smallest programs: process start, with 0, 1 and 10 standard-library modules touched (`per = 20`) |
+| `start-up` | `hello`, `startup-0`, `startup-1`, `startup-10`, `lines-500` | the smallest programs: process start, with 0, 1 and 10 standard-library modules touched, and a script of 500 lines, for what a start pays per line (`per = 20`) |
 | `compute` | `loop`, `fib`, `nbody`, `trees`, `spectral`, `mandel`, `fannkuch`, `closures`, `dispatch`, `sieve`, `words`, `strings`, `strbuild`, `maps`, `lists`, `json`, `json-deep`, `csv`, `regex-ish`, `richards`, `deltablue` | how fast a script computes: the compute set of `cigcompile bench`, the same programs and `.expect` files, so the interpreter and the compiler are measured the same way |
 | `kernel` | `burn small tree` (100 files of 1 KiB), `burn big tree` (1,000 files of 16 KiB), `unburn small tree`, `unburn big tree`, `overwrite big file` (32 MiB over 32 MiB), `restore big file` (an unburn of that overwrite), `hop, 2,000 files unchanged` | what a burn, an unburn and a hop cost, with `tin-growth`, `disk-per-byte`, `fsyncs-per-op` and `file:` next to the time |
 
