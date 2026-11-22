@@ -283,19 +283,34 @@ pub struct Stats {
     pub bytes: u64,
 }
 
+/// The cache's own files: an entry, or what a write that never finished
+/// left beside one. Only real folders are entered and only plain files
+/// are listed, never through a link: nothing outside the cache is ever
+/// counted or removed, whatever is put in its place.
 fn files() -> Vec<(PathBuf, fs::Metadata)> {
     let mut out = Vec::new();
+    let is_dir = |p: &Path| fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_dir());
+    if !is_dir(&root()) {
+        return out;
+    }
     let Ok(shards) = fs::read_dir(root()) else {
         return out;
     };
     for shard in shards.flatten() {
+        if !is_dir(&shard.path()) {
+            continue;
+        }
         let Ok(inner) = fs::read_dir(shard.path()) else {
             continue;
         };
         for f in inner.flatten() {
-            if let Ok(meta) = fs::symlink_metadata(f.path()) {
-                if meta.is_file() {
-                    out.push((f.path(), meta));
+            let path = f.path();
+            if !(is_entry(&path) || is_leftover(&path)) {
+                continue;
+            }
+            if let Ok(meta) = fs::symlink_metadata(&path) {
+                if meta.file_type().is_file() {
+                    out.push((path, meta));
                 }
             }
         }
@@ -307,6 +322,21 @@ fn is_entry(path: &Path) -> bool {
     path.file_name()
         .and_then(|n| n.to_str())
         .is_some_and(|n| n.len() == 64 && n.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
+/// The name [`store`] writes under before it renames: `.<key>.<pid>.tmp`.
+fn is_leftover(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .and_then(|n| n.strip_prefix('.'))
+        .and_then(|n| n.strip_suffix(".tmp"))
+        .and_then(|n| n.split_once('.'))
+        .is_some_and(|(key, pid)| {
+            key.len() == 64
+                && key.bytes().all(|b| b.is_ascii_hexdigit())
+                && !pid.is_empty()
+                && pid.bytes().all(|b| b.is_ascii_digit())
+        })
 }
 
 /// The entries and their size, for `cig tin` and `cig doctor`.
@@ -362,10 +392,14 @@ fn remove_where(gone: impl Fn(&Path, &fs::Metadata) -> bool) -> Stats {
             removed.bytes += meta.len();
         }
     }
-    // Shards left empty go too; one that still holds something stays.
+    // Shards left empty go too; one that still holds something stays,
+    // and so does anything that is not a folder of the cache's own.
     if let Ok(shards) = fs::read_dir(root()) {
         for shard in shards.flatten() {
-            let _ = fs::remove_dir(shard.path());
+            let path = shard.path();
+            if fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_dir()) {
+                let _ = fs::remove_dir(&path);
+            }
         }
     }
     removed
@@ -503,6 +537,68 @@ mod tests {
         fs::set_permissions(&key_path, fs::Permissions::from_mode(0o644)).unwrap();
         assert!(lookup(&key).is_none());
         assert!(store(&key, &module(1), false).is_err(), "and not replaced");
+    }
+
+    /// Whatever is put where the cache's folders go, the sweep removes
+    /// only the cache's own files: it enters no link, and a file with
+    /// another name stays.
+    #[cfg(unix)]
+    #[test]
+    fn sweep_and_clear_touch_nothing_that_is_not_the_caches_own() {
+        let home = Home::new();
+        let key = key_for("aa");
+        store(&key, &module(1), false).unwrap();
+        // A folder elsewhere, with an old file, linked in as a shard.
+        let outside = home._tmp.path().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        let precious = outside.join("notes.txt");
+        fs::write(&precious, "keep me").unwrap();
+        let looks_like_ours = outside.join(key_for("ab").hex());
+        fs::write(&looks_like_ours, "not an entry of this cache").unwrap();
+        for f in [&precious, &looks_like_ours] {
+            let h = fs::OpenOptions::new().write(true).open(f).unwrap();
+            h.set_modified(SystemTime::now() - KEEP - Duration::from_secs(60))
+                .unwrap();
+        }
+        std::os::unix::fs::symlink(&outside, root().join("zz")).unwrap();
+        // A stray file inside a real shard, with a name that is not the
+        // cache's.
+        let shard = path_of(&key).parent().unwrap().to_path_buf();
+        let stray = shard.join("README");
+        fs::write(&stray, "someone's").unwrap();
+        let h = fs::OpenOptions::new().write(true).open(&stray).unwrap();
+        h.set_modified(SystemTime::now() - KEEP - Duration::from_secs(60))
+            .unwrap();
+        drop(h);
+        assert_eq!(stats().entries, 1, "the link's files are not counted");
+        assert_eq!(sweep(), Stats::default(), "nothing of the cache's is stale");
+        assert_eq!(clear().entries, 1);
+        assert!(precious.exists() && looks_like_ours.exists() && stray.exists());
+        assert!(
+            fs::symlink_metadata(root().join("zz")).is_ok(),
+            "the link stays"
+        );
+    }
+
+    /// What a write that never finished leaves is removed once it is old.
+    #[test]
+    fn sweep_removes_an_old_leftover_of_a_write() {
+        let _home = Home::new();
+        let key = key_for("aa");
+        store(&key, &module(1), false).unwrap();
+        let shard = path_of(&key).parent().unwrap().to_path_buf();
+        let fresh = shard.join(format!(".{}.123.tmp", key.hex()));
+        let old = shard.join(format!(".{}.456.tmp", key.hex()));
+        fs::write(&fresh, "half").unwrap();
+        fs::write(&old, "half").unwrap();
+        let h = fs::OpenOptions::new().write(true).open(&old).unwrap();
+        h.set_modified(SystemTime::now() - Duration::from_secs(2 * 3600))
+            .unwrap();
+        drop(h);
+        sweep();
+        assert!(fresh.exists(), "a write in flight is left alone");
+        assert!(!old.exists());
+        assert!(lookup(&key).is_some());
     }
 
     #[test]
