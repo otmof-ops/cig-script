@@ -5,6 +5,18 @@ project follows semantic versioning.
 
 ## Unreleased
 
+- **The engines measured on cig 1.25.0 as released**
+  (`docs/ENGINES-1.25.0.md`, `docs/ENGINES-FIRST-RUNS-1.25.0.md`,
+  `bench/results/1.25.0-engines/`). The 1.25.0 notes carry figures from a
+  development build of the change. On the release's own Linux binary, on
+  the same development machine, the compute programs come out as they
+  did: with its module in the tin `cig run --engine vm` takes 0.57 of the
+  tree-walker's time on the 21 (faster on 19, level on 2, slower on none).
+  cigo's script does not: the released tree-walker starts it in 36.2 ms
+  where the development build took 53.4, the VM in 10.6, and a first run
+  on the VM takes 305.9 ms, 8.45 times the tree-walker's. The README's
+  "How fast it is" quotes the release's figures now.
+
 ## 1.25.0 — 2026-11-23
 
 `cig run` can run a script on the bytecode VM. `cig run --engine vm` (or

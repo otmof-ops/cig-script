@@ -1,0 +1,227 @@
+{
+ "rounds": 31,
+ "seed": 1,
+ "programs": [
+  {
+   "name": "closures",
+   "expect": "/var/tmp/cig-eng-rel/src/cig-script/bench/compute/closures.expect",
+   "source": "/var/tmp/cig-eng-rel/src/cig-script/bench/compute/closures.cig"
+  },
+  {
+   "name": "csv",
+   "expect": "/var/tmp/cig-eng-rel/src/cig-script/bench/compute/csv.expect",
+   "source": "/var/tmp/cig-eng-rel/src/cig-script/bench/compute/csv.cig"
+  },
+  {
+   "name": "deltablue",
+   "expect": "/var/tmp/cig-eng-rel/src/cig-script/bench/compute/deltablue.expect",
+   "source": "/var/tmp/cig-eng-rel/src/cig-script/bench/compute/deltablue.cig"
+  },
+  {
+   "name": "dispatch",
+   "expect": "/var/tmp/cig-eng-rel/src/cig-script/bench/compute/dispatch.expect",
+   "source": "/var/tmp/cig-eng-rel/src/cig-script/bench/compute/dispatch.cig"
+  },
+  {
+   "name": "fannkuch",
+   "expect": "/var/tmp/cig-eng-rel/src/cig-script/bench/compute/fannkuch.expect",
+   "source": "/var/tmp/cig-eng-rel/src/cig-script/bench/compute/fannkuch.cig"
+  },
+  {
+   "name": "fib",
+   "expect": "/var/tmp/cig-eng-rel/src/cig-script/bench/compute/fib.expect",
+   "source": "/var/tmp/cig-eng-rel/src/cig-script/bench/compute/fib.cig"
+  },
+  {
+   "name": "hello",
+   "expect": "/var/tmp/cig-eng-rel/src/cig-script/bench/compute/hello.expect",
+   "source": "/var/tmp/cig-eng-rel/src/cig-script/bench/compute/hello.cig"
+  },
+  {
+   "name": "json-deep",
+   "expect": "/var/tmp/cig-eng-rel/src/cig-script/bench/compute/json-deep.expect",
+   "source": "/var/tmp/cig-eng-rel/src/cig-script/bench/compute/json-deep.cig"
+  },
+  {
+   "name": "json",
+   "expect": "/var/tmp/cig-eng-rel/src/cig-script/bench/compute/json.expect",
+   "source": "/var/tmp/cig-eng-rel/src/cig-script/bench/compute/json.cig"
+  },
+  {
+   "name": "lists",
+   "expect": "/var/tmp/cig-eng-rel/src/cig-script/bench/compute/lists.expect",
+   "source": "/var/tmp/cig-eng-rel/src/cig-script/bench/compute/lists.cig"
+  },
+  {
+   "name": "loop",
+   "expect": "/var/tmp/cig-eng-rel/src/cig-script/bench/compute/loop.expect",
+   "source": "/var/tmp/cig-eng-rel/src/cig-script/bench/compute/loop.cig"
+  },
+  {
+   "name": "mandel",
+   "expect": "/var/tmp/cig-eng-rel/src/cig-script/bench/compute/mandel.expect",
+   "source": "/var/tmp/cig-eng-rel/src/cig-script/bench/compute/mandel.cig"
+  },
+  {
+   "name": "maps",
+   "expect": "/var/tmp/cig-eng-rel/src/cig-script/bench/compute/maps.expect",
+   "source": "/var/tmp/cig-eng-rel/src/cig-script/bench/compute/maps.cig"
+  },
+  {
+   "name": "nbody",
+   "expect": "/var/tmp/cig-eng-rel/src/cig-script/bench/compute/nbody.expect",
+   "source": "/var/tmp/cig-eng-rel/src/cig-script/bench/compute/nbody.cig"
+  },
+  {
+   "name": "regex-ish",
+   "expect": "/var/tmp/cig-eng-rel/src/cig-script/bench/compute/regex-ish.expect",
+   "source": "/var/tmp/cig-eng-rel/src/cig-script/bench/compute/regex-ish.cig"
+  },
+  {
+   "name": "richards",
+   "expect": "/var/tmp/cig-eng-rel/src/cig-script/bench/compute/richards.expect",
+   "source": "/var/tmp/cig-eng-rel/src/cig-script/bench/compute/richards.cig"
+  },
+  {
+   "name": "sieve",
+   "expect": "/var/tmp/cig-eng-rel/src/cig-script/bench/compute/sieve.expect",
+   "source": "/var/tmp/cig-eng-rel/src/cig-script/bench/compute/sieve.cig"
+  },
+  {
+   "name": "spectral",
+   "expect": "/var/tmp/cig-eng-rel/src/cig-script/bench/compute/spectral.expect",
+   "source": "/var/tmp/cig-eng-rel/src/cig-script/bench/compute/spectral.cig"
+  },
+  {
+   "name": "startup-0",
+   "expect": "/var/tmp/cig-eng-rel/src/cig-script/bench/compute/startup-0.expect",
+   "source": "/var/tmp/cig-eng-rel/src/cig-script/bench/compute/startup-0.cig"
+  },
+  {
+   "name": "startup-1",
+   "expect": "/var/tmp/cig-eng-rel/src/cig-script/bench/compute/startup-1.expect",
+   "source": "/var/tmp/cig-eng-rel/src/cig-script/bench/compute/startup-1.cig"
+  },
+  {
+   "name": "startup-10",
+   "expect": "/var/tmp/cig-eng-rel/src/cig-script/bench/compute/startup-10.expect",
+   "source": "/var/tmp/cig-eng-rel/src/cig-script/bench/compute/startup-10.cig"
+  },
+  {
+   "name": "strbuild",
+   "expect": "/var/tmp/cig-eng-rel/src/cig-script/bench/compute/strbuild.expect",
+   "source": "/var/tmp/cig-eng-rel/src/cig-script/bench/compute/strbuild.cig"
+  },
+  {
+   "name": "strings",
+   "expect": "/var/tmp/cig-eng-rel/src/cig-script/bench/compute/strings.expect",
+   "source": "/var/tmp/cig-eng-rel/src/cig-script/bench/compute/strings.cig"
+  },
+  {
+   "name": "trees",
+   "expect": "/var/tmp/cig-eng-rel/src/cig-script/bench/compute/trees.expect",
+   "source": "/var/tmp/cig-eng-rel/src/cig-script/bench/compute/trees.cig"
+  },
+  {
+   "name": "words",
+   "expect": "/var/tmp/cig-eng-rel/src/cig-script/bench/compute/words.expect",
+   "source": "/var/tmp/cig-eng-rel/src/cig-script/bench/compute/words.cig"
+  }
+ ],
+ "sides": [
+  {
+   "name": "cig-tree",
+   "lang": "cig",
+   "label": "`cig run --engine tree`",
+   "version": [
+    "/var/tmp/cig-eng-rel/bin/cig",
+    "--version"
+   ],
+   "stage": [
+    "/var/tmp/cig-eng-rel/src/cig-script/bench/compute/{name}.cig"
+   ],
+   "run": [
+    "/var/tmp/cig-eng-rel/bin/cig",
+    "run",
+    "--engine",
+    "tree",
+    "{name}.cig"
+   ],
+   "env": {
+    "CIG_SEAL_KEY": "file",
+    "CIG_MAX_STEPS": "0",
+    "CIG_REPORTS": "never",
+    "CIG_DOCTOR": "0",
+    "NO_COLOR": "1",
+    "CIGSCRIPT_HOME": "/var/tmp/cig-eng-rel/main/home-cig-tree"
+   },
+   "stderr": "(burned [0-9]+ ops? \\([0-9]+ irreversible\\), run [0-9]{8}T[0-9]{6}-[0-9a-f]+\\n)?",
+   "cold": null
+  },
+  {
+   "name": "cig-vm",
+   "lang": "cig",
+   "label": "`cig run --engine vm`",
+   "version": [
+    "/var/tmp/cig-eng-rel/bin/cig",
+    "--version"
+   ],
+   "stage": [
+    "/var/tmp/cig-eng-rel/src/cig-script/bench/compute/{name}.cig"
+   ],
+   "run": [
+    "/var/tmp/cig-eng-rel/bin/cig",
+    "run",
+    "--engine",
+    "vm",
+    "{name}.cig"
+   ],
+   "env": {
+    "CIG_SEAL_KEY": "file",
+    "CIG_MAX_STEPS": "0",
+    "CIG_REPORTS": "never",
+    "CIG_DOCTOR": "0",
+    "NO_COLOR": "1",
+    "CIGSCRIPT_HOME": "/var/tmp/cig-eng-rel/main/home-cig-vm"
+   },
+   "stderr": "(burned [0-9]+ ops? \\([0-9]+ irreversible\\), run [0-9]{8}T[0-9]{6}-[0-9a-f]+\\n)?",
+   "cold": null
+  },
+  {
+   "name": "cig-vm-cold",
+   "lang": "cig",
+   "label": "`cig run --engine vm`, nothing in the tin",
+   "version": [
+    "/var/tmp/cig-eng-rel/bin/cig",
+    "--version"
+   ],
+   "stage": [
+    "/var/tmp/cig-eng-rel/src/cig-script/bench/compute/{name}.cig"
+   ],
+   "run": [
+    "/var/tmp/cig-eng-rel/bin/cig",
+    "run",
+    "--engine",
+    "vm",
+    "{name}.cig"
+   ],
+   "env": {
+    "CIG_SEAL_KEY": "file",
+    "CIG_MAX_STEPS": "0",
+    "CIG_REPORTS": "never",
+    "CIG_DOCTOR": "0",
+    "NO_COLOR": "1",
+    "CIGSCRIPT_HOME": "/var/tmp/cig-eng-rel/main/home-cig-vm-cold"
+   },
+   "stderr": "(burned [0-9]+ ops? \\([0-9]+ irreversible\\), run [0-9]{8}T[0-9]{6}-[0-9a-f]+\\n)?",
+   "cold": "/var/tmp/cig-eng-rel/main/home-cig-vm-cold/tin/modules"
+  }
+ ],
+ "not_installed": [
+  "lua",
+  "luajit",
+  "rustc"
+ ],
+ "compute": "/var/tmp/cig-eng-rel/src/cig-script/bench/compute",
+ "ref": "/var/tmp/cig-eng-rel/src/cig-script/bench/ref"
+}

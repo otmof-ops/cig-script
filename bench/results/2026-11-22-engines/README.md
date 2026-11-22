@@ -10,7 +10,7 @@ The raw data behind [`docs/ENGINES-2026-11-22.md`](../../../docs/ENGINES-2026-11
 | `start/pass1/`, `start/pass2/` | the same sides on three scripts: `bench/compute/hello.cig`, `bench/engines/lines-500.cig` and cigo's `orchestrate.cig` (cig-orchestrator at `0d6c934`, run with no arguments), given to the harness as its `--compute` folder |
 | `main/numbers.json`, `start/numbers.json` | every number, as `report.py` made it |
 | `main/engines.md.in`, `start/first-runs.md.in` | the templates of the two documents |
-| `main/readme.md.in`, `start/readme.md.in`, and `readme.md` beside each | the templates of the two paragraphs the README quotes under "How fast it is", and each as rendered |
+| `main/readme.md.in`, `start/readme.md.in`, and `readme.md` beside each | the templates of the two paragraphs the README quoted under "How fast it is" until cig 1.25.0 was measured as released ([`../1.25.0-engines/`](../1.25.0-engines/)), and each as rendered |
 
 Every number in the two documents is made from the passes and checked by a second program written apart from the first:
 
@@ -20,7 +20,7 @@ for run in "main engines.md.in docs/ENGINES-2026-11-22.md" "start first-runs.md.
   d=bench/results/2026-11-22-engines/$1
   python3 bench/compare/report.py --pass $d/pass1 --pass $d/pass2 --numbers $d/numbers.json --render $d/$2 $3
   python3 bench/compare/check.py --pass $d/pass1 --pass $d/pass2 --numbers $d/numbers.json --render $d/$2 $3 \
-    --render $d/readme.md.in $d/readme.md --contains README.md $d/readme.md
+    --render $d/readme.md.in $d/readme.md
 done
 ```
 
