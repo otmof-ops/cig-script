@@ -1,0 +1,1 @@
+From its second run on, cigo's 20,664-line script starts in 10.6 ms on the VM where the tree-walker takes 36.2. The first run of a script pays for the lowering: 7.7 ms against 2.5 for a 500-line script ([measured here](docs/ENGINES-FIRST-RUNS-1.25.0.md)), which is why the tree-walker is still the default.

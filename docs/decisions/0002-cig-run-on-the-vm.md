@@ -177,6 +177,17 @@ loading the module, and keeping it. The default changes when a first run
 stops paying that up front: a cheaper lowering, or a first run on the
 tree-walker with the module made for the next one.
 
+**Measured again on cig 1.25.0 as released, the same holds.** The same
+runs with the release's own binary, on the same development machine
+([the run](../ENGINES-1.25.0.md),
+[the first runs](../ENGINES-FIRST-RUNS-1.25.0.md)): the compute programs
+come out as they did, and a first run of the 500-line script still takes
+several times the tree-walker's. What differs is cigo's script, the
+longest of the three: the released build's tree-walker starts it in about
+two thirds of the development build's time, so the VM's gain there is
+smaller and a first run costs more against it. The test machine has not
+measured either yet.
+
 ## Options considered
 
 | Option | Why not |

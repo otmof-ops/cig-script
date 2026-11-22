@@ -1,0 +1,117 @@
+{
+ "rounds": 31,
+ "seed": 1,
+ "programs": [
+  {
+   "name": "hello",
+   "expect": "/var/tmp/cig-eng-rel/start-src/hello.expect",
+   "source": "/var/tmp/cig-eng-rel/start-src/hello.cig"
+  },
+  {
+   "name": "lines-500",
+   "expect": "/var/tmp/cig-eng-rel/start-src/lines-500.expect",
+   "source": "/var/tmp/cig-eng-rel/start-src/lines-500.cig"
+  },
+  {
+   "name": "orchestrate",
+   "expect": "/var/tmp/cig-eng-rel/start-src/orchestrate.expect",
+   "source": "/var/tmp/cig-eng-rel/start-src/orchestrate.cig"
+  }
+ ],
+ "sides": [
+  {
+   "name": "cig-tree",
+   "lang": "cig",
+   "label": "`cig run --engine tree`",
+   "version": [
+    "/var/tmp/cig-eng-rel/bin/cig",
+    "--version"
+   ],
+   "stage": [
+    "/var/tmp/cig-eng-rel/start-src/{name}.cig"
+   ],
+   "run": [
+    "/var/tmp/cig-eng-rel/bin/cig",
+    "run",
+    "--engine",
+    "tree",
+    "{name}.cig"
+   ],
+   "env": {
+    "CIG_SEAL_KEY": "file",
+    "CIG_MAX_STEPS": "0",
+    "CIG_REPORTS": "never",
+    "CIG_DOCTOR": "0",
+    "NO_COLOR": "1",
+    "CIGSCRIPT_HOME": "/var/tmp/cig-eng-rel/start/home-cig-tree"
+   },
+   "stderr": "(burned [0-9]+ ops? \\([0-9]+ irreversible\\), run [0-9]{8}T[0-9]{6}-[0-9a-f]+\\n)?",
+   "cold": null
+  },
+  {
+   "name": "cig-vm",
+   "lang": "cig",
+   "label": "`cig run --engine vm`",
+   "version": [
+    "/var/tmp/cig-eng-rel/bin/cig",
+    "--version"
+   ],
+   "stage": [
+    "/var/tmp/cig-eng-rel/start-src/{name}.cig"
+   ],
+   "run": [
+    "/var/tmp/cig-eng-rel/bin/cig",
+    "run",
+    "--engine",
+    "vm",
+    "{name}.cig"
+   ],
+   "env": {
+    "CIG_SEAL_KEY": "file",
+    "CIG_MAX_STEPS": "0",
+    "CIG_REPORTS": "never",
+    "CIG_DOCTOR": "0",
+    "NO_COLOR": "1",
+    "CIGSCRIPT_HOME": "/var/tmp/cig-eng-rel/start/home-cig-vm"
+   },
+   "stderr": "(burned [0-9]+ ops? \\([0-9]+ irreversible\\), run [0-9]{8}T[0-9]{6}-[0-9a-f]+\\n)?",
+   "cold": null
+  },
+  {
+   "name": "cig-vm-cold",
+   "lang": "cig",
+   "label": "`cig run --engine vm`, nothing in the tin",
+   "version": [
+    "/var/tmp/cig-eng-rel/bin/cig",
+    "--version"
+   ],
+   "stage": [
+    "/var/tmp/cig-eng-rel/start-src/{name}.cig"
+   ],
+   "run": [
+    "/var/tmp/cig-eng-rel/bin/cig",
+    "run",
+    "--engine",
+    "vm",
+    "{name}.cig"
+   ],
+   "env": {
+    "CIG_SEAL_KEY": "file",
+    "CIG_MAX_STEPS": "0",
+    "CIG_REPORTS": "never",
+    "CIG_DOCTOR": "0",
+    "NO_COLOR": "1",
+    "CIGSCRIPT_HOME": "/var/tmp/cig-eng-rel/start/home-cig-vm-cold"
+   },
+   "stderr": "(burned [0-9]+ ops? \\([0-9]+ irreversible\\), run [0-9]{8}T[0-9]{6}-[0-9a-f]+\\n)?",
+   "cold": "/var/tmp/cig-eng-rel/start/home-cig-vm-cold/tin/modules"
+  }
+ ],
+ "not_installed": [
+  "lua",
+  "luajit",
+  "rustc"
+ ],
+ "compute": "/var/tmp/cig-eng-rel/start-src",
+ "ref": "/var/tmp/cig-eng-rel/src/cig-script/bench/ref"
+}
