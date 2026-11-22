@@ -347,6 +347,13 @@ pub fn product_doctor(ctx: &Ctx, fix: bool) -> i32 {
             human_bytes(modules.bytes)
         );
     }
+    // A cache that cannot be used fails no run, so nothing else says it.
+    if let Some(why) = crate::burn::modcache::problem() {
+        outln!(
+            "  modules       {}",
+            ctx.yellow(&format!("not kept: {why}"))
+        );
+    }
     // The ledger and the run index (#177, #178): one line each, named
     // so the operator sees them without `--json`.
     let ledger_label = match ledger_presence {
@@ -1341,9 +1348,19 @@ fn json_findings(
                 if modules.entries == 1 { "" } else { "s" },
                 human_bytes(modules.bytes)
             ),
-            "a script on the vm is lowered once and its module kept; each is safe to remove and is lowered again on its script's next run (cig tin gc drops the ones nothing loads)",
+            "a script on the vm is lowered once and its module kept; each is safe to remove and is lowered again on its script's next run (cig tin gc drops another build's, and the ones not loaded for 30 days)",
             None,
         ));
+        // A cache that cannot be used fails no run, so nothing else says it.
+        if let Some(why) = crate::burn::modcache::problem() {
+            out.push(finding(
+                "modules-kept",
+                "warn",
+                why,
+                "a run on the vm lowers its script every time while no module can be kept; nothing else changes",
+                None,
+            ));
+        }
     }
 
     // The tin's protection: who can read it, where the key is, and whether

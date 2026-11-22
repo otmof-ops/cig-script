@@ -488,7 +488,7 @@ pub fn tin_cmd(ctx: &Ctx, cmd: Option<TinCommand>) -> i32 {
                 );
                 if modules.entries > 0 {
                     outln!(
-                        "{} lowered module{} ({} bytes), kept so a script is lowered once; each is safe to remove (cig tin gc drops the ones nothing loads)",
+                        "{} lowered module{} ({} bytes), kept so a script is lowered once; each is safe to remove (cig tin gc drops another build's, and the ones not loaded for 30 days)",
                         modules.entries,
                         if modules.entries == 1 { "" } else { "s" },
                         modules.bytes
@@ -711,9 +711,9 @@ pub fn tin_cmd(ctx: &Ctx, cmd: Option<TinCommand>) -> i32 {
             }
             let (removed, bytes) = tin::gc(sealed_orphans);
             let kept = tin::du().objects;
-            // The lowered modules nothing loads anymore: another cig's, and
-            // the ones no run asked for in a month. Each is lowered again
-            // if its script ever runs.
+            // The lowered modules another build of cig made, and the ones
+            // no run loaded for 30 days. Each is lowered again if its
+            // script ever runs.
             let modules = crate::burn::modcache::sweep();
             if ctx.json {
                 outln!(
@@ -727,7 +727,7 @@ pub fn tin_cmd(ctx: &Ctx, cmd: Option<TinCommand>) -> i32 {
                 );
                 if modules.entries > 0 {
                     eprintln!(
-                        "removed {} lowered module{} ({} bytes) that nothing loads anymore",
+                        "removed {} lowered module{} ({} bytes): another build's, or not loaded for 30 days",
                         modules.entries,
                         if modules.entries == 1 { "" } else { "s" },
                         modules.bytes
