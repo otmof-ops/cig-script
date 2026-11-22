@@ -3063,11 +3063,69 @@ fn glob_star_lists_no_empty_entry_and_dot_slash_patterns_match() {
 
 // ----- crash round: backtraces that name the function (#23), burns put back after a crash (#24)
 
+/// #254: a run must not end because the lowering has a bug the tree-walker
+/// does not. A panic in the lowering is said and reported like any crash,
+/// and the script still runs, on the tree-walker, with the reason in the
+/// run's record and nothing kept in the tin.
+#[test]
+fn a_crash_in_the_lowering_leaves_the_run_to_the_tree_walker() {
+    let sb = Sandbox::new();
+    sb.write("x.cig", "exhale \"still here\"\n");
+    let out = sb.cig_env(
+        &["run", "--engine", "vm", "x.cig"],
+        &[("CIG_INTERNAL_PANIC", "lower")],
+    );
+    let err = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(out.status.code(), Some(0), "{err}");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "still here\n");
+    assert!(
+        err.contains("error[E901 internal]: cig crashed: deliberate test panic in the lowering"),
+        "{err}"
+    );
+    assert!(
+        err.contains("this run goes on, on the tree-walker"),
+        "{err}"
+    );
+    let runs = sb.runs();
+    assert_eq!(runs.len(), 1, "{runs:?}");
+    let engine = &runs[0]["engine"];
+    assert_eq!(engine["engine"], "tree", "{engine}");
+    assert_eq!(engine["asked"], "vm", "{engine}");
+    assert!(
+        engine["why"]
+            .as_str()
+            .is_some_and(|w| w.starts_with("the lowering crashed on it: deliberate test panic")),
+        "{engine}"
+    );
+    let reports: Vec<serde_json::Value> =
+        serde_json::from_str(&sb.run_ok(&["--json", "__crash", "list"])).unwrap();
+    assert_eq!(reports.len(), 1, "the crash is reported: {reports:?}");
+    assert!(
+        tree_bytes(&sb.home().join("tin").join("modules")).is_empty(),
+        "a module was kept"
+    );
+    // The same script without the fault, to show the fault was the reason.
+    let fine = sb.cig(&["run", "--engine", "vm", "x.cig"]);
+    assert!(fine.status.success());
+    assert_eq!(sb.runs().len(), 2);
+    assert!(
+        sb.runs()
+            .iter()
+            .any(|r| r["engine"]["engine"] == "vm" && r["engine"]["module"] == "lowered"),
+        "{:?}",
+        sb.runs()
+    );
+}
+
 #[test]
 fn a_release_crash_report_names_the_function_that_panicked() {
     let sb = Sandbox::new();
     sb.write("x.cig", "exhale \"never\"\n");
-    let out = sb.cig_env(&["run", "x.cig"], &[("CIG_INTERNAL_PANIC", "eval")]);
+    // The hook is the tree-walker's (the VM allows itself no panic).
+    let out = sb.cig_env(
+        &["run", "x.cig"],
+        &[("CIG_INTERNAL_PANIC", "eval"), ("CIG_ENGINE", "tree")],
+    );
     assert_eq!(out.status.code(), Some(70));
     let list: Vec<serde_json::Value> =
         serde_json::from_str(&sb.run_ok(&["--json", "__crash", "list"])).unwrap();
@@ -3427,6 +3485,56 @@ fn a_pinned_script_is_lit_by_its_version_and_says_so() {
     let v: serde_json::Value = serde_json::from_str(&sb.run_ok(&["--json", "versions"])).unwrap();
     assert_eq!(v["humidor"][0]["version"], "1.0.0");
     assert!(v["humidor"][0]["last_lit"].is_string(), "{v}");
+}
+
+/// #254: a pinned script goes to the cig it names, which may be from
+/// before `--engine` and would refuse it as unknown. The flag is not
+/// handed on; the choice goes with the run as `CIG_ENGINE`. What comes
+/// after `--` is the script's, an `--engine` of its own included.
+#[cfg(unix)]
+#[test]
+fn a_pinned_script_is_handed_on_without_the_engine_flag() {
+    use std::os::unix::fs::PermissionsExt;
+    let sb = Sandbox::new();
+    let shelf = sb.home().join("humidor").join("1.0.0");
+    fs::create_dir_all(&shelf).unwrap();
+    let fake = shelf.join("cig");
+    fs::write(
+        &fake,
+        "#!/bin/sh\necho \"handed: $* (engine=${CIG_ENGINE:-unset})\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
+    sb.write("s.cig", "# cig 1.0.0\nexhale \"never here\"\n");
+    for (given, handed) in [
+        (
+            vec!["run", "--engine", "vm", "s.cig", "--", "--engine", "steam"],
+            "handed: run s.cig -- --engine steam (engine=vm)\n",
+        ),
+        (
+            vec!["run", "s.cig", "--engine=tree", "--dry-run"],
+            "handed: run s.cig --dry-run (engine=tree)\n",
+        ),
+        (
+            vec!["light", "--engine", "vm", "s.cig", "deploy"],
+            "handed: light s.cig deploy (engine=vm)\n",
+        ),
+    ] {
+        // The variable says the other engine: the flag is what counts.
+        let other = if handed.contains("engine=vm") {
+            "tree"
+        } else {
+            "vm"
+        };
+        let out = sb.cig_env(&given, &[("CIG_ENGINE", other)]);
+        assert_eq!(String::from_utf8_lossy(&out.stdout), handed, "{given:?}");
+    }
+    // No flag: nothing is taken out, and the variable goes on as it came.
+    let out = sb.cig_env(&["run", "s.cig", "--", "x"], &[("CIG_ENGINE", "vm")]);
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "handed: run s.cig -- x (engine=vm)\n"
+    );
 }
 
 #[cfg(unix)]
@@ -11349,10 +11457,11 @@ fn a_crash_report_cwd_is_a_placeholder() {
     let sb = Sandbox::new();
     fs::create_dir_all(sb.path().join("Zqx-Work/sub")).unwrap();
     sb.write("Zqx-Work/sub/x.cig", "exhale \"never\"\n");
+    // The hook is the tree-walker's (the VM allows itself no panic).
     let out = sb.cig_in(
         "Zqx-Work/sub",
         &["run", "x.cig"],
-        &[("CIG_INTERNAL_PANIC", "eval")],
+        &[("CIG_INTERNAL_PANIC", "eval"), ("CIG_ENGINE", "tree")],
     );
     assert_eq!(out.status.code(), Some(70));
     let list: Vec<serde_json::Value> =
@@ -17989,8 +18098,14 @@ fn a_poisoned_inbox_is_dropped() {
     let runs = sb.runs();
     assert_eq!(runs.len(), 1, "a poisoned child run was taken in: {runs:?}");
     assert!(runs[0]["parent"].is_null());
-    // Nothing poisoned reached the tin.
+    // Nothing poisoned reached the tin. (On the VM the tin also keeps
+    // this script's lowered module, which holds the script's own text,
+    // the word included: that folder is the script's, not the hop's.)
+    let modules = sb.home().join("tin").join("modules");
     for (p, bytes) in tree_bytes(&sb.home().join("tin")) {
+        if p.starts_with(&modules) {
+            continue;
+        }
         assert!(
             !String::from_utf8_lossy(&bytes).contains("POISON"),
             "{} holds the poison",
@@ -18437,29 +18552,58 @@ fn bench_timings_flag_phases_that_overlap_and_products_that_say_nothing() {
 fn cig_run_writes_its_phases_when_asked_and_only_then() {
     let sb = Sandbox::new();
     let script = sb.write("hello.cig", "exhale \"hi\"\n");
-    let quiet = sb.cig(&["run", script.to_str().unwrap()]);
+    // (On the tree-walker, so the tin is still empty for the VM's first
+    // run below.)
+    let quiet = sb.cig(&["run", "--engine", "tree", script.to_str().unwrap()]);
     assert!(
         !String::from_utf8_lossy(&quiet.stderr).contains("\"phase\""),
         "no flag, no lines"
     );
-    let out = sb.cig(&["run", script.to_str().unwrap(), "--timings"]);
-    assert!(out.status.success());
-    let err = String::from_utf8_lossy(&out.stderr);
-    let names: Vec<String> = err
-        .lines()
-        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
-        .filter(|v| v["v"] == 1 && v["product"] == "cig")
-        .filter_map(|v| v["phase"].as_str().map(str::to_string))
-        .collect();
-    for want in ["lower", "check", "run", "burn"] {
-        assert!(
-            names.iter().any(|n| n == want),
-            "{want} in {names:?}\n{err}"
-        );
+    // The phases of a run, in the order they ended, on `engine`.
+    let phases = |engine: &str| -> Vec<String> {
+        let out = sb.cig(&[
+            "run",
+            "--engine",
+            engine,
+            script.to_str().unwrap(),
+            "--timings",
+        ]);
+        assert!(out.status.success());
+        let err = String::from_utf8_lossy(&out.stderr).to_string();
+        err.lines()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .filter(|v| v["v"] == 1 && v["product"] == "cig")
+            .filter_map(|v| v["phase"].as_str().map(str::to_string))
+            .collect()
+    };
+    let in_order = |names: &[String], want: &[&str]| {
+        let at: Vec<usize> = want
+            .iter()
+            .map(|w| {
+                names
+                    .iter()
+                    .position(|n| n == w)
+                    .unwrap_or_else(|| panic!("{w} in {names:?}"))
+            })
+            .collect();
+        assert!(at.windows(2).all(|p| p[0] < p[1]), "{want:?} in {names:?}");
+    };
+    // The tree-walker: the script is read, checked, then run.
+    in_order(&phases("tree"), &["lower", "check", "run", "burn"]);
+    // The VM, the first time: the tin is asked (`module`), then the script
+    // is read and checked as before, and lowered and kept (`compile`).
+    let first = phases("vm");
+    in_order(
+        &first,
+        &["module", "lower", "check", "compile", "run", "burn"],
+    );
+    // And from then on the module is the tin's: nothing is read, checked
+    // or lowered.
+    let later = phases("vm");
+    in_order(&later, &["module", "run", "burn"]);
+    for gone in ["lower", "check", "compile"] {
+        assert!(!later.iter().any(|n| n == gone), "{gone} in {later:?}");
     }
-    // The order they ended in: the script is read, checked, then run.
-    let at = |n: &str| names.iter().position(|x| x == n).unwrap();
-    assert!(at("lower") < at("check") && at("check") < at("run") && at("run") < at("burn"));
     // A bad descriptor is a usage error, never a silent no-op.
     let bad = sb.cig(&["run", script.to_str().unwrap(), "--timings=77"]);
     assert_eq!(bad.status.code(), Some(3));

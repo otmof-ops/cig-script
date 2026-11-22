@@ -93,6 +93,14 @@ jobs:
       - if: runner.os == 'Linux'
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
       - run: cargo test --workspace
+      # The suites that run scripts through `cig run`, once more with the VM
+      # as its engine (#254): every test that holds the tree-walker to an
+      # output holds the VM to it too. (`engines` compares the two on what
+      # a run leaves, journals included; this is the rest of the suite.)
+      - if: matrix.os == 'ubuntu-latest'
+        run: cargo test --test cli --test programs --test walker --test steps --test hops --test wall --test pack --test foreign
+        env:
+          CIG_ENGINE: vm
       # Release inlining changes which frames a backtrace keeps, and the
       # crash tests read them: run the suite once as users run cig.
       - if: matrix.os == 'ubuntu-latest'
@@ -107,6 +115,13 @@ jobs:
         run: cargo test --release --test differential
         env:
           CIG_REQUIRE_DIFFERENTIAL: "1"
+      # And the VM against that same release (#254): the reference is the
+      # tree-walker as released, which does not know the variable.
+      - if: matrix.os == 'ubuntu-latest'
+        run: cargo test --release --test differential
+        env:
+          CIG_REQUIRE_DIFFERENTIAL: "1"
+          CIG_ENGINE: vm
       - run: cargo run --release -- run examples/hello.cig -- ci
       - run: cargo run --release -- chains examples/tasks.cig
       # The benchmark gates (#145): every case's output is its expect file and

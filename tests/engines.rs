@@ -5,20 +5,27 @@
 //! tree-walker. Every script of the corpus runs three times: on the
 //! tree-walker, on the VM with an empty tin (the run lowers the script and
 //! keeps its module), and on the VM again (the run loads the module from
-//! the tin). The exit status, standard output and standard error of the
-//! three are compared, for a real run and for a dry run, and each real
-//! run's record is read for the engine it names.
+//! the tin). The three are compared, for a real run and for a dry run, in
+//! everything a run leaves: its exit status, standard output and standard
+//! error; the files in its folder; how its record says it went (status,
+//! error and where, burns, whether it was rolled back); and its journal,
+//! line for line. Each real run's record is read for the engine it names.
 //!
 //! The corpus is the scripts written to fail and to resolve names
 //! (`tests/walker`), the step-budget scripts (`tests/steps`), the language
-//! tour (`tests/scripts`), the examples, and the compute programs that
-//! finish quickly in a debug build.
+//! tour (`tests/scripts`), the examples, the compute programs that finish
+//! quickly in a debug build, and the burn programs (`tests/lower/burns.rs`:
+//! every way into, through and out of a burn), which are what give the
+//! journals something to hold.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 use wait_timeout::ChildExt;
+
+#[path = "lower/burns.rs"]
+mod burns;
 
 /// The compute programs that finish in about a second in a debug build.
 const COMPUTE: [&str; 9] = [
@@ -54,23 +61,42 @@ fn scripts_in(dir: &str, only: Option<&[&str]>) -> Vec<PathBuf> {
     v
 }
 
-/// The corpus, each script with its step budget: the scripts written to
-/// fail run with one (one of them never ends); the rest run without.
-fn corpus() -> Vec<(PathBuf, &'static str)> {
-    let mut corpus: Vec<(PathBuf, &str)> = scripts_in("tests/walker", None)
+/// The corpus, each script with its name and its step budget: the scripts
+/// written to fail run with one (one of them never ends); the rest run
+/// without. The burn programs are written out under the folder returned
+/// with it, which lasts as long as the caller keeps it.
+fn corpus() -> (Vec<(PathBuf, String, &'static str)>, tempfile::TempDir) {
+    let named = |p: PathBuf| {
+        let name = p.strip_prefix(root()).unwrap_or(&p).display().to_string();
+        (p, name.replace('\\', "/"))
+    };
+    let mut corpus: Vec<(PathBuf, String, &str)> = scripts_in("tests/walker", None)
         .into_iter()
         .chain(scripts_in("tests/steps", None))
-        .map(|p| (p, "5000"))
+        .map(named)
+        .map(|(p, name)| (p, name, "5000"))
         .collect();
     corpus.extend(
         scripts_in("tests/scripts", None)
             .into_iter()
             .chain(scripts_in("examples", None))
             .chain(scripts_in("bench/compute", Some(&COMPUTE)))
-            .map(|p| (p, "0")),
+            .map(named)
+            .map(|(p, name)| (p, name, "0")),
     );
-    assert!(corpus.len() >= 30, "corpus is too small: {}", corpus.len());
-    corpus
+    // The burn programs, their files named beside the script.
+    let written = tempfile::tempdir().expect("tempdir");
+    for (name, template, files) in burns::burn_corpus() {
+        let mut source = template.to_string();
+        for (k, file) in files.iter().enumerate().rev() {
+            source = source.replace(&format!("P{k}"), &format!("{file:?}"));
+        }
+        let path = written.path().join(format!("{name}.cig"));
+        fs::write(&path, source).expect("write a burn program");
+        corpus.push((path, format!("tests/lower/burns.rs: {name}"), "0"));
+    }
+    assert!(corpus.len() >= 70, "corpus is too small: {}", corpus.len());
+    (corpus, written)
 }
 
 /// A state directory and a keys directory that outlive one run, so a second
@@ -123,9 +149,25 @@ fn is_run_id(word: &str) -> bool {
 }
 
 /// What a run printed, with what differs between any two runs taken out:
-/// the folder it ran in and its run id.
+/// the folder it ran in, as it was given and as the system resolves it (a
+/// temporary folder is often reached through a link), and its run id.
 fn normal(text: &str, cwd: &Path) -> String {
-    let text = text.replace(&cwd.to_string_lossy().to_string(), "<cwd>");
+    let mut text = text.to_string();
+    let mut forms = vec![cwd.to_path_buf()];
+    if let Ok(real) = cwd.canonicalize() {
+        forms.push(real);
+    }
+    // The longest first, so one form inside another is taken whole.
+    let mut names: Vec<String> = forms
+        .iter()
+        .map(|p| p.to_string_lossy().to_string())
+        .flat_map(|n| [n.replace('\\', "/"), n])
+        .collect();
+    names.sort_by_key(|n| std::cmp::Reverse(n.len()));
+    names.dedup();
+    for name in names {
+        text = text.replace(&name, "<cwd>");
+    }
     text.split_inclusive(|c: char| c.is_whitespace() || c == ',' || c == ')' || c == '(')
         .map(|piece| {
             let word = piece
@@ -139,12 +181,120 @@ fn normal(text: &str, cwd: &Path) -> String {
         .collect()
 }
 
-/// Exit status, stdout and stderr of `cig run [--dry-run] --engine <engine>
-/// <script>` in a fresh folder, with `tin` as its state.
+/// The files under `dir`, each with its length and the SHA-256 of its
+/// bytes: what a run left in its folder.
+fn files_in(dir: &Path) -> String {
+    use sha2::{Digest, Sha256};
+    fn walk(dir: &Path, root: &Path, out: &mut Vec<String>) {
+        let mut entries: Vec<PathBuf> = fs::read_dir(dir)
+            .map(|d| d.filter_map(|e| e.ok().map(|e| e.path())).collect())
+            .unwrap_or_default();
+        entries.sort();
+        for p in entries {
+            let name = p
+                .strip_prefix(root)
+                .unwrap_or(&p)
+                .to_string_lossy()
+                .replace('\\', "/");
+            match fs::symlink_metadata(&p) {
+                Ok(m) if m.is_dir() => {
+                    out.push(format!("{name}/"));
+                    walk(&p, root, out);
+                }
+                Ok(m) if m.is_file() => {
+                    let bytes = fs::read(&p).unwrap_or_default();
+                    out.push(format!(
+                        "{name} {} {}",
+                        bytes.len(),
+                        hex::encode(Sha256::digest(&bytes))
+                    ));
+                }
+                Ok(_) => out.push(format!("{name} (not a file)")),
+                Err(_) => {}
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(dir, dir, &mut out);
+    out.join("\n")
+}
+
+/// A journal line or a record without what each run has its own of: when
+/// it happened, the hash chain over those times, the run's id, and where
+/// in its own tin a before-state was put (its being there still counts).
+fn without_own(v: &mut serde_json::Value) {
+    match v {
+        serde_json::Value::Object(m) => {
+            for k in ["at", "prev", "run", "mtime_ns"] {
+                m.remove(k);
+            }
+            if let Some(s) = m.get_mut("snapshot") {
+                *s = serde_json::Value::Bool(true);
+            }
+            for (_, inner) in m.iter_mut() {
+                without_own(inner);
+            }
+        }
+        serde_json::Value::Array(a) => a.iter_mut().for_each(without_own),
+        _ => {}
+    }
+}
+
+/// The run folders in `tin`.
+fn run_folders(tin: &Tin) -> std::collections::BTreeSet<PathBuf> {
+    fs::read_dir(tin.home().join("runs"))
+        .map(|d| d.filter_map(|e| e.ok().map(|e| e.path())).collect())
+        .unwrap_or_default()
+}
+
+/// What a run left in its state directory, `made` being the run folders
+/// that were not there before it: how its record says it went, and its
+/// journal. A run that never started (a script that does not parse or
+/// check) left neither. `cwd` is the folder it ran in.
+fn recorded(made: &[PathBuf], cwd: &Path) -> String {
+    let mut out = Vec::new();
+    for dir in made {
+        let Some(record) = fs::read_to_string(dir.join("run.json"))
+            .ok()
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        else {
+            out.push("a run folder without a record that reads".to_string());
+            continue;
+        };
+        for field in [
+            "mode",
+            "status",
+            "error",
+            "diagnostic",
+            "burns",
+            "irreversible",
+            "rolled_back",
+            "args",
+        ] {
+            out.push(format!("record {field}: {}", record[field]));
+        }
+        let journal = fs::read_to_string(dir.join("journal.jsonl")).unwrap_or_default();
+        for line in journal.lines() {
+            match serde_json::from_str::<serde_json::Value>(line) {
+                Ok(mut v) => {
+                    without_own(&mut v);
+                    out.push(format!("journal: {v}"));
+                }
+                Err(_) => out.push(format!("journal (not JSON): {line}")),
+            }
+        }
+    }
+    normal(&out.join("\n"), cwd)
+}
+
+/// What `cig run [--dry-run] --engine <engine> <script>` did in a fresh
+/// folder, with `tin` as its state: its exit status, stdout and stderr,
+/// the files it left, and what its record and journal say.
 fn run(script: &Path, budget: &str, engine: &str, dry: bool, tin: &Tin) -> String {
     let cwd = tempfile::tempdir().expect("tempdir");
     let name = script.file_name().expect("name");
     fs::copy(script, cwd.path().join(name)).expect("copy script");
+    let before = run_folders(tin);
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_cig"));
     cmd.arg("run").arg("--engine").arg(engine);
     if dry {
@@ -185,11 +335,14 @@ fn run(script: &Path, budget: &str, engine: &str, dry: bool, tin: &Tin) -> Strin
         }
     };
     let out = child.wait_with_output().expect("output");
+    let made: Vec<PathBuf> = run_folders(tin).difference(&before).cloned().collect();
     format!(
-        "exit {}\n--- stdout\n{}--- stderr\n{}",
+        "exit {}\n--- stdout\n{}--- stderr\n{}--- files\n{}\n--- recorded\n{}\n",
         status.code().unwrap_or(-1),
         normal(&String::from_utf8_lossy(&out.stdout), cwd.path()),
-        normal(&String::from_utf8_lossy(&out.stderr), cwd.path())
+        normal(&String::from_utf8_lossy(&out.stderr), cwd.path()),
+        files_in(cwd.path()),
+        recorded(&made, cwd.path())
     )
 }
 
@@ -212,12 +365,11 @@ fn a_run_on_the_vm_matches_the_tree_walker_cold_and_warm() {
     let mut differ = Vec::new();
     let mut on_tree = Vec::new();
     let mut not_cached = Vec::new();
-    for (script, budget) in corpus() {
-        let name = script
-            .strip_prefix(root())
-            .unwrap_or(&script)
-            .display()
-            .to_string();
+    // How much of the corpus the comparison of records and journals is
+    // about: scripts that ran at all, and scripts that burned.
+    let (mut recorded_runs, mut journaled) = (0, 0);
+    let (corpus, _written) = corpus();
+    for (script, name, budget) in corpus {
         let tree = run(&script, budget, "tree", false, &Tin::new());
         let tin = Tin::new();
         let cold = run(&script, budget, "vm", false, &tin);
@@ -234,6 +386,8 @@ fn a_run_on_the_vm_matches_the_tree_walker_cold_and_warm() {
                 first_difference(&tree, &warm)
             ));
         }
+        recorded_runs += usize::from(tree.contains("\nrecord status: "));
+        journaled += usize::from(tree.contains("\njournal: {\"seq\":"));
         // What the two runs' records say ran them. A script that does not
         // parse or check has no run, so no record.
         let engines = tin.engines();
@@ -256,6 +410,11 @@ fn a_run_on_the_vm_matches_the_tree_walker_cold_and_warm() {
         differ.is_empty(),
         "the VM and the tree-walker differ on:\n{}",
         differ.join("\n")
+    );
+    println!("{recorded_runs} scripts left a record, {journaled} of them a journal with burns");
+    assert!(
+        recorded_runs >= 70 && journaled >= 40,
+        "the records and journals compared are too few to mean much: {recorded_runs} records, {journaled} journals"
     );
     assert!(
         not_cached.is_empty(),
@@ -289,12 +448,8 @@ fn a_run_on_the_vm_matches_the_tree_walker_cold_and_warm() {
 #[test]
 fn a_dry_run_on_the_vm_plans_what_the_tree_walker_plans() {
     let mut differ = Vec::new();
-    for (script, budget) in corpus() {
-        let name = script
-            .strip_prefix(root())
-            .unwrap_or(&script)
-            .display()
-            .to_string();
+    let (corpus, _written) = corpus();
+    for (script, name, budget) in corpus {
         let tree = run(&script, budget, "tree", true, &Tin::new());
         let tin = Tin::new();
         let cold = run(&script, budget, "vm", true, &tin);
