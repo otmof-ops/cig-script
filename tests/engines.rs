@@ -150,7 +150,9 @@ fn is_run_id(word: &str) -> bool {
 
 /// What a run printed, with what differs between any two runs taken out:
 /// the folder it ran in, as it was given and as the system resolves it (a
-/// temporary folder is often reached through a link), and its run id.
+/// temporary folder is often reached through a link), written with either
+/// separator or as JSON writes it (a record's error quotes paths), and its
+/// run id.
 fn normal(text: &str, cwd: &Path) -> String {
     let mut text = text.to_string();
     let mut forms = vec![cwd.to_path_buf()];
@@ -161,7 +163,7 @@ fn normal(text: &str, cwd: &Path) -> String {
     let mut names: Vec<String> = forms
         .iter()
         .map(|p| p.to_string_lossy().to_string())
-        .flat_map(|n| [n.replace('\\', "/"), n])
+        .flat_map(|n| [n.replace('\\', "/"), n.replace('\\', "\\\\"), n])
         .collect();
     names.sort_by_key(|n| std::cmp::Reverse(n.len()));
     names.dedup();
