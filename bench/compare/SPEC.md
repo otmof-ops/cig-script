@@ -35,8 +35,9 @@ Named groups of sides (each in this order):
 - `CIG_SIDES` = `cig`, `stage-a`, `stage-b`, `cig-dry`, `stage-a-dry`, `stage-b-dry`
 - `LANGUAGES` = `lua`, `luajit-off`, `luajit`, `python`, `node`, `rust`
 - `IDIOMS` = `python-idiom` (its base is `python`), `node-idiom` (base `node`), `rust-idiom` (base `rust`)
+- `ENGINES` = `cig-tree`, `cig-vm`, `cig-vm-cold`: `cig run` under each engine, with the script's module in the tin and with nothing in the tin
 - `MAIN` = `cig`, `stage-b`, then `LANGUAGES`
-- `ALL` = `CIG_SIDES`, then `cig-first`, then `LANGUAGES`, then the three of `IDIOMS`
+- `ALL` = `CIG_SIDES`, then `cig-first`, then `ENGINES`, then `LANGUAGES`, then the three of `IDIOMS`
 
 ## 3. Which numbers exist: a valid pair
 
@@ -100,7 +101,9 @@ In what follows, `p` is a program, `s` a side, `k` a pass number from 1 (written
 1. (A, B) for each A in `CIG_SIDES`, for each B in `LANGUAGES`;
 2. (`stage-b`, `cig`), (`stage-a`, `cig`), (`stage-b-dry`, `cig-dry`);
 3. (`python-idiom`, `python`), (`node-idiom`, `node`), (`rust-idiom`, `rust`);
-4. (`stage-b`, `python-idiom`), (`stage-b`, `node-idiom`), (`stage-b`, `rust-idiom`).
+4. (`stage-b`, `python-idiom`), (`stage-b`, `node-idiom`), (`stage-b`, `rust-idiom`);
+5. (`cig-vm`, `cig-tree`), (`cig-vm-cold`, `cig-tree`), (`cig-vm`, `stage-b`);
+6. (`cig-vm`, B) for each B in `LANGUAGES`.
 
 **The run record**, for R in `cig`, `stage-a`, `stage-b`, with R-dry being R followed by `-dry`, over the programs (in the order of section 2) where (p, R) and (p, R-dry) are both valid, when there is at least one:
 
@@ -148,6 +151,9 @@ A cell that names a key is that key's text, or `–` when the key does not exist
 | `cig` | `` `cig run` `` |
 | `cig-dry` | `` `cig run --dry-run` `` |
 | `cig-first` | `` `cig run`, new folder `` |
+| `cig-tree` | `` `cig run --engine tree` `` |
+| `cig-vm` | `` `cig run --engine vm` `` |
+| `cig-vm-cold` | `` `cig run --engine vm`, empty tin `` |
 | `stage-a` | stage a |
 | `stage-a-dry` | stage a, `` `--dry-run` `` |
 | `stage-b` | stage b |
@@ -162,7 +168,7 @@ A cell that names a key is that key's text, or `–` when the key does not exist
 | `node-idiom` | Node, idiomatic |
 | `rust-idiom` | Rust, idiomatic |
 
-In plain characters: `cig`'s label is backtick, `cig run`, backtick; `cig-dry`'s is backtick, `cig run --dry-run`, backtick; `cig-first`'s is backtick, `cig run`, backtick, `, new folder`; `stage-a-dry`'s is `stage a, ` then backtick, `--dry-run`, backtick (and `stage-b-dry`'s the same with `b`); `luajit-off`'s is `LuaJIT ` then backtick, `-joff`, backtick.
+In plain characters: `cig`'s label is backtick, `cig run`, backtick; `cig-dry`'s is backtick, `cig run --dry-run`, backtick; `cig-first`'s is backtick, `cig run`, backtick, `, new folder`; `cig-tree`'s is backtick, `cig run --engine tree`, backtick; `cig-vm`'s is backtick, `cig run --engine vm`, backtick; `cig-vm-cold`'s is backtick, `cig run --engine vm`, backtick, `, empty tin`; `stage-a-dry`'s is `stage a, ` then backtick, `--dry-run`, backtick (and `stage-b-dry`'s the same with `b`); `luajit-off`'s is `LuaJIT ` then backtick, `-joff`, backtick.
 
 | name | header | rows (in order) | cells |
 |---|---|---|---|
@@ -179,6 +185,7 @@ In plain characters: `cig`'s label is backtick, `cig run`, backtick; `cig-dry`'s
 | `passes` | `compute set`, then for A in `cig`, `stage-b`, for each pass k: the label of A, then ` ÷, pass `, then k | the label of each side in `LANGUAGES` | for A in `cig`, `stage-b`, for each pass k: `geomean.passK.compute.A.B` |
 | `moved` | `program`, `side`, then for each pass k: `pass k, ms`. **Two text columns.** | for each program p in order, for each side s in `ALL` where (p, s) is valid and the largest of its `median_k` over the passes divided by the smallest is above `1.10` | `` `p` ``, the label of s, then `median.passK.p.s` for each pass k |
 | `stability` | `side`, `programs`, then for each pass k from 2: `pass k ÷ pass 1`; then for each pass k: `last third ÷ first third, pass k`; then for each pass k: `CV over 5%, pass k` | for each side s in `ALL` where `programs.s` exists | the label of s, `programs.s`, then `repeat.passK.s` for each k from 2, `drift.passK.s` for each k, `noisy.passK.s` for each k |
+| `engines` | `program`, then the labels of `cig-tree`, `cig-vm`, `cig-vm-cold`, then `vm ÷ tree`, then `vm, empty tin ÷ tree` | each program | `median.p.cig-tree`, `median.p.cig-vm`, `median.p.cig-vm-cold`, `ratio.p.cig-vm.cig-tree`, `ratio.p.cig-vm-cold.cig-tree` |
 | `conditions` | (an empty string), then `pass k` for each pass. **Every column is text**, so no row is left out. | see below | see below |
 
 **`conditions`, its rows in order.** First, for each (KEY, label) below, a row: the label, then for each pass the shown value of `condition(pass, KEY)[0]`, or `–` when the pass has no such line:

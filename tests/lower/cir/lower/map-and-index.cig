@@ -1,0 +1,3 @@
+roll k = "a"
+stick m = {[k]: 1, b: 2, [k + "c"]: 3}
+exhale m["ac"]

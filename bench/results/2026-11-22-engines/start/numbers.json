@@ -1,0 +1,610 @@
+{
+ "anon.hello.cig-tree": {
+  "text": "1.0",
+  "value": 928.0
+ },
+ "anon.hello.cig-vm": {
+  "text": "1.0",
+  "value": 930.0
+ },
+ "anon.hello.cig-vm-cold": {
+  "text": "1.0",
+  "value": 932.0
+ },
+ "anon.lines-500.cig-tree": {
+  "text": "1.0",
+  "value": 1006.0
+ },
+ "anon.lines-500.cig-vm": {
+  "text": "1.0",
+  "value": 932.0
+ },
+ "anon.lines-500.cig-vm-cold": {
+  "text": "1.9",
+  "value": 1808.0
+ },
+ "anon.orchestrate.cig-tree": {
+  "text": "30.7",
+  "value": 29976.0
+ },
+ "anon.orchestrate.cig-vm": {
+  "text": "8.4",
+  "value": 8192.0
+ },
+ "anon.orchestrate.cig-vm-cold": {
+  "text": "71.2",
+  "value": 69506.0
+ },
+ "date.pass1": {
+  "text": "2026-11-22T12:27:09Z",
+  "value": "2026-11-22T12:27:09Z"
+ },
+ "date.pass2": {
+  "text": "2026-11-22T12:29:05Z",
+  "value": "2026-11-22T12:29:05Z"
+ },
+ "drift.pass1.cig-tree": {
+  "text": "0.96",
+  "value": 0.9565814622337291
+ },
+ "drift.pass1.cig-vm": {
+  "text": "1.05",
+  "value": 1.051368098038517
+ },
+ "drift.pass1.cig-vm-cold": {
+  "text": "1.07",
+  "value": 1.0736578480565258
+ },
+ "drift.pass2.cig-tree": {
+  "text": "1.10",
+  "value": 1.101755794063465
+ },
+ "drift.pass2.cig-vm": {
+  "text": "1.06",
+  "value": 1.058419632774318
+ },
+ "drift.pass2.cig-vm-cold": {
+  "text": "1.07",
+  "value": 1.0689300499977497
+ },
+ "failed.pass1": {
+  "text": "0",
+  "value": 0
+ },
+ "failed.pass2": {
+  "text": "0",
+  "value": 0
+ },
+ "faster.compute.cig-vm-cold.cig-tree": {
+  "text": "0",
+  "value": 0
+ },
+ "faster.compute.cig-vm.cig-tree": {
+  "text": "2",
+  "value": 2
+ },
+ "faster.start.cig-vm-cold.cig-tree": {
+  "text": "0",
+  "value": 0
+ },
+ "faster.start.cig-vm.cig-tree": {
+  "text": "0",
+  "value": 0
+ },
+ "floor.pass1": {
+  "text": "0.28",
+  "value": 0.28
+ },
+ "floor.pass2": {
+  "text": "0.27",
+  "value": 0.274
+ },
+ "geomean.compute.cig-vm-cold.cig-tree": {
+  "text": "4.84",
+  "value": 4.840871038951292
+ },
+ "geomean.compute.cig-vm.cig-tree": {
+  "text": "0.44",
+  "value": 0.44375698885454723
+ },
+ "geomean.pass1.compute.cig-vm-cold.cig-tree": {
+  "text": "4.88",
+  "value": 4.88482259973818
+ },
+ "geomean.pass1.compute.cig-vm.cig-tree": {
+  "text": "0.44",
+  "value": 0.4398446852749184
+ },
+ "geomean.pass1.start.cig-vm-cold.cig-tree": {
+  "text": "1.19",
+  "value": 1.1931449745252434
+ },
+ "geomean.pass1.start.cig-vm.cig-tree": {
+  "text": "1.08",
+  "value": 1.077350625289486
+ },
+ "geomean.pass2.compute.cig-vm-cold.cig-tree": {
+  "text": "4.94",
+  "value": 4.9425374266857895
+ },
+ "geomean.pass2.compute.cig-vm.cig-tree": {
+  "text": "0.46",
+  "value": 0.45856759032492733
+ },
+ "geomean.pass2.start.cig-vm-cold.cig-tree": {
+  "text": "1.00",
+  "value": 1.0012776831345827
+ },
+ "geomean.pass2.start.cig-vm.cig-tree": {
+  "text": "0.92",
+  "value": 0.9199318568994891
+ },
+ "geomean.start.cig-vm-cold.cig-tree": {
+  "text": "1.11",
+  "value": 1.1101541251133271
+ },
+ "geomean.start.cig-vm.cig-tree": {
+  "text": "0.99",
+  "value": 0.9850407978241159
+ },
+ "highest.compute.cig-vm-cold.cig-tree": {
+  "text": "orchestrate",
+  "value": 7.359294340294369
+ },
+ "highest.compute.cig-vm.cig-tree": {
+  "text": "lines-500",
+  "value": 0.9647791399104884
+ },
+ "highest.start.cig-vm-cold.cig-tree": {
+  "text": "hello",
+  "value": 1.1101541251133271
+ },
+ "highest.start.cig-vm.cig-tree": {
+  "text": "hello",
+  "value": 0.9850407978241159
+ },
+ "history.first.pass1": {
+  "text": "3",
+  "value": 3
+ },
+ "history.first.pass2": {
+  "text": "108",
+  "value": 108
+ },
+ "history.last.pass1": {
+  "text": "93",
+  "value": 93
+ },
+ "history.last.pass2": {
+  "text": "198",
+  "value": 198
+ },
+ "inverse.compute.cig-vm-cold.cig-tree": {
+  "text": "0.21",
+  "value": 0.20657439373072747
+ },
+ "inverse.compute.cig-vm.cig-tree": {
+  "text": "2.25",
+  "value": 2.2534856354178476
+ },
+ "inverse.start.cig-vm-cold.cig-tree": {
+  "text": "0.90",
+  "value": 0.9007758268681095
+ },
+ "inverse.start.cig-vm.cig-tree": {
+  "text": "1.02",
+  "value": 1.0151863782788773
+ },
+ "level.compute.cig-vm-cold.cig-tree": {
+  "text": "0",
+  "value": 0
+ },
+ "level.compute.cig-vm.cig-tree": {
+  "text": "0",
+  "value": 0
+ },
+ "level.start.cig-vm-cold.cig-tree": {
+  "text": "0",
+  "value": 0
+ },
+ "level.start.cig-vm.cig-tree": {
+  "text": "1",
+  "value": 1
+ },
+ "lowest.compute.cig-vm-cold.cig-tree": {
+  "text": "lines-500",
+  "value": 3.1842770967114227
+ },
+ "lowest.compute.cig-vm.cig-tree": {
+  "text": "orchestrate",
+  "value": 0.20410916551898595
+ },
+ "lowest.start.cig-vm-cold.cig-tree": {
+  "text": "hello",
+  "value": 1.1101541251133271
+ },
+ "lowest.start.cig-vm.cig-tree": {
+  "text": "hello",
+  "value": 0.9850407978241159
+ },
+ "median.hello.cig-tree": {
+  "text": "2.2",
+  "value": 2.2060000000000004
+ },
+ "median.hello.cig-vm": {
+  "text": "2.2",
+  "value": 2.173
+ },
+ "median.hello.cig-vm-cold": {
+  "text": "2.4",
+  "value": 2.449
+ },
+ "median.lines-500.cig-tree": {
+  "text": "2.6",
+  "value": 2.5695
+ },
+ "median.lines-500.cig-vm": {
+  "text": "2.5",
+  "value": 2.479
+ },
+ "median.lines-500.cig-vm-cold": {
+  "text": "8.2",
+  "value": 8.182
+ },
+ "median.orchestrate.cig-tree": {
+  "text": "53.4",
+  "value": 53.3685
+ },
+ "median.orchestrate.cig-vm": {
+  "text": "10.9",
+  "value": 10.893
+ },
+ "median.orchestrate.cig-vm-cold": {
+  "text": "392.8",
+  "value": 392.7545
+ },
+ "median.pass1.hello.cig-tree": {
+  "text": "2.2",
+  "value": 2.159
+ },
+ "median.pass1.hello.cig-vm": {
+  "text": "2.3",
+  "value": 2.326
+ },
+ "median.pass1.hello.cig-vm-cold": {
+  "text": "2.6",
+  "value": 2.576
+ },
+ "median.pass1.lines-500.cig-tree": {
+  "text": "2.6",
+  "value": 2.56
+ },
+ "median.pass1.lines-500.cig-vm": {
+  "text": "2.5",
+  "value": 2.472
+ },
+ "median.pass1.lines-500.cig-vm-cold": {
+  "text": "8.4",
+  "value": 8.382
+ },
+ "median.pass1.orchestrate.cig-tree": {
+  "text": "54.2",
+  "value": 54.225
+ },
+ "median.pass1.orchestrate.cig-vm": {
+  "text": "10.9",
+  "value": 10.864
+ },
+ "median.pass1.orchestrate.cig-vm-cold": {
+  "text": "395.2",
+  "value": 395.175
+ },
+ "median.pass2.hello.cig-tree": {
+  "text": "2.3",
+  "value": 2.348
+ },
+ "median.pass2.hello.cig-vm": {
+  "text": "2.2",
+  "value": 2.16
+ },
+ "median.pass2.hello.cig-vm-cold": {
+  "text": "2.4",
+  "value": 2.351
+ },
+ "median.pass2.lines-500.cig-tree": {
+  "text": "2.6",
+  "value": 2.588
+ },
+ "median.pass2.lines-500.cig-vm": {
+  "text": "2.5",
+  "value": 2.495
+ },
+ "median.pass2.lines-500.cig-vm-cold": {
+  "text": "8.2",
+  "value": 8.165
+ },
+ "median.pass2.orchestrate.cig-tree": {
+  "text": "49.9",
+  "value": 49.949
+ },
+ "median.pass2.orchestrate.cig-vm": {
+  "text": "10.9",
+  "value": 10.895
+ },
+ "median.pass2.orchestrate.cig-vm-cold": {
+  "text": "386.8",
+  "value": 386.754
+ },
+ "mhz.max.pass1": {
+  "text": "3351",
+  "value": 3351
+ },
+ "mhz.max.pass2": {
+  "text": "3166",
+  "value": 3166
+ },
+ "mhz.min.pass1": {
+  "text": "1027",
+  "value": 1027
+ },
+ "mhz.min.pass2": {
+  "text": "1162",
+  "value": 1162
+ },
+ "n.compute.cig-vm-cold.cig-tree": {
+  "text": "2",
+  "value": 2
+ },
+ "n.compute.cig-vm.cig-tree": {
+  "text": "2",
+  "value": 2
+ },
+ "n.start.cig-vm-cold.cig-tree": {
+  "text": "1",
+  "value": 1
+ },
+ "n.start.cig-vm.cig-tree": {
+  "text": "1",
+  "value": 1
+ },
+ "noisy.pass1.cig-tree": {
+  "text": "3",
+  "value": 3
+ },
+ "noisy.pass1.cig-vm": {
+  "text": "3",
+  "value": 3
+ },
+ "noisy.pass1.cig-vm-cold": {
+  "text": "2",
+  "value": 2
+ },
+ "noisy.pass2.cig-tree": {
+  "text": "3",
+  "value": 3
+ },
+ "noisy.pass2.cig-vm": {
+  "text": "3",
+  "value": 3
+ },
+ "noisy.pass2.cig-vm-cold": {
+  "text": "2",
+  "value": 2
+ },
+ "p10.hello.cig-tree": {
+  "text": "1.9",
+  "value": 1.86
+ },
+ "p10.hello.cig-vm": {
+  "text": "1.8",
+  "value": 1.789
+ },
+ "p10.hello.cig-vm-cold": {
+  "text": "2.0",
+  "value": 1.996
+ },
+ "p10.lines-500.cig-tree": {
+  "text": "2.2",
+  "value": 2.215
+ },
+ "p10.lines-500.cig-vm": {
+  "text": "2.1",
+  "value": 2.068
+ },
+ "p10.lines-500.cig-vm-cold": {
+  "text": "7.7",
+  "value": 7.721
+ },
+ "p10.orchestrate.cig-tree": {
+  "text": "47.6",
+  "value": 47.607
+ },
+ "p10.orchestrate.cig-vm": {
+  "text": "10.1",
+  "value": 10.079
+ },
+ "p10.orchestrate.cig-vm-cold": {
+  "text": "383.0",
+  "value": 383.005
+ },
+ "p90.hello.cig-tree": {
+  "text": "3.0",
+  "value": 2.988
+ },
+ "p90.hello.cig-vm": {
+  "text": "2.9",
+  "value": 2.927
+ },
+ "p90.hello.cig-vm-cold": {
+  "text": "3.1",
+  "value": 3.108
+ },
+ "p90.lines-500.cig-tree": {
+  "text": "3.3",
+  "value": 3.335
+ },
+ "p90.lines-500.cig-vm": {
+  "text": "3.3",
+  "value": 3.326
+ },
+ "p90.lines-500.cig-vm-cold": {
+  "text": "9.4",
+  "value": 9.385
+ },
+ "p90.orchestrate.cig-tree": {
+  "text": "57.4",
+  "value": 57.386
+ },
+ "p90.orchestrate.cig-vm": {
+  "text": "12.0",
+  "value": 12.005
+ },
+ "p90.orchestrate.cig-vm-cold": {
+  "text": "406.1",
+  "value": 406.113
+ },
+ "pairs.pass1": {
+  "text": "9",
+  "value": 9
+ },
+ "pairs.pass2": {
+  "text": "9",
+  "value": 9
+ },
+ "passes": {
+  "text": "2",
+  "value": 2
+ },
+ "peak.hello.cig-tree": {
+  "text": "9.8",
+  "value": 9582.0
+ },
+ "peak.hello.cig-vm": {
+  "text": "9.8",
+  "value": 9546.0
+ },
+ "peak.hello.cig-vm-cold": {
+  "text": "10.4",
+  "value": 10166.0
+ },
+ "peak.lines-500.cig-tree": {
+  "text": "10.0",
+  "value": 9748.0
+ },
+ "peak.lines-500.cig-vm": {
+  "text": "9.7",
+  "value": 9434.0
+ },
+ "peak.lines-500.cig-vm-cold": {
+  "text": "11.5",
+  "value": 11212.0
+ },
+ "peak.orchestrate.cig-tree": {
+  "text": "46.9",
+  "value": 45792.0
+ },
+ "peak.orchestrate.cig-vm": {
+  "text": "18.2",
+  "value": 17812.0
+ },
+ "peak.orchestrate.cig-vm-cold": {
+  "text": "81.7",
+  "value": 79792.0
+ },
+ "programs.cig-tree": {
+  "text": "3",
+  "value": 3
+ },
+ "programs.cig-vm": {
+  "text": "3",
+  "value": 3
+ },
+ "programs.cig-vm-cold": {
+  "text": "3",
+  "value": 3
+ },
+ "programs.compute": {
+  "text": "2",
+  "value": 2
+ },
+ "programs.start": {
+  "text": "1",
+  "value": 1
+ },
+ "ratio.hello.cig-vm-cold.cig-tree": {
+  "text": "1.11",
+  "value": 1.1101541251133271
+ },
+ "ratio.hello.cig-vm.cig-tree": {
+  "text": "0.99",
+  "value": 0.9850407978241159
+ },
+ "ratio.lines-500.cig-vm-cold.cig-tree": {
+  "text": "3.18",
+  "value": 3.1842770967114227
+ },
+ "ratio.lines-500.cig-vm.cig-tree": {
+  "text": "0.96",
+  "value": 0.9647791399104884
+ },
+ "ratio.orchestrate.cig-vm-cold.cig-tree": {
+  "text": "7.36",
+  "value": 7.359294340294369
+ },
+ "ratio.orchestrate.cig-vm.cig-tree": {
+  "text": "0.20",
+  "value": 0.20410916551898595
+ },
+ "repeat.pass2.cig-tree": {
+  "text": "1.00",
+  "value": 1.0042280118421107
+ },
+ "repeat.pass2.cig-vm": {
+  "text": "0.98",
+  "value": 0.9795678750346472
+ },
+ "repeat.pass2.cig-vm-cold": {
+  "text": "0.95",
+  "value": 0.954670607595863
+ },
+ "rounds.pass1": {
+  "text": "31",
+  "value": 31
+ },
+ "rounds.pass2": {
+  "text": "31",
+  "value": 31
+ },
+ "samples.pass1": {
+  "text": "279",
+  "value": 279
+ },
+ "samples.pass2": {
+  "text": "279",
+  "value": 279
+ },
+ "slower.compute.cig-vm-cold.cig-tree": {
+  "text": "2",
+  "value": 2
+ },
+ "slower.compute.cig-vm.cig-tree": {
+  "text": "0",
+  "value": 0
+ },
+ "slower.start.cig-vm-cold.cig-tree": {
+  "text": "1",
+  "value": 1
+ },
+ "slower.start.cig-vm.cig-tree": {
+  "text": "0",
+  "value": 0
+ },
+ "temp.max.pass1": {
+  "text": "85",
+  "value": 85
+ },
+ "temp.max.pass2": {
+  "text": "85",
+  "value": 85
+ }
+}

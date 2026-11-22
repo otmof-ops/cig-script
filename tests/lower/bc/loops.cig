@@ -1,0 +1,17 @@
+roll total = 0
+roll i = 0
+while i < 10 {
+  i += 1
+  if i == 3 {
+    continue
+  }
+  roll j = 0
+  while j < i {
+    j += 1
+    if j > 4 {
+      break
+    }
+    total += j
+  }
+}
+exhale total

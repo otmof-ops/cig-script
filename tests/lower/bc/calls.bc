@@ -1,0 +1,73 @@
+; module: calls.cig
+
+fn 0 <anonymous> (0 args, 12 regs, main, 5 consts, 3 children, 0 upvals, 0 handlers, 17 lines, 0 regions, 0 region rows):
+  0000   closure   R0, Fn0
+  0001   mov       R1, R0
+  0002   closure   R0, Fn1
+  0003   mov       R2, R0
+  0004   steps     0, 1
+  0005   closure   R3, Fn2
+  0006   mov       R4, R3
+  0007   steps     0, 1
+  0008   loadk     R6, K0 ("4")
+  0009   callb     R5, B3, n=1
+  0010   mov       R6, R5
+  0011   steps     0, 1
+  0012   mov       R7, R3
+  0013   mov       R8, R6
+  0014   call      R7, n=1, n=0
+  0015   mov       R9, R0
+  0016   mov       R10, R6
+  0017   mov       R8, R2
+  0018   call      R8, n=2, n=0
+  0019   mov       R10, R7
+  0020   mov       R11, R8
+  0021   mov       R9, R1
+  0022   call      R9, n=2, n=0
+  0023   mov       R8, R6
+  0024   callb     R7, B1, n=1
+  0025   mov       R11, R7
+  0026   callb     R10, B0, n=1
+  0027   add       R0, R9, R10
+  0028   mov       R3, R0
+  0029   exhale    R3, x1
+  0030   newmap    R0, 4
+  0031   loadk     R3, K1 ("add")
+  0032   insertmap R0, R3, R1
+  0033   loadk     R3, K2 ("fact")
+  0034   insertmap R0, R3, R2
+  0035   loadk     R3, K3 ("sq")
+  0036   insertmap R0, R3, R4
+  0037   loadk     R3, K4 ("n")
+  0038   insertmap R0, R3, R6
+  0039   ret       R0
+
+  fn 1 add (2 args, 3 regs, pull, 0 consts, 0 children, 0 upvals, 0 handlers, 3 lines, 0 regions, 0 region rows):
+    0000   steps     0, 1
+    0001   add       R2, R0, R1
+    0002   ret       R2
+
+  fn 2 fact (2 args, 5 regs, pull, 1 consts, 0 children, 0 upvals, 0 handlers, 12 lines, 0 regions, 0 region rows):
+    0000   steps     0, 1
+    0001   loadint   R2, 1
+    0002   lej       R1, R2, -> 4
+    0003   jmp       0, -> 7
+    0004   steps     0, 1
+    0005   loadint   R3, 1
+    0006   ret       R3
+    0007   steps     0, 1
+    0008   subk      R4, R1, K0 (int 1)
+    0009   mov       R2, R0
+    0010   mov       R3, R0
+    0011   call      R2, n=2, n=0
+    0012   mul       R3, R1, R2
+    0013   ret       R3
+
+  fn 3 <anonymous> (1 args, 2 regs, lambda, 0 consts, 0 children, 0 upvals, 0 handlers, 1 lines, 0 regions, 0 region rows):
+    0000   mul       R1, R0, R0
+    0001   ret       R1
+
+; fn 0 lines: 0@1:1 2@4:1 4@10:1 5@10:12 6@10:1 7@11:1 8@11:14 9@11:10 10@11:1 11@12:1 12@12:12 15@12:19 19@12:8 23@12:40 25@12:36 27@12:8 28@12:1
+; fn 1 lines: 0@2:3 1@2:9 2@2:3
+; fn 2 lines: 0@5:3 1@5:11 2@5:6 3@5:3 4@6:5 5@6:11 6@6:5 7@8:3 8@8:24 9@8:13 12@8:9 13@8:3
+; fn 3 lines: 0@10:23

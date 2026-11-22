@@ -1,0 +1,7 @@
+roll a = 1
+roll b = 0
+stick s = "x"
+[1, 2]
+"${s}!"
+a / b
+exhale a

@@ -5,6 +5,76 @@ project follows semantic versioning.
 
 ## Unreleased
 
+- **`cig run` on the VM (#254).** `cig run --engine vm` (or
+  `CIG_ENGINE=vm`, or `cig config engine vm` for a default) runs a script's
+  bytecode on the VM, which until now only a program built by `cigcompile
+  build --stage b` reached. `cig light` takes the same flag.
+  - **One lowering.** The lowering (source to CIR to bytecode) moved here
+    from cig-compile as `cigscript::lower`, with its tests and its
+    reference (`docs/LOWERING.md`), so that `cig run` and `cigcompile
+    build` use one copy; cig-compile drops its own in a change of its
+    own. Two defects in it are fixed on the way (the two entries below).
+  - **Lowered once.** A script's module is kept under the tin
+    (`<state>/tin/modules`), found by the SHA-256 over this cig's build,
+    the lowering's version, the level and the script, and used only when
+    its MAC verifies under this machine's module key, a file in the keys
+    directory. Only a plain file is opened, and nothing past its headers
+    is read before the MAC verifies. A module holds the script's names and
+    literals as the script does, and is kept as the tin keeps any file
+    that is not a secret: owner-only, not encrypted. `cig tin` and `cig
+    doctor` count the modules, and `cig tin gc` removes another build's and
+    any not loaded for about 30 days; each is safe to remove.
+  - **The same run.** `tests/engines.rs` runs a corpus on both engines,
+    lowered and from the tin, as a real run and as a dry run, and compares
+    what each run leaves: its exit status and what it printed (with the
+    folder and the run id taken out), the files in its folder, how its
+    record says it went, and its journal. CI runs the suites that run
+    scripts a second time with the VM as the engine, and the VM against
+    the 1.20.0 release. No script fails to run because of the VM: one the
+    lowering does not take, fails on or crashes on runs on the
+    tree-walker. A run's record says which engine ran, where the VM's
+    module came from, and why the tree-walker ran a script that asked for
+    the VM, and `cig runs <id>` shows it.
+  - **A pinned script** still runs on the cig it names: `--engine` is
+    taken out of what is handed to that cig, which may be from before the
+    flag, and the choice goes with the run as `CIG_ENGINE`.
+  - **The tree-walker is still the default.** With its module in the tin
+    the VM takes less time (`docs/ENGINES-2026-11-22.md`); a first run
+    pays for lowering the script
+    (`docs/ENGINES-FIRST-RUNS-2026-11-22.md`). Each choice and its reason
+    is in `docs/decisions/0002-cig-run-on-the-vm.md`.
+
+- **Fixed: a function that runs before a declaration it reads.** Found by
+  the engine suite. The interpreter looks a name up as the script runs, so
+  a function called before a name's own statement has run finds the next
+  one out, or none (E501). The lowering read the name's slot instead,
+  which is empty until then: a program built at stage `b` printed `null`
+  there, or wrote the wrong variable. The lowering now declines such a
+  script (`tests/lower_names.rs` has each shape, `docs/LOWERING.md` the
+  rule): `cig run --engine vm` runs it on the tree-walker and says so in
+  the run's record, and `cigcompile build --stage b` refuses it where
+  stage `a` builds it.
+
+- **Fixed: a function given a second name after it is called.** Found in
+  review, by running generated scripts on both engines. Where a `pull` is
+  called and then named again (`roll g = f`), the bytecode read the
+  call's function from the new name's slot, which is empty until that
+  statement runs: the call failed with `cannot call null` (E404), and
+  where the new name was assigned again afterwards, a later call of the
+  `pull` ran the wrong function. Programs built at stage `b` by
+  cig-compile 0.5.0 have it; the tree-walker and stage `a` never did. A
+  direct call now reads the slot the `pull` itself was declared into
+  (`tests/walker/resolve-alias.cig` and the `pull-aliased` programs of
+  `tests/lower_bc.rs` hold it).
+
+- **`bench/compare` measures `cig run` under each engine.** Three sides,
+  `cig-tree`, `cig-vm` and `cig-vm-cold` (the VM with nothing in the tin),
+  each with a cig home of its own, and in `SPEC.md` their pairs, labels
+  and table; `check.py` was brought to the new specification apart from
+  `report.py`, and the paper of 2026-11-15 still renders byte for byte
+  from both. `bench/bench.toml` gains `lines-500`, a start-up case of a
+  script of 500 lines.
+
 - **Benchmarks against other languages (`bench/compare`, `bench/ref`).** The
   25 programs of `bench/compute` written again in Lua, Python, JavaScript
   and (eight of them) Rust, each held to one rule, the same program

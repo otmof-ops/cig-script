@@ -4,7 +4,7 @@
 //! `cig run`, `cig check`, `cig eval`.
 
 use super::{exit, Ctx};
-use crate::burn::{runs::RunRecord, Kernel, Mode, PlannedOp};
+use crate::burn::{modcache, runs::RunRecord, Kernel, Mode, PlannedOp};
 use crate::check;
 use crate::config::Config;
 use crate::crash::Kind as ReportKind;
@@ -303,6 +303,56 @@ pub enum Engine {
     Bytecode,
 }
 
+/// Which engine a script's run asks for: `--engine`, `CIG_ENGINE`, or the
+/// config's `engine` (#254). A compiled program has no say here: its
+/// engine is its stage's ([`Engine`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum EngineArg {
+    /// Bytecode on the VM: the script is lowered once and its module kept
+    /// in the tin. A script the lowering does not take runs on the
+    /// tree-walker, and the run's record says why.
+    Vm,
+    /// The tree-walker.
+    Tree,
+}
+
+impl EngineArg {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            EngineArg::Vm => "vm",
+            EngineArg::Tree => "tree",
+        }
+    }
+
+    fn named(s: &str) -> Option<EngineArg> {
+        match s.trim() {
+            "vm" => Some(EngineArg::Vm),
+            "tree" => Some(EngineArg::Tree),
+            _ => None,
+        }
+    }
+}
+
+/// The engine this run asks for: the flag, else `CIG_ENGINE`, else the
+/// config's `engine`. The variable is read before the config, so one run
+/// or one shell can choose whatever the default says. A value that names
+/// no engine is a usage error, said before anything runs.
+fn engine_asked(flag: Option<EngineArg>, config: &Config) -> Result<EngineArg, Diagnostic> {
+    if let Some(e) = flag {
+        return Ok(e);
+    }
+    if let Ok(v) = std::env::var("CIG_ENGINE") {
+        if !v.trim().is_empty() {
+            return EngineArg::named(&v).ok_or_else(|| {
+                crate::diagnostics::usage(format!("CIG_ENGINE=`{v}` is not an engine"))
+                    .code("E800")
+                    .with_hint("the engines are vm and tree; --engine chooses for one run")
+            });
+        }
+    }
+    Ok(EngineArg::named(&config.get("engine")).unwrap_or(EngineArg::Tree))
+}
+
 /// What a run runs: a script's text, or a stage `b` program's loaded
 /// module with the program it came from, for the text a diagnostic
 /// quotes and `--light`'s list of chains.
@@ -378,18 +428,27 @@ pub fn run_program(
 fn load_bytecode(
     program: &crate::program::Opened,
 ) -> Result<std::rc::Rc<crate::vm::Program>, String> {
-    let body = program.bytecode()?;
-    let loaded = if crate::program::validate_by_env() {
-        let module = cig_bytecode::parse_module(&body)
-            .map_err(|e| format!("the program's bytecode does not read: {e}"))?;
-        let verified =
-            cig_bytecode::verify_module(&module).map_err(|e| crate::vm::refusal(&e).message)?;
-        crate::vm::load(verified).map_err(|d| d.message)?
-    } else {
-        crate::vm::open(body).map_err(|d| d.message)?
-    };
+    let loaded = open_module(program.bytecode()?, "the program's bytecode")?;
     std::mem::forget(std::rc::Rc::clone(&loaded));
     Ok(loaded)
+}
+
+/// A module's bytes, opened on this cig's VM as a start opens them: the
+/// header, the hash over every byte after it, and the top level, with
+/// every other function verified at its first call. With `CIG_VALIDATE=1`
+/// the whole module is parsed and every function verified and loaded
+/// before anything runs. Either way the hash is checked first, which is
+/// what ties a module kept in the tin to the MAC over its header.
+fn open_module(body: Vec<u8>, what: &str) -> Result<std::rc::Rc<crate::vm::Program>, String> {
+    if crate::program::validate_by_env() {
+        let module =
+            cig_bytecode::parse_module(&body).map_err(|e| format!("{what} does not read: {e}"))?;
+        let verified =
+            cig_bytecode::verify_module(&module).map_err(|e| crate::vm::refusal(&e).message)?;
+        crate::vm::load(verified).map_err(|d| d.message)
+    } else {
+        crate::vm::open(body).map_err(|d| d.message)
+    }
 }
 
 fn run_source(
@@ -434,11 +493,35 @@ fn run_script(
     code
 }
 
-/// What the run's engine runs: the syntax tree on the tree-walker, or a
-/// loaded module on the VM.
-enum Ready {
-    Tree(Program),
-    Module(std::rc::Rc<crate::vm::Program>),
+/// What a script's engine choice came to, for the run's record.
+#[derive(Default)]
+struct Chosen {
+    /// The run asked for the VM.
+    asked_vm: bool,
+    /// Where the VM's module came from: `cached` (the tin) or `lowered`
+    /// (by this run).
+    module: Option<&'static str>,
+    /// Asked for the VM, ran on the tree-walker: why.
+    why_tree: Option<String>,
+}
+
+impl Chosen {
+    /// The record's `engine`: which engine ran, where its module came
+    /// from, and why the tree-walker ran a script that asked for the VM.
+    /// A compiled program's engine is its stage's and its module its own.
+    fn note(&self, on_vm: bool, compiled: bool) -> Option<serde_json::Value> {
+        let mut v = serde_json::json!({ "engine": if on_vm { "vm" } else { "tree" } });
+        if !compiled {
+            if let (true, Some(from)) = (on_vm, self.module) {
+                v["module"] = serde_json::json!(from);
+            }
+            if let (false, true) = (on_vm, self.asked_vm) {
+                v["asked"] = serde_json::json!("vm");
+                v["why"] = serde_json::json!(self.why_tree.as_deref().unwrap_or("no module"));
+            }
+        }
+        Some(v)
+    }
 }
 
 fn run_source_inner(
@@ -450,40 +533,101 @@ fn run_source_inner(
     t: &crate::timings::Timings,
 ) -> i32 {
     let name = args.file.to_string_lossy().to_string();
-    // The tree-walker's script is parsed here; a stage `b` program's
-    // module was read and loaded before the run began, and its text is
-    // read only when something needs it (a diagnostic's quoted line,
-    // `--light`'s list of chains).
-    let (ready, source) = match script {
-        Script::Text(source) => {
+    // A script's own text. A stage `b` program's module was read and
+    // loaded before the run began, and its text is read only when
+    // something needs it (a diagnostic's quoted line, `--light`'s list of
+    // chains).
+    let source: Option<&str> = match script {
+        Script::Text(source) => Some(source.as_str()),
+        Script::Module { .. } => None,
+    };
+    let script_sha = source.map(sha256);
+    let config = Config::load();
+    let pin = match (compiled, source) {
+        (None, Some(source)) => pin::pin_for(&args.file, source).ok().flatten(),
+        _ => None,
+    };
+    // A version file's pin is not in the script's bytes, so what it warns
+    // about cannot be told from them: such a script is checked on every run.
+    let pin_in_script = !matches!(
+        pin.as_ref().map(|p| &p.source),
+        Some(pin::Source::VersionFile(_))
+    );
+    // The engine a script asks for (#254). `--no-check` runs a script as
+    // written, which only the tree-walker does.
+    let mut chosen = Chosen::default();
+    if let (None, Some(_)) = (compiled, source) {
+        match engine_asked(args.engine, &config) {
+            Ok(EngineArg::Vm) if args.no_check => {
+                chosen.asked_vm = true;
+                chosen.why_tree = Some(
+                    "--no-check runs the script as written, which only the tree-walker does"
+                        .to_string(),
+                );
+            }
+            Ok(EngineArg::Vm) => chosen.asked_vm = true,
+            Ok(EngineArg::Tree) => {}
+            Err(d) => {
+                report(ctx, &d, None, None);
+                return exit::USAGE;
+            }
+        }
+    }
+    let wants_module = chosen.asked_vm && chosen.why_tree.is_none();
+    let mut module: Option<std::rc::Rc<crate::vm::Program>> = match script {
+        Script::Module { module, .. } => Some(module.clone()),
+        Script::Text(_) => None,
+    };
+    // The script's module, when the tin holds one this machine made for
+    // this cig. With nothing to say again (no warnings when it was checked)
+    // the run starts from it; otherwise the script is checked first, so
+    // what it warns about is said as on every run, and the module is still
+    // not lowered again.
+    let key = match (&script_sha, wants_module) {
+        (Some(sha), true) => Some(modcache::key_for(sha)),
+        _ => None,
+    };
+    let mut kept: Option<Vec<u8>> = None;
+    if let Some(key) = &key {
+        let module_t = t.start();
+        if let Some(entry) = modcache::lookup(key) {
+            if entry.warned || !pin_in_script {
+                kept = Some(entry.module);
+            } else if let Ok(m) = open_module(entry.module, "the kept module") {
+                module = Some(m);
+                chosen.module = Some("cached");
+            }
+        }
+        t.end("module", module_t);
+    }
+    // The script is parsed unless a module stands ready for it.
+    let parsed = match (source, &module) {
+        (Some(source), None) => {
             let lower_t = t.start();
             let parsed = parse(source);
             t.end("lower", lower_t);
             match parsed {
-                Ok(p) => (Ready::Tree(p), Some(source.as_str())),
+                Ok(p) => Some(p),
                 Err(d) => {
                     report(ctx, &d, Some(&name), Some(source));
                     return exit::SYNTAX_ERROR;
                 }
             }
         }
-        Script::Module { module, .. } => (Ready::Module(module.clone()), None),
-    };
-    let tree = match &ready {
-        Ready::Tree(p) => Some((p, source.unwrap_or_default())),
-        Ready::Module(_) => None,
-    };
-    let pin = match (compiled, tree) {
-        (None, Some((_, source))) => pin::pin_for(&args.file, source).ok().flatten(),
         _ => None,
     };
+    let tree = parsed.as_ref().map(|p| (p, source.unwrap_or_default()));
+    // Does a later run have something to say again? The check's own
+    // warnings, and a pin's when the pin is the script's own line.
+    let mut warned = false;
     // A program was checked when it was compiled (`no_check`); a module
     // has no tree to check.
     if let (false, Some((program, source))) = (args.no_check, tree) {
         let check_t = t.start();
         let mut rep = check::check(program, &[]);
-        rep.warnings
-            .extend(pin_warnings(program, pin.as_ref(), &name));
+        let pinned = pin_warnings(program, pin.as_ref(), &name);
+        warned = !rep.warnings.is_empty() || (pin_in_script && !pinned.is_empty());
+        rep.warnings.extend(pinned);
         t.end("check", check_t);
         if !rep.ok() {
             if ctx.json {
@@ -515,6 +659,52 @@ fn run_source_inner(
         check::resolve(program);
         t.end("resolve", resolve_t);
     }
+    // The checked script's module: the one the tin kept, else lowered now
+    // and kept for the next run. A script the lowering does not take yet
+    // runs on the tree-walker, as does one whose module will not load; the
+    // run's record says which engine ran and why. No script fails to run
+    // because of the VM.
+    if let (true, None, Some((program, _))) = (wants_module, &module, tree) {
+        let compile_t = t.start();
+        if let Some(m) = kept
+            .take()
+            .and_then(|b| open_module(b, "the kept module").ok())
+        {
+            module = Some(m);
+            chosen.module = Some("cached");
+        } else {
+            // The module is named by what is in it, not by where the
+            // script lies: the same script anywhere is the same module.
+            match crate::lower::module_loaded(program, "") {
+                Ok((bytes, m)) => {
+                    if let Some(key) = &key {
+                        // A module that cannot be kept is lowered again
+                        // next time; the run goes on either way.
+                        let _ = modcache::store(key, &bytes, warned);
+                    }
+                    // The module as the lowering loaded it to check it:
+                    // the bytes are for the next run.
+                    module = Some(m);
+                    chosen.module = Some("lowered");
+                }
+                Err(crate::lower::Failure::Refused(what)) => {
+                    chosen.why_tree = Some(format!("the lowering does not take it yet: {what}"));
+                }
+                Err(crate::lower::Failure::Internal(e)) => {
+                    chosen.why_tree = Some(format!("the lowering failed on it: {e}"));
+                }
+                Err(crate::lower::Failure::Crashed(e)) => {
+                    // The crash hook has said what broke and where its
+                    // report is; this says what happens to the run.
+                    eprintln!(
+                        "  = the lowering is what crashed: this run goes on, on the tree-walker"
+                    );
+                    chosen.why_tree = Some(format!("the lowering crashed on it: {e}"));
+                }
+            }
+        }
+        t.end("compile", compile_t);
+    }
 
     // Everything between the check and the first line of the script: the
     // trial's plan comparison, the run's record and the kernel.
@@ -538,18 +728,18 @@ fn run_source_inner(
     } else if args.trial {
         "always".to_string()
     } else {
-        Config::load().get("trial")
+        config.get("trial")
     };
     let mut trial_note = None;
-    let last_good = match tree {
-        Some((program, source))
+    let last_good = match source {
+        Some(source)
             if compiled.is_none()
                 && !args.dry_run
                 && !pin::dispatched()
                 && trial_mode != "never" =>
         {
             let (handed, note, last) =
-                trial_before_run(ctx, &args, source, program, &name, &trial_mode);
+                trial_before_run(ctx, &args, source, parsed.as_ref(), &name, &trial_mode);
             if let Some(code) = handed {
                 return code;
             }
@@ -582,12 +772,13 @@ fn run_source_inner(
             return exit::SCRIPT_ERROR;
         }
     }
-    let mut record = RunRecord::begin(
+    let mut record = RunRecord::begin_hashed(
         &args.file,
-        source.unwrap_or_default(),
+        script_sha.unwrap_or_else(|| sha256("")),
         &args.args,
         if args.dry_run { "dry-run" } else { "run" },
     );
+    record.engine = chosen.note(module.is_some(), compiled.is_some());
     if let Some(p) = compiled {
         // The script's sha256 as the program's record gives it, at either
         // stage: `cig runs` and `--unburn` see one program.
@@ -644,15 +835,23 @@ fn run_source_inner(
 
     t.end("begin", begin_t);
     let run_t = t.start();
-    let mut result = match &ready {
-        Ready::Tree(program) => interp.run_program(program),
-        Ready::Module(module) => crate::vm::run_script(&mut interp, module),
+    // The module on the VM when the run has one, else the tree on the
+    // tree-walker. One of the two is always there: a script without a
+    // module was parsed.
+    let mut result = match (&module, &parsed) {
+        (Some(module), _) => crate::vm::run_script(&mut interp, module),
+        (None, Some(program)) => interp.run_program(program),
+        (None, None) => Err(Diagnostic::new(
+            Kind::Internal,
+            "the run has neither a module nor a tree",
+        )
+        .code("E900")),
     };
     if result.is_ok() {
         if let Some(chain_name) = &chain {
-            result = light_named_chain(&mut interp, chain_name, || match &ready {
-                Ready::Tree(program) => Ok(super::chains::declared(program)),
-                Ready::Module(_) => {
+            result = light_named_chain(&mut interp, chain_name, || match &parsed {
+                Some(program) => Ok(super::chains::declared(program)),
+                None => {
                     let text = script.text()?;
                     parse(text)
                         .map(|p| super::chains::declared(&p))
@@ -875,8 +1074,8 @@ fn run_source_inner(
                 }));
                 let _ = save(&record);
                 humidor::touch(last);
-                let argv: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
-                let fallback = match humidor::dispatch(bin, &argv) {
+                let fallback = match humidor::dispatch_run(bin, args.engine.map(EngineArg::as_str))
+                {
                     Ok(code) => code,
                     Err(e) => {
                         eprintln!("{} {e}", ctx.red("error[E807 usage]:"));
@@ -1244,7 +1443,7 @@ fn trial_before_run(
     ctx: &Ctx,
     args: &super::RunArgs,
     source: &str,
-    program: &Program,
+    program: Option<&Program>,
     name: &str,
     mode: &str,
 ) -> (
@@ -1328,6 +1527,30 @@ fn trial_before_run(
             "trial: this script last went through on cig {last} (run {run_id}); comparing its plan with {current}"
         ))
     );
+    // The plan here is the tree-walker's, from the script's tree: the
+    // run's own when it parsed one, else parsed now (a run that started
+    // from its module in the tin has none). The script passed the check
+    // when its module was made, so its names are resolved as an unchecked
+    // run's are.
+    let parsed_now;
+    let program = match program {
+        Some(p) => p,
+        None => match parse(source) {
+            Ok(p) => {
+                check::resolve(&p);
+                parsed_now = p;
+                &parsed_now
+            }
+            Err(d) => {
+                eprintln!("{} {}", ctx.yellow("trial skipped:"), d.message);
+                return (
+                    None,
+                    Some(serde_json::json!({"last_good": last.to_string(), "skipped": d.message})),
+                    Some((last, bin)),
+                );
+            }
+        },
+    };
     let (mine, recorded) = trial::plan_here_recorded(program, name, &args.args, args.max_steps);
     let mine = match mine {
         Ok(p) => p,
@@ -1398,8 +1621,7 @@ fn trial_before_run(
         ctx.bold("trial:")
     );
     humidor::touch(&last);
-    let argv: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
-    match humidor::dispatch(&bin, &argv) {
+    match humidor::dispatch_run(&bin, args.engine.map(EngineArg::as_str)) {
         Ok(code) => (Some(code), None, None),
         Err(e) => {
             eprintln!("{} {e}", ctx.red("error[E807 usage]:"));

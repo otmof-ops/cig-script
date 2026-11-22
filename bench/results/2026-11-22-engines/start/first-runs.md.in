@@ -1,0 +1,25 @@
+# A first run on the VM, 2026-11-22: `hello`, a 500-line script and cigo
+
+<!-- SPDX-License-Identifier: CC-BY-4.0 -->
+
+`cig run --engine vm` lowers a script to bytecode the first time it runs it, and keeps the module in the tin for the runs after, until the script or cig changes. This is what the first run costs and what the later ones gain, on three scripts: `hello`, the smallest of [the benchmark programs](../bench/compute/hello.cig); [`bench/engines/lines-500.cig`](../bench/engines/lines-500.cig), 500 lines of small functions; and cigo's `orchestrate.cig`, 20,664 lines (cig-orchestrator at `0d6c934`, run with no arguments, which prints its help). It was measured for [#254](https://github.com/otmof-ops/cig-script/issues/254), beside [the benchmark programs](ENGINES-2026-11-22.md), on the same machine with the same build, by the same method.
+
+Every measured number here is made from the samples in [`bench/results/2026-11-22-engines/start/`](../bench/results/2026-11-22-engines/start/) by [`bench/compare/report.py`](../bench/compare/report.py), and made again by [`bench/compare/check.py`](../bench/compare/check.py).
+
+## In short
+
+- **From the second run on, the VM starts cigo in {{median.orchestrate.cig-vm}} ms where the tree-walker takes {{median.orchestrate.cig-tree}}**: {{ratio.orchestrate.cig-vm.cig-tree}} of the time. The tree-walker parses and checks 20,664 lines at every start; the VM loads the module it kept. The 500-line script takes {{median.lines-500.cig-vm}} ms against {{median.lines-500.cig-tree}}, {{ratio.lines-500.cig-vm.cig-tree}} of the time, and `hello` {{median.hello.cig-vm}} ms against {{median.hello.cig-tree}}, {{ratio.hello.cig-vm.cig-tree}}.
+- **The first run pays for the lowering**: {{median.hello.cig-vm-cold}} ms for `hello`, {{ratio.hello.cig-vm-cold.cig-tree}} times the tree-walker's {{median.hello.cig-tree}}; {{median.lines-500.cig-vm-cold}} ms for the 500-line script, {{ratio.lines-500.cig-vm-cold.cig-tree}} times the tree-walker's {{median.lines-500.cig-tree}}; and {{median.orchestrate.cig-vm-cold}} ms for cigo, {{ratio.orchestrate.cig-vm-cold.cig-tree}} times the tree-walker's {{median.orchestrate.cig-tree}}. It is paid once for a script on a build of cig: an edit to the script, or an update of cig, pays it again.
+- **This is why the tree-walker is still the default.** One of #254's conditions for making the VM the default is that, on the test machine with cig as released, a first run of `hello` and of a 500-line script is within 10% of the tree-walker's. On this development machine they take {{ratio.hello.cig-vm-cold.cig-tree}} and {{ratio.lines-500.cig-vm-cold.cig-tree}} times as long. The VM is there for a run, a shell or a machine that asks for it (`--engine vm`, `CIG_ENGINE=vm`, `cig config engine vm`).
+
+## The three scripts
+
+The median time in milliseconds over {{rounds.pass1}} rounds in each of {{passes}} passes, and each VM side's time divided by the tree-walker's:
+
+{{table:engines}}
+
+Failed pairs: {{failed.pass1}} in pass 1, {{failed.pass2}} in pass 2. The method is [the benchmark programs' run's](ENGINES-2026-11-22.md#how-it-was-measured): whole processes, every output checked, rounds in a random order, a home for each side.
+
+## Conditions
+
+{{table:conditions}}

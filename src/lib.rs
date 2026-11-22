@@ -9,6 +9,8 @@
 //! * [`syntax`] turns source text into an AST,
 //! * [`check`] walks the AST for static mistakes,
 //! * [`interp`] evaluates it, calling into the [`stdlib`],
+//! * [`lower`] turns a checked AST into CIR and CIR into the bytecode the
+//!   [`vm`] runs; `cig run` and cig-compile share it,
 //! * [`burn`] is the kernel: it gates side effects, journals them and rolls
 //!   them back.
 //!
@@ -27,6 +29,7 @@ pub mod errors;
 pub mod humidor;
 pub mod installer;
 pub mod interp;
+pub mod lower;
 pub mod pass;
 pub mod pin;
 pub mod program;

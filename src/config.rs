@@ -32,6 +32,11 @@ pub const KEYS: &[(&str, &str, &str)] = &[
         "before a run on a cig this script has not been proved on: auto (compare plans with its last good version when that is in the humidor), always (fetch it if needed), never",
     ),
     (
+        "engine",
+        "tree",
+        "which engine `cig run` uses: tree (the tree-walker), or vm (bytecode, lowered once and kept in the tin; a script the lowering does not take runs on the tree-walker and its record says so); `--engine` and CIG_ENGINE choose for one run",
+    ),
+    (
         "issues_repo",
         "otmof-ops/cig-script",
         "GitHub repository that receives crash reports (owner/name)",
@@ -236,6 +241,8 @@ impl Config {
                     "crash_rollback must be ask, always or never, not `{other}`"
                 ))
             }
+            ("engine", "tree" | "vm") => {}
+            ("engine", other) => return Err(format!("engine must be tree or vm, not `{other}`")),
             ("trial", "auto" | "always" | "never") => {}
             ("trial", other) => {
                 return Err(format!(

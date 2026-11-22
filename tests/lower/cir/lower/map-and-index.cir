@@ -1,0 +1,23 @@
+cir 1 "map-and-index.cig"
+func @0() main {                                             @1:1
+  step                                                       @1:1
+  %0 = const "a"                                             @1:10
+  decl $0:k! %0                                              @1:1
+  step                                                       @2:1
+  %1 = load $0:k!                                            @2:13
+  %2 = key %1                                                @2:13
+  %3 = const 1                                               @2:17
+  %4 = const 2                                               @2:23
+  %5 = load $0:k!                                            @2:27
+  %6 = const "c"                                             @2:31
+  %7 = bin + %5, %6                                          @2:27
+  %8 = key %7                                                @2:27
+  %9 = const 3                                               @2:37
+  %10 = map {[%2]: %3, "b": %4, [%8]: %9}                    @2:11 key@2:13 key@2:27
+  decl $1:m %10                                              @2:1
+  step                                                       @3:1
+  %11 = load $1:m                                            @3:8
+  %12 = const "ac"                                           @3:10
+  %13 = index %11[%12]                                       @3:8 idx@3:10
+  exhale %13                                                 @3:1
+}

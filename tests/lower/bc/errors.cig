@@ -1,0 +1,26 @@
+pull safe(x) {
+  try {
+    snuff 10 / x
+  } ashtray e {
+    exhale "caught", e.message
+    snuff -1
+  } finally {
+    exhale "checked", x
+  }
+}
+for x in [2, 0] {
+  try {
+    if x == 0 {
+      break
+    }
+    exhale safe(x)
+  } finally {
+    exhale "turn", x
+  }
+}
+stick f = len
+try {
+  cough {message: "no", code: 2}
+} ashtray e {
+  exhale f(e.message), e.code
+}

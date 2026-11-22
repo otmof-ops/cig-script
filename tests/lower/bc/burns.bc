@@ -1,0 +1,119 @@
+; module: burns.cig
+
+fn 0 <anonymous> (0 args, 15 regs, main, 17 consts, 2 children, 0 upvals, 0 handlers, 56 lines, 3 regions, 3 region rows):
+  0000   closure   R0, Fn0
+  0001   mov       R1, R0
+  0002   steps     0, 1
+  0003   loadk     R2, K0 ("./build")
+  0004   loadk     R3, K1 ("./logs")
+  0005   mov       R4, R2
+  0006   mov       R5, R3
+  0007   pack      R4, x2
+  0008   nop       
+  0009   nop       
+  0010   steps     0, 1
+  0011   loadint   R2, 0
+  0012   loadint   R3, 2
+  0013   loadk     R4, K2 ("step")
+  0014   loadk     R5, K3 ("./build/x")
+  0015   loadint   R6, 1
+  0016   mov       R7, R2
+  0017   mov       R8, R3
+  0018   loadint   R9, 1
+  0019   steps     1, 0
+  0020   forprep   R7, -> 41
+  0021   steps     1, 1
+  0022   steps     1, 1
+  0023   newmap    R11, 0
+  0024   burn.enter class=normal, Rg0 (label K2 ("step"))
+  0025   comp.enter R11, K4 ("
+    fs.rm(s.p)
+  "), K5 ("s")
+  0026   steps     1, 1
+  0027   setfield  R11, K6 ("p"), R5
+  0028   steps     1, 1
+  0029   getfield  R13, R11, K6 ("p")
+  0030   mov       R12, R1
+  0031   call      R12, n=1, n=0
+  0032   steps     1, 1
+  0033   nej       R10, R6, -> 38
+  0034   steps     1, 1
+  0035   comp.leave
+  0036   burn.leave
+  0037   jmp       0, -> 41
+  0038   comp.leave
+  0039   burn.leave
+  0040   forloop   R7, -> 21
+  0041   steps     0, 1
+  0042   burn.enter class=unlit, Rg1
+  0043   steps     0, 1
+  0044   loadk     R3, K7 ("./logs/d")
+  0045   burn.op   R2, K8 ("fs.mkdir"), kind=5, argc=1
+  0046   burn.leave
+  0047   steps     0, 1
+  0048   closure   R2, Fn1
+  0049   loadk     R4, K9 ("ship")
+  0050   loadk     R5, K10 ("deploy")
+  0051   mov       R6, R0
+  0052   loadnull  R7
+  0053   mov       R8, R2
+  0054   chain.make R3, x5
+  0055   nop       
+  0056   nop       
+  0057   mov       R9, R3
+  0058   steps     0, 1
+  0059   loadk     R2, K11 ("a")
+  0060   loadk     R3, K12 ("b")
+  0061   newlist   R4, 2
+  0062   appendlist R4, R2
+  0063   appendlist R4, R3
+  0064   loadk     R2, K13 ("turn-")
+  0065   mov       R5, R4
+  0066   iterprep  R5
+  0067   steps     1, 0
+  0068   iternext  R5, -> 83
+  0069   steps     1, 1
+  0070   steps     1, 1
+  0071   add       R3, R2, R8
+  0072   newmap    R10, 0
+  0073   burn.enter class=normal, Rg2 (label R3)
+  0074   nop       
+  0075   steps     1, 1
+  0076   loadk     R13, K14 ("./logs/turns")
+  0077   mov       R14, R8
+  0078   burn.op   R12, K15 ("fs.append_text"), kind=1, argc=2
+  0079   steps     1, 1
+  0080   burn.leave
+  0081   jmp       0, -> 82
+  0082   loop      0, -> 68
+  0083   steps     0, 1
+  0084   loadbool  R2, 1
+  0085   testn     R2, -> 93
+  0086   steps     0, 1
+  0087   loadk     R4, K16 ("inner")
+  0088   loadk     R5, K10 ("deploy")
+  0089   mov       R6, R0
+  0090   chain.make R3, x3
+  0091   nop       
+  0092   mov       R7, R3
+  0093   newmap    R0, 2
+  0094   loadk     R2, K10 ("deploy")
+  0095   insertmap R0, R2, R1
+  0096   loadk     R2, K9 ("ship")
+  0097   insertmap R0, R2, R9
+  0098   ret       R0
+
+  fn 1 deploy (1 args, 4 regs, pull, requires_burn, 2 consts, 0 children, 0 upvals, 0 handlers, 4 lines, 0 regions, 0 region rows):
+    0000   steps     0, 1
+    0001   loadk     R3, K0 ("a")
+    0002   mov       R2, R0
+    0003   burn.op   R1, K1 ("fs.write_text"), kind=0, argc=2
+    0004   loadnull  R1
+    0005   ret       R1
+
+  fn 2 <anonymous> (1 args, 1 regs, lambda, 0 consts, 0 children, 0 upvals, 0 handlers, 1 lines, 0 regions, 0 region rows):
+    0000   ret       R0
+
+; fn 0 lines: 0@2:1 2@1:1 3@1:8 4@1:19 5@1:1 8@1:8 9@1:19 10@5:1 11@5:10 12@5:13 13@5:1 20@5:10 21@5:1 22@6:3 25@12:12 26@7:5 27@7:5 28@8:5 29@8:12 30@8:5 32@9:5 33@9:8 34@10:7 38@6:3 40@5:1 41@16:1 43@17:3 44@17:12 45@17:3 46@16:1 47@19:1 48@19:22 49@19:1 55@19:14 56@19:22 57@19:1 58@20:1 59@20:11 60@20:16 61@20:10 64@20:1 70@21:3 71@21:12 72@21:3 74@21:12 75@22:5 76@22:20 77@22:5 79@23:5 82@20:1 83@26:1 84@26:4 85@26:1 86@27:3 91@27:17 92@27:3
+; fn 1 lines: 0@3:3 1@3:20 2@3:3 4@2:1
+; fn 2 lines: 0@19:33

@@ -17,6 +17,7 @@ pub mod inbox;
 pub mod journal;
 pub mod ledger;
 pub mod lock;
+pub mod modcache;
 pub mod overlay;
 pub mod pack;
 pub mod parcel;

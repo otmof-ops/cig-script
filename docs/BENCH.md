@@ -281,7 +281,7 @@ request).
 
 | group | cases | what it measures |
 |---|---|---|
-| `start-up` | `hello`, `startup-0`, `startup-1`, `startup-10` | the smallest programs: process start, with 0, 1 and 10 standard-library modules touched (`per = 20`) |
+| `start-up` | `hello`, `startup-0`, `startup-1`, `startup-10`, `lines-500` | the smallest programs: process start, with 0, 1 and 10 standard-library modules touched, and a script of 500 lines, for what a start pays per line (`per = 20`) |
 | `compute` | `loop`, `fib`, `nbody`, `trees`, `spectral`, `mandel`, `fannkuch`, `closures`, `dispatch`, `sieve`, `words`, `strings`, `strbuild`, `maps`, `lists`, `json`, `json-deep`, `csv`, `regex-ish`, `richards`, `deltablue` | how fast a script computes: the compute set of `cigcompile bench`, the same programs and `.expect` files, so the interpreter and the compiler are measured the same way |
 | `kernel` | `burn small tree` (100 files of 1 KiB), `burn big tree` (1,000 files of 16 KiB), `unburn small tree`, `unburn big tree`, `overwrite big file` (32 MiB over 32 MiB), `restore big file` (an unburn of that overwrite), `hop, 2,000 files unchanged` | what a burn, an unburn and a hop cost, with `tin-growth`, `disk-per-byte`, `fsyncs-per-op` and `file:` next to the time |
 
@@ -493,9 +493,11 @@ is set:
 | phase | what it covers |
 |---|---|
 | `start` | from the first instruction of `main` to the start of the run: arguments, configuration, reading the script |
-| `lower` | parsing the source into the program |
+| `module` | on the VM (`--engine vm`): looking for the script's lowered module in the tin, and loading it when it is there |
+| `lower` | parsing the source into the program (not written when the run starts from its module in the tin) |
 | `check` | the static check (not written with `--no-check`) |
 | `resolve` | in its place when there is no check (`--no-check`, a compiled program on the tree-walker): resolving the top level's names; a function body's are resolved inside `run`, the first time it is called |
+| `compile` | on the VM, when the tin had no module to start from: lowering the checked script to bytecode, verifying it, loading it and keeping it in the tin |
 | `begin` | the trial's plan comparison, the run's record and the kernel |
 | `run` | the interpreter, the script itself |
 | `burn` | what a run leaves behind once the program has ended: rollback, the record, the journal's head, the ledger, the report |

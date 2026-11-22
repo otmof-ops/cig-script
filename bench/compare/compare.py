@@ -98,6 +98,21 @@ def find(given, names):
     return None
 
 
+def engines(cig):
+    """Whether this cig chooses its engine per run (`cig run --engine`, cig 1.25.0 on)."""
+    try:
+        p = subprocess.run([cig, "run", "--help"], stdout=subprocess.PIPE,
+                           stderr=subprocess.DEVNULL, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return b"--engine" in p.stdout
+
+
+def cig_home():
+    """The home cig runs with: `CIGSCRIPT_HOME`, else its default."""
+    return os.environ.get("CIGSCRIPT_HOME") or os.path.join(os.path.expanduser("~"), ".cigscript")
+
+
 def build_spec(args):
     compute = os.path.abspath(args.compute)
     ref = os.path.abspath(args.ref)
@@ -131,6 +146,22 @@ def build_spec(args):
         side("cig-first", "cig", "`cig run`, in a new folder each time", version=[cig, "--version"],
              stage=[script], run=[cig, "run", "{name}.cig"], env=CIG_ENV, only=["hello"], fresh=True,
              stderr=CIG_RUN_STDERR)
+        # `cig run` under each engine (cig 1.25.0 on). On the VM a script is lowered
+        # once and its module kept in the tin: `cig-vm` finds it there (the checked
+        # run before the rounds put it there), `cig-vm-cold` never does (its tin's
+        # modules are removed before each run, so every run lowers). Each of the
+        # three keeps its own home, so one's tin is not another's and all three
+        # carry the same number of run records at every round.
+        if engines(cig):
+            for name, engine, label, cold in (
+                    ("cig-tree", "tree", "`cig run --engine tree`", False),
+                    ("cig-vm", "vm", "`cig run --engine vm`", False),
+                    ("cig-vm-cold", "vm", "`cig run --engine vm`, nothing in the tin", True)):
+                home = cig_home() + "-" + name
+                side(name, "cig", label, version=[cig, "--version"], stage=[script],
+                     run=[cig, "run", "--engine", engine, "{name}.cig"],
+                     env=dict(CIG_ENV, CIGSCRIPT_HOME=home), stderr=CIG_RUN_STDERR,
+                     cold=os.path.join(home, "tin", "modules") if cold else None)
     else:
         missing.append("cig")
     cigcompile = find(args.cigcompile, ["cigcompile"])
@@ -271,12 +302,22 @@ class Run:
         self.home = os.path.join(work, "%s.%s" % self.key)
         self.capture = os.path.join(scratch, "%s.%s" % self.key)
         self.fresh = bool(side.get("fresh"))
+        self.cold = side.get("cold")
         self.where = self.home
         with open(prog["expect"], "rb") as f:
             self.expect = f.read()
 
     def ready(self):
         """The folder as the run should find it. Not timed. True when it changed the disk."""
+        if self.cold and os.path.isdir(self.cold):
+            # A cold run finds no module in its tin: it lowers its own.
+            shutil.rmtree(self.cold, ignore_errors=True)
+            self.settle()
+            return True
+        return self.settle()
+
+    def settle(self):
+        """`ready`, for the folder itself."""
         if self.fresh:
             if self.where != self.home:
                 shutil.rmtree(self.where, ignore_errors=True)
@@ -451,12 +492,16 @@ def package_temp():
 
 
 def history():
-    """How many run records cig keeps in the home it runs with."""
-    home = os.environ.get("CIGSCRIPT_HOME") or os.path.join(os.path.expanduser("~"), ".cigscript")
-    try:
-        return str(len(os.listdir(os.path.join(home, "runs"))))
-    except OSError:
-        return "0"
+    """How many run records cig keeps in the home it runs with: the most in any
+    one home, where sides keep homes of their own."""
+    home = cig_home()
+    most = 0
+    for h in [home] + [home + "-" + s for s in ("cig-tree", "cig-vm", "cig-vm-cold")]:
+        try:
+            most = max(most, len(os.listdir(os.path.join(h, "runs"))))
+        except OSError:
+            pass
+    return str(most)
 
 
 def platform_profile():

@@ -1,0 +1,45 @@
+# SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
+# SPDX-License-Identifier: FSL-1.1-ALv2
+pull outer() {
+  pull one() {
+    snuff 1
+  }
+  exhale one()
+  roll again = one
+  exhale again()
+  again = pack() => 2
+  exhale [one(), again()]
+}
+outer()
+outer()
+pull keeper() {
+  pull f() {
+    snuff "f"
+  }
+  stick g = f
+  roll h = g
+  snuff [f(), g(), h()]
+}
+exhale keeper()
+exhale keeper()
+pull inner() {
+  pull f() {
+    snuff 10
+  }
+  if true {
+    roll alias = f
+    exhale alias() + f()
+  }
+  for n in [1, 2] {
+    stick a = f
+    exhale a() + n
+  }
+  snuff f()
+}
+exhale inner()
+pull top() {
+  snuff "top"
+}
+exhale top()
+roll second = top
+exhale [second(), top()]

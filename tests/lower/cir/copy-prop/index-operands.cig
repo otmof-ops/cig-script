@@ -1,0 +1,4 @@
+stick xs = [1, 2]
+stick i = 1
+xs[i] = xs[i] + 1
+exhale xs[i]

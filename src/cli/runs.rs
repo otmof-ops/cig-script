@@ -713,6 +713,20 @@ fn show(ctx: &Ctx, id: &str, all: &[RunRecord], verify: bool) -> i32 {
             &rec.script_sha256[..rec.script_sha256.len().min(12)]
         );
     }
+    if let Some(e) = &rec.engine {
+        // Which engine ran, where the VM's module came from, and why the
+        // tree-walker ran a script that asked for the VM (#254).
+        let detail = match (e["module"].as_str(), e["why"].as_str()) {
+            (Some("cached"), _) => "  (its module from the tin)".to_string(),
+            (Some("lowered"), _) => "  (lowered by this run and kept in the tin)".to_string(),
+            (_, Some(why)) => format!("  (asked for the vm; {why})"),
+            _ => String::new(),
+        };
+        outln!(
+            "  engine    {}{detail}",
+            e["engine"].as_str().unwrap_or("?")
+        );
+    }
     if !rec.args.is_empty() {
         outln!("  args      {}", rec.args.join(" "));
     }

@@ -1,0 +1,21 @@
+cir 1 "unused.cig"
+func @0() main {                                             @1:1
+  step                                                       @1:1
+  %0 = const 1                                               @1:10
+  decl $0:a! %0                                              @1:1
+  step                                                       @2:1
+  %1 = const 0                                               @2:10
+  decl $1:b! %1                                              @2:1
+  step                                                       @3:1
+  %2 = const "x"                                             @3:11
+  decl $2:s %2                                               @3:1
+  step                                                       @4:1
+  step                                                       @5:1
+  step                                                       @6:1
+  %8 = load $0:a!                                            @6:1
+  %9 = load $1:b!                                            @6:5
+  %10 = bin / %8, %9                                         @6:1
+  step                                                       @7:1
+  %11 = load $0:a!                                           @7:8
+  exhale %11                                                 @7:1
+}

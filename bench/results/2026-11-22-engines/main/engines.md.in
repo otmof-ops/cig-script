@@ -1,0 +1,47 @@
+# `cig run` on each engine, 2026-11-22: the tree-walker and the VM
+
+<!-- SPDX-License-Identifier: CC-BY-4.0 -->
+
+The {{programs.cig-tree}} programs of [`bench/compute`](../bench/compute/), run by one build of cig three ways: `cig run --engine tree`; `cig run --engine vm` with the script's module already in the tin; and `cig run --engine vm` with nothing in the tin, so every run lowers the script before it runs it. It was measured for [#254](https://github.com/otmof-ops/cig-script/issues/254), which lets `cig run` use the VM.
+
+This is not the benchmark paper's machine or build. The machine is a development machine (the conditions are below), and the cig is this change's own build, not a release; it gives its version as 1.24.0, the last release's. Read the ratios; the times belong to this machine.
+
+Every measured number here is made from the samples in [`bench/results/2026-11-22-engines/main/`](../bench/results/2026-11-22-engines/main/) by [`bench/compare/report.py`](../bench/compare/report.py), and made again by [`bench/compare/check.py`](../bench/compare/check.py), a second program written apart from the first to [the same definitions](../bench/compare/SPEC.md).
+
+## In short
+
+- **With its module in the tin, the VM runs the {{n.compute.cig-vm.cig-tree}} compute programs in {{geomean.compute.cig-vm.cig-tree}} of the tree-walker's time**, {{inverse.compute.cig-vm.cig-tree}} times as fast: faster on {{faster.compute.cig-vm.cig-tree}}, level on {{level.compute.cig-vm.cig-tree}}, slower on {{slower.compute.cig-vm.cig-tree}}. It gains the most on `{{lowest.compute.cig-vm.cig-tree}}` and the least on `{{highest.compute.cig-vm.cig-tree}}`.
+- **On the {{n.start.cig-vm.cig-tree}} start-up programs** the VM takes {{geomean.start.cig-vm.cig-tree}} of the tree-walker's time at the geometric mean: {{faster.start.cig-vm.cig-tree}} faster, {{level.start.cig-vm.cig-tree}} level and {{slower.start.cig-vm.cig-tree}} slower. `hello` takes {{median.hello.cig-tree}} ms on the tree-walker and {{median.hello.cig-vm}} ms on the VM.
+- **A first run pays for the lowering.** With nothing in the tin a run lowers the script, verifies and loads the module, and keeps it. On the compute programs that comes to {{geomean.compute.cig-vm-cold.cig-tree}} of the tree-walker's time, faster on {{faster.compute.cig-vm-cold.cig-tree}} of {{n.compute.cig-vm-cold.cig-tree}}; on the start-up programs, to {{geomean.start.cig-vm-cold.cig-tree}}: `hello` takes {{median.hello.cig-vm-cold}} ms against {{median.hello.cig-tree}}. These are scripts of 4 to 14 lines; [the first runs of longer scripts](ENGINES-FIRST-RUNS-2026-11-22.md) cost far more.
+
+## Every program
+
+The median time of each program, in milliseconds, over {{rounds.pass1}} rounds in each of {{passes}} passes, and the VM's time divided by the tree-walker's. Under 1, the VM took less time. A program counts as faster below 0.97, slower above 1.03, and level between, judged on the ratio before it is rounded for the table.
+
+{{table:engines}}
+
+## How it was measured
+
+As [the benchmark paper](BENCHMARKS-2026-11-15.md#how-it-was-measured) measures, with [`bench/compare/compare.py`](../bench/compare/compare.py):
+
+- **A whole process.** Each time is the wall time of one `cig run`, from just before it is started until it has exited and been reaped. Start-up is in every number.
+- **Every run checked.** A run counts only if it exits 0 and prints exactly the program's `.expect` file. Failed pairs: {{failed.pass1}} in pass 1, {{failed.pass2}} in pass 2.
+- **Rounds in a random order.** In each of the {{rounds.pass1}} rounds of a pass every program runs once on every side, all {{pairs.pass1}} of them, in an order drawn from a seeded generator. A time is the median of a pair's samples over both passes.
+- **One home for each side.** Each of the three sides keeps its own cig home, so one side's tin is not another's and all three carry the same number of run records at every round (a run's start-up grows with its history, [#252](https://github.com/otmof-ops/cig-script/issues/252)).
+- **With its module in the tin** means the checked run before the rounds lowered the script and kept its module; every timed run then loads it. **With nothing in the tin** means the side's lowered modules are removed before each run, outside the timed part, and the disk is synced.
+- **The same cig settings as the paper**: `CIG_SEAL_KEY=file`, `CIG_MAX_STEPS=0`, `CIG_REPORTS=never`, `CIG_DOCTOR=0` and `NO_COLOR=1`.
+
+## Conditions
+
+{{table:conditions}}
+
+## How steady the numbers are
+
+{{table:stability}}
+
+## What this does not show
+
+- **Not the paper's machine, and not a release.** The paper's numbers against Lua, CPython, Node and Rust were measured on the test machine with cig as released. This run compares cig with itself, on another machine, from a development build. `cig run` on the VM against the other languages waits for a run on the test machine.
+- **Small programs, timed whole.** Most of these programs run for tens of milliseconds; on the shortest the engine is a small part of the time.
+- **Not a quiet machine.** The package reached {{temp.max.pass1}} °C in pass 1 and {{temp.max.pass2}} °C in pass 2, and the samples of many pairs vary by more than 5% (the table above). On the programs that take about 3 ms, a ratio within a few hundredths of 1 is level here, whichever side of 1 it falls.
+- **A module is one build's.** A cig that has just been updated lowers every script again on its first run: the build of cig is part of the key a module is kept under.

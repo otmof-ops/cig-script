@@ -1,0 +1,5 @@
+stick a = 2 + 3 * 4
+stick big = 9223372036854775807 + 1
+stick q = 7 / 0
+stick yes = "a" + "b" == "ab"
+exhale a, big, q, yes
