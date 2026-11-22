@@ -312,6 +312,8 @@ fn private_file(path: &Path) -> io::Result<fs::File> {
 }
 
 fn private_dirs() -> fs::DirBuilder {
+    // Only Unix has a mode to set.
+    #[cfg_attr(not(unix), allow(unused_mut))]
     let mut b = fs::DirBuilder::new();
     #[cfg(unix)]
     {

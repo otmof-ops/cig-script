@@ -3101,7 +3101,7 @@ fn a_crash_in_the_lowering_leaves_the_run_to_the_tree_walker() {
         serde_json::from_str(&sb.run_ok(&["--json", "__crash", "list"])).unwrap();
     assert_eq!(reports.len(), 1, "the crash is reported: {reports:?}");
     assert!(
-        tree_bytes(&sb.home().join("tin").join("modules")).is_empty(),
+        !sb.home().join("tin").join("modules").exists(),
         "a module was kept"
     );
     // The same script without the fault, to show the fault was the reason.
