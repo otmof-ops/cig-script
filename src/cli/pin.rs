@@ -109,7 +109,7 @@ pub fn pin_of(ctx: &Ctx, file: &Path) -> Result<Option<Pin>, i32> {
 /// When a script is pinned to a version this cig is not, hand the whole
 /// invocation to that version from the humidor, fetching it first when it
 /// is not there. `None` means: run here.
-pub fn dispatch_if_pinned(ctx: &Ctx, file: &Path, verb: &str) -> Option<i32> {
+pub fn dispatch_if_pinned(ctx: &Ctx, file: &Path, verb: &str, engine: Option<&str>) -> Option<i32> {
     let pin = match pin_of(ctx, file) {
         Ok(Some(p)) => p,
         Ok(None) => return None,
@@ -166,9 +166,8 @@ pub fn dispatch_if_pinned(ctx: &Ctx, file: &Path, verb: &str) -> Option<i32> {
             ))
         );
     }
-    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
     humidor::touch(&version);
-    match humidor::dispatch(&bin, &args) {
+    match humidor::dispatch_run(&bin, engine) {
         Ok(code) => Some(code),
         Err(e) => {
             eprintln!("{} {e}", ctx.red("error[E807 usage]:"));

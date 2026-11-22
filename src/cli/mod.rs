@@ -529,9 +529,11 @@ pub fn entry() -> i32 {
         .stack_size(256 * 1024 * 1024)
         .spawn(move || {
             // Test hook for the crash reporter: `1` panics here, `eval` inside
-            // the evaluator, `after-burn` in the kernel after the first burn.
+            // the tree-walker (the VM allows itself no panic, this one
+            // included), `after-burn` in the kernel after the first burn,
+            // `lower` in the lowering.
             if let Ok(v) = std::env::var("CIG_INTERNAL_PANIC") {
-                if v != "eval" && v != "after-burn" {
+                if !matches!(v.as_str(), "eval" | "after-burn" | "lower") {
                     panic!("deliberate test panic (CIG_INTERNAL_PANIC is set)");
                 }
             }
@@ -583,14 +585,19 @@ pub fn main() -> i32 {
     };
     // A pinned script is lit by the cig it asks for, whatever is installed.
     let pinned_file = match &cli.command {
-        Command::Run(a) => Some((a.file.clone(), if a.dry_run { "dry run" } else { "run" })),
-        Command::Light(a) => Some((a.file.clone(), "light")),
-        Command::Check { file, .. } => Some((file.clone(), "check")),
-        Command::Chains { file } => Some((file.clone(), "chains")),
+        Command::Run(a) => Some((
+            a.file.clone(),
+            if a.dry_run { "dry run" } else { "run" },
+            a.engine,
+        )),
+        Command::Light(a) => Some((a.file.clone(), "light", a.engine)),
+        Command::Check { file, .. } => Some((file.clone(), "check", None)),
+        Command::Chains { file } => Some((file.clone(), "chains", None)),
         _ => None,
     };
-    if let Some((file, verb)) = pinned_file {
-        if let Some(code) = pin::dispatch_if_pinned(&ctx, &file, verb) {
+    if let Some((file, verb, engine)) = pinned_file {
+        let engine = engine.map(run::EngineArg::as_str);
+        if let Some(code) = pin::dispatch_if_pinned(&ctx, &file, verb, engine) {
             return code;
         }
     }

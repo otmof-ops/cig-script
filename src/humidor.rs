@@ -341,9 +341,53 @@ fn fetch_text(url: &str) -> Option<String> {
 /// directory, `CIG_DISPATCHED=1` so it never dispatches again. Returns the
 /// exit status it ended with.
 pub fn dispatch(bin: &Path, args: &[std::ffi::OsString]) -> Result<i32, String> {
-    let status = std::process::Command::new(bin)
-        .args(args)
-        .env("CIG_DISPATCHED", "1")
+    hand_over(bin, args, None)
+}
+
+/// [`dispatch`] for a `cig run` or a `cig light`, whose `--engine` (when
+/// `engine` says one was given) is taken out of the arguments: a cig from
+/// before the flag refuses it as unknown. The choice goes on as
+/// `CIG_ENGINE` instead, which such a cig ignores and a later one reads
+/// in the flag's place.
+pub fn dispatch_run(bin: &Path, engine: Option<&str>) -> Result<i32, String> {
+    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    match engine {
+        Some(engine) => hand_over(bin, &without_engine(&args), Some(engine)),
+        None => hand_over(bin, &args, None),
+    }
+}
+
+/// `args` without the first `--engine <value>` or `--engine=<value>`.
+/// Called only when the flag was given, and then the first is the flag:
+/// the script's own arguments come after a `--`, where nothing is
+/// touched, and no option before it takes `--engine` as its value.
+fn without_engine(args: &[std::ffi::OsString]) -> Vec<std::ffi::OsString> {
+    let mut out = Vec::with_capacity(args.len());
+    let mut taken = false;
+    let mut rest = args.iter();
+    while let Some(a) = rest.next() {
+        if !taken && a == "--" {
+            taken = true;
+        } else if !taken && a == "--engine" {
+            taken = true;
+            rest.next();
+            continue;
+        } else if !taken && a.to_string_lossy().starts_with("--engine=") {
+            taken = true;
+            continue;
+        }
+        out.push(a.clone());
+    }
+    out
+}
+
+fn hand_over(bin: &Path, args: &[std::ffi::OsString], engine: Option<&str>) -> Result<i32, String> {
+    let mut command = std::process::Command::new(bin);
+    command.args(args).env("CIG_DISPATCHED", "1");
+    if let Some(engine) = engine {
+        command.env("CIG_ENGINE", engine);
+    }
+    let status = command
         .status()
         .map_err(|e| format!("cannot start {}: {e}", bin.display()))?;
     #[cfg(unix)]
@@ -360,6 +404,35 @@ pub fn dispatch(bin: &Path, args: &[std::ffi::OsString]) -> Result<i32, String> 
 mod tests {
     use super::*;
     use crate::pin::Constraint;
+
+    #[test]
+    fn the_engine_flag_is_taken_out_and_nothing_of_the_scripts() {
+        let args = |list: &[&str]| -> Vec<std::ffi::OsString> {
+            list.iter().map(std::ffi::OsString::from).collect()
+        };
+        for (given, left) in [
+            (vec!["run", "--engine", "vm", "x.cig"], vec!["run", "x.cig"]),
+            (
+                vec!["--json", "run", "x.cig", "--engine=tree", "--dry-run"],
+                vec!["--json", "run", "x.cig", "--dry-run"],
+            ),
+            (
+                vec!["light", "--engine", "vm", "x.cig", "deploy"],
+                vec!["light", "x.cig", "deploy"],
+            ),
+            // The script's own arguments, after `--`, are the script's.
+            (
+                vec!["run", "--engine", "vm", "x.cig", "--", "--engine", "steam"],
+                vec!["run", "x.cig", "--", "--engine", "steam"],
+            ),
+            (
+                vec!["run", "x.cig", "--", "--engine=steam"],
+                vec!["run", "x.cig", "--", "--engine=steam"],
+            ),
+        ] {
+            assert_eq!(without_engine(&args(&given)), args(&left), "{given:?}");
+        }
+    }
 
     #[test]
     fn yanked_lines_parse_with_reasons() {

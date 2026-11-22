@@ -34,12 +34,15 @@ pub enum Failure {
     Refused(String),
     /// The lowering or the verifier found its own bug.
     Internal(String),
+    /// The lowering panicked: a bug it did not find. Only
+    /// [`module_loaded`] gives this; the panic's message is the text.
+    Crashed(String),
 }
 
 impl std::fmt::Display for Failure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Failure::Refused(s) | Failure::Internal(s) => f.write_str(s),
+            Failure::Refused(s) | Failure::Internal(s) | Failure::Crashed(s) => f.write_str(s),
         }
     }
 }
@@ -88,11 +91,38 @@ pub fn module_bytes_at(program: &Program, file: &str, opt: u8) -> Result<Vec<u8>
 /// [`module_bytes`], with the module as this cig's VM loaded it while it
 /// was checked: a run that has just lowered a script runs what was loaded
 /// and keeps the bytes, without opening them a second time.
+///
+/// This is `cig run`'s way in, and a run must not end because the lowering
+/// has a bug the tree-walker does not: a panic in here comes back as
+/// [`Failure::Crashed`], and the caller runs the script on the tree-walker.
 pub fn module_loaded(
     program: &Program,
     file: &str,
 ) -> Result<(Vec<u8>, std::rc::Rc<crate::vm::Program>), Failure> {
-    lowered_at(program, file, DEFAULT_LEVEL).map_err(Failure::from)
+    guarded(|| {
+        if std::env::var("CIG_INTERNAL_PANIC").as_deref() == Ok("lower") {
+            // Test hook: a panic from inside the lowering, for the run
+            // that must go on without it.
+            panic!("deliberate test panic in the lowering (CIG_INTERNAL_PANIC=lower)");
+        }
+        lowered_at(program, file, DEFAULT_LEVEL).map_err(Failure::from)
+    })
+}
+
+/// `f`, with a panic inside it turned into [`Failure::Crashed`]. The
+/// lowering only reads the tree it is given and builds its own, so the
+/// tree is whole whatever happened in here. The panic hook has run by the
+/// time this returns: the crash is said and its report saved as for any
+/// other.
+fn guarded<T>(f: impl FnOnce() -> Result<T, Failure>) -> Result<T, Failure> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).unwrap_or_else(|panic| {
+        let said = panic
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| panic.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "a panic without a message".to_string());
+        Err(Failure::Crashed(said))
+    })
 }
 
 fn lowered_at(
@@ -189,4 +219,27 @@ fn not_built(f: &cig_bytecode::Function) -> Option<Stop> {
         pc = d.pc + d.width;
     }
     f.children.iter().find_map(not_built)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_panic_in_the_lowering_comes_back_as_a_failure() {
+        let crashed: Result<(), Failure> = guarded(|| panic!("the len is 3 but the index is 4"));
+        assert_eq!(
+            crashed,
+            Err(Failure::Crashed(
+                "the len is 3 but the index is 4".to_string()
+            ))
+        );
+        let slot = 7;
+        let formatted: Result<(), Failure> = guarded(|| panic!("no slot {slot}"));
+        assert_eq!(formatted, Err(Failure::Crashed("no slot 7".to_string())));
+        // What does not panic comes back as it was.
+        assert_eq!(guarded(|| Ok(5)), Ok(5));
+        let refused: Result<(), Failure> = guarded(|| Err(Failure::Refused("x".to_string())));
+        assert_eq!(refused, Err(Failure::Refused("x".to_string())));
+    }
 }

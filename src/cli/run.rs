@@ -428,18 +428,27 @@ pub fn run_program(
 fn load_bytecode(
     program: &crate::program::Opened,
 ) -> Result<std::rc::Rc<crate::vm::Program>, String> {
-    let body = program.bytecode()?;
-    let loaded = if crate::program::validate_by_env() {
-        let module = cig_bytecode::parse_module(&body)
-            .map_err(|e| format!("the program's bytecode does not read: {e}"))?;
-        let verified =
-            cig_bytecode::verify_module(&module).map_err(|e| crate::vm::refusal(&e).message)?;
-        crate::vm::load(verified).map_err(|d| d.message)?
-    } else {
-        crate::vm::open(body).map_err(|d| d.message)?
-    };
+    let loaded = open_module(program.bytecode()?, "the program's bytecode")?;
     std::mem::forget(std::rc::Rc::clone(&loaded));
     Ok(loaded)
+}
+
+/// A module's bytes, opened on this cig's VM as a start opens them: the
+/// header, the hash over every byte after it, and the top level, with
+/// every other function verified at its first call. With `CIG_VALIDATE=1`
+/// the whole module is parsed and every function verified and loaded
+/// before anything runs. Either way the hash is checked first, which is
+/// what ties a module kept in the tin to the MAC over its header.
+fn open_module(body: Vec<u8>, what: &str) -> Result<std::rc::Rc<crate::vm::Program>, String> {
+    if crate::program::validate_by_env() {
+        let module =
+            cig_bytecode::parse_module(&body).map_err(|e| format!("{what} does not read: {e}"))?;
+        let verified =
+            cig_bytecode::verify_module(&module).map_err(|e| crate::vm::refusal(&e).message)?;
+        crate::vm::load(verified).map_err(|d| d.message)
+    } else {
+        crate::vm::open(body).map_err(|d| d.message)
+    }
 }
 
 fn run_source(
@@ -584,7 +593,7 @@ fn run_source_inner(
         if let Some(entry) = modcache::lookup(key) {
             if entry.warned || !pin_in_script {
                 kept = Some(entry.module);
-            } else if let Ok(m) = crate::vm::open(entry.module) {
+            } else if let Ok(m) = open_module(entry.module, "the kept module") {
                 module = Some(m);
                 chosen.module = Some("cached");
             }
@@ -657,7 +666,10 @@ fn run_source_inner(
     // because of the VM.
     if let (true, None, Some((program, _))) = (wants_module, &module, tree) {
         let compile_t = t.start();
-        if let Some(m) = kept.take().and_then(|b| crate::vm::open(b).ok()) {
+        if let Some(m) = kept
+            .take()
+            .and_then(|b| open_module(b, "the kept module").ok())
+        {
             module = Some(m);
             chosen.module = Some("cached");
         } else {
@@ -680,6 +692,14 @@ fn run_source_inner(
                 }
                 Err(crate::lower::Failure::Internal(e)) => {
                     chosen.why_tree = Some(format!("the lowering failed on it: {e}"));
+                }
+                Err(crate::lower::Failure::Crashed(e)) => {
+                    // The crash hook has said what broke and where its
+                    // report is; this says what happens to the run.
+                    eprintln!(
+                        "  = the lowering is what crashed: this run goes on, on the tree-walker"
+                    );
+                    chosen.why_tree = Some(format!("the lowering crashed on it: {e}"));
                 }
             }
         }
@@ -1054,8 +1074,8 @@ fn run_source_inner(
                 }));
                 let _ = save(&record);
                 humidor::touch(last);
-                let argv: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
-                let fallback = match humidor::dispatch(bin, &argv) {
+                let fallback = match humidor::dispatch_run(bin, args.engine.map(EngineArg::as_str))
+                {
                     Ok(code) => code,
                     Err(e) => {
                         eprintln!("{} {e}", ctx.red("error[E807 usage]:"));
@@ -1601,8 +1621,7 @@ fn trial_before_run(
         ctx.bold("trial:")
     );
     humidor::touch(&last);
-    let argv: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
-    match humidor::dispatch(&bin, &argv) {
+    match humidor::dispatch_run(&bin, args.engine.map(EngineArg::as_str)) {
         Ok(code) => (Some(code), None, None),
         Err(e) => {
             eprintln!("{} {e}", ctx.red("error[E807 usage]:"));
