@@ -1,0 +1,44 @@
+; module: arith.cig
+
+fn 0 <anonymous> (0 args, 6 regs, main, 9 consts, 0 children, 0 upvals, 0 handlers, 26 lines, 0 regions, 0 region rows):
+  0000   steps     0, 1
+  0001   loadint   R0, 7
+  0002   steps     0, 1
+  0003   loadk     R1, K0 (int 40000)
+  0004   steps     0, 1
+  0005   mulk      R2, R0, K1 (int 3)
+  0006   divk      R3, R1, K2 (int 2)
+  0007   sub       R4, R2, R3
+  0008   steps     0, 1
+  0009   loadk     R2, K3 (float 2.5)
+  0010   steps     0, 1
+  0011   lek       R3, R4, K4 (int 0)
+  0012   not       R3, R3
+  0013   testn     R3, -> 16
+  0014   lt        R3, R2, R0
+  0015   not       R3, R3
+  0016   testn     R3, -> 20
+  0017   steps     0, 1
+  0018   loadint   R4, 1
+  0019   jmp       0, -> 24
+  0020   loadint   R5, 7
+  0021   eqj       R0, R5, -> 24
+  0022   steps     0, 1
+  0023   loadint   R4, 2
+  0024   steps     0, 1
+  0025   modk      R3, R0, K2 (int 2)
+  0026   add       R5, R4, R3
+  0027   mov       R3, R5
+  0028   exhale    R3, x1
+  0029   newmap    R3, 4
+  0030   loadk     R5, K5 ("a")
+  0031   insertmap R3, R5, R0
+  0032   loadk     R5, K6 ("b")
+  0033   insertmap R3, R5, R1
+  0034   loadk     R5, K7 ("c")
+  0035   insertmap R3, R5, R4
+  0036   loadk     R5, K8 ("d")
+  0037   insertmap R3, R5, R2
+  0038   ret       R3
+
+; fn 0 lines: 0@1:1 1@1:10 2@2:1 3@2:10 4@3:1 5@3:10 6@3:18 7@3:10 8@4:1 9@4:10 10@5:1 11@5:4 13@5:4 14@5:14 16@5:1 17@6:3 18@6:7 19@5:1 20@7:16 21@7:11 22@8:3 23@8:7 24@10:1 25@10:12 26@10:8 27@10:1

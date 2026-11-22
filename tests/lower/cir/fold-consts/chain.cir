@@ -1,0 +1,33 @@
+cir 1 "chain.cig"
+func @0() main {                                             @1:1
+  step                                                       @1:1
+  %0 = const 2                                               @1:11
+  %1 = const 3                                               @1:15
+  %2 = const 4                                               @1:19
+  %3 = const 12                                              @1:15
+  %4 = const 14                                              @1:11
+  decl $0:a %4                                               @1:1
+  step                                                       @2:1
+  %5 = const 9223372036854775807                             @2:13
+  %6 = const 1                                               @2:35
+  %7 = bin + %5, %6                                          @2:13
+  decl $1:big %7                                             @2:1
+  step                                                       @3:1
+  %8 = const 7                                               @3:11
+  %9 = const 0                                               @3:15
+  %10 = bin / %8, %9                                         @3:11
+  decl $2:q %10                                              @3:1
+  step                                                       @4:1
+  %11 = const "a"                                            @4:13
+  %12 = const "b"                                            @4:19
+  %13 = const "ab"                                           @4:13
+  %14 = const "ab"                                           @4:26
+  %15 = const true                                           @4:13
+  decl $3:yes %15                                            @4:1
+  step                                                       @5:1
+  %16 = load $0:a                                            @5:8
+  %17 = load $1:big                                          @5:11
+  %18 = load $2:q                                            @5:16
+  %19 = load $3:yes                                          @5:19
+  exhale %16, %17, %18, %19                                  @5:1
+}

@@ -1,0 +1,9 @@
+pull greet(name) {
+  fs.write_text("out.txt", "hi " + name)
+}
+roll n = 0
+burn ("demo") {
+  greet("a")
+  n += 1
+}
+exhale n

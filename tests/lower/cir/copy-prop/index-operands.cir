@@ -1,0 +1,19 @@
+cir 1 "index-operands.cig"
+func @0() main {                                             @1:1
+  step                                                       @1:1
+  %0 = const 1                                               @1:13
+  %1 = const 2                                               @1:16
+  %2 = list [%0, %1]                                         @1:12
+  decl $0:xs %2                                              @1:1
+  step                                                       @2:1
+  %3 = const 1                                               @2:11
+  decl $1:i %3                                               @2:1
+  step                                                       @3:1
+  %6 = index %2[%3]                                          @3:9 idx@3:12
+  %7 = const 1                                               @3:17
+  %8 = bin + %6, %7                                          @3:9
+  set.index %2[%3] = %8                                      @3:1 obj@3:1 idx@3:4
+  step                                                       @4:1
+  %13 = index %2[%3]                                         @4:8 idx@4:11
+  exhale %13                                                 @4:1
+}

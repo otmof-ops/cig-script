@@ -1,0 +1,28 @@
+pack { "./build", "./logs" }
+pull deploy(p) {
+  fs.write_text(p, "a")
+}
+for i in 0..2 {
+  burn (s, "step") {
+    s.p = "./build/x"
+    deploy(s.p)
+    if i == 1 {
+      break
+    }
+  } unburn {
+    fs.rm(s.p)
+  }
+}
+burn unlit {
+  fs.mkdir("./logs/d")
+}
+chain ship { deploy, pack(x) => x }
+for t in ["a", "b"] {
+  burn (r, "turn-" + t) {
+    fs.append_text("./logs/turns", t)
+    continue
+  }
+}
+if true {
+  chain inner { deploy }
+}

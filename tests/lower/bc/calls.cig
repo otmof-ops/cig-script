@@ -1,0 +1,12 @@
+pull add(a, b) {
+  snuff a + b
+}
+pull fact(self, n) {
+  if n <= 1 {
+    snuff 1
+  }
+  snuff n * self(self, n - 1)
+}
+stick sq = pack(x) => x * x
+roll n = int("4")
+exhale add(sq(n), fact(fact, n)) + len(str(n))

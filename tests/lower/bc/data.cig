@@ -1,0 +1,17 @@
+pull fib(n) {
+  if n < 2 {
+    snuff n
+  }
+  snuff fib(n - 1) + fib(n - 2)
+}
+roll fs = []
+for i in 0..3 {
+  fs.push(pack() => i * fib(i + 5))
+}
+roll m = {name: "cig", n: 0}
+for f in fs {
+  m.n += f()
+}
+roll xs = [m.name, m?.missing]
+xs[0] = xs[0].upper()
+exhale "${xs} ${m}"
