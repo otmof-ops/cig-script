@@ -29,9 +29,13 @@ START = ["hello", "startup-0", "startup-1", "startup-10"]
 CIG_SIDES = ["cig", "stage-a", "stage-b", "cig-dry", "stage-a-dry", "stage-b-dry"]
 LANGUAGES = ["lua", "luajit-off", "luajit", "python", "node", "rust"]
 IDIOMS = {"python-idiom": "python", "node-idiom": "node", "rust-idiom": "rust"}
+ENGINES = ["cig-tree", "cig-vm", "cig-vm-cold"]
 MAIN = ["cig", "stage-b"] + LANGUAGES
+ALL = CIG_SIDES + ["cig-first"] + ENGINES + LANGUAGES + list(IDIOMS)
 LABEL = {
     "cig": "`cig run`", "cig-dry": "`cig run --dry-run`", "cig-first": "`cig run`, new folder",
+    "cig-tree": "`cig run --engine tree`", "cig-vm": "`cig run --engine vm`",
+    "cig-vm-cold": "`cig run --engine vm`, empty tin",
     "stage-a": "stage a", "stage-a-dry": "stage a, `--dry-run`",
     "stage-b": "stage b", "stage-b-dry": "stage b, `--dry-run`",
     "lua": "Lua", "luajit-off": "LuaJIT `-joff`", "luajit": "LuaJIT",
@@ -177,6 +181,8 @@ class Numbers:
         pairs += [("stage-b", "cig"), ("stage-a", "cig"), ("stage-b-dry", "cig-dry")]
         pairs += [(i, base) for i, base in IDIOMS.items()]
         pairs += [("stage-b", i) for i in IDIOMS]
+        pairs += [("cig-vm", "cig-tree"), ("cig-vm-cold", "cig-tree"), ("cig-vm", "stage-b")]
+        pairs += [("cig-vm", b) for b in LANGUAGES]
         for a, b in pairs:
             for p in self.programs:
                 if self.valid(p, a) and self.valid(p, b):
@@ -348,7 +354,7 @@ class Numbers:
         head = ["program", "side"] + ["pass %d, ms" % (k + 1) for k in range(np)]
         rows = []
         for p in self.programs:
-            for s in CIG_SIDES + ["cig-first"] + LANGUAGES + list(IDIOMS):
+            for s in ALL:
                 if not self.valid(p, s):
                     continue
                 medians = [self.median(p, s, k) for k in range(np)]
@@ -364,7 +370,7 @@ class Numbers:
         head += ["last third ÷ first third, pass %d" % (k + 1) for k in range(np)]
         head += ["CV over 5%%, pass %d" % (k + 1) for k in range(np)]
         rows = []
-        for s in CIG_SIDES + ["cig-first"] + LANGUAGES + list(IDIOMS):
+        for s in ALL:
             if "programs." + s not in self.keys:
                 continue
             row = [LABEL[s], self.text("programs." + s)]
@@ -417,6 +423,13 @@ class Numbers:
                     rows.append(row)
         return self.grid(head, rows, text_columns=np + 1)
 
+    def table_engines(self):
+        head = ["program"] + [LABEL[s] for s in ENGINES] + ["vm ÷ tree", "vm, empty tin ÷ tree"]
+        rows = [["`%s`" % p] + [self.text("median.%s.%s" % (p, s)) for s in ENGINES]
+                + [self.text("ratio.%s.cig-vm.cig-tree" % p), self.text("ratio.%s.cig-vm-cold.cig-tree" % p)]
+                for p in self.programs]
+        return self.grid(head, rows)
+
     def table(self, name):
         tables = {
             "medians": lambda: self.table_by_program("median", MAIN),
@@ -434,6 +447,7 @@ class Numbers:
             "passes": self.table_passes,
             "moved": self.table_moved,
             "stability": self.table_stability,
+            "engines": self.table_engines,
             "conditions": self.table_conditions,
         }
         if name not in tables:

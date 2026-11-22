@@ -1,0 +1,438 @@
+{
+ "anon.lines-500.cig-tree": {
+  "text": "1.0",
+  "value": 964.0
+ },
+ "anon.lines-500.cig-vm": {
+  "text": "0.9",
+  "value": 844.0
+ },
+ "anon.lines-500.cig-vm-cold": {
+  "text": "1.8",
+  "value": 1742.0
+ },
+ "anon.orchestrate.cig-tree": {
+  "text": "30.7",
+  "value": 29968.0
+ },
+ "anon.orchestrate.cig-vm": {
+  "text": "8.4",
+  "value": 8182.0
+ },
+ "anon.orchestrate.cig-vm-cold": {
+  "text": "71.2",
+  "value": 69518.0
+ },
+ "date.pass1": {
+  "text": "2026-11-22T11:24:48Z",
+  "value": "2026-11-22T11:24:48Z"
+ },
+ "date.pass2": {
+  "text": "2026-11-22T11:26:42Z",
+  "value": "2026-11-22T11:26:42Z"
+ },
+ "drift.pass1.cig-tree": {
+  "text": "1.06",
+  "value": 1.0592622804104797
+ },
+ "drift.pass1.cig-vm": {
+  "text": "1.02",
+  "value": 1.0220331735456591
+ },
+ "drift.pass1.cig-vm-cold": {
+  "text": "1.01",
+  "value": 1.0116460330758397
+ },
+ "drift.pass2.cig-tree": {
+  "text": "1.16",
+  "value": 1.1578736241173428
+ },
+ "drift.pass2.cig-vm": {
+  "text": "0.95",
+  "value": 0.945817921771345
+ },
+ "drift.pass2.cig-vm-cold": {
+  "text": "0.99",
+  "value": 0.9914861628185845
+ },
+ "failed.pass1": {
+  "text": "0",
+  "value": 0
+ },
+ "failed.pass2": {
+  "text": "0",
+  "value": 0
+ },
+ "faster.compute.cig-vm-cold.cig-tree": {
+  "text": "0",
+  "value": 0
+ },
+ "faster.compute.cig-vm.cig-tree": {
+  "text": "2",
+  "value": 2
+ },
+ "floor.pass1": {
+  "text": "0.28",
+  "value": 0.28
+ },
+ "floor.pass2": {
+  "text": "0.28",
+  "value": 0.283
+ },
+ "geomean.compute.cig-vm-cold.cig-tree": {
+  "text": "4.58",
+  "value": 4.580303530010434
+ },
+ "geomean.compute.cig-vm.cig-tree": {
+  "text": "0.42",
+  "value": 0.41914526667710805
+ },
+ "geomean.pass1.compute.cig-vm-cold.cig-tree": {
+  "text": "4.53",
+  "value": 4.528305795010376
+ },
+ "geomean.pass1.compute.cig-vm.cig-tree": {
+  "text": "0.41",
+  "value": 0.41143368316917217
+ },
+ "geomean.pass2.compute.cig-vm-cold.cig-tree": {
+  "text": "4.66",
+  "value": 4.658918429005416
+ },
+ "geomean.pass2.compute.cig-vm.cig-tree": {
+  "text": "0.43",
+  "value": 0.43433806578757916
+ },
+ "highest.compute.cig-vm-cold.cig-tree": {
+  "text": "orchestrate",
+  "value": 7.364421896578181
+ },
+ "highest.compute.cig-vm.cig-tree": {
+  "text": "lines-500",
+  "value": 0.8509681881051175
+ },
+ "history.first.pass1": {
+  "text": "2",
+  "value": 2
+ },
+ "history.first.pass2": {
+  "text": "72",
+  "value": 72
+ },
+ "history.last.pass1": {
+  "text": "62",
+  "value": 62
+ },
+ "history.last.pass2": {
+  "text": "132",
+  "value": 132
+ },
+ "inverse.compute.cig-vm-cold.cig-tree": {
+  "text": "0.22",
+  "value": 0.21832614224099728
+ },
+ "inverse.compute.cig-vm.cig-tree": {
+  "text": "2.39",
+  "value": 2.385807688889776
+ },
+ "level.compute.cig-vm-cold.cig-tree": {
+  "text": "0",
+  "value": 0
+ },
+ "level.compute.cig-vm.cig-tree": {
+  "text": "0",
+  "value": 0
+ },
+ "lowest.compute.cig-vm-cold.cig-tree": {
+  "text": "lines-500",
+  "value": 2.84872060857538
+ },
+ "lowest.compute.cig-vm.cig-tree": {
+  "text": "orchestrate",
+  "value": 0.20645043731778429
+ },
+ "median.lines-500.cig-tree": {
+  "text": "2.9",
+  "value": 2.8920000000000003
+ },
+ "median.lines-500.cig-vm": {
+  "text": "2.5",
+  "value": 2.4610000000000003
+ },
+ "median.lines-500.cig-vm-cold": {
+  "text": "8.2",
+  "value": 8.2385
+ },
+ "median.orchestrate.cig-tree": {
+  "text": "52.1",
+  "value": 52.135999999999996
+ },
+ "median.orchestrate.cig-vm": {
+  "text": "10.8",
+  "value": 10.7635
+ },
+ "median.orchestrate.cig-vm-cold": {
+  "text": "384.0",
+  "value": 383.9515
+ },
+ "median.pass1.lines-500.cig-tree": {
+  "text": "2.9",
+  "value": 2.933
+ },
+ "median.pass1.lines-500.cig-vm": {
+  "text": "2.4",
+  "value": 2.424
+ },
+ "median.pass1.lines-500.cig-vm-cold": {
+  "text": "8.2",
+  "value": 8.172
+ },
+ "median.pass1.orchestrate.cig-tree": {
+  "text": "52.3",
+  "value": 52.289
+ },
+ "median.pass1.orchestrate.cig-vm": {
+  "text": "10.7",
+  "value": 10.71
+ },
+ "median.pass1.orchestrate.cig-vm-cold": {
+  "text": "384.8",
+  "value": 384.827
+ },
+ "median.pass2.lines-500.cig-tree": {
+  "text": "2.9",
+  "value": 2.865
+ },
+ "median.pass2.lines-500.cig-vm": {
+  "text": "2.6",
+  "value": 2.553
+ },
+ "median.pass2.lines-500.cig-vm-cold": {
+  "text": "8.3",
+  "value": 8.35
+ },
+ "median.pass2.orchestrate.cig-tree": {
+  "text": "51.4",
+  "value": 51.383
+ },
+ "median.pass2.orchestrate.cig-vm": {
+  "text": "10.9",
+  "value": 10.878
+ },
+ "median.pass2.orchestrate.cig-vm-cold": {
+  "text": "382.7",
+  "value": 382.673
+ },
+ "mhz.max.pass1": {
+  "text": "3047",
+  "value": 3047
+ },
+ "mhz.max.pass2": {
+  "text": "3323",
+  "value": 3323
+ },
+ "mhz.min.pass1": {
+  "text": "983",
+  "value": 983
+ },
+ "mhz.min.pass2": {
+  "text": "1017",
+  "value": 1017
+ },
+ "n.compute.cig-vm-cold.cig-tree": {
+  "text": "2",
+  "value": 2
+ },
+ "n.compute.cig-vm.cig-tree": {
+  "text": "2",
+  "value": 2
+ },
+ "noisy.pass1.cig-tree": {
+  "text": "2",
+  "value": 2
+ },
+ "noisy.pass1.cig-vm": {
+  "text": "2",
+  "value": 2
+ },
+ "noisy.pass1.cig-vm-cold": {
+  "text": "1",
+  "value": 1
+ },
+ "noisy.pass2.cig-tree": {
+  "text": "2",
+  "value": 2
+ },
+ "noisy.pass2.cig-vm": {
+  "text": "2",
+  "value": 2
+ },
+ "noisy.pass2.cig-vm-cold": {
+  "text": "1",
+  "value": 1
+ },
+ "p10.lines-500.cig-tree": {
+  "text": "2.3",
+  "value": 2.335
+ },
+ "p10.lines-500.cig-vm": {
+  "text": "2.1",
+  "value": 2.103
+ },
+ "p10.lines-500.cig-vm-cold": {
+  "text": "7.9",
+  "value": 7.871
+ },
+ "p10.orchestrate.cig-tree": {
+  "text": "47.2",
+  "value": 47.181
+ },
+ "p10.orchestrate.cig-vm": {
+  "text": "10.1",
+  "value": 10.093
+ },
+ "p10.orchestrate.cig-vm-cold": {
+  "text": "376.9",
+  "value": 376.943
+ },
+ "p90.lines-500.cig-tree": {
+  "text": "3.4",
+  "value": 3.435
+ },
+ "p90.lines-500.cig-vm": {
+  "text": "3.1",
+  "value": 3.061
+ },
+ "p90.lines-500.cig-vm-cold": {
+  "text": "9.1",
+  "value": 9.111
+ },
+ "p90.orchestrate.cig-tree": {
+  "text": "58.2",
+  "value": 58.236
+ },
+ "p90.orchestrate.cig-vm": {
+  "text": "11.6",
+  "value": 11.57
+ },
+ "p90.orchestrate.cig-vm-cold": {
+  "text": "394.7",
+  "value": 394.695
+ },
+ "pairs.pass1": {
+  "text": "6",
+  "value": 6
+ },
+ "pairs.pass2": {
+  "text": "6",
+  "value": 6
+ },
+ "passes": {
+  "text": "2",
+  "value": 2
+ },
+ "peak.lines-500.cig-tree": {
+  "text": "9.8",
+  "value": 9612.0
+ },
+ "peak.lines-500.cig-vm": {
+  "text": "9.7",
+  "value": 9446.0
+ },
+ "peak.lines-500.cig-vm-cold": {
+  "text": "11.2",
+  "value": 10960.0
+ },
+ "peak.orchestrate.cig-tree": {
+  "text": "46.7",
+  "value": 45576.0
+ },
+ "peak.orchestrate.cig-vm": {
+  "text": "18.3",
+  "value": 17864.0
+ },
+ "peak.orchestrate.cig-vm-cold": {
+  "text": "81.8",
+  "value": 79870.0
+ },
+ "programs.cig-tree": {
+  "text": "2",
+  "value": 2
+ },
+ "programs.cig-vm": {
+  "text": "2",
+  "value": 2
+ },
+ "programs.cig-vm-cold": {
+  "text": "2",
+  "value": 2
+ },
+ "programs.compute": {
+  "text": "2",
+  "value": 2
+ },
+ "programs.start": {
+  "text": "0",
+  "value": 0
+ },
+ "ratio.lines-500.cig-vm-cold.cig-tree": {
+  "text": "2.85",
+  "value": 2.84872060857538
+ },
+ "ratio.lines-500.cig-vm.cig-tree": {
+  "text": "0.85",
+  "value": 0.8509681881051175
+ },
+ "ratio.orchestrate.cig-vm-cold.cig-tree": {
+  "text": "7.36",
+  "value": 7.364421896578181
+ },
+ "ratio.orchestrate.cig-vm.cig-tree": {
+  "text": "0.21",
+  "value": 0.20645043731778429
+ },
+ "repeat.pass2.cig-tree": {
+  "text": "0.98",
+  "value": 0.9797400058807222
+ },
+ "repeat.pass2.cig-vm": {
+  "text": "1.03",
+  "value": 1.034281821194432
+ },
+ "repeat.pass2.cig-vm-cold": {
+  "text": "1.01",
+  "value": 1.0079992331924903
+ },
+ "rounds.pass1": {
+  "text": "31",
+  "value": 31
+ },
+ "rounds.pass2": {
+  "text": "31",
+  "value": 31
+ },
+ "samples.pass1": {
+  "text": "186",
+  "value": 186
+ },
+ "samples.pass2": {
+  "text": "186",
+  "value": 186
+ },
+ "slower.compute.cig-vm-cold.cig-tree": {
+  "text": "2",
+  "value": 2
+ },
+ "slower.compute.cig-vm.cig-tree": {
+  "text": "0",
+  "value": 0
+ },
+ "temp.max.pass1": {
+  "text": "80",
+  "value": 80
+ },
+ "temp.max.pass2": {
+  "text": "80",
+  "value": 80
+ }
+}

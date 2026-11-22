@@ -1,0 +1,500 @@
+# SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# A script of 500 lines, for the time a first run takes on each engine
+# (cig-script#254): 41 small functions of three shapes, each called once.
+# Not one of the benchmark programs.
+pull step_00(n) {
+  roll acc = 0
+  for k in range(n) {
+    if k % 2 == 0 {
+      acc += k
+    } else {
+      acc -= 1
+    }
+  }
+  snuff acc
+}
+pull step_01(n) {
+  roll words = []
+  for k in range(n) {
+    words.push("w${k + 1}")
+  }
+  stick joined = words.join("-")
+  if joined.len() > 4 {
+    snuff joined.len()
+  }
+  snuff 0
+}
+pull step_02(n) {
+  roll seen = {}
+  for k in range(n) {
+    seen["k${k % 3}"] = k + 2
+  }
+  roll total = 0
+  for key in seen {
+    total += seen[key]
+  }
+  snuff total
+}
+pull step_03(n) {
+  roll acc = 3
+  for k in range(n) {
+    if k % 2 == 0 {
+      acc += k
+    } else {
+      acc -= 1
+    }
+  }
+  snuff acc
+}
+pull step_04(n) {
+  roll words = []
+  for k in range(n) {
+    words.push("w${k + 4}")
+  }
+  stick joined = words.join("-")
+  if joined.len() > 7 {
+    snuff joined.len()
+  }
+  snuff 0
+}
+pull step_05(n) {
+  roll seen = {}
+  for k in range(n) {
+    seen["k${k % 3}"] = k + 5
+  }
+  roll total = 0
+  for key in seen {
+    total += seen[key]
+  }
+  snuff total
+}
+pull step_06(n) {
+  roll acc = 6
+  for k in range(n) {
+    if k % 2 == 0 {
+      acc += k
+    } else {
+      acc -= 1
+    }
+  }
+  snuff acc
+}
+pull step_07(n) {
+  roll words = []
+  for k in range(n) {
+    words.push("w${k + 7}")
+  }
+  stick joined = words.join("-")
+  if joined.len() > 10 {
+    snuff joined.len()
+  }
+  snuff 0
+}
+pull step_08(n) {
+  roll seen = {}
+  for k in range(n) {
+    seen["k${k % 3}"] = k + 8
+  }
+  roll total = 0
+  for key in seen {
+    total += seen[key]
+  }
+  snuff total
+}
+pull step_09(n) {
+  roll acc = 9
+  for k in range(n) {
+    if k % 2 == 0 {
+      acc += k
+    } else {
+      acc -= 1
+    }
+  }
+  snuff acc
+}
+pull step_10(n) {
+  roll words = []
+  for k in range(n) {
+    words.push("w${k + 10}")
+  }
+  stick joined = words.join("-")
+  if joined.len() > 13 {
+    snuff joined.len()
+  }
+  snuff 0
+}
+pull step_11(n) {
+  roll seen = {}
+  for k in range(n) {
+    seen["k${k % 3}"] = k + 11
+  }
+  roll total = 0
+  for key in seen {
+    total += seen[key]
+  }
+  snuff total
+}
+pull step_12(n) {
+  roll acc = 12
+  for k in range(n) {
+    if k % 2 == 0 {
+      acc += k
+    } else {
+      acc -= 1
+    }
+  }
+  snuff acc
+}
+pull step_13(n) {
+  roll words = []
+  for k in range(n) {
+    words.push("w${k + 13}")
+  }
+  stick joined = words.join("-")
+  if joined.len() > 16 {
+    snuff joined.len()
+  }
+  snuff 0
+}
+pull step_14(n) {
+  roll seen = {}
+  for k in range(n) {
+    seen["k${k % 3}"] = k + 14
+  }
+  roll total = 0
+  for key in seen {
+    total += seen[key]
+  }
+  snuff total
+}
+pull step_15(n) {
+  roll acc = 15
+  for k in range(n) {
+    if k % 2 == 0 {
+      acc += k
+    } else {
+      acc -= 1
+    }
+  }
+  snuff acc
+}
+pull step_16(n) {
+  roll words = []
+  for k in range(n) {
+    words.push("w${k + 16}")
+  }
+  stick joined = words.join("-")
+  if joined.len() > 19 {
+    snuff joined.len()
+  }
+  snuff 0
+}
+pull step_17(n) {
+  roll seen = {}
+  for k in range(n) {
+    seen["k${k % 3}"] = k + 17
+  }
+  roll total = 0
+  for key in seen {
+    total += seen[key]
+  }
+  snuff total
+}
+pull step_18(n) {
+  roll acc = 18
+  for k in range(n) {
+    if k % 2 == 0 {
+      acc += k
+    } else {
+      acc -= 1
+    }
+  }
+  snuff acc
+}
+pull step_19(n) {
+  roll words = []
+  for k in range(n) {
+    words.push("w${k + 19}")
+  }
+  stick joined = words.join("-")
+  if joined.len() > 22 {
+    snuff joined.len()
+  }
+  snuff 0
+}
+pull step_20(n) {
+  roll seen = {}
+  for k in range(n) {
+    seen["k${k % 3}"] = k + 20
+  }
+  roll total = 0
+  for key in seen {
+    total += seen[key]
+  }
+  snuff total
+}
+pull step_21(n) {
+  roll acc = 21
+  for k in range(n) {
+    if k % 2 == 0 {
+      acc += k
+    } else {
+      acc -= 1
+    }
+  }
+  snuff acc
+}
+pull step_22(n) {
+  roll words = []
+  for k in range(n) {
+    words.push("w${k + 22}")
+  }
+  stick joined = words.join("-")
+  if joined.len() > 25 {
+    snuff joined.len()
+  }
+  snuff 0
+}
+pull step_23(n) {
+  roll seen = {}
+  for k in range(n) {
+    seen["k${k % 3}"] = k + 23
+  }
+  roll total = 0
+  for key in seen {
+    total += seen[key]
+  }
+  snuff total
+}
+pull step_24(n) {
+  roll acc = 24
+  for k in range(n) {
+    if k % 2 == 0 {
+      acc += k
+    } else {
+      acc -= 1
+    }
+  }
+  snuff acc
+}
+pull step_25(n) {
+  roll words = []
+  for k in range(n) {
+    words.push("w${k + 25}")
+  }
+  stick joined = words.join("-")
+  if joined.len() > 28 {
+    snuff joined.len()
+  }
+  snuff 0
+}
+pull step_26(n) {
+  roll seen = {}
+  for k in range(n) {
+    seen["k${k % 3}"] = k + 26
+  }
+  roll total = 0
+  for key in seen {
+    total += seen[key]
+  }
+  snuff total
+}
+pull step_27(n) {
+  roll acc = 27
+  for k in range(n) {
+    if k % 2 == 0 {
+      acc += k
+    } else {
+      acc -= 1
+    }
+  }
+  snuff acc
+}
+pull step_28(n) {
+  roll words = []
+  for k in range(n) {
+    words.push("w${k + 28}")
+  }
+  stick joined = words.join("-")
+  if joined.len() > 31 {
+    snuff joined.len()
+  }
+  snuff 0
+}
+pull step_29(n) {
+  roll seen = {}
+  for k in range(n) {
+    seen["k${k % 3}"] = k + 29
+  }
+  roll total = 0
+  for key in seen {
+    total += seen[key]
+  }
+  snuff total
+}
+pull step_30(n) {
+  roll acc = 30
+  for k in range(n) {
+    if k % 2 == 0 {
+      acc += k
+    } else {
+      acc -= 1
+    }
+  }
+  snuff acc
+}
+pull step_31(n) {
+  roll words = []
+  for k in range(n) {
+    words.push("w${k + 31}")
+  }
+  stick joined = words.join("-")
+  if joined.len() > 34 {
+    snuff joined.len()
+  }
+  snuff 0
+}
+pull step_32(n) {
+  roll seen = {}
+  for k in range(n) {
+    seen["k${k % 3}"] = k + 32
+  }
+  roll total = 0
+  for key in seen {
+    total += seen[key]
+  }
+  snuff total
+}
+pull step_33(n) {
+  roll acc = 33
+  for k in range(n) {
+    if k % 2 == 0 {
+      acc += k
+    } else {
+      acc -= 1
+    }
+  }
+  snuff acc
+}
+pull step_34(n) {
+  roll words = []
+  for k in range(n) {
+    words.push("w${k + 34}")
+  }
+  stick joined = words.join("-")
+  if joined.len() > 37 {
+    snuff joined.len()
+  }
+  snuff 0
+}
+pull step_35(n) {
+  roll seen = {}
+  for k in range(n) {
+    seen["k${k % 3}"] = k + 35
+  }
+  roll total = 0
+  for key in seen {
+    total += seen[key]
+  }
+  snuff total
+}
+pull step_36(n) {
+  roll acc = 36
+  for k in range(n) {
+    if k % 2 == 0 {
+      acc += k
+    } else {
+      acc -= 1
+    }
+  }
+  snuff acc
+}
+pull step_37(n) {
+  roll words = []
+  for k in range(n) {
+    words.push("w${k + 37}")
+  }
+  stick joined = words.join("-")
+  if joined.len() > 40 {
+    snuff joined.len()
+  }
+  snuff 0
+}
+pull step_38(n) {
+  roll seen = {}
+  for k in range(n) {
+    seen["k${k % 3}"] = k + 38
+  }
+  roll total = 0
+  for key in seen {
+    total += seen[key]
+  }
+  snuff total
+}
+pull step_39(n) {
+  roll acc = 39
+  for k in range(n) {
+    if k % 2 == 0 {
+      acc += k
+    } else {
+      acc -= 1
+    }
+  }
+  snuff acc
+}
+pull step_40(n) {
+  roll words = []
+  for k in range(n) {
+    words.push("w${k + 40}")
+  }
+  stick joined = words.join("-")
+  if joined.len() > 43 {
+    snuff joined.len()
+  }
+  snuff 0
+}
+roll sum = 0
+sum += step_00(3)
+sum += step_01(4)
+sum += step_02(5)
+sum += step_03(6)
+sum += step_04(7)
+sum += step_05(3)
+sum += step_06(4)
+sum += step_07(5)
+sum += step_08(6)
+sum += step_09(7)
+sum += step_10(3)
+sum += step_11(4)
+sum += step_12(5)
+sum += step_13(6)
+sum += step_14(7)
+sum += step_15(3)
+sum += step_16(4)
+sum += step_17(5)
+sum += step_18(6)
+sum += step_19(7)
+sum += step_20(3)
+sum += step_21(4)
+sum += step_22(5)
+sum += step_23(6)
+sum += step_24(7)
+sum += step_25(3)
+sum += step_26(4)
+sum += step_27(5)
+sum += step_28(6)
+sum += step_29(7)
+sum += step_30(3)
+sum += step_31(4)
+sum += step_32(5)
+sum += step_33(6)
+sum += step_34(7)
+sum += step_35(3)
+sum += step_36(4)
+sum += step_37(5)
+sum += step_38(6)
+sum += step_39(7)
+sum += step_40(3)
+exhale sum
+exhale "done"

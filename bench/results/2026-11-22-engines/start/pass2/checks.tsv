@@ -1,0 +1,7 @@
+program	side	status	detail
+lines-500	cig-tree	ok	
+lines-500	cig-vm	ok	
+lines-500	cig-vm-cold	ok	
+orchestrate	cig-tree	ok	
+orchestrate	cig-vm	ok	
+orchestrate	cig-vm-cold	ok	

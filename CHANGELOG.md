@@ -5,6 +5,51 @@ project follows semantic versioning.
 
 ## Unreleased
 
+- **`cig run` on the VM (#254).** `cig run --engine vm` (or
+  `CIG_ENGINE=vm`, or `cig config engine vm` for a default) runs a script's
+  bytecode on the VM, which until now only a program built by `cigcompile
+  build --stage b` reached. `cig light` takes the same flag.
+  - **One lowering.** The lowering (source to CIR to bytecode) moved here
+    from cig-compile as `cigscript::lower`, unchanged, with its tests and
+    its reference (`docs/LOWERING.md`): `cig run` and `cigcompile build`
+    share one copy and cannot drift.
+  - **Lowered once.** A script's module is kept under the tin
+    (`<state>/tin/modules`), found by the SHA-256 over the cig version,
+    the lowering's version, the level and the script, and used only when
+    its MAC verifies under this machine's module key, a file in the keys
+    directory. `cig tin` counts the modules, `cig doctor` lists them and
+    `cig tin gc` removes the ones nothing loads; each is safe to remove.
+  - **The same run.** `tests/engines.rs` runs the corpus on both engines,
+    lowered and from the tin, as a real run and as a dry run, and compares
+    every exit status and every byte printed. No script fails to run
+    because of the VM: one the lowering does not take runs on the
+    tree-walker. A run's record says which engine ran, where the VM's
+    module came from, and why the tree-walker ran a script that asked for
+    the VM, and `cig runs <id>` shows it.
+  - **The tree-walker is still the default.** With its module in the tin
+    the VM is the faster engine (`docs/ENGINES-2026-11-22.md`); a first
+    run pays for the lowering
+    (`docs/ENGINES-FIRST-RUNS-2026-11-22.md`). Each choice and its reason
+    is in `docs/decisions/0002-cig-run-on-the-vm.md`.
+
+- **Fixed: a function that runs before a declaration it reads.** Found by
+  the engine suite. The interpreter looks a name up as the script runs, so
+  a function called before a name's own statement has run finds the next
+  one out, or none (E501). The lowering read the name's slot instead,
+  which is empty until then: a program built at stage `b` printed `null`
+  there, or wrote the wrong variable. The lowering now declines such a
+  script (`tests/lower_names.rs` has each shape, `docs/LOWERING.md` the
+  rule): `cig run --engine vm` runs it on the tree-walker and says so in
+  the run's record, and `cigcompile build --stage b` refuses it where
+  stage `a` builds it.
+
+- **`bench/compare` measures `cig run` under each engine.** Three sides,
+  `cig-tree`, `cig-vm` and `cig-vm-cold` (the VM with nothing in the tin),
+  each with a cig home of its own, and in `SPEC.md` their pairs, labels
+  and table; `check.py` was brought to the new specification apart from
+  `report.py`, and the paper of 2026-11-15 still renders byte for byte
+  from both.
+
 - **Benchmarks against other languages (`bench/compare`, `bench/ref`).** The
   25 programs of `bench/compute` written again in Lua, Python, JavaScript
   and (eight of them) Rust, each held to one rule, the same program

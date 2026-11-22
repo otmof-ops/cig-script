@@ -1,0 +1,46 @@
+date_utc	2026-11-22T11:23:14Z
+cpu	Intel(R) Core(TM) Ultra 7 255H
+cores	16
+kernel	6.17.0-1033-oem
+driver	intel_pstate
+governor	powersave
+epp	performance
+no_turbo	0
+max_mhz	5100
+profile	performance
+transparent_hugepages	always [madvise] never
+mains	1
+load_average	0.70 0.89 1.24 2/1875 326524
+temp_c	57
+history	0
+harness	Python 3.12.3
+rounds	31
+seed	1
+floor_ms	0.286	0.272	0.810
+not_installed	lua
+not_installed	luajit
+not_installed	rustc
+side	cig-tree	`cig run --engine tree`	cig 1.24.0
+command	cig-tree	cig run --engine tree {name}.cig
+env	cig-tree	CIGSCRIPT_HOME=home-cig-tree
+env	cig-tree	CIG_DOCTOR=0
+env	cig-tree	CIG_MAX_STEPS=0
+env	cig-tree	CIG_REPORTS=never
+env	cig-tree	CIG_SEAL_KEY=file
+env	cig-tree	NO_COLOR=1
+side	cig-vm	`cig run --engine vm`	cig 1.24.0
+command	cig-vm	cig run --engine vm {name}.cig
+env	cig-vm	CIGSCRIPT_HOME=home-cig-vm
+env	cig-vm	CIG_DOCTOR=0
+env	cig-vm	CIG_MAX_STEPS=0
+env	cig-vm	CIG_REPORTS=never
+env	cig-vm	CIG_SEAL_KEY=file
+env	cig-vm	NO_COLOR=1
+side	cig-vm-cold	`cig run --engine vm`, nothing in the tin	cig 1.24.0
+command	cig-vm-cold	cig run --engine vm {name}.cig
+env	cig-vm-cold	CIGSCRIPT_HOME=home-cig-vm-cold
+env	cig-vm-cold	CIG_DOCTOR=0
+env	cig-vm-cold	CIG_MAX_STEPS=0
+env	cig-vm-cold	CIG_REPORTS=never
+env	cig-vm-cold	CIG_SEAL_KEY=file
+env	cig-vm-cold	NO_COLOR=1

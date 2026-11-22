@@ -28,13 +28,17 @@ CIG_SIDES = ["cig", "stage-a", "stage-b", "cig-dry", "stage-a-dry", "stage-b-dry
 LANGUAGES = ["lua", "luajit-off", "luajit", "python", "node", "rust"]
 IDIOMS = [("python-idiom", "python"), ("node-idiom", "node"), ("rust-idiom", "rust")]
 IDIOM_SIDES = [i for i, _ in IDIOMS]
+ENGINES = ["cig-tree", "cig-vm", "cig-vm-cold"]
 MAIN = ["cig", "stage-b"] + LANGUAGES
-ALL = CIG_SIDES + ["cig-first"] + LANGUAGES + IDIOM_SIDES
+ALL = CIG_SIDES + ["cig-first"] + ENGINES + LANGUAGES + IDIOM_SIDES
 
 LABELS = {
     "cig": "`cig run`",
     "cig-dry": "`cig run --dry-run`",
     "cig-first": "`cig run`, new folder",
+    "cig-tree": "`cig run --engine tree`",
+    "cig-vm": "`cig run --engine vm`",
+    "cig-vm-cold": "`cig run --engine vm`, empty tin",
     "stage-a": "stage a",
     "stage-a-dry": "stage a, `--dry-run`",
     "stage-b": "stage b",
@@ -215,6 +219,8 @@ class Model:
         out += [("stage-b", "cig"), ("stage-a", "cig"), ("stage-b-dry", "cig-dry")]
         out += [("python-idiom", "python"), ("node-idiom", "node"), ("rust-idiom", "rust")]
         out += [("stage-b", "python-idiom"), ("stage-b", "node-idiom"), ("stage-b", "rust-idiom")]
+        out += [("cig-vm", "cig-tree"), ("cig-vm-cold", "cig-tree"), ("cig-vm", "stage-b")]
+        out += [("cig-vm", b) for b in LANGUAGES]
         return out
 
     def build(self):
@@ -476,6 +482,15 @@ class Model:
                 row += [t("noisy.pass%d.%s" % (k, s)) for k in range(1, n + 1)]
                 rows.append(row)
             return self.render_table(header, [False] + [True] * (len(header) - 1), rows)
+        if name == "engines":
+            header = ["program"] + [LABELS[s] for s in ENGINES] + [
+                "vm " + DIV + " tree", "vm, empty tin " + DIV + " tree"]
+            rows = [["`%s`" % p]
+                    + [t("median.%s.%s" % (p, s)) for s in ENGINES]
+                    + [t("ratio.%s.cig-vm.cig-tree" % p),
+                       t("ratio.%s.cig-vm-cold.cig-tree" % p)]
+                    for p in self.programs]
+            return self.render_table(header, [False] + [True] * 5, rows)
         if name == "conditions":
             return self.conditions_table()
         raise Fatal("unknown table %r" % name)
@@ -661,6 +676,9 @@ def main(argv):
     except Fatal as exc:
         print("check.py: error: %s" % exc, file=sys.stderr)
         return 2
+    if os.environ.get("CHECK_DUMP_KEYS"):
+        for key in sorted(model.keys):
+            print("KEY %s\t%s\t%r" % (key, model.keys[key][0], model.keys[key][1]))
     diffs = []
     compare_numbers(model, opts["numbers"], diffs)
     docs = 0
