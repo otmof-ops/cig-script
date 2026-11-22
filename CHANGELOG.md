@@ -5,6 +5,33 @@ project follows semantic versioning.
 
 ## Unreleased
 
+## 1.25.0 — 2026-11-23
+
+`cig run` can run a script on the bytecode VM. `cig run --engine vm` (or
+`CIG_ENGINE=vm`, or `cig config engine vm`) lowers the script to bytecode
+once, keeps the module in the tin, and runs it on the VM that until now
+only a program built by `cigcompile build --stage b` reached. A script's
+output, its errors and their positions, its journal and what it leaves on
+disk are the same on either engine, held by a suite that runs both; a
+script the lowering does not take runs on the tree-walker, and the run's
+record says so. The lowering is one copy now, in cig, for `cig run` and
+cig-compile alike, and two defects in it are fixed: both are in stage `b`
+programs built by cig-compile 0.5.0 (the two "Fixed" entries below). The
+static x86_64 build copies with its own routines (#251).
+
+The tree-walker is still the default. A first run on the VM pays for
+lowering the script before it starts: 1.11 times the tree-walker's time
+for `hello`, 3.18 for a script of 500 lines and 7.36 for cigo's script of
+20,664 lines. The VM becomes the default when that cost is gone (#259).
+
+Timed on one development machine, on this change's own build (the release
+build, whole processes, each engine with a cig home of its own;
+`docs/ENGINES-2026-11-22.md` and `docs/ENGINES-FIRST-RUNS-2026-11-22.md`):
+with its module in the tin, `cig run --engine vm` takes 0.58 of the
+tree-walker's time on the 21 compute programs of `bench/compute` (faster
+on 18, level on 3, slower on none), and cigo's script starts in 10.9 ms
+against 53.4.
+
 - **`cig run` on the VM (#254).** `cig run --engine vm` (or
   `CIG_ENGINE=vm`, or `cig config engine vm` for a default) runs a script's
   bytecode on the VM, which until now only a program built by `cigcompile
