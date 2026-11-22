@@ -9,6 +9,7 @@
 pub mod effects;
 pub mod ir;
 pub mod lower;
+pub mod names;
 pub mod pass;
 pub mod print;
 pub mod verify;
@@ -33,7 +34,7 @@ pub fn lower_program(
     file: &str,
 ) -> Result<Module, LowerError> {
     let resolver = effects::Resolver::new();
-    lower::lower(program, file, &resolver).map_err(LowerError::Internal)
+    lower::lower(program, file, &resolver).map_err(LowerError::from)
 }
 
 #[derive(Debug)]
@@ -42,6 +43,22 @@ pub enum LowerError {
     Diagnostic(crate::diagnostics::Diagnostic),
     /// The checker let through something lowering cannot place: a bug.
     Internal(String),
+    /// A script the lowering does not take: what, and where. It is a
+    /// script whose meaning depends on a name being looked up as it runs,
+    /// which only the tree-walker does.
+    Refused {
+        what: String,
+        span: crate::syntax::span::Span,
+    },
+}
+
+impl From<lower::Fail> for LowerError {
+    fn from(f: lower::Fail) -> LowerError {
+        match f {
+            lower::Fail::Bug(e) => LowerError::Internal(e),
+            lower::Fail::Refused(what, span) => LowerError::Refused { what, span },
+        }
+    }
 }
 
 /// Lower, run the default passes, print: `--emit=cir`. The verifier's

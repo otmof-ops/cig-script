@@ -82,6 +82,24 @@ pub fn module_bytes(program: &Program, file: &str) -> Result<Vec<u8>, Failure> {
 /// lists as not built. The bytes are the module as
 /// [`cig_bytecode::serialize_module`] writes it.
 pub fn module_bytes_at(program: &Program, file: &str, opt: u8) -> Result<Vec<u8>, Stop> {
+    lowered_at(program, file, opt).map(|(bytes, _)| bytes)
+}
+
+/// [`module_bytes`], with the module as this cig's VM loaded it while it
+/// was checked: a run that has just lowered a script runs what was loaded
+/// and keeps the bytes, without opening them a second time.
+pub fn module_loaded(
+    program: &Program,
+    file: &str,
+) -> Result<(Vec<u8>, std::rc::Rc<crate::vm::Program>), Failure> {
+    lowered_at(program, file, DEFAULT_LEVEL).map_err(Failure::from)
+}
+
+fn lowered_at(
+    program: &Program,
+    file: &str,
+    opt: u8,
+) -> Result<(Vec<u8>, std::rc::Rc<crate::vm::Program>), Stop> {
     use bc::{compile_program, CompileError, Error};
     use cir::LowerError;
     let passes = cir::pass::level(opt);
@@ -95,6 +113,11 @@ pub fn module_bytes_at(program: &Program, file: &str, opt: u8) -> Result<Vec<u8>
             what: format!("the lowering to IR failed ({e})"),
             span: None,
             bug: true,
+        },
+        CompileError::Lower(LowerError::Refused { what, span }) => Stop {
+            what,
+            span: Some(span),
+            bug: false,
         },
         CompileError::Verify(e) => Stop {
             what: format!(
@@ -133,12 +156,12 @@ pub fn module_bytes_at(program: &Program, file: &str, opt: u8) -> Result<Vec<u8>
         span: None,
         bug: true,
     })?;
-    crate::vm::load(verified).map_err(|d| Stop {
+    let loaded = crate::vm::load(verified).map_err(|d| Stop {
         what: format!("this cig's VM does not load it: {}", d.message),
         span: d.span,
         bug: false,
     })?;
-    Ok(cig_bytecode::serialize_module(&m))
+    Ok((cig_bytecode::serialize_module(&m), loaded))
 }
 
 /// The first instruction, in pre-order, that this cig's VM lists as not

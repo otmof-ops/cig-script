@@ -168,3 +168,44 @@ construct and position: a `pack` root that runs a pull or a function.
 what it lowers in the VM and holds its output, errors, positions and
 step count to the tree-walker's, and for burns the files, the journal,
 a dry run's plan and what a rollback puts back.
+
+## A name read before its declaration
+
+The interpreter looks a name up as the script runs. A function that reads
+a name before the name's own statement has run finds the next one out, or
+none:
+
+```cig
+main()                          # E501: unknown name `LIMIT`
+stick LIMIT = 10
+pull main() { exhale LIMIT }
+```
+
+```cig
+roll x = 1
+pull outer() {
+  pull f() { snuff x }
+  roll before = f()             # the outer x: 1
+  roll x = 2
+  snuff [before, f()]           # then the inner one: [1, 2]
+}
+```
+
+A lowered function reads a slot, and a slot has no "not declared yet". So
+the lowering takes a function that captures a name its block has not
+declared yet only where the function cannot run before the declaration:
+
+- a `pull` is hoisted, and may read any name its block declares, as long
+  as no statement up to and including that declaration names the pull,
+  directly or through the block's other pulls;
+- a function literal bound to a name may read that name (it cannot run
+  before its own declaration is done);
+- any other function made before a declaration it would capture is
+  declined.
+
+Naming a pull is enough: the lowering does not follow a value to where it
+is called. What is declined is not an error. `cig run --engine vm` runs
+the script on the tree-walker and its record says why; `cigcompile build
+--stage b` refuses the build with the same text, and stage `a` builds it.
+`tests/lower_names.rs` holds each shape, and `tests/engines.rs` holds the
+two engines to each other on whole scripts.

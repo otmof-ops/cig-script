@@ -1169,7 +1169,11 @@ fn a_frame_past_the_limit_is_an_error() {
 #[test]
 fn real_programs_lower_or_name_what_refuses_them() {
     let mut scripts = Vec::new();
-    if let Some(src) = std::env::var_os("CIGSCRIPT_SRC").map(std::path::PathBuf::from) {
+    // This checkout's scripts, or another's when `CIGSCRIPT_SRC` names one.
+    {
+        let src = std::env::var_os("CIGSCRIPT_SRC")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")));
         for dir in ["examples", "tests/scripts", "tests/corpus"] {
             if let Ok(rd) = std::fs::read_dir(src.join(dir)) {
                 let mut found: Vec<_> = rd
@@ -1198,12 +1202,14 @@ fn real_programs_lower_or_name_what_refuses_them() {
             Ok(m) => {
                 verify_module(&m).unwrap_or_else(|e| panic!("{name}: {e}"));
                 lowered += 1;
-                // The language scripts need no files: run them both ways.
-                // The others run in an empty directory of their own, for
-                // real and as a dry run, and leave the same files, journal
-                // and plan; one that starts a process runs only where
-                // CIG_BC_RUN_PROCS is set (the test box).
-                if dir == "tests/scripts/" {
+                // The language scripts that burn nothing need no files: run
+                // them both ways here. The others run in an empty directory
+                // of their own, for real and as a dry run, and leave the
+                // same files, journal and plan (a script that burns would
+                // otherwise write into the directory the tests run in); one
+                // that starts a process runs only where CIG_BC_RUN_PROCS is
+                // set (the test box).
+                if dir == "tests/scripts/" && !src.contains("burn") {
                     let src = src.clone();
                     let (got, want) =
                         big_stack(move || (vm(&m, 1_000_000), tree_walker(&src, 1_000_000)));

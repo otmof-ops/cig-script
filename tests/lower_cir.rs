@@ -446,10 +446,10 @@ fn golden_for_pass(sub: &str, name: &str, passes: &[&'static dyn Pass]) {
 /// refuses are refused here too.
 #[test]
 fn every_script_cigscript_carries_lowers_and_verifies() {
-    let Some(src) = std::env::var_os("CIGSCRIPT_SRC").map(std::path::PathBuf::from) else {
-        eprintln!("CIGSCRIPT_SRC is not set; skipped");
-        return;
-    };
+    // This checkout's scripts, or another's when `CIGSCRIPT_SRC` names one.
+    let src = std::env::var_os("CIGSCRIPT_SRC")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")));
     let mut lowered = 0;
     let mut refused = Vec::new();
     for dir in ["examples", "tests/scripts", "tests/corpus"] {
@@ -472,6 +472,8 @@ fn every_script_cigscript_carries_lowers_and_verifies() {
                 }
                 Err(LowerError::Diagnostic(_)) => refused.push(name),
                 Err(LowerError::Internal(e)) => panic!("{name}: {e}"),
+                // None of the corpus reads a name before its declaration.
+                Err(LowerError::Refused { what, .. }) => panic!("{name}: not taken: {what}"),
             }
         }
     }

@@ -18,15 +18,46 @@ use std::collections::HashMap;
 
 pub type Error = String;
 
-/// A name in a scope. `pending`: allocated when the block was entered, not
-/// declared yet: invisible to the block's own straight-line code, visible
-/// to a function body (which runs later, as the interpreter's closures
-/// resolve names when they run).
+/// A name in a scope. A name is allocated when its block is entered and
+/// declared when its statement runs. Until then it is invisible to the
+/// block's own straight-line code, and visible to a function body, which
+/// runs later (the interpreter's closures resolve names when they run).
 #[derive(Clone, Copy)]
 struct Entry {
     var: VarId,
     pull: Option<FuncId>,
-    pending: bool,
+    wait: Wait,
+}
+
+/// Where an allocated name stands. The interpreter looks a name up as the
+/// script runs: a function that reads a name before the name's declaration
+/// has run finds the next one out, or none (E501). A slot has no such
+/// answer, so a function may capture a name that is not declared yet only
+/// where it cannot run before the declaration; anything else is refused
+/// ([`Fail::Refused`]) and the script runs on the tree-walker.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Wait {
+    /// Declared.
+    No,
+    /// Its block's pulls are being lowered. A pull runs when something
+    /// calls it; whether that can be before this declaration is judged
+    /// once all of them are lowered (`Lowerer::early_use`).
+    Hoist,
+    /// Not declared yet, and its block's statements are being lowered: a
+    /// function made now could run before the declaration does.
+    Later,
+    /// Its own declaration is being lowered and the value is a function
+    /// literal: that function cannot run before the declaration is done.
+    Binding,
+}
+
+/// Why a script has no module.
+#[derive(Debug)]
+pub enum Fail {
+    /// The checker let through something the lowering cannot place: a bug.
+    Bug(String),
+    /// The script is one the lowering does not take: what, and where.
+    Refused(String, Span),
 }
 
 struct Builder {
@@ -44,6 +75,9 @@ struct Lowerer<'r> {
     next_region: u32,
     stack: Vec<Builder>,
     resolver: &'r Resolver,
+    /// Set when the lowering stops because it does not take the script
+    /// (not because it found its own bug): what, and where.
+    refused: Option<(String, Span)>,
 }
 
 enum Name {
@@ -52,7 +86,7 @@ enum Name {
 }
 
 /// Lower a program that has passed the checker.
-pub fn lower(program: &ast::Program, file: &str, resolver: &Resolver) -> Result<Module, Error> {
+pub fn lower(program: &ast::Program, file: &str, resolver: &Resolver) -> Result<Module, Fail> {
     let mut l = Lowerer {
         file: file.to_string(),
         funcs: vec![None],
@@ -61,6 +95,7 @@ pub fn lower(program: &ast::Program, file: &str, resolver: &Resolver) -> Result<
         next_region: 0,
         stack: Vec::new(),
         resolver,
+        refused: None,
     };
     let span = program
         .body
@@ -75,7 +110,12 @@ pub fn lower(program: &ast::Program, file: &str, resolver: &Resolver) -> Result<
         captures: Vec::new(),
     });
     let mut body = Block::default();
-    l.block(&program.body, &mut body, None)?;
+    if let Err(e) = l.block(&program.body, &mut body, None) {
+        return Err(match l.refused.take() {
+            Some((what, at)) => Fail::Refused(what, at),
+            None => Fail::Bug(e),
+        });
+    }
     let b = l.stack.pop().expect("main");
     l.funcs[0] = Some(Func {
         id: FuncId(0),
@@ -157,18 +197,41 @@ impl Lowerer<'_> {
         self.value(out, span, Kind::Const(c), ty)
     }
 
+    /// Stop the lowering because it does not take this script. The error
+    /// the caller sees is [`Fail::Refused`].
+    fn refuse(&mut self, what: String, at: Span) -> Error {
+        self.refused.get_or_insert((what, fix(at)));
+        String::new()
+    }
+
     /// Resolve a name: this function's declared scopes, then enclosing
-    /// functions' (declared or pending: a capture), then the prelude.
+    /// functions' (declared, or not yet declared where the function being
+    /// lowered cannot run before the declaration: a capture), then the
+    /// prelude.
     fn resolve(&mut self, name: &str) -> Result<Name, Error> {
         let depth = self.stack.len();
         for level in (0..depth).rev() {
             let own = level == depth - 1;
-            let found = self.stack[level]
-                .scopes
-                .iter()
-                .rev()
-                .find_map(|s| s.get(name).copied().filter(|e| !(own && e.pending)));
+            let found = self.stack[level].scopes.iter().rev().find_map(|s| {
+                s.get(name)
+                    .copied()
+                    .filter(|e| !(own && e.wait != Wait::No))
+            });
             if let Some(e) = found {
+                if !own && e.wait == Wait::Later {
+                    // The function being lowered was made by a statement
+                    // that runs before this name's declaration: it could
+                    // run before it too, and the interpreter would then
+                    // look the name up further out.
+                    let at = self.vars[e.var.0 as usize].span;
+                    return Err(self.refuse(
+                        format!(
+                            "`{name}` is declared at line {}, after a function that reads it is made; a name read before its declaration is looked up as the script runs, which only the tree-walker does",
+                            at.line
+                        ),
+                        at,
+                    ));
+                }
                 if !own {
                     // A capture: every function between owner and user carries it.
                     self.vars[e.var.0 as usize].captured = true;
@@ -205,7 +268,7 @@ impl Lowerer<'_> {
                 Entry {
                     var,
                     pull: None,
-                    pending: false,
+                    wait: Wait::No,
                 },
             );
         }
@@ -233,7 +296,7 @@ impl Lowerer<'_> {
                 Entry {
                     var,
                     pull: None,
-                    pending: true,
+                    wait: Wait::Hoist,
                 },
             );
         }
@@ -259,9 +322,13 @@ impl Lowerer<'_> {
                 .get_mut(&f.name)
                 .expect("allocated");
             e.pull = Some(fid);
-            e.pending = false;
+            e.wait = Wait::No;
             planned.push((f, fid, e.var));
         }
+        let hoisted: Vec<(&ast::FnDecl, FuncId, VarId)> = planned
+            .iter()
+            .map(|(f, fid, var)| (**f, *fid, *var))
+            .collect();
         for (f, fid, var) in planned {
             self.func(
                 fid,
@@ -273,6 +340,15 @@ impl Lowerer<'_> {
             )?;
             let c = self.value(out, f.span, Kind::Closure(fid), Ty::Func);
             self.emit(out, f.span, Kind::Decl(var, c), None);
+        }
+        // The pulls are lowered: can one of them run before a declaration
+        // it reads? Then the statements, during which a function made
+        // before a declaration may no longer capture it.
+        self.early_use(stmts, &hoisted)?;
+        for e in self.cur().scopes.last_mut().expect("pushed").values_mut() {
+            if e.wait == Wait::Hoist {
+                e.wait = Wait::Later;
+            }
         }
         for s in stmts {
             self.stmt(s, out)?;
@@ -307,7 +383,7 @@ impl Lowerer<'_> {
                 Entry {
                     var: v,
                     pull: None,
-                    pending: false,
+                    wait: Wait::No,
                 },
             );
             ps.push(v);
@@ -339,15 +415,120 @@ impl Lowerer<'_> {
         Ok(())
     }
 
-    /// Mark a pending entry of the current function declared.
+    /// Mark an allocated name of the current function declared.
     fn declare(&mut self, name: &str) -> Result<VarId, Error> {
         for s in self.cur().scopes.iter_mut().rev() {
             if let Some(e) = s.get_mut(name) {
-                e.pending = false;
+                e.wait = Wait::No;
                 return Ok(e.var);
             }
         }
         Err(format!("`{name}` was declared without being allocated"))
+    }
+
+    /// Can a pull of this block run before a declaration it reads? A pull
+    /// is hoisted, so it may capture any name its block declares; that is
+    /// right as long as nothing calls it before the name's statement has
+    /// run. So: for each pull, the last of the block's declarations it
+    /// reads, itself or through the block's other pulls it names; and no
+    /// statement up to and including that declaration may name the pull.
+    /// Naming is enough to refuse (the pull may be called, passed on or
+    /// kept there): what is refused runs on the tree-walker, as written.
+    fn early_use(
+        &mut self,
+        stmts: &[Stmt],
+        pulls: &[(&ast::FnDecl, FuncId, VarId)],
+    ) -> Result<(), Error> {
+        if pulls.is_empty() {
+            return Ok(());
+        }
+        // Where each name this block declares is declared.
+        let mut declared_at: HashMap<VarId, usize> = HashMap::new();
+        {
+            let scope = self.cur().scopes.last().expect("pushed");
+            for (i, s) in stmts.iter().enumerate() {
+                let name = match s {
+                    Stmt::Declare { name, .. } => name,
+                    Stmt::Chain(c) => &c.name,
+                    _ => continue,
+                };
+                if let Some(e) = scope.get(name) {
+                    declared_at.insert(e.var, i);
+                }
+            }
+        }
+        if declared_at.is_empty() {
+            return Ok(());
+        }
+        let index: HashMap<VarId, usize> = pulls
+            .iter()
+            .enumerate()
+            .map(|(i, (_, _, var))| (*var, i))
+            .collect();
+        // What each pull reads of this block: the last declaration it
+        // needs, and the block's pulls it names.
+        let mut need: Vec<Option<(usize, VarId)>> = Vec::with_capacity(pulls.len());
+        let mut names: Vec<Vec<usize>> = Vec::with_capacity(pulls.len());
+        for (_, fid, _) in pulls {
+            let captures = &self.funcs[fid.0 as usize]
+                .as_ref()
+                .expect("the pull is lowered")
+                .captures;
+            need.push(
+                captures
+                    .iter()
+                    .filter_map(|v| declared_at.get(v).map(|i| (*i, *v)))
+                    .max(),
+            );
+            names.push(
+                captures
+                    .iter()
+                    .filter_map(|v| index.get(v).copied())
+                    .collect(),
+            );
+        }
+        // A pull needs what the pulls it names need.
+        loop {
+            let mut changed = false;
+            for p in 0..pulls.len() {
+                for &q in &names[p] {
+                    if need[q] > need[p] {
+                        need[p] = need[q];
+                        changed = true;
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        let Some(last) = need.iter().flatten().map(|(i, _)| *i).max() else {
+            return Ok(());
+        };
+        for (k, s) in stmts.iter().enumerate().take(last + 1) {
+            if matches!(s, Stmt::Pull(_)) {
+                continue;
+            }
+            let mut named = std::collections::HashSet::new();
+            super::names::in_stmt(s, &mut named);
+            for (p, (f, _, _)) in pulls.iter().enumerate() {
+                let Some((d, var)) = need[p] else { continue };
+                if k <= d && named.contains(f.name.as_str()) {
+                    let info = &self.vars[var.0 as usize];
+                    let (name, at) = (info.name.clone(), info.span);
+                    return Err(self.refuse(
+                        format!(
+                            "`{name}` is declared at line {}, after `{}` can first run (line {}); a name read before its declaration is looked up as the script runs, which only the tree-walker does",
+                            at.line,
+                            f.name,
+                            s.span().line
+                        ),
+                        at,
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 
     fn stmt(&mut self, s: &Stmt, out: &mut Block) -> Result<(), Error> {
@@ -361,6 +542,18 @@ impl Lowerer<'_> {
             Stmt::Declare {
                 name, value, span, ..
             } => {
+                // A function literal bound to a name may read that name: it
+                // cannot run before this declaration is done.
+                if matches!(value.kind, ExprKind::Lambda { .. }) {
+                    for s in self.cur().scopes.iter_mut().rev() {
+                        if let Some(e) = s.get_mut(name) {
+                            if e.wait == Wait::Later {
+                                e.wait = Wait::Binding;
+                            }
+                            break;
+                        }
+                    }
+                }
                 let v = self.expr(value, out)?;
                 let var = self.declare(name)?;
                 self.emit(out, *span, Kind::Decl(var, v), None);
