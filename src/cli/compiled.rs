@@ -316,6 +316,8 @@ pub fn main(p: Opened) -> i32 {
         trial: false,
         no_trial: true,
         pin: false,
+        // A program's engine is its stage's (`Engine`, below).
+        engine: None,
         timings: None,
         stats: None,
         args: o.args,

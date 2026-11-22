@@ -442,6 +442,9 @@ pub struct RunArgs {
     /// Pin this run when it ends, so keep_runs, keep_days and the history budget keep it (the run before a migration or a release).
     #[arg(long)]
     pub pin: bool,
+    /// Which engine runs the script: `vm` (bytecode, lowered once and kept in the tin) or `tree` (the tree-walker); also CIG_ENGINE, and `cig config engine` for a default.
+    #[arg(long, value_enum, value_name = "ENGINE")]
+    pub engine: Option<run::EngineArg>,
     /// Write where the time went (lower, check, run, burn) as JSON lines to descriptor FD, to CIG_TIMINGS_FD, or to stderr (`--timings`, `--timings=9`).
     #[arg(long, value_name = "FD", num_args = 0..=1, require_equals = true, default_missing_value = "")]
     pub timings: Option<String>,
@@ -477,6 +480,9 @@ pub struct LightArgs {
     /// Run here without comparing plans with the last good version.
     #[arg(long)]
     pub no_trial: bool,
+    /// Which engine runs the script: `vm` or `tree` (see `cig run --help`).
+    #[arg(long, value_enum, value_name = "ENGINE")]
+    pub engine: Option<run::EngineArg>,
     /// Arguments passed to the script as `args`.
     #[arg(last = true)]
     pub args: Vec<String>,
@@ -687,6 +693,7 @@ fn dispatch(ctx: Ctx, command: Command) -> i32 {
                 trial: a.trial,
                 no_trial: a.no_trial,
                 pin: false,
+                engine: a.engine,
                 timings: None,
                 stats: None,
                 args: a.args,

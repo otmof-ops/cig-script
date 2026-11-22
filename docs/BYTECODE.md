@@ -2,7 +2,8 @@
 
 CigScript's stage-B VM runs a register bytecode. This file is the
 format's **contract**: everything in `crates/cig-bytecode/` implements
-it, the VM core runs it, CigCompile's lowering writes it, and future
+it, the VM core runs it, the lowering (`src/lower`, [LOWERING.md](LOWERING.md))
+writes it for `cig run --engine vm` and for cig-compile alike, and future
 packages can rely on the rules below without reading the crate's code.
 See otmof-ops/cig-compile#31 for the stage-B issue.
 

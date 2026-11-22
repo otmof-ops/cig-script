@@ -337,6 +337,16 @@ pub fn product_doctor(ctx: &Ctx, fix: bool) -> i32 {
             (None, false) => String::new(),
         }
     );
+    // The lowered modules `cig run` keeps in the tin (#254): what they are,
+    // their size, and that they are safe to remove.
+    let modules = crate::burn::modcache::stats();
+    if modules.entries > 0 {
+        outln!(
+            "  modules       {} lowered ({}), kept so a script is lowered once; safe to remove (cig tin gc)",
+            modules.entries,
+            human_bytes(modules.bytes)
+        );
+    }
     // The ledger and the run index (#177, #178): one line each, named
     // so the operator sees them without `--json`.
     let ledger_label = match ledger_presence {
@@ -1317,6 +1327,23 @@ fn json_findings(
             "the history stays inside its budget",
             None,
         )),
+    }
+
+    // The lowered modules `cig run` keeps in the tin (#254).
+    {
+        let modules = crate::burn::modcache::stats();
+        out.push(finding(
+            "modules",
+            "ok",
+            format!(
+                "{} lowered module{} in the tin ({})",
+                modules.entries,
+                if modules.entries == 1 { "" } else { "s" },
+                human_bytes(modules.bytes)
+            ),
+            "a script on the vm is lowered once and its module kept; each is safe to remove and is lowered again on its script's next run (cig tin gc drops the ones nothing loads)",
+            None,
+        ));
     }
 
     // The tin's protection: who can read it, where the key is, and whether

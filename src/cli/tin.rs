@@ -449,10 +449,12 @@ pub fn tin_cmd(ctx: &Ctx, cmd: Option<TinCommand>) -> i32 {
         TinCommand::Du => {
             let u = tin::du();
             let referenced = tin::referenced().len();
+            // The lowered modules `cig run` keeps beside the objects (#254).
+            let modules = crate::burn::modcache::stats();
             if ctx.json {
                 outln!(
                     "{}",
-                    serde_json::json!({"objects": u.objects, "bytes": u.stored, "stored": u.stored, "recipes": u.recipes, "logical": u.logical, "sealed": u.sealed, "sealed_bytes": u.sealed_bytes, "packs": u.packs, "packed": u.packed, "referenced": referenced, "dir": tin::dir()})
+                    serde_json::json!({"objects": u.objects, "bytes": u.stored, "stored": u.stored, "recipes": u.recipes, "logical": u.logical, "sealed": u.sealed, "sealed_bytes": u.sealed_bytes, "packs": u.packs, "packed": u.packed, "referenced": referenced, "dir": tin::dir(), "modules": modules.entries, "modules_bytes": modules.bytes})
                 );
             } else {
                 outln!(
@@ -484,6 +486,14 @@ pub fn tin_cmd(ctx: &Ctx, cmd: Option<TinCommand>) -> i32 {
                     },
                     crate::crash::tilde(&tin::dir())
                 );
+                if modules.entries > 0 {
+                    outln!(
+                        "{} lowered module{} ({} bytes), kept so a script is lowered once; each is safe to remove (cig tin gc drops the ones nothing loads)",
+                        modules.entries,
+                        if modules.entries == 1 { "" } else { "s" },
+                        modules.bytes
+                    );
+                }
             }
             exit::OK
         }
@@ -701,16 +711,28 @@ pub fn tin_cmd(ctx: &Ctx, cmd: Option<TinCommand>) -> i32 {
             }
             let (removed, bytes) = tin::gc(sealed_orphans);
             let kept = tin::du().objects;
+            // The lowered modules nothing loads anymore: another cig's, and
+            // the ones no run asked for in a month. Each is lowered again
+            // if its script ever runs.
+            let modules = crate::burn::modcache::sweep();
             if ctx.json {
                 outln!(
                     "{}",
-                    serde_json::json!({"removed": removed, "bytes": bytes, "kept": kept})
+                    serde_json::json!({"removed": removed, "bytes": bytes, "kept": kept, "modules_removed": modules.entries, "modules_bytes": modules.bytes})
                 );
             } else {
                 eprintln!(
                     "removed {removed} object{} ({bytes} bytes); {kept} kept, each referred to by a run (cig runs --prune N lets more go)",
                     if removed == 1 { "" } else { "s" }
                 );
+                if modules.entries > 0 {
+                    eprintln!(
+                        "removed {} lowered module{} ({} bytes) that nothing loads anymore",
+                        modules.entries,
+                        if modules.entries == 1 { "" } else { "s" },
+                        modules.bytes
+                    );
+                }
             }
             exit::OK
         }

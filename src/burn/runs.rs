@@ -125,6 +125,13 @@ pub struct RunRecord {
     /// it runs on, and the binary. `script` is then the program's name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub program: Option<serde_json::Value>,
+    /// Which engine ran the script (#254): `engine` is `vm` or `tree`;
+    /// `module` says where the VM's module came from (`cached` from the
+    /// tin, or `lowered` by this run); `asked` and `why` are there when the
+    /// run asked for the VM and the tree-walker ran the script instead.
+    /// Absent in records from before 1.25.0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine: Option<serde_json::Value>,
     /// The directory this record was read from, which is where its journal
     /// is even when the directory no longer matches the id.
     #[serde(skip)]
@@ -141,8 +148,15 @@ impl RunRecord {
     /// own start time (a process to spawn on some of them).
     pub fn begin(script: &Path, source: &str, args: &[String], mode: &str) -> Self {
         use sha2::{Digest, Sha256};
-        let now = chrono::Utc::now();
         let sha = hex::encode(Sha256::digest(source.as_bytes()));
+        Self::begin_hashed(script, sha, args, mode)
+    }
+
+    /// [`RunRecord::begin`] for a caller that has the script's SHA-256
+    /// already (a run on the VM hashes the script to find its module).
+    pub fn begin_hashed(script: &Path, sha: String, args: &[String], mode: &str) -> Self {
+        use sha2::{Digest, Sha256};
+        let now = chrono::Utc::now();
         let mut salt = Sha256::new();
         salt.update(now.timestamp_nanos_opt().unwrap_or(0).to_le_bytes());
         salt.update(std::process::id().to_le_bytes());
@@ -181,6 +195,7 @@ impl RunRecord {
             },
             trial: None,
             program: None,
+            engine: None,
             no_rollback: false,
             loaded_from: None,
         }
@@ -225,6 +240,7 @@ impl RunRecord {
             pid_started: None,
             trial: None,
             program: None,
+            engine: None,
             no_rollback: false,
             loaded_from: None,
         }
