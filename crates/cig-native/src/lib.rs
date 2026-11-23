@@ -66,6 +66,6 @@ pub mod loader;
 pub use context::Context;
 pub use format::{
     op, Arch, Entry, Exit, FormatError, Op, Section, Site, Tables, Ty, ALIGN, ENTRY_LEN,
-    FOOTER_LEN, INTERFACE, MAGIC, MAX_ARGS, MAX_FRAME, SITE_LEN, VERSION,
+    FOOTER_LEN, INTERFACE, MAGIC, MAX_ARGS, MAX_FRAME, MAX_ROWS, SITE_LEN, VERSION,
 };
 pub use loader::{Code, MapError, Mapped};

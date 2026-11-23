@@ -85,7 +85,32 @@ pub fn module_bytes(program: &Program, file: &str) -> Result<Vec<u8>, Failure> {
 /// lists as not built. The bytes are the module as
 /// [`cig_bytecode::serialize_module`] writes it.
 pub fn module_bytes_at(program: &Program, file: &str, opt: u8) -> Result<Vec<u8>, Stop> {
-    lowered_at(program, file, opt).map(|(bytes, _)| bytes)
+    lowered_at(program, file, opt).map(|l| l.bytes)
+}
+
+/// A script lowered, with what native code is compiled from: the IR the
+/// module was lowered from, and which IR function each of the module's
+/// functions is.
+pub struct Lowered {
+    /// The module's bytes, as [`module_bytes_at`] gives them.
+    pub bytes: Vec<u8>,
+    /// The IR after the passes of the level: what `bytes` was lowered
+    /// from, so native code compiled from it and the bytecode mean the
+    /// same thing.
+    pub cir: cir::Module,
+    /// The IR function behind each function of the module, in the
+    /// module's numbering ([`bc::lower_indexed`]).
+    pub funcs: Vec<cir::ir::FuncId>,
+}
+
+/// [`module_bytes_at`], keeping the IR: what `cigcompile build --stage c`
+/// compiles a program's native code from.
+pub fn lowered_with_cir(program: &Program, file: &str, opt: u8) -> Result<Lowered, Stop> {
+    lowered_at(program, file, opt).map(|l| Lowered {
+        bytes: l.bytes,
+        cir: l.cir,
+        funcs: l.funcs,
+    })
 }
 
 /// [`module_bytes`], with the module as this cig's VM loaded it while it
@@ -105,7 +130,9 @@ pub fn module_loaded(
             // that must go on without it.
             panic!("deliberate test panic in the lowering (CIG_INTERNAL_PANIC=lower)");
         }
-        lowered_at(program, file, DEFAULT_LEVEL).map_err(Failure::from)
+        lowered_at(program, file, DEFAULT_LEVEL)
+            .map(|l| (l.bytes, l.loaded))
+            .map_err(Failure::from)
     })
 }
 
@@ -125,15 +152,28 @@ fn guarded<T>(f: impl FnOnce() -> Result<T, Failure>) -> Result<T, Failure> {
     })
 }
 
-fn lowered_at(
-    program: &Program,
-    file: &str,
-    opt: u8,
-) -> Result<(Vec<u8>, std::rc::Rc<crate::vm::Program>), Stop> {
-    use bc::{compile_program, CompileError, Error};
+/// Everything one lowering makes.
+struct Whole {
+    bytes: Vec<u8>,
+    loaded: std::rc::Rc<crate::vm::Program>,
+    cir: cir::Module,
+    funcs: Vec<cir::ir::FuncId>,
+}
+
+fn lowered_at(program: &Program, file: &str, opt: u8) -> Result<Whole, Stop> {
+    use bc::{CompileError, Error};
     use cir::LowerError;
     let passes = cir::pass::level(opt);
-    let m = compile_program(program, file, &passes).map_err(|e| match e {
+    // The steps of `bc::compile_program`, with the IR and the functions'
+    // ids kept.
+    let lowered = cir::lower_program(program, file)
+        .map_err(CompileError::Lower)
+        .and_then(|mut ir| {
+            cir::pass::run_passes(&mut ir, &passes).map_err(CompileError::Verify)?;
+            let (m, funcs) = bc::lower_indexed(&ir).map_err(CompileError::Bytecode)?;
+            Ok((ir, m, funcs))
+        });
+    let (ir, m, funcs) = lowered.map_err(|e| match e {
         CompileError::Lower(LowerError::Diagnostic(d)) => Stop {
             what: d.message,
             span: d.span,
@@ -191,7 +231,12 @@ fn lowered_at(
         span: d.span,
         bug: false,
     })?;
-    Ok((cig_bytecode::serialize_module(&m), loaded))
+    Ok(Whole {
+        bytes: cig_bytecode::serialize_module(&m),
+        loaded,
+        cir: ir,
+        funcs,
+    })
 }
 
 /// The first instruction, in pre-order, that this cig's VM lists as not
@@ -224,6 +269,54 @@ fn not_built(f: &cig_bytecode::Function) -> Option<Stop> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_ir_function_behind_each_module_function_is_in_the_modules_order() {
+        // Functions that nest, one made in a loop, and one nothing calls.
+        let source = "\
+pull outer(x) {
+  pull inner(y) { snuff y + 1 }
+  snuff inner(x)
+}
+pull second(x) { snuff x }
+stick double = pack(x) { snuff x * 2 }
+for i in 0..2 {
+  pull looped(z) { snuff z + i }
+  exhale looped(i)
+}
+pull unused(x) { snuff x }
+exhale outer(1), second(2), double(3)
+";
+        let ast = crate::syntax::parse(source).unwrap();
+        let l = lowered_with_cir(&ast, "t.cig", DEFAULT_LEVEL).unwrap();
+        assert_eq!(l.bytes, module_bytes(&ast, "t.cig").unwrap());
+        fn names(f: &cig_bytecode::Function, out: &mut Vec<String>) {
+            out.push(f.name.clone());
+            for c in &f.children {
+                names(c, out);
+            }
+        }
+        let mut module = Vec::new();
+        names(
+            &cig_bytecode::parse_module(&l.bytes).unwrap().main,
+            &mut module,
+        );
+        let ir: Vec<String> = l
+            .funcs
+            .iter()
+            .map(|f| l.cir.funcs[f.0 as usize].name.clone().unwrap_or_default())
+            .collect();
+        assert_eq!(ir, module);
+        assert_eq!(l.funcs.first().map(|f| f.0), Some(0));
+        for name in ["outer", "inner", "second", "looped"] {
+            assert_eq!(ir.iter().filter(|n| *n == name).count(), 1, "{name}");
+        }
+        // Each function of the module is one function of the IR.
+        let mut seen = l.funcs.clone();
+        seen.sort();
+        seen.dedup();
+        assert_eq!(seen.len(), l.funcs.len());
+    }
 
     #[test]
     fn a_panic_in_the_lowering_comes_back_as_a_failure() {

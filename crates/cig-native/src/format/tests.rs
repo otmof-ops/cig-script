@@ -191,7 +191,10 @@ fn the_constants_are_the_layouts() {
     assert_eq!(&MAGIC, b"CIGNATV1");
     assert_eq!((VERSION, INTERFACE), (1, 1));
     assert_eq!((ENTRY_LEN, SITE_LEN, FOOTER_LEN), (24, 24, 80));
-    assert_eq!((ALIGN, MAX_ARGS, MAX_FRAME), (65_536, 8, 4096));
+    assert_eq!(
+        (ALIGN, MAX_ARGS, MAX_ROWS, MAX_FRAME),
+        (65_536, 8, 16, 4096)
+    );
     assert_eq!(
         [Ty::Null, Ty::Bool, Ty::Int, Ty::Float].map(Ty::as_u8),
         [0, 1, 2, 3]
@@ -569,6 +572,59 @@ fn a_function_has_one_argument_count() {
     writer_refuses(
         |s| s.entries[0].args = vec![Ty::Int; 300],
         FormatError::TooManyArgs { at: 0, count: 300 },
+    );
+}
+
+#[test]
+fn a_function_has_at_most_sixteen_entries() {
+    let all = [Ty::Null, Ty::Bool, Ty::Int, Ty::Float];
+    // The first `n` rows of three types, in their order: each distinct.
+    let rows = |func: u32, n: usize| -> Vec<Entry> {
+        let mut out = Vec::new();
+        for a in all {
+            for b in all {
+                for c in all {
+                    out.push(Entry {
+                        func,
+                        offset: 0,
+                        args: vec![a, b, c],
+                        ret: Ty::Null,
+                    });
+                }
+            }
+        }
+        out.truncate(n);
+        out
+    };
+    let with = |entries: Vec<Entry>| Section {
+        entries,
+        sites: vec![],
+        ..sample()
+    };
+    assert_eq!(MAX_ROWS, 16);
+    // Sixteen each of two functions is a section.
+    let full = with([rows(3, 16), rows(4, 16)].concat());
+    let body = full.to_bytes().expect("written");
+    assert_eq!(Section::parse(&body).as_ref(), Ok(&full));
+    // A seventeenth of the second is not, to the writer.
+    let want = FormatError::TooManyRows { at: 32 };
+    assert_eq!(
+        with([rows(3, 16), rows(4, 17)].concat()).to_bytes(),
+        Err(want.clone())
+    );
+    // Nor to the reader: the same entry put after the table by hand
+    // (the next row in order: bool, null, null), and counted.
+    let last = ENTRIES_AT + 31 * ENTRY_LEN;
+    let mut entry = body[last..last + ENTRY_LEN].to_vec();
+    entry[12..15].copy_from_slice(&[1, 0, 0]);
+    let mut b = body.clone();
+    b.splice(last + ENTRY_LEN..last + ENTRY_LEN, entry);
+    let footer = b.len() - FOOTER_LEN;
+    put_u32(&mut b, footer + 24, 33);
+    assert_eq!(Tables::parse(&b), Err(want.clone()));
+    assert_eq!(
+        want.to_string(),
+        "entry 32 is its function's entry number 17, and a function has at most 16"
     );
 }
 

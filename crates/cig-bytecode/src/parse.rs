@@ -106,6 +106,13 @@ impl Reader {
         Ok(Reader { bytes, index })
     }
 
+    /// The module's integrity hash: the BLAKE3 over every byte after the
+    /// header, which the header carries and [`Reader::open`] checked. It
+    /// names this module: what is compiled from a module records it.
+    pub fn hash(&self) -> [u8; 32] {
+        module_hash(&self.bytes).unwrap_or_default()
+    }
+
     /// The number of functions (at least 1).
     pub fn len(&self) -> usize {
         self.index.entries.len()
@@ -199,6 +206,14 @@ struct Index {
     kids_at: Vec<usize>,
     /// Each function's depth: 0 for the top level.
     depth: Vec<u32>,
+}
+
+/// The integrity hash a serialized module's header carries, as
+/// [`crate::serialize_module`] wrote it. `None` when `bytes` is shorter
+/// than a header. The field is read, not checked: [`Reader::open`] and
+/// [`parse_module`] check it.
+pub fn module_hash(bytes: &[u8]) -> Option<[u8; 32]> {
+    bytes.get(8..HEADER_LEN)?.try_into().ok()
 }
 
 impl Index {

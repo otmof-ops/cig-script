@@ -961,14 +961,16 @@ impl Interp {
     /// [`Interp::leave_call`].
     pub(crate) fn enter_call(&mut self, span: Span) -> Result<(), Diagnostic> {
         if self.call_depth >= MAX_CALL_DEPTH {
-            return Err(runtime(format!(
-                "call depth exceeded {MAX_CALL_DEPTH}; is there unbounded recursion?"
-            ))
-            .code("E506")
-            .at(span));
+            return Err(depth_exceeded(span));
         }
         self.call_depth += 1;
         Ok(())
+    }
+
+    /// How many more script calls [`Interp::enter_call`] takes before
+    /// E506: what native code, which counts its own calls, is given.
+    pub(crate) fn calls_left(&self) -> usize {
+        MAX_CALL_DEPTH.saturating_sub(self.call_depth)
     }
 
     /// The call [`Interp::enter_call`] counted has returned.
@@ -1262,6 +1264,17 @@ fn store_type_error(obj: &Value, idx: &Value, idx_span: Span, obj_span: Span) ->
             .code("E405")
             .at(obj_span),
     }
+}
+
+/// E506 at `span`: the call there would be one deeper than
+/// [`MAX_CALL_DEPTH`]. [`Interp::enter_call`] raises it, and so does a
+/// call inside native code, which the VM reports with this.
+pub(crate) fn depth_exceeded(span: Span) -> Diagnostic {
+    runtime(format!(
+        "call depth exceeded {MAX_CALL_DEPTH}; is there unbounded recursion?"
+    ))
+    .code("E506")
+    .at(span)
 }
 
 /// E401 for a script function called with the wrong number of arguments.
