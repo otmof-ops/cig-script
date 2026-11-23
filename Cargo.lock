@@ -442,6 +442,14 @@ name = "cig-copy"
 version = "0.1.0"
 
 [[package]]
+name = "cig-native"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "tempfile",
+]
+
+[[package]]
 name = "cig-pass"
 version = "0.1.0"
 dependencies = [

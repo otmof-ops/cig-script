@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
+# SPDX-License-Identifier: FSL-1.1-ALv2
+
+[package]
+name = "cig-native"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+description = "cig-native: the native section's format, the context native code shares with the VM, and the loader that maps and calls it, for CigScript's stage-C programs"
+license = "FSL-1.1-ALv2"
+repository = "https://github.com/otmof-ops/cig-script"
+readme = "README.md"
+keywords = ["native-code", "loader", "mmap", "aot", "compiler"]
+categories = ["compilers"]
+
+[lib]
+name = "cig_native"
+path = "src/lib.rs"
+
+[target.'cfg(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64")))'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
