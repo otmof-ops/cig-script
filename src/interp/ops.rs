@@ -10,13 +10,14 @@ use crate::syntax::ast::BinOp;
 use crate::syntax::span::Span;
 use crate::value::Value;
 
-type Eval = Result<Value, Diagnostic>;
+/// A value, or the error the operator raises.
+pub type Eval = Result<Value, Diagnostic>;
 
 /// A binary operator on two evaluated operands. The short-circuit
 /// operators (`&&`, `||`, `??`) never reach here: they decide whether to
 /// evaluate their right side at all.
 #[inline(never)]
-pub(crate) fn binary(op: BinOp, l: Value, r: Value, span: Span) -> Eval {
+pub fn binary(op: BinOp, l: Value, r: Value, span: Span) -> Eval {
     use Value::*;
     let type_err = |what: &str| {
         type_error(format!(
@@ -155,7 +156,7 @@ pub(crate) fn binary(op: BinOp, l: Value, r: Value, span: Span) -> Eval {
 }
 
 /// Unary `-`: ints (with overflow) and floats; anything else is E403.
-pub(crate) fn negate(v: Value, span: Span) -> Eval {
+pub fn negate(v: Value, span: Span) -> Eval {
     match v {
         Value::Int(i) => i.checked_neg().map(Value::Int).ok_or_else(|| {
             runtime("integer overflow in negation")

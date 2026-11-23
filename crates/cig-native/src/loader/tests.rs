@@ -43,7 +43,8 @@ fn there_is_no_loader_on_this_target() {
 ))]
 mod on_linux {
     use super::*;
-    use crate::format::{op, Entry, Exit, Section, Site, Ty};
+    use crate::format::{op, Body, Entry, Exit, Rule, Section, Site, Ty};
+    use crate::{Host, Stop};
 
     // Three entries of the entry convention,
     // `extern "C" fn(ctx: *mut Context, args: *const u64, ret: *mut u64) -> u32`:
@@ -154,6 +155,8 @@ mod on_linux {
                 right: Ty::Int,
                 in_loop: false,
             }],
+            bodies: vec![],
+            rule: Rule::None,
         }
     }
 
@@ -364,6 +367,282 @@ mod on_linux {
         let m = Mapped::map(&file, 65_536, 100).expect("mapped");
         assert_eq!((m.len(), m.is_empty()), (100, false));
     }
+
+    // ----- bodies, entered on both architectures ----------------------
+
+    // Two bodies of the body signature,
+    // `extern "C" fn(ctx: *mut Context, at: u32) -> u64`:
+    //
+    //   run_through: calls ctx.helpers->run(ctx, 10, 20) and returns
+    //                its result unchanged. Context offsets: helpers at
+    //                48, Helpers::run at offset 0 of Helpers.
+    //   const_stop:  returns the bits of Stop::At(42) = 42.
+
+    /// System V: ctx in rdi, at in esi, result in rax.
+    #[cfg(target_arch = "x86_64")]
+    #[rustfmt::skip]
+    mod body_code {
+        pub const RUN_THROUGH: &[u8] = &[
+            0x55,                               // push rbp
+            0x48, 0x89, 0xE5,                   // mov rbp, rsp
+            0x48, 0x8B, 0x47, 0x30,             // mov rax, [rdi+48]      ; helpers
+            0x48, 0x8B, 0x00,                   // mov rax, [rax]         ; helpers->run
+            0xBE, 0x0A, 0x00, 0x00, 0x00,       // mov esi, 10
+            0xBA, 0x14, 0x00, 0x00, 0x00,       // mov edx, 20
+            0xFF, 0xD0,                         // call rax
+            0x5D,                               // pop rbp
+            0xC3,                               // ret
+        ];
+        pub const CONST_STOP: &[u8] = &[
+            0xB8, 0x2A, 0x00, 0x00, 0x00,       // mov eax, 42
+            0xC3,                               // ret
+        ];
+    }
+
+    /// AAPCS64: ctx in x0, at in w1, result in x0. Each instruction is
+    /// one 32-bit word, little-endian.
+    #[cfg(target_arch = "aarch64")]
+    #[rustfmt::skip]
+    mod body_code {
+        pub const RUN_THROUGH: &[u8] = &[
+            0xFD, 0x7B, 0xBF, 0xA9, // stp x29, x30, [sp, #-16]!
+            0xFD, 0x03, 0x00, 0x91, // mov x29, sp
+            0x08, 0x18, 0x40, 0xF9, // ldr x8, [x0, #48]
+            0x08, 0x01, 0x40, 0xF9, // ldr x8, [x8]
+            0x41, 0x01, 0x80, 0x52, // mov w1, #10
+            0x82, 0x02, 0x80, 0x52, // mov w2, #20
+            0x00, 0x01, 0x3F, 0xD6, // blr x8
+            0xFD, 0x7B, 0xC1, 0xA8, // ldp x29, x30, [sp], #16
+            0xC0, 0x03, 0x5F, 0xD6, // ret
+        ];
+        pub const CONST_STOP: &[u8] = &[
+            0x40, 0x05, 0x80, 0xD2, // mov x0, #42
+            0xC0, 0x03, 0x5F, 0xD6, // ret
+        ];
+    }
+
+    /// `section()` plus two bodies after its entries: body 0 is
+    /// `run_through`, body 1 is `const_stop`.
+    fn section_with_bodies() -> Section {
+        let mut s = section();
+        let entries_len = code::ADD.len() + code::MARK.len() + code::TICK.len();
+        let run_through_offset = entries_len as u32;
+        let const_stop_offset = run_through_offset + body_code::RUN_THROUGH.len() as u32;
+        s.code.extend_from_slice(body_code::RUN_THROUGH);
+        s.code.extend_from_slice(body_code::CONST_STOP);
+        s.bodies = vec![
+            Body {
+                func: 1,
+                offset: run_through_offset,
+                resumes: vec![0, 1, 5],
+            },
+            Body {
+                func: 2,
+                offset: const_stop_offset,
+                resumes: vec![0],
+            },
+        ];
+        s.rule = Rule::Every;
+        s
+    }
+
+    fn armed_with_bodies() -> Code {
+        let body = section_with_bodies().to_bytes().expect("a section");
+        let (_keep, file) = file_with(65_536, &body);
+        let tables = Tables::parse(&body).expect("its tables");
+        let mapped = Mapped::map(&file, 65_536, tables.code_len as usize).expect("mapped");
+        let code = &body[..tables.code_len as usize];
+        // SAFETY: as in `armed`.
+        let armed = unsafe { mapped.arm(code, &tables) }.expect("armed");
+        // Hold the file alive for the length of the test by leaking
+        // the handle: the mapping needs the file only while it reads,
+        // and once `arm` has returned it is independent.
+        std::mem::forget(_keep);
+        armed
+    }
+
+    /// A host that records how it was called and returns a scripted
+    /// list of stops from `run`.
+    struct Recording {
+        /// Stops `run` returns, one per call, in order. Panics past
+        /// the end.
+        run_returns: Vec<Stop>,
+        /// Arguments `run` was given, in order.
+        run_calls: Vec<(u32, u32)>,
+        /// `(reg, list)` `list` returns.
+        list_returns: Vec<(u32, bool)>,
+    }
+
+    impl Host for Recording {
+        fn run(&mut self, _ctx: &mut Context, from: u32, to: u32) -> Stop {
+            self.run_calls.push((from, to));
+            assert!(
+                !self.run_returns.is_empty(),
+                "host.run called more times than scripted",
+            );
+            self.run_returns.remove(0)
+        }
+        fn list(&mut self, _ctx: &mut Context, reg: u32) -> bool {
+            let (want, giving) = *self
+                .list_returns
+                .first()
+                .expect("host.list called more times than scripted");
+            assert_eq!(want, reg);
+            self.list_returns.remove(0);
+            giving
+        }
+    }
+
+    #[test]
+    fn enter_calls_run_through_the_context_and_returns_its_bits() {
+        let code = armed_with_bodies();
+        assert_eq!(code.bodies(), 2);
+        let mut host = Recording {
+            run_returns: vec![Stop::At(17)],
+            run_calls: vec![],
+            list_returns: vec![],
+        };
+        let mut ctx = Context::new(100, 10);
+        let stop = code.enter(0, 0, &mut ctx, &mut host);
+        assert_eq!(stop, Some(Stop::At(17)));
+        assert_eq!(host.run_calls, vec![(10, 20)]);
+        // `enter` clears the two pointers after the body returns.
+        assert!(ctx.helpers.is_null() && ctx.host.is_null());
+    }
+
+    #[test]
+    fn enter_a_body_that_returns_a_constant_stop() {
+        let code = armed_with_bodies();
+        let mut host = Recording {
+            run_returns: vec![],
+            run_calls: vec![],
+            list_returns: vec![],
+        };
+        let mut ctx = Context::new(50, 5);
+        let stop = code.enter(1, 0, &mut ctx, &mut host);
+        assert_eq!(stop, Some(Stop::At(42)));
+        assert!(host.run_calls.is_empty());
+    }
+
+    #[test]
+    fn enter_passes_raised_through_unchanged() {
+        let code = armed_with_bodies();
+        let mut host = Recording {
+            run_returns: vec![Stop::Raised(13)],
+            run_calls: vec![],
+            list_returns: vec![],
+        };
+        let mut ctx = Context::new(100, 10);
+        let stop = code.enter(0, 0, &mut ctx, &mut host);
+        assert_eq!(stop, Some(Stop::Raised(13)));
+    }
+
+    #[test]
+    fn enter_returns_none_for_a_body_or_a_resume_point_it_does_not_have() {
+        let code = armed_with_bodies();
+        let mut host = Recording {
+            run_returns: vec![],
+            run_calls: vec![],
+            list_returns: vec![],
+        };
+        let mut ctx = Context::new(100, 10);
+        for body in [2usize, 99, usize::MAX] {
+            assert_eq!(code.enter(body, 0, &mut ctx, &mut host), None);
+        }
+        // Body 1 has only resume point 0.
+        assert_eq!(code.enter(1, 1, &mut ctx, &mut host), None);
+        assert_eq!(code.enter(1, 99, &mut ctx, &mut host), None);
+        // Body 0 has three resume points (pcs 0, 1 and 5): a fourth is
+        // not one, and a pc is not an index.
+        for at in [3u32, 4, 5, 6, u32::MAX] {
+            assert_eq!(code.enter(0, at, &mut ctx, &mut host), None);
+        }
+        // Nothing was run.
+        assert!(host.run_calls.is_empty());
+        // Each of its three is entered.
+        for at in 0..3u32 {
+            host.run_returns = vec![Stop::At(17)];
+            assert_eq!(
+                code.enter(0, at, &mut ctx, &mut host),
+                Some(Stop::At(17)),
+                "{at}"
+            );
+        }
+        assert_eq!(host.run_calls.len(), 3);
+    }
+
+    #[test]
+    fn a_panic_in_host_run_is_caught_and_resumed_after_the_body_returns() {
+        /// A host that panics from `run`, and counts how many times it
+        /// was asked. The body is expected to see `Stop::Raised(from)`
+        /// and return it; `enter` then resumes the panic.
+        struct Panicky {
+            calls: std::cell::Cell<u32>,
+        }
+        impl Host for Panicky {
+            fn run(&mut self, _ctx: &mut Context, _from: u32, _to: u32) -> Stop {
+                self.calls.set(self.calls.get() + 1);
+                panic!("host run blew up");
+            }
+            fn list(&mut self, _ctx: &mut Context, _reg: u32) -> bool {
+                unreachable!("list is not called in this test");
+            }
+        }
+        let code = armed_with_bodies();
+        let mut host = Panicky {
+            calls: std::cell::Cell::new(0),
+        };
+        let mut ctx = Context::new(100, 10);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            code.enter(0, 0, &mut ctx, &mut host)
+        }));
+        let payload = result.expect_err("the panic was resumed");
+        let text = payload
+            .downcast_ref::<&'static str>()
+            .copied()
+            .or_else(|| payload.downcast_ref::<String>().map(|s| s.as_str()))
+            .unwrap_or("<not a string>");
+        assert_eq!(text, "host run blew up");
+        assert_eq!(host.calls.get(), 1, "host.run was reached once");
+        // The pointers are cleared even on the panic path.
+        assert!(ctx.helpers.is_null() && ctx.host.is_null());
+    }
+
+    #[test]
+    fn arm_refuses_a_body_outside_the_code() {
+        // `arm` checks each body's offset too.
+        let body = section_with_bodies().to_bytes().expect("written");
+        let (_keep, file) = file_with(65_536, &body);
+        let mut tables = Tables::parse(&body).expect("its tables");
+        let mapped = Mapped::map(&file, 65_536, tables.code_len as usize).expect("mapped");
+        let code_bytes = body[..tables.code_len as usize].to_vec();
+        tables.bodies[0].offset = tables.code_len;
+        match unsafe { mapped.arm(&code_bytes, &tables) } {
+            Err(MapError::Mismatch(what)) => assert_eq!(what, "a body lies outside the code"),
+            Err(e) => panic!("another error: {e}"),
+            Ok(_) => panic!("armed"),
+        }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn arm_refuses_a_body_inside_an_instruction() {
+        let body = section_with_bodies().to_bytes().expect("written");
+        let (_keep, file) = file_with(65_536, &body);
+        let mut tables = Tables::parse(&body).expect("its tables");
+        let mapped = Mapped::map(&file, 65_536, tables.code_len as usize).expect("mapped");
+        let code_bytes = body[..tables.code_len as usize].to_vec();
+        tables.bodies[0].offset += 1;
+        match unsafe { mapped.arm(&code_bytes, &tables) } {
+            Err(MapError::Mismatch(what)) => {
+                assert_eq!(what, "a body is not on an instruction boundary")
+            }
+            Err(e) => panic!("another error: {e}"),
+            Ok(_) => panic!("armed"),
+        }
+    }
+
+    // ----- end bodies tests -------------------------------------------
 
     #[test]
     fn a_refusal_of_the_system_is_reported_with_its_error() {

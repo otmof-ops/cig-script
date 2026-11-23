@@ -2,13 +2,16 @@
 // SPDX-License-Identifier: FSL-1.1-ALv2
 
 //! The layout of a `native` section's body: the code, the entry table,
-//! the site table and the footer.
+//! the site table, the body table, the resume table and the footer.
 //!
 //! ```text
 //! code           the machine code, from the body's first byte
 //! zero padding   to a multiple of 8
 //! entry table    count x 24 bytes
 //! site table     count x 24 bytes
+//! body table     count x 16 bytes: func u32, offset u32, first u32, count u32
+//! resume table   count x 4 bytes:  pc u32
+//! zero padding   to a multiple of 8
 //! footer         80 bytes, at the body's end
 //! ```
 //!
@@ -32,11 +35,12 @@ use core::fmt;
 pub const MAGIC: [u8; 8] = *b"CIGNATV1";
 
 /// The format version this crate writes and reads.
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 
 /// The interface version this crate writes and reads: the context's
-/// layout, the entry convention and [`MAX_FRAME`].
-pub const INTERFACE: u32 = 1;
+/// layout, the entry convention, [`MAX_FRAME`], and the body's
+/// signature and the helpers' table ([`MAX_BODY_FRAME`]).
+pub const INTERFACE: u32 = 2;
 
 /// A `native` body starts at a file offset that is a multiple of this:
 /// the largest unit any target maps a file in (4 KiB pages on x86-64
@@ -52,15 +56,21 @@ pub const MAX_ARGS: usize = 8;
 /// compiled for. A caller looks through them at a call.
 pub const MAX_ROWS: usize = 16;
 
-/// The most stack one call of any function in a section uses, in bytes:
-/// its frame, with the return address and the saved frame pointer. It is
-/// part of interface 1. The code generator compiles no function that
-/// needs more, and a caller that lets native code go `depth_left` calls
-/// deep counts on `depth_left * MAX_FRAME` bytes of stack being enough.
+/// The most stack one call of any function in a section uses through
+/// its entry, in bytes: its frame, with the return address and the
+/// saved frame pointer. It is part of interface 2. The code generator
+/// compiles no function whose entry needs more, and a caller that lets
+/// native code go `depth_left` calls deep counts on `depth_left *
+/// MAX_FRAME` bytes of stack being enough.
 ///
 /// It is no larger than the smallest guard page, so a chain of calls
 /// that did run off a stack would touch the guard page and not jump it.
 pub const MAX_FRAME: usize = 4096;
+
+/// The most stack one call of any body in a section uses, in bytes.
+/// The code generator compiles no body whose frame is larger, and the
+/// VM enters a body only where the stack has room for it.
+pub const MAX_BODY_FRAME: usize = 65_536;
 
 /// The footer's length.
 pub const FOOTER_LEN: usize = 80;
@@ -70,6 +80,12 @@ pub const ENTRY_LEN: usize = 24;
 
 /// A site's length in the table.
 pub const SITE_LEN: usize = 24;
+
+/// A body's length in the table.
+pub const BODY_LEN: usize = 16;
+
+/// A resume point's length in the table.
+pub const RESUME_LEN: usize = 4;
 
 /// The type of a value native code holds.
 #[repr(u8)]
@@ -218,6 +234,49 @@ pub mod op {
     pub const GE: Op = 10;
 }
 
+/// Which functions of the module the build gave a body.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Rule {
+    /// No function has a body.
+    None = 0,
+    /// Every function with a backward jump has a body.
+    Loops = 1,
+    /// Every function has a body.
+    Every = 2,
+}
+
+impl Rule {
+    /// The rule's code in the footer.
+    pub const fn as_u32(self) -> u32 {
+        self as u32
+    }
+
+    /// The rule a code names.
+    pub const fn from_u32(v: u32) -> Option<Rule> {
+        match v {
+            0 => Some(Rule::None),
+            1 => Some(Rule::Loops),
+            2 => Some(Rule::Every),
+            _ => None,
+        }
+    }
+}
+
+/// One function's body: the function's index in the module (0 is the
+/// top level), where its code starts, and the pcs it can be entered at.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Body {
+    /// The function's index in the bytecode module. 0 is the top level.
+    pub func: u32,
+    /// The offset of the body's first instruction in the code.
+    pub offset: u32,
+    /// The pcs the body can be entered at, strictly ascending. The
+    /// first is `0`. Its index here is the `at` the body is entered
+    /// with.
+    pub resumes: Vec<u32>,
+}
+
 /// One specialization: a function, a row of argument types, and where
 /// its entry is in the code.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -270,6 +329,10 @@ pub struct Section {
     pub entries: Vec<Entry>,
     /// The sites. Native code names one by its index.
     pub sites: Vec<Site>,
+    /// The bodies, strictly ascending by function.
+    pub bodies: Vec<Body>,
+    /// Which functions of the module the build gave a body.
+    pub rule: Rule,
 }
 
 /// A section without its code: what a runtime keeps while the code
@@ -287,6 +350,10 @@ pub struct Tables {
     pub entries: Vec<Entry>,
     /// The sites.
     pub sites: Vec<Site>,
+    /// The bodies, strictly ascending by function.
+    pub bodies: Vec<Body>,
+    /// Which functions of the module the build gave a body.
+    pub rule: Rule,
 }
 
 /// Why bytes are not a section's body, or a [`Section`] is not one
@@ -447,6 +514,60 @@ pub enum FormatError {
         /// The site.
         at: usize,
     },
+    /// A body's offset is not inside the code.
+    BodyOutsideCode {
+        /// The body.
+        at: usize,
+        /// Its offset.
+        offset: u32,
+        /// The code's length.
+        code_len: u32,
+    },
+    /// A body sorts the same as, or before, the one it follows (by
+    /// function).
+    BodiesOutOfOrder {
+        /// The later body.
+        at: usize,
+    },
+    /// A body has no resume point.
+    BodyWithoutResume {
+        /// The body.
+        at: usize,
+    },
+    /// A body's first resume point is not pc 0.
+    BodyFirstResumeNotZero {
+        /// The body.
+        at: usize,
+        /// The pc that was first.
+        found: u32,
+    },
+    /// A body's resume points are not strictly ascending.
+    ResumesOutOfOrder {
+        /// The body.
+        at: usize,
+        /// The pc that sorts out of order.
+        pc: u32,
+    },
+    /// A body's `first` or `count` does not place its resume points as
+    /// the run of pcs following the previous body's.
+    ResumeRunMismatch {
+        /// The body.
+        at: usize,
+        /// The `first` and `count` found.
+        found: (u32, u32),
+        /// Where the run should start, and how many are left.
+        expected: (u32, u32),
+    },
+    /// The resume table has pcs no body's `first`/`count` reaches.
+    ResumeTableHasExtra {
+        /// How many pcs are past the last body's run.
+        extra: u32,
+    },
+    /// The footer's `rule` is not 0, 1 or 2.
+    BadRule {
+        /// The code found.
+        found: u32,
+    },
 }
 
 impl fmt::Display for FormatError {
@@ -525,6 +646,41 @@ impl fmt::Display for FormatError {
                 write!(f, "site {at} has flags {value:#04x}; only bit 0 is defined")
             }
             BadSpan { at } => write!(f, "site {at} ends before it starts"),
+            BodyOutsideCode {
+                at,
+                offset,
+                code_len,
+            } => write!(
+                f,
+                "body {at} is at offset {offset}, outside the {code_len} bytes of code"
+            ),
+            BodiesOutOfOrder { at } => write!(
+                f,
+                "body {at} sorts before the body it follows, or shares its function"
+            ),
+            BodyWithoutResume { at } => write!(f, "body {at} has no resume point"),
+            BodyFirstResumeNotZero { at, found } => write!(
+                f,
+                "body {at}'s first resume point is pc {found}, not 0"
+            ),
+            ResumesOutOfOrder { at, pc } => write!(
+                f,
+                "body {at}'s resume point {pc} sorts before the pc it follows"
+            ),
+            ResumeRunMismatch {
+                at,
+                found,
+                expected,
+            } => write!(
+                f,
+                "body {at}'s resume run (first {}, count {}) does not follow the previous body's (expected first {}, up to {} left)",
+                found.0, found.1, expected.0, expected.1
+            ),
+            ResumeTableHasExtra { extra } => write!(
+                f,
+                "the resume table has {extra} pcs past the last body's run"
+            ),
+            BadRule { found } => write!(f, "rule code {found} names none"),
         }
     }
 }
@@ -550,7 +706,19 @@ impl std::error::Error for FormatError {}
 /// | `Negate` | 0 | int | null |
 /// | `Range` | 0 | int | int |
 /// | `Budget`, `Depth` | 0 | null | null |
-fn check(arch: Arch, code_len: u32, entries: &[Entry], sites: &[Site]) -> Result<(), FormatError> {
+///
+/// Bodies: strictly ascending by function; an offset inside the code and
+/// a multiple of the architecture's instruction size; at least one
+/// resume point whose first is pc 0, and strictly ascending; with their
+/// `first` and `count` running back-to-back over the resume table and
+/// covering it exactly.
+fn check(
+    arch: Arch,
+    code_len: u32,
+    entries: &[Entry],
+    sites: &[Site],
+    bodies: &[Body],
+) -> Result<(), FormatError> {
     let align = arch.code_align();
     if code_len % align != 0 {
         return Err(FormatError::Misaligned {
@@ -626,6 +794,44 @@ fn check(arch: Arch, code_len: u32, entries: &[Entry], sites: &[Site]) -> Result
         };
         if !operands {
             return Err(FormatError::BadOperands { at });
+        }
+    }
+    let mut prev_func: Option<u32> = None;
+    for (at, b) in bodies.iter().enumerate() {
+        if let Some(p) = prev_func {
+            if b.func <= p {
+                return Err(FormatError::BodiesOutOfOrder { at });
+            }
+        }
+        prev_func = Some(b.func);
+        if b.offset >= code_len {
+            return Err(FormatError::BodyOutsideCode {
+                at,
+                offset: b.offset,
+                code_len,
+            });
+        }
+        if b.offset % align != 0 {
+            return Err(FormatError::Misaligned {
+                what: "a body's offset",
+                at,
+                value: b.offset,
+                align,
+            });
+        }
+        if b.resumes.is_empty() {
+            return Err(FormatError::BodyWithoutResume { at });
+        }
+        if b.resumes[0] != 0 {
+            return Err(FormatError::BodyFirstResumeNotZero {
+                at,
+                found: b.resumes[0],
+            });
+        }
+        for w in b.resumes.windows(2) {
+            if w[1] <= w[0] {
+                return Err(FormatError::ResumesOutOfOrder { at, pc: w[1] });
+            }
         }
     }
     Ok(())
@@ -753,8 +959,36 @@ fn get_site(b: &[u8; SITE_LEN], at: usize) -> Result<Site, FormatError> {
 }
 
 /// The zero bytes between the code and the entry table.
-fn padding(code_len: u32) -> u32 {
+fn code_padding(code_len: u32) -> u32 {
     (8 - code_len % 8) % 8
+}
+
+/// The zero bytes between the resume table and the footer. The entry,
+/// site and body tables are 8-byte aligned and have 8-byte-multiple
+/// widths; only the resume table (4 bytes a row) can leave an odd
+/// multiple of 4 behind.
+fn resume_padding(resume_count: u32) -> u32 {
+    // Zero or four bytes: an even number of resume points is already
+    // an 8-byte multiple, an odd one needs four more. Taken `% 2`
+    // first so the multiplication cannot overflow a u32.
+    (resume_count % 2) * RESUME_LEN as u32
+}
+
+/// A body's 16 bytes.
+fn put_body(out: &mut Vec<u8>, b: &Body, first: u32) {
+    out.extend_from_slice(&b.func.to_le_bytes());
+    out.extend_from_slice(&b.offset.to_le_bytes());
+    out.extend_from_slice(&first.to_le_bytes());
+    // At most `u32::MAX` resumes: the writer's count fits in a u32
+    // because the resume table's own length fits.
+    let count = b.resumes.len() as u32;
+    out.extend_from_slice(&count.to_le_bytes());
+}
+
+/// A body from its 16 bytes' first 12: the resumes are filled in after
+/// the resume table is read.
+fn get_body_head(b: &[u8; BODY_LEN]) -> (u32, u32, u32, u32) {
+    (u32_at(b, 0), u32_at(b, 4), u32_at(b, 8), u32_at(b, 12))
 }
 
 impl Section {
@@ -767,23 +1001,47 @@ impl Section {
         let code_len = count("bytes of code", self.code.len())?;
         let entries = count("entries", self.entries.len())?;
         let sites = count("sites", self.sites.len())?;
-        check(self.arch, code_len, &self.entries, &self.sites)?;
+        let body_count = count("bodies", self.bodies.len())?;
+        let resume_total: usize = self.bodies.iter().map(|b| b.resumes.len()).sum();
+        let resume_count = count("resume points", resume_total)?;
+        check(
+            self.arch,
+            code_len,
+            &self.entries,
+            &self.sites,
+            &self.bodies,
+        )?;
 
         let mut out = Vec::with_capacity(
             self.code.len()
                 + 8
                 + self.entries.len() * ENTRY_LEN
                 + self.sites.len() * SITE_LEN
+                + self.bodies.len() * BODY_LEN
+                + resume_total * RESUME_LEN
+                + 8
                 + FOOTER_LEN,
         );
         out.extend_from_slice(&self.code);
-        out.resize(out.len() + padding(code_len) as usize, 0);
+        out.resize(out.len() + code_padding(code_len) as usize, 0);
         for e in &self.entries {
             put_entry(&mut out, e);
         }
         for s in &self.sites {
             put_site(&mut out, s);
         }
+        let mut first: u32 = 0;
+        for b in &self.bodies {
+            put_body(&mut out, b, first);
+            // `check` ran: `resume_total` fits a u32, so does `first`.
+            first += b.resumes.len() as u32;
+        }
+        for b in &self.bodies {
+            for pc in &b.resumes {
+                out.extend_from_slice(&pc.to_le_bytes());
+            }
+        }
+        out.resize(out.len() + resume_padding(resume_count) as usize, 0);
         out.extend_from_slice(&MAGIC);
         for v in [
             VERSION,
@@ -796,7 +1054,10 @@ impl Section {
             out.extend_from_slice(&v.to_le_bytes());
         }
         out.extend_from_slice(&self.module);
-        out.extend_from_slice(&[0; 16]);
+        for v in [body_count, resume_count, self.rule.as_u32()] {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        out.extend_from_slice(&[0; 4]);
         Ok(out)
     }
 
@@ -814,6 +1075,8 @@ impl Section {
             code,
             entries: t.entries,
             sites: t.sites,
+            bodies: t.bodies,
+            rule: t.rule,
         })
     }
 }
@@ -854,21 +1117,28 @@ impl Tables {
             (u32_at(footer, 20), u32_at(footer, 24), u32_at(footer, 28));
         let mut module = [0u8; 32];
         module.copy_from_slice(&footer[32..64]);
-        if let Some(i) = footer[64..].iter().position(|b| *b != 0) {
+        let (bodies_n, resumes_n, rule_v) =
+            (u32_at(footer, 64), u32_at(footer, 68), u32_at(footer, 72));
+        if let Some(i) = footer[76..].iter().position(|b| *b != 0) {
             return Err(FormatError::NonzeroReserved {
                 region: "footer",
                 at: 0,
-                offset: 64 + i,
+                offset: 76 + i,
             });
         }
+        let rule = Rule::from_u32(rule_v).ok_or(FormatError::BadRule { found: rule_v })?;
 
         // The body is exactly its parts. In 64 bits the sum cannot
         // overflow: each term is under 2^37.
-        let pad = padding(code_len);
+        let code_pad = code_padding(code_len);
+        let resume_pad = resume_padding(resumes_n);
         let declared = u64::from(code_len)
-            + u64::from(pad)
+            + u64::from(code_pad)
             + u64::from(entries_n) * ENTRY_LEN as u64
             + u64::from(sites_n) * SITE_LEN as u64
+            + u64::from(bodies_n) * BODY_LEN as u64
+            + u64::from(resumes_n) * RESUME_LEN as u64
+            + u64::from(resume_pad)
             + FOOTER_LEN as u64;
         if declared != body.len() as u64 {
             return Err(FormatError::BadLength {
@@ -877,19 +1147,38 @@ impl Tables {
             });
         }
         // From here every count is bounded by the body's own length.
-        let entries_at = code_len as usize + pad as usize;
+        let entries_at = code_len as usize + code_pad as usize;
         let sites_at = entries_at + entries_n as usize * ENTRY_LEN;
-        let footer_at = sites_at + sites_n as usize * SITE_LEN;
-        let (Some(pad_bytes), Some(entry_bytes), Some(site_bytes)) = (
+        let bodies_at = sites_at + sites_n as usize * SITE_LEN;
+        let resumes_at = bodies_at + bodies_n as usize * BODY_LEN;
+        let resume_pad_at = resumes_at + resumes_n as usize * RESUME_LEN;
+        let footer_at = resume_pad_at + resume_pad as usize;
+        let (
+            Some(code_pad_bytes),
+            Some(entry_bytes),
+            Some(site_bytes),
+            Some(body_bytes),
+            Some(resume_bytes),
+            Some(resume_pad_bytes),
+        ) = (
             body.get(code_len as usize..entries_at),
             body.get(entries_at..sites_at),
-            body.get(sites_at..footer_at),
-        ) else {
+            body.get(sites_at..bodies_at),
+            body.get(bodies_at..resumes_at),
+            body.get(resumes_at..resume_pad_at),
+            body.get(resume_pad_at..footer_at),
+        )
+        else {
             return Err(short);
         };
-        if let Some(i) = pad_bytes.iter().position(|b| *b != 0) {
+        if let Some(i) = code_pad_bytes.iter().position(|b| *b != 0) {
             return Err(FormatError::NonzeroPadding {
                 offset: code_len as usize + i,
+            });
+        }
+        if let Some(i) = resume_pad_bytes.iter().position(|b| *b != 0) {
+            return Err(FormatError::NonzeroPadding {
+                offset: resume_pad_at + i,
             });
         }
         let mut entries = Vec::with_capacity(entries_n as usize);
@@ -906,13 +1195,62 @@ impl Tables {
             };
             sites.push(get_site(b, at)?);
         }
-        check(arch, code_len, &entries, &sites)?;
+        // Read the body heads, check the resume runs cover the table,
+        // then slice out each body's pcs from the resume bytes.
+        let mut heads = Vec::with_capacity(bodies_n as usize);
+        let mut expected_first: u32 = 0;
+        let mut left: u32 = resumes_n;
+        for (at, chunk) in body_bytes.chunks_exact(BODY_LEN).enumerate() {
+            let Ok(b) = <&[u8; BODY_LEN]>::try_from(chunk) else {
+                return Err(short);
+            };
+            let (func, offset, first, count) = get_body_head(b);
+            if first != expected_first || count > left {
+                return Err(FormatError::ResumeRunMismatch {
+                    at,
+                    found: (first, count),
+                    expected: (expected_first, left),
+                });
+            }
+            expected_first = expected_first.saturating_add(count);
+            left -= count;
+            heads.push((func, offset, first, count));
+        }
+        if left != 0 {
+            return Err(FormatError::ResumeTableHasExtra { extra: left });
+        }
+        let mut bodies = Vec::with_capacity(bodies_n as usize);
+        for (at, (func, offset, first, count)) in heads.into_iter().enumerate() {
+            let from = first as usize * RESUME_LEN;
+            let to = from + count as usize * RESUME_LEN;
+            let Some(slice) = resume_bytes.get(from..to) else {
+                return Err(short);
+            };
+            let mut resumes = Vec::with_capacity(count as usize);
+            for chunk in slice.chunks_exact(RESUME_LEN) {
+                let mut word = [0u8; 4];
+                word.copy_from_slice(chunk);
+                resumes.push(u32::from_le_bytes(word));
+            }
+            // `check` below catches an empty resume list, a first that
+            // is not 0, and resume points out of order; here we build
+            // the list and `check` sees it like any other.
+            let _ = at;
+            bodies.push(Body {
+                func,
+                offset,
+                resumes,
+            });
+        }
+        check(arch, code_len, &entries, &sites, &bodies)?;
         Ok(Tables {
             arch,
             module,
             code_len,
             entries,
             sites,
+            bodies,
+            rule,
         })
     }
 }

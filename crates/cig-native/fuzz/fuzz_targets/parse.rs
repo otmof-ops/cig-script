@@ -3,7 +3,9 @@
 
 //! The section's reader never panics on any body the fuzzer makes up,
 //! and a body it takes is the one encoding of its section: written back,
-//! it is the same bytes.
+//! it is the same bytes. Version 2 (interface 2): the body and resume
+//! tables, the rule, and the extra footer fields are covered by the
+//! same round trip.
 
 #![no_main]
 

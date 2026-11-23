@@ -16,14 +16,21 @@
 //! loaded.
 //!
 //! - [`mod@format`]: the section's body ([`Section`], [`Tables`], [`Entry`],
-//!   [`Site`]), written by [`Section::to_bytes`] and read by
-//!   [`Tables::parse`] and [`Section::parse`]. A body is hostile data to
-//!   the reader. No `unsafe`.
-//! - [`Context`]: the 64 bytes native code and the VM share for one
-//!   call.
+//!   [`Site`], [`Body`], [`Rule`]), written by [`Section::to_bytes`] and
+//!   read by [`Tables::parse`] and [`Section::parse`]. A body is hostile
+//!   data to the reader. No `unsafe`.
+//! - [`Context`]: the 80 bytes native code and the VM share for one
+//!   call (interface 2: with the frame, the helpers and the host added
+//!   for bodies).
+//! - [`mod@value`]: what native code knows of a value in a frame
+//!   (interface 2): where its tag and payload are, and the tags of
+//!   null, bool, int and float. [`value::agrees`] holds a runtime's
+//!   value type to these constants.
 //! - [`loader`]: [`Mapped`], a section's code mapped read and execute
-//!   from a file, and [`Code`], a mapping whose entries can be called.
-//!   Every `unsafe` block of the crate is in this module.
+//!   from a file, [`Code`], a mapping whose entries and bodies can be
+//!   called, and the helpers' table ([`Helpers`], [`Host`]) that stands
+//!   between native code and the runtime. Every `unsafe` block of the
+//!   crate is in this module and in [`mod@value`].
 //!
 //! ## Trust
 //!
@@ -62,10 +69,13 @@ mod context;
 pub mod format;
 #[allow(unsafe_code)]
 pub mod loader;
+#[allow(unsafe_code)]
+pub mod value;
 
 pub use context::Context;
 pub use format::{
-    op, Arch, Entry, Exit, FormatError, Op, Section, Site, Tables, Ty, ALIGN, ENTRY_LEN,
-    FOOTER_LEN, INTERFACE, MAGIC, MAX_ARGS, MAX_FRAME, MAX_ROWS, SITE_LEN, VERSION,
+    op, Arch, Body, Entry, Exit, FormatError, Op, Rule, Section, Site, Tables, Ty, ALIGN, BODY_LEN,
+    ENTRY_LEN, FOOTER_LEN, INTERFACE, MAGIC, MAX_ARGS, MAX_BODY_FRAME, MAX_FRAME, MAX_ROWS,
+    RESUME_LEN, SITE_LEN, VERSION,
 };
-pub use loader::{Code, MapError, Mapped};
+pub use loader::{Code, Helpers, Host, MapError, Mapped, Stop};

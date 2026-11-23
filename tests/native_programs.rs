@@ -338,6 +338,8 @@ fn section(source: &str, l: &Lowered) -> native::Section {
         code: [ADD, STUB].concat(),
         entries,
         sites: sites(source),
+        bodies: Vec::new(),
+        rule: native::Rule::None,
     }
 }
 

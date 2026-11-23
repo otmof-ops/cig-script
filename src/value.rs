@@ -19,20 +19,37 @@ use std::rc::Rc;
 pub type List = Rc<RefCell<Vec<Value>>>;
 pub type Map = Rc<RefCell<IndexMap<String, Value>>>;
 
+/// A runtime value.
+///
+/// The representation is stated (`#[repr(C, u8)]`) and the tags are
+/// explicit: native code reads the tag byte and the payload by their
+/// offsets, which are the ones [`cig_native::value`] names. Size and
+/// alignment are asserted below.
 #[derive(Clone)]
+#[repr(C, u8)]
 pub enum Value {
-    Null,
-    Bool(bool),
-    Int(i64),
-    Float(f64),
-    Str(Rc<str>),
-    List(List),
-    Map(Map),
-    Func(Rc<Function>),
-    Builtin(Rc<Builtin>),
-    Module(Rc<Module>),
-    Chain(Rc<Chain>),
+    Null = cig_native::value::NULL,
+    Bool(bool) = cig_native::value::BOOL,
+    Int(i64) = cig_native::value::INT,
+    Float(f64) = cig_native::value::FLOAT,
+    Str(Rc<str>) = cig_native::value::OWNS,
+    List(List) = cig_native::value::OWNS + 1,
+    Map(Map) = cig_native::value::OWNS + 2,
+    Func(Rc<Function>) = cig_native::value::OWNS + 3,
+    Builtin(Rc<Builtin>) = cig_native::value::OWNS + 4,
+    Module(Rc<Module>) = cig_native::value::OWNS + 5,
+    Chain(Rc<Chain>) = cig_native::value::OWNS + 6,
 }
+
+// The layout native code is compiled against (cig-native's `value`
+// module): a 24-byte register, 8-byte aligned, tag at 0 and payload at 8.
+const _: () = {
+    assert!(std::mem::size_of::<Value>() == cig_native::value::SIZE);
+    assert!(std::mem::align_of::<Value>() == 8);
+    assert!(cig_native::value::SIZE == 24);
+    assert!(cig_native::value::TAG == 0);
+    assert!(cig_native::value::PAYLOAD == 8);
+};
 
 /// An ordered list of steps declared with `chain name { ... }`.
 pub struct Chain {
