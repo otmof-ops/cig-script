@@ -1,0 +1,27 @@
+types 1 "fourth-row-collapses.cig"
+spec @0 main () -> dynamic
+  slot $0:pick func
+  slot $1:a dynamic
+  slot $2:b dynamic
+  slot $3:c dynamic
+  slot $4:d dynamic
+  val %0 func
+  val %1 int
+  val %2 dynamic
+  val %3 float
+  val %4 dynamic
+  val %5 str
+  val %6 dynamic
+  val %7 bool
+  val %8 dynamic
+  val %9 dynamic
+  val %10 dynamic
+  val %11 dynamic
+  val %12 dynamic
+  call #8 -> @1(dynamic)
+  call #12 -> @1(dynamic)
+  call #16 -> @1(dynamic)
+  call #20 -> @1(dynamic)
+spec @1 pick (dynamic) -> dynamic
+  slot $5:x! dynamic
+  val %0 dynamic

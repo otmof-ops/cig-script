@@ -1,0 +1,24 @@
+types 1 "recursive-fib.cig"
+spec @0 main () -> dynamic
+  slot $0:fib func
+  val %0 func
+  val %1 int
+  val %2 int
+  call #24 -> @1(int)
+spec @1 fib (int) -> int
+  slot $1:n! int
+  val %0 int
+  val %1 int
+  val %2 bool
+  val %3 int
+  val %4 int
+  val %5 int
+  val %6 int
+  val %7 int
+  val %8 int
+  val %9 int
+  val %10 int
+  val %11 int
+  val %12 int
+  call #13 -> @1(int)
+  call #17 -> @1(int)

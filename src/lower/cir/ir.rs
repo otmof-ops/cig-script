@@ -95,7 +95,7 @@ pub struct ValueInfo {
     pub def: InstrId,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub enum Ty {
     Dynamic,
     Null,

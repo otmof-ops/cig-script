@@ -1,0 +1,24 @@
+types 1 "two-rows-int-and-float.cig"
+spec @0 main () -> dynamic
+  slot $0:dbl func
+  slot $1:a int
+  slot $2:b float
+  val %0 func
+  val %1 int
+  val %2 int
+  val %3 float
+  val %4 float
+  val %5 int
+  val %6 float
+  call #10 -> @1(int)
+  call #14 -> @1(float)
+spec @1 dbl (int) -> int
+  slot $3:x! int
+  val %0 int
+  val %1 int
+  val %2 int
+spec @1 dbl (float) -> float
+  slot $3:x! float
+  val %0 float
+  val %1 float
+  val %2 float
