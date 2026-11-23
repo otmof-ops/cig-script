@@ -781,3 +781,89 @@ fn timing_on_one_program() {
         inf.specs().len()
     );
 }
+
+/// The rows `name` has, in order.
+fn rows_of(m: &Module, inf: &Inference, name: &str) -> Vec<Row> {
+    spec_of(m, inf, name)
+        .iter()
+        .map(|s| s.row.clone())
+        .collect()
+}
+
+const FIB: &str = "pull fib(n) {\n  if n < 2 { snuff n }\n  snuff fib(n - 1) + fib(n - 2)\n}\n";
+
+/// A call's argument that nothing has typed yet (here the result of a
+/// function the walk has not reached) asks for no row: the call is
+/// asked for once, with the argument's type.
+#[test]
+fn a_call_given_another_calls_result_asks_for_one_row() {
+    let src = format!("{FIB}pull label(n) {{ snuff \"fib = ${{n}}\" }}\nexhale label(fib(20))\n");
+    let m = lower(&src, "label.cig");
+    let inf = infer::infer(&m);
+    assert_eq!(rows_of(&m, &inf, "label"), [Row(vec![Ty::Int])]);
+    assert_eq!(rows_of(&m, &inf, "fib"), [Row(vec![Ty::Int])]);
+    assert_eq!(inf.specs().len(), 3, "the top level, fib and label");
+}
+
+/// Such a call does not count against the rows a function keeps: three
+/// calls with three types, each the result of another call, are three
+/// rows and no collapse.
+#[test]
+fn rows_not_yet_typed_do_not_count_against_the_rows_a_function_keeps() {
+    let src = format!(
+        "{FIB}pull half(x) {{\n  if x < 1.0 {{ snuff x }}\n  snuff half(x / 2.0)\n}}\npull odd(n) {{\n  if n == 0 {{ snuff false }}\n  snuff not odd(n - 1)\n}}\npull show(x) {{ snuff x }}\nexhale show(fib(5)), show(half(8.0)), show(odd(3))\n"
+    );
+    let m = lower(&src, "three.cig");
+    let inf = infer::infer(&m);
+    assert_eq!(MAX_ROWS, 3);
+    assert_eq!(
+        rows_of(&m, &inf, "show"),
+        [
+            Row(vec![Ty::Bool]),
+            Row(vec![Ty::Int]),
+            Row(vec![Ty::Float])
+        ]
+    );
+    for s in spec_of(&m, &inf, "show") {
+        assert_eq!(Row(vec![s.ret]), s.row, "it returns what it is given");
+    }
+}
+
+/// A row asked for while a callee's result was still one type is not in
+/// the result once that result is `Dynamic`: the inference holds what
+/// the top level reaches, and nothing a walk left behind.
+#[test]
+fn a_row_no_call_enters_any_more_is_not_in_the_result() {
+    let src = "pull text(n) { snuff \"s\" }\npull pick(n) {\n  if n > 0 { snuff 1 }\n  snuff text(n)\n}\npull show(x) { snuff x }\nexhale show(pick(1))\n";
+    let m = lower(src, "stale.cig");
+    let inf = infer::infer(&m);
+    assert_eq!(spec_of(&m, &inf, "pick")[0].ret, Ty::Dynamic);
+    assert_eq!(rows_of(&m, &inf, "show"), [Row(vec![Ty::Dynamic])]);
+    // Every spec is one a call of a spec in the result enters.
+    let entered: Vec<(FuncId, Row)> = inf
+        .specs()
+        .iter()
+        .flat_map(|s| s.calls.values().cloned())
+        .collect();
+    for s in inf.specs() {
+        assert!(
+            s.func == FuncId(0) || entered.contains(&(s.func, s.row.clone())),
+            "{:?} {:?}",
+            s.func,
+            s.row
+        );
+    }
+}
+
+/// A call an argument of which never gets a type (the result of a
+/// function that never returns) is in code that cannot run: it has no
+/// entry in its spec's call table, and its function no row from it.
+#[test]
+fn a_call_that_cannot_run_enters_nothing() {
+    let src = "pull never(n) { snuff never(n) }\npull show(x) { snuff x }\nexhale show(never(1))\n";
+    let m = lower(src, "never.cig");
+    let inf = infer::infer(&m);
+    assert_eq!(rows_of(&m, &inf, "never"), [Row(vec![Ty::Int])]);
+    assert!(spec_of(&m, &inf, "show").is_empty());
+    assert_eq!(top(&inf).calls.len(), 1, "the call of `never` alone");
+}

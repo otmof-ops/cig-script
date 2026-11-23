@@ -80,6 +80,14 @@ function collapses to a single row of all `dynamic`, and the three
 previous rows are dropped. The cap is cig-compile's
 [decision 0005](https://github.com/otmof-ops/cig-compile/blob/main/docs/decisions/0005-what-goes-native-first.md)'s.
 
+A call is asked for once every argument of it has a type: the result of
+a function the analysis has not reached yet is no type, and asks for no
+row. A call an argument of which never gets one (the result of a
+function that never returns) is in code that cannot run. The result
+holds the specializations the top level reaches through its calls, and
+nothing an earlier pass left behind, so it is the same whatever order
+the analysis took.
+
 **What a type promises.** When the analysis gives a value, a variable or
 a function's result any type but `dynamic`, then in every run in which
 that function is entered with arguments of that row, it has that type.

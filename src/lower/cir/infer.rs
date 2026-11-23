@@ -28,6 +28,12 @@
 //! up a lattice of height two (`Bot < concrete < Dynamic`) and the row
 //! count is bounded.
 //!
+//! A call asks for a row once every argument of it has a type: a `Bot`
+//! argument asks for nothing, so a row is one some run can enter and the
+//! rows a function keeps are not spent on passes that knew less. The
+//! result is what the top level reaches through the call tables as the
+//! walk left them ([`infer`]).
+//!
 //! **Captures.** `VarInfo` alone decides a slot's rule across functions:
 //! a slot that is `mutable && captured` is `Dynamic` everywhere (owner
 //! and every reader); its value is set in the owner's spec before any
@@ -72,7 +78,8 @@ pub struct Spec {
     /// The join of the types it returns.
     pub ret: Ty,
     /// Each `call.user` in it, by its instruction: the specialization
-    /// that call enters.
+    /// that call enters. A call with no entry is one an argument of
+    /// which never got a type: it is in code that cannot run.
     pub calls: BTreeMap<InstrId, (FuncId, Row)>,
 }
 
@@ -110,7 +117,27 @@ pub fn infer(m: &Module) -> Inference {
     s.collapsed_sweep();
     let mut specs: Vec<Spec> = s.into_specs();
     specs.sort_by(|a, b| (a.func, &a.row).cmp(&(b.func, &b.row)));
-    Inference { specs }
+    Inference {
+        specs: reached(specs),
+    }
+}
+
+/// The specializations the top level reaches through the call tables as
+/// the walk left them. A row asked for by a walk that knew less (before
+/// a callee's result rose to `Dynamic`, say) is one no call enters any
+/// more: it is left out, so the result is the same whatever order the
+/// walk took.
+fn reached(mut specs: Vec<Spec>) -> Vec<Spec> {
+    let mut keep: BTreeSet<(FuncId, Row)> = BTreeSet::new();
+    let mut next = vec![(FuncId(0), Row(Vec::new()))];
+    while let Some(key) = next.pop() {
+        let found = specs.binary_search_by(|s| (s.func, &s.row).cmp(&(key.0, &key.1)));
+        if let (Ok(at), true) = (found, keep.insert(key)) {
+            next.extend(specs[at].calls.values().cloned());
+        }
+    }
+    specs.retain(|s| keep.contains(&(s.func, s.row.clone())));
+    specs
 }
 
 /// The inference as text, for `--emit=types` and for golden files:
@@ -588,7 +615,20 @@ impl<'m> State<'m> {
             | Kind::PackDecl(_)
             | Kind::Exhale(_) => Some(Lat::dynamic()),
             Kind::CallUser { func: g, args } => {
-                let row = Row(args.iter().map(|a| self.val(key, *a).out()).collect());
+                let types: Vec<Lat> = args.iter().map(|a| self.val(key, *a)).collect();
+                // An argument nothing has typed yet (the result of a call
+                // whose function is not walked yet, a slot a later
+                // statement of a loop stores): there is no row to ask
+                // for. Asking with `Dynamic` in its place would make a
+                // row no run enters, and count it against `MAX_ROWS`.
+                // The walk comes back here once it is typed: this spec
+                // is walked again when a slot of it or a callee's result
+                // moves. An argument that never is typed is in code that
+                // cannot run, and the call has no entry in `calls`.
+                if types.contains(&Lat::Bot) {
+                    return Some(Lat::Bot);
+                }
+                let row = Row(types.into_iter().map(Lat::out).collect());
                 // A `Func` whose arity is not the call's argument count
                 // is not specialized: the run raises E401.
                 let arity = self
