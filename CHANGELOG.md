@@ -5,6 +5,19 @@ project follows semantic versioning.
 
 ## Unreleased
 
+- **`cig-native`: what a program and its compiler agree on about native
+  code.** A new crate in the workspace, for programs built at stage `c`
+  (cig-compile's decisions 0005 to 0007): the layout of a program's
+  `native` section, written and read by one piece of code; the 64-byte
+  context native code shares with the VM; and the loader that maps a
+  section's code from the program's own file, read and execute and never
+  writable, and calls it. The reader treats a section as hostile data,
+  and a section has one encoding: what is read is written back the same.
+  Mapping is safe and gives nothing to read or call; making a mapping
+  callable is one `unsafe` step, where the caller answers for the bytes;
+  a call is checked against its entry. The loader is built for Linux on
+  x86-64 and aarch64, and every `unsafe` block of the crate is in it.
+  Nothing in `cig` uses the crate yet.
 - **The engines measured on cig 1.25.0 as released**
   (`docs/ENGINES-1.25.0.md`, `docs/ENGINES-FIRST-RUNS-1.25.0.md`,
   `bench/results/1.25.0-engines/`). The 1.25.0 notes carry figures from a

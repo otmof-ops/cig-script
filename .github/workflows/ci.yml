@@ -249,6 +249,20 @@ jobs:
             cargo +nightly fuzz run $t fuzz/corpus/$t -- -max_total_time=60
           done
 
+  # A native section is read by every program that has one, before anything
+  # is mapped: its reader is fuzzed for a minute on every push.
+  fuzz-cig-native:
+    name: fuzz (cig-native)
+    needs: changes
+    if: needs.changes.outputs.code_changed == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - run: cargo install cargo-fuzz --locked
+      - working-directory: crates/cig-native
+        run: cargo +nightly fuzz run parse -- -max_total_time=60
+
   # No hosted runner: a VM. It must not hold a merge back when the VM itself
   # misbehaves, so its failure is reported, not fatal; the log says.
   test-freebsd:
@@ -282,7 +296,7 @@ jobs:
   ci-ok:
     name: ci
     if: always()
-    needs: [changes, test, test-alpine, passes-issue, passes-verify, fuzz-cig-pass, test-freebsd, reuse]
+    needs: [changes, test, test-alpine, passes-issue, passes-verify, fuzz-cig-pass, fuzz-cig-native, test-freebsd, reuse]
     runs-on: ubuntu-latest
     steps:
       - name: every needed job passed or was skipped
