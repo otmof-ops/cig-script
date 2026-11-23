@@ -173,6 +173,15 @@ pub fn refused_kind(kind: &Kind) -> Option<&'static str> {
 
 /// Lower a verified CIR module to bytecode, and verify what came out.
 pub fn lower(m: &ir::Module) -> Result<bc::Module, Error> {
+    lower_indexed(m).map(|(module, _)| module)
+}
+
+/// [`lower`], with the CIR function behind each function of the module:
+/// element `i` is the function the module's function `i` was lowered
+/// from, in the module's own numbering (pre-order, 0 the top level: the
+/// verifier's, the VM's and the disassembly's). A CIR function no
+/// `closure` makes is in no module and is not listed.
+pub fn lower_indexed(m: &ir::Module) -> Result<(bc::Module, Vec<FuncId>), Error> {
     let catalogue: HashMap<&'static str, u32> = crate::stdlib::builtin_catalogue()
         .iter()
         .enumerate()
@@ -193,9 +202,10 @@ pub fn lower(m: &ir::Module) -> Result<bc::Module, Error> {
         .funcs
         .first()
         .ok_or_else(|| Error::Internal("the module has no top level".into()))?;
+    let (main, ids) = cx.function(main, 1)?;
     let module = bc::Module {
         source_name: m.file.clone(),
-        main: cx.function(main, 1)?,
+        main,
     };
     if let Err(e) = verify_module(&module) {
         return Err(Error::Internal(format!(
@@ -203,7 +213,27 @@ pub fn lower(m: &ir::Module) -> Result<bc::Module, Error> {
             e.rule()
         )));
     }
-    Ok(module)
+    let mut order = Vec::new();
+    ids.preorder(&mut order);
+    Ok((module, order))
+}
+
+/// The CIR function a lowered function came from, and its children's, in
+/// the order the function's `children` holds them: a tree shaped as the
+/// module is.
+struct Ids {
+    id: FuncId,
+    children: Vec<Ids>,
+}
+
+impl Ids {
+    /// The ids as the module numbers its functions.
+    fn preorder(&self, out: &mut Vec<FuncId>) {
+        out.push(self.id);
+        for c in &self.children {
+            c.preorder(out);
+        }
+    }
 }
 
 /// Parse, check, lower to CIR, run `passes`, lower to bytecode.
@@ -283,7 +313,7 @@ impl<'m> Cx<'m> {
     /// whose offset does not fit its signed 8-bit field is lowered again
     /// as a compare into a register and a `test`, which reaches as far as
     /// any jump.
-    fn function(&self, f: &'m Func, depth: u32) -> Result<bc::Function, Error> {
+    fn function(&self, f: &'m Func, depth: u32) -> Result<(bc::Function, Ids), Error> {
         if depth > MAX_FUNCTION_DEPTH {
             return Err(Error::Limit {
                 what: format!(
@@ -295,7 +325,7 @@ impl<'m> Cx<'m> {
         let (mut wide, mut far) = (false, HashSet::new());
         loop {
             match FnLower::new(self, f, depth, wide, far.clone()).run() {
-                Ok(x) => return Ok(x),
+                Ok((x, children)) => return Ok((x, Ids { id: f.id, children })),
                 Err(Retry::Error(e)) => return Err(e),
                 Err(Retry::Wide) if !wide => wide = true,
                 Err(Retry::Wide) => {
@@ -456,6 +486,8 @@ struct FnLower<'c, 'm> {
     consts: Vec<Constant>,
     const_index: HashMap<ConstKey<'m>, u32>,
     children: Vec<bc::Function>,
+    /// Beside `children`: the CIR function each one came from.
+    child_ids: Vec<Ids>,
     labels: Vec<Option<usize>>,
     patches: Vec<Patch>,
     /// The frame's length so far, and the registers below it that are
@@ -571,6 +603,7 @@ impl<'c, 'm> FnLower<'c, 'm> {
             consts: Vec::new(),
             const_index: HashMap::new(),
             children: Vec::new(),
+            child_ids: Vec::new(),
             labels: Vec::new(),
             patches: Vec::new(),
             frame: 0,
@@ -621,7 +654,7 @@ impl<'c, 'm> FnLower<'c, 'm> {
         }
     }
 
-    fn run(mut self) -> Result<bc::Function, Retry> {
+    fn run(mut self) -> Result<(bc::Function, Vec<Ids>), Retry> {
         let f = self.f;
         // Parameters are the frame's first registers.
         for p in &f.params {
@@ -690,7 +723,8 @@ impl<'c, 'm> FnLower<'c, 'm> {
             what: "a function with more than 65,535 parameters".into(),
             span: f.span,
         })?;
-        Ok(bc::Function {
+        let child_ids = self.child_ids;
+        let function = bc::Function {
             name: f.name.clone().unwrap_or_default(),
             kind,
             reg_count,
@@ -711,7 +745,8 @@ impl<'c, 'm> FnLower<'c, 'm> {
                 rows.sort_by_key(|r| (r.pc_start, std::cmp::Reverse(r.pc_end)));
                 rows
             },
-        })
+        };
+        Ok((function, child_ids))
     }
 
     /// The top level's only normal end (it has no `snuff`): a map of every
@@ -2301,7 +2336,7 @@ impl<'c, 'm> FnLower<'c, 'm> {
                     .funcs
                     .get(fid.0 as usize)
                     .ok_or_else(|| Error::Internal(format!("no function {}", fid.0)))?;
-                let mut child = self.cx.function(target, self.depth + 1)?;
+                let (mut child, ids) = self.cx.function(target, self.depth + 1)?;
                 self.span = i.span;
                 // One upvalue per captured slot, in the child's capture
                 // order: this function's register (its cell), or this
@@ -2320,6 +2355,7 @@ impl<'c, 'm> FnLower<'c, 'm> {
                 }
                 let index = self.children.len() as u32;
                 self.children.push(child);
+                self.child_ids.push(ids);
                 let r = self.define(i)?;
                 self.abx(Op::CLOSURE, r, index)?;
             }

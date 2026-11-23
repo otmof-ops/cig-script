@@ -429,6 +429,17 @@ fn load_bytecode(
     program: &crate::program::Opened,
 ) -> Result<std::rc::Rc<crate::vm::Program>, String> {
     let loaded = open_module(program.bytecode()?, "the program's bytecode")?;
+    // A stage `c` program's native code is loaded the first time the run
+    // calls one of the script's functions; with `CIG_VALIDATE=1`, here,
+    // before anything runs, and a damaged section stops the start. A
+    // section this machine cannot load never does: the bytecode is the
+    // whole program.
+    if let Some(source) = crate::native::Source::of(program) {
+        loaded.offer_native(source);
+        if crate::program::validate_by_env() {
+            loaded.load_native().map_err(|e| e.to_string())?;
+        }
+    }
     std::mem::forget(std::rc::Rc::clone(&loaded));
     Ok(loaded)
 }
@@ -445,7 +456,13 @@ fn open_module(body: Vec<u8>, what: &str) -> Result<std::rc::Rc<crate::vm::Progr
             cig_bytecode::parse_module(&body).map_err(|e| format!("{what} does not read: {e}"))?;
         let verified =
             cig_bytecode::verify_module(&module).map_err(|e| crate::vm::refusal(&e).message)?;
-        crate::vm::load(verified).map_err(|d| d.message)
+        // The hash `parse_module` checked names the module, as it does
+        // for one opened without the whole parse.
+        match cig_bytecode::module_hash(&body) {
+            Some(hash) => crate::vm::load_hashed(verified, hash),
+            None => crate::vm::load(verified),
+        }
+        .map_err(|d| d.message)
     } else {
         crate::vm::open(body).map_err(|d| d.message)
     }

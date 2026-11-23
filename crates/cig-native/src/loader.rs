@@ -138,9 +138,10 @@ impl Mapped {
     /// **The file does not change under the mapping.** From the moment
     /// the caller read `code` from the file until the returned [`Code`]
     /// is dropped, the mapped range of the file is not written and the
-    /// file is not shortened. A program's own executable is such a file
-    /// on Linux: the system refuses to open a running executable for
-    /// writing.
+    /// file is not shortened. The image a process is running is such a
+    /// file to exactly the extent the process's own code is: the system
+    /// maps that code from the same file in the same way, and Linux
+    /// refuses to open a running executable for writing.
     ///
     /// **The bytes are the code generator's.** `code` and `tables` are
     /// the code and the tables of one native section made by cig's code

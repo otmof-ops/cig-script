@@ -59,8 +59,8 @@ footer         80 bytes, at the body's end
 | 20 | 4 | zero |
 
 A type is `0` null, `1` bool, `2` int, `3` float. Entries are sorted by
-function index and then by argument types, no two alike, and every entry
-of one function has the same argument count. An entry's offset is inside
+function index and then by argument types, no two alike; every entry of
+one function has the same argument count, and a function has at most 16. An entry's offset is inside
 the code, and where instructions have one size (aarch64: 4 bytes) it and
 the code's length are multiples of it.
 
@@ -113,7 +113,7 @@ extern "C" fn(ctx: *mut Context, args: *const u64, ret: *mut u64) -> u32
 
 | offset | size | field |
 |---:|---:|---|
-| 0 | 8 | `steps_left`: steps before the budget is spent |
+| 0 | 8 | `steps_left`: steps before the budget is spent. Code takes one at each step mark and leaves when that took it below zero, with -1 here |
 | 8 | 8 | `depth_left`: how deep the code's own calls may nest |
 | 16 | 4 | `site`: on an exit, the site it left from |
 | 20 | 4 | `flags`: on an exit, bit 0 when a function on the way out was called from inside a loop |

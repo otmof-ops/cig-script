@@ -96,8 +96,11 @@ use std::cell::{OnceCell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
+mod native;
 #[cfg(test)]
 mod tests;
+
+pub use native::{stack_starts_here, Native};
 
 /// `CIG_VM_STATS=1`: instructions executed and time by opcode, written to
 /// the run's error stream when a script ends. Built only with the
@@ -245,6 +248,15 @@ pub struct Program {
     /// The builtin behind `pow`/`powk`: `math.pow`, the language's only
     /// power operation.
     pow: Option<&'static Builtin>,
+    /// The module's integrity hash, when it was opened from its bytes
+    /// ([`open`]): what native code compiled from it names.
+    hash: Option<[u8; 32]>,
+    /// A stage `c` program's native code, loaded the first time a call
+    /// could use it: `Some(None)` once it is known there is none this
+    /// run can use.
+    native: OnceCell<Option<Native>>,
+    /// Where that code lies, until it is loaded.
+    native_source: std::cell::Cell<Option<crate::native::Source>>,
 }
 
 /// The loaded functions, by pre-order index.
@@ -442,6 +454,18 @@ fn unreadable(e: &ParseError) -> Diagnostic {
 /// kind). Every function is loaded here, so the run enters none for the
 /// first time.
 pub fn load(v: Verified<'_>) -> Result<Rc<Program>, Diagnostic> {
+    load_as(v, None)
+}
+
+/// [`load`], for a module parsed from bytes whose header carries `hash`
+/// (`cig_bytecode::module_hash`, which `parse_module` checked): the
+/// program can then take native code compiled from that module, as one
+/// [`open`] made can.
+pub fn load_hashed(v: Verified<'_>, hash: [u8; 32]) -> Result<Rc<Program>, Diagnostic> {
+    load_as(v, Some(hash))
+}
+
+fn load_as(v: Verified<'_>, hash: Option<[u8; 32]>) -> Result<Rc<Program>, Diagnostic> {
     let known = Known::new();
     let mut funcs = Vec::new();
     let mut heads = Vec::new();
@@ -452,6 +476,9 @@ pub fn load(v: Verified<'_>) -> Result<Rc<Program>, Diagnostic> {
         reader: None,
         pow: known.pow(),
         known,
+        hash,
+        native: OnceCell::new(),
+        native_source: std::cell::Cell::new(None),
     }))
 }
 
@@ -485,15 +512,68 @@ pub fn open(bytes: Vec<u8>) -> Result<Rc<Program>, Diagnostic> {
     let program = Rc::new(Program {
         funcs: Funcs((0..n).map(|_| OnceCell::new()).collect()),
         heads,
+        hash: Some(reader.hash()),
         reader: Some(reader),
         pow: known.pow(),
         known,
+        native: OnceCell::new(),
+        native_source: std::cell::Cell::new(None),
     });
     program.ready(0, Span::default())?;
     Ok(program)
 }
 
 impl Program {
+    /// Give a stage `c` program's module where its native code lies. The
+    /// code is loaded the first time the run calls one of the script's
+    /// functions; a run that calls none never reads it.
+    pub fn offer_native(&self, source: crate::native::Source) {
+        self.native_source.set(Some(source));
+    }
+
+    /// Load the offered native code now, as `CIG_VALIDATE=1` does before
+    /// anything runs. `Err` when the section is damaged; a section this
+    /// machine cannot load is not an error, and the program runs its
+    /// bytecode.
+    pub fn load_native(&self) -> Result<(), crate::native::Unused> {
+        let loaded = self.native_from_source();
+        let damaged = match &loaded {
+            Err(e @ crate::native::Unused::Damaged(_)) => Err(e.clone()),
+            _ => Ok(()),
+        };
+        // A second load finds it loaded, or finds no source.
+        let _ = self.native.set(loaded.ok().flatten());
+        damaged
+    }
+
+    /// The native code from the offered source: `None` with nothing
+    /// offered, or for a module that was not opened from its bytes.
+    fn native_from_source(&self) -> Result<Option<Native>, crate::native::Unused> {
+        let (Some(source), Some(hash)) = (self.native_source.take(), self.hash) else {
+            return Ok(None);
+        };
+        let arity = |i: u32| self.heads.get(i as usize).map(|h| h.arity);
+        let (code, tables) = source.load(&hash, arity)?;
+        Ok(Some(Native::new(code, tables, self.heads.len())))
+    }
+
+    /// The program's native code, loaded at the first call that asks.
+    #[inline(always)]
+    fn native(&self) -> Option<&Native> {
+        match self.native.get() {
+            Some(n) => n.as_ref(),
+            None => self.first_native(),
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn first_native(&self) -> Option<&Native> {
+        self.native
+            .get_or_init(|| self.native_from_source().ok().flatten())
+            .as_ref()
+    }
+
     /// Make function `index` ready to run: nothing when it is loaded; at
     /// its first entry, read its body, verify it ([`verify_function`]) and
     /// load it, before its first instruction runs. A function that does
@@ -2172,6 +2252,11 @@ impl Machine<'_> {
         };
         let n = d.b_u as usize;
         let target = self.target(program, index, at, n, proto, d.pc)?;
+        if let Some(native) = program.native() {
+            if let Some(done) = self.call_native(native, index, n, proto, d, base) {
+                return done.map(|()| true);
+            }
+        }
         let caller = (!proto.plain).then(|| base.saturating_add(proto.reg_count));
         let first = at.saturating_add(1);
         self.push(target, index, upvals, first, n, d.c, caller, proto, d.pc)?;
@@ -2184,6 +2269,86 @@ impl Machine<'_> {
             c.site = pc;
         }
         Ok(true)
+    }
+
+    /// `call A, B, C` of function `func` as native code, when the program
+    /// has an entry of it for these `n` arguments' types and the stack
+    /// has room for the calls native code may nest (`native::has_room`).
+    /// `None`, with nothing changed, when it does not: the call pushes a
+    /// frame as any other.
+    ///
+    /// What a frame's call does, this does: the call's depth is counted
+    /// at the call's position (`E506`) and given back; the cells of the
+    /// caller's registers from the first argument up are gone
+    /// ([`Machine::push`]); the result goes to `R(A)` with the rest of
+    /// its row null; and an error is raised at the call, where the
+    /// caller's tries are offered it.
+    ///
+    /// What a frame needs and this does not, it does not do. The callee
+    /// gets no registers, so the register stack does not grow and its
+    /// ceiling (`E514`, the VM's own limit, which the tree-walker has
+    /// not) is not reached by this call. And the closure's upvalues are
+    /// not read: an entry's code depends on its arguments alone (the
+    /// compiler makes one only for a function that reads no variable of
+    /// another), so every closure of the function is the same to it.
+    ///
+    /// Out of line: its frame holds the arguments' slots, and
+    /// `run_frame_code`'s must stay small (a builtin's callback re-enters
+    /// it).
+    #[inline(never)]
+    fn call_native(
+        &mut self,
+        native: &Native,
+        func: usize,
+        n: usize,
+        proto: &Proto,
+        d: &DecodedInstr,
+        base: usize,
+    ) -> Option<Result<(), Fault>> {
+        let at = base.saturating_add(d.a as usize);
+        let first = at.saturating_add(1);
+        let (entry, ret, slots) = native.entry(func, n, |k, ty| {
+            let i = first.saturating_add(k);
+            if !proto.plain {
+                if let Some(Some(cell)) = self.cells.get(i) {
+                    return native::slot(ty, &cell.borrow());
+                }
+            }
+            native::slot(ty, self.stack.get(i)?)
+        })?;
+        let args = slots.get(..n)?;
+        if !native::has_room(self.interp.calls_left()) {
+            return None;
+        }
+        if let Err(e) = self.interp.enter_call(Span::default()) {
+            return Some(Err(e.at(span_at(proto, d.pc)).into()));
+        }
+        if !proto.plain {
+            let params = first.saturating_add(n);
+            for i in first..params {
+                if let Some(cell) = self.cells.get_mut(i).and_then(Option::take) {
+                    if let Some(slot) = self.stack.get_mut(i) {
+                        *slot = cell.borrow().clone();
+                    }
+                }
+            }
+            self.forget_cells(params, base.saturating_add(proto.reg_count));
+        }
+        let result = native.run(self.interp, entry, ret, args);
+        self.interp.leave_call();
+        let v = match result {
+            Ok(v) => v,
+            Err(e) => return Some(Err(e.into())),
+        };
+        if !self.write_result(at, d.c, v) {
+            let span = span_at(proto, d.pc);
+            return Some(Err(broken("a result register past its frame", span).into()));
+        }
+        // The caller goes on after the call.
+        if let Some(f) = self.frames.last_mut() {
+            f.pc = d.pc as usize + d.width as usize;
+        }
+        Some(Ok(()))
     }
 
     /// What a call needs of `R(at)` when it holds a compiled function of
