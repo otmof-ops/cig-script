@@ -524,10 +524,14 @@ pub fn entry() -> i32 {
         crate::update::cleanup_old();
     }
     // Scripts recurse; give the evaluator a generous stack.
+    const STACK: usize = 256 * 1024 * 1024;
     let handle = std::thread::Builder::new()
         .name("cig".into())
-        .stack_size(256 * 1024 * 1024)
+        .stack_size(STACK)
         .spawn(move || {
+            // Native code is entered only where this stack has room for
+            // the calls it may nest.
+            crate::vm::stack_starts_here(STACK);
             // Test hook for the crash reporter: `1` panics here, `eval` inside
             // the tree-walker (the VM allows itself no panic, this one
             // included), `after-burn` in the kernel after the first burn,

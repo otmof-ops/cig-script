@@ -13,9 +13,12 @@
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Context {
-    /// The steps left before the step budget is spent. Native code takes
-    /// one at each step mark and leaves with [`Exit::Budget`](crate::Exit)
-    /// when it would go below zero. `i64::MAX` when there is no budget.
+    /// The steps left before the step budget is spent. At each step mark
+    /// native code takes one, and leaves with
+    /// [`Exit::Budget`](crate::Exit) when that took it below zero: it
+    /// leaves with -1 here, having counted the mark that spent the
+    /// budget. However it comes back, what it took from this is the
+    /// steps it ran. `i64::MAX` when there is no budget.
     pub steps_left: i64,
     /// How deep native code's own calls may nest from here. Native code
     /// leaves with [`Exit::Depth`](crate::Exit) at a call that finds it

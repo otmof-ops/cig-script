@@ -30,6 +30,7 @@ pub mod humidor;
 pub mod installer;
 pub mod interp;
 pub mod lower;
+pub mod native;
 pub mod pass;
 pub mod pin;
 pub mod program;
@@ -49,6 +50,7 @@ pub mod vm;
 /// that lowers to bytecode builds its modules with the same copy of the
 /// crate the VM loads, so a `Verified` it makes is one `vm::load` takes.
 pub use cig_bytecode;
+pub use cig_native;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 

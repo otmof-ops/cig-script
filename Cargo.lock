@@ -489,6 +489,7 @@ dependencies = [
  "chrono",
  "cig-bytecode",
  "cig-copy",
+ "cig-native",
  "cig-pass",
  "cig-vault",
  "clap",

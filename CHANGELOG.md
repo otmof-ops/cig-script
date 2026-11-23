@@ -5,6 +5,42 @@ project follows semantic versioning.
 
 ## Unreleased
 
+- **Stage `c` programs: native code under the VM** (cig-compile's
+  decisions 0005 and 0006). A program may now hold a `native` section:
+  machine code for some of its functions, each compiled for one row of
+  argument types (ints, floats, bools, null). At a call of such a
+  function with arguments of one of its rows the VM runs the native
+  code; for any other call it runs the bytecode, as before. What the
+  program does is the same either way: native code makes no error of its
+  own (the interpreter's own operator makes it, from the operands native
+  code hands back), the step budget is charged mark by mark, and the
+  depth limit falls on the same call.
+  - The payload format gains stage `c` and the `native` section, which
+    lies on a 65,536-byte boundary so the program can map its code from
+    its own file, read and execute and never writable. Only a stage `c`
+    program has one (`docs/PROGRAMS.md`).
+  - The code is loaded the first time the run calls a function of the
+    script, after it is checked against the section table's sha256, the
+    module it was compiled from and that module's functions. Where it
+    cannot be used (another system than Linux on x86-64 and aarch64, a
+    refused mapping, a section that is not this program's), the program
+    runs its bytecode. `CIG_VALIDATE=1` loads it at the start and
+    reports a damaged one as `E1050`; `--cig-program` says what it holds.
+  - Native code is entered only where the stack has room for the calls
+    the depth limit leaves it.
+  - A stage `c` program's native section is machine code, trusted as the
+    program's runtime is and not as its script is (`docs/PROGRAMS.md`,
+    "Integrity, not authenticity"). `CIG_NATIVE=0` makes a program run
+    its bytecode and never load its native code.
+  - `cig-native`: a function has at most 16 entries, and the context's
+    `steps_left` is -1 at a budget exit (the mark that spent the budget
+    is counted), both now rules the runtime holds native code to.
+  - `cigscript::lower::lowered_with_cir` gives a compiler the IR a
+    module was lowered from and the IR function behind each of the
+    module's functions; `cig_bytecode::module_hash` and `Reader::hash`
+    give the hash that names a module.
+  - No compiler writes the section yet: cigcompile's `--stage c` is the
+    next step. Stage `a` and `b` programs and `cig run` are unchanged.
 - **`cig-native`: what a program and its compiler agree on about native
   code.** A new crate in the workspace, for programs built at stage `c`
   (cig-compile's decisions 0005 to 0007): the layout of a program's

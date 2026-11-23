@@ -2,7 +2,7 @@
 
 <!-- SPDX-License-Identifier: CC-BY-4.0 -->
 
-A **program** is a CigScript script appended to the `cig` of the same version. It is one executable that runs its script and takes no command. A stage `a` program runs its script's text on the tree-walker; a stage `b` program runs the bytecode cigcompile lowered it to, on the VM. Either runs through the same run as `cig run`, with the same kernel, journal, plan and rollback.
+A **program** is a CigScript script appended to the `cig` of the same version. It is one executable that runs its script and takes no command. A stage `a` program runs its script's text on the tree-walker; a stage `b` program runs the bytecode cigcompile lowered it to, on the VM; a stage `c` program is a stage `b` program that also holds native code for some of its functions, which the VM calls. Each runs through the same run as `cig run`, with the same kernel, journal, plan and rollback.
 
 ## How one is made
 
@@ -16,7 +16,7 @@ The payload starts where the runtime's image ends (`P`) and runs to the end of t
 ... cig ...        the runtime, as released; its image ends at P
 record             JSON, {"format":2,...
 zero padding       to the first body's alignment
-section bodies     in table order, each at a file offset that is a multiple of 16
+section bodies     in table order, each at a file offset that is a multiple of 16 (`native`: of 65,536)
 section table      count x 64 bytes
 trailer            56 bytes, "CIGPROG2" first
 ```
@@ -25,26 +25,36 @@ trailer            56 bytes, "CIGPROG2" first
 
 **A table entry** (64 bytes): the id (8, lower-case ASCII letters, digits and `-`, a letter first, zero-padded), the body's version (u16), the encoding (u8: `0` stored as is, `1` raw DEFLATE, RFC 1951), flags (u8: bit 0 required, other bits `0`), the decoded length (u32), the offset from `P` (u64), the stored length (u64), and the sha256 of the stored bytes (32).
 
-**The record** is one JSON object without whitespace, its keys in this order: `format` (`2`), `name`, `file`, `sha256` (of the script's text, decoded, hex; as in format 1, so `cig runs` and `--unburn` work across formats), `cig`, `compiler`, `stage` (`"a"` runs the source on the tree-walker, `"b"` the bytecode on the VM), `opt` (the level it was built at), `target` (the target triple, at most 64 characters), `runtime_sha256` (the sha256 of the bytes before `P`), and `own_flags` (`true`, written only when set). A reader ignores keys it does not know. `name`, `file`, `compiler` and `cig` follow format 1's limits; `opt` and `target` are printable text.
+**The record** is one JSON object without whitespace, its keys in this order: `format` (`2`), `name`, `file`, `sha256` (of the script's text, decoded, hex; as in format 1, so `cig runs` and `--unburn` work across formats), `cig`, `compiler`, `stage` (`"a"` runs the source on the tree-walker, `"b"` the bytecode on the VM, `"c"` the bytecode on the VM with the `native` section's code called from it), `opt` (the level it was built at), `target` (the target triple, at most 64 characters), `runtime_sha256` (the sha256 of the bytes before `P`), and `own_flags` (`true`, written only when set). A reader ignores keys it does not know. `name`, `file`, `compiler` and `cig` follow format 1's limits; `opt` and `target` are printable text.
 
 **The sections:**
 
-| id | holds | stage `a` | stage `b` |
-|---|---|---|---|
-| `source` | the script's text: raw DEFLATE (level 9) when it is 4 KiB or more, stored as is below that | required | kept |
-| `bytecode` | the bytecode module, its `CIGB` header included | absent | required |
-| `tree`, `snap` | the checked tree and the top level's constants, archived | optional | absent |
-| `sbom` | the program's CycloneDX SBOM, DEFLATE | optional | optional |
+| id | holds | stage `a` | stage `b` | stage `c` |
+|---|---|---|---|---|
+| `source` | the script's text: raw DEFLATE (level 9) when it is 4 KiB or more, stored as is below that | required | kept | kept |
+| `bytecode` | the bytecode module, its `CIGB` header included | absent | required | required |
+| `tree`, `snap` | the checked tree and the top level's constants, archived | optional | absent | absent |
+| `sbom` | the program's CycloneDX SBOM, DEFLATE | optional | optional | optional |
+| `native` | machine code for some of the script's functions, with its tables (the `cig-native` crate's layout), stored as is | absent | absent | present, not required |
 
 The same inputs give the same bytes.
 
-**The rules.** Each is refused with `E1050` and a message that names it: the trailer's magic, its flags, the payload's length (at most 64 MiB, and inside the file), the record's length, the section count, the record and table fitting the payload, the head sha256, a record that starts with `{"format":`, reads and holds format 2; ids that are well formed, not repeated, and in the order `source`, `bytecode`, `tree`, `snap`, `sbom`, then any other id by its bytes; each body between the record and the table, after the one before it, at a file offset that is a multiple of 16; padding between the record, the bodies and the table that is zero and shorter than 16 bytes; an encoding of `0` or `1` and no flag bit but bit 0; a decoded length of at most 64 MiB, equal to the stored length for encoding `0`; a required section this cig does not know; and a stage whose section is missing (`source` for `a`, `bytecode` for `b`).
+**The rules.** Each is refused with `E1050` and a message that names it: the trailer's magic, its flags, the payload's length (at most 64 MiB, and inside the file), the record's length, the section count, the record and table fitting the payload, the head sha256, a record that starts with `{"format":`, reads and holds format 2; ids that are well formed, not repeated, and in the order `source`, `bytecode`, `tree`, `snap`, `sbom`, then any other id by its bytes; each body between the record and the table, after the one before it, at a file offset that is a multiple of 16, and section `native` at one that is a multiple of 65,536; padding between the record, the bodies and the table that is zero and shorter than the alignment of what it lies before; a `native` section that is stored as it is, in a stage `c` program and in no other; an encoding of `0` or `1` and no flag bit but bit 0; a decoded length of at most 64 MiB, equal to the stored length for encoding `0`; a required section this cig does not know; and a stage whose section is missing (`source` for `a`, `bytecode` for `b` and `c`, and `native` for `c`).
 
 **How it starts.** A start reads the trailer, the record and the table and checks the head sha256: a constant amount, whatever the script's size. It then refuses raised rights (`E1054`), answers cig's internal calls, refuses another cig's program (`E1051`), and checks the table's rules. `--help`, `--explain` and `--cig-program` answer there and read no body. A run and `--chains` read the `source` body, check its sha256 against the table and its text's sha256 against the record, and run it as `cig run` would. A body that does not match its table, or inflates past its decoded length, is refused with `E1050` when it is used.
 
 **A stage `b` program** runs its bytecode on the VM. Its run reads the `bytecode` body and opens the module: its magic, its version, its flags, which must be zero, and the BLAKE3 in its header over every byte after the header; its head, string pool, directory and tree; every function's name, kind and upvalues (against its parent's registers and upvalues); and the top level, read, verified and loaded (builtins, prelude names, burn-op kinds). It runs it through the same run as `cig run`: the same kernel, run record, journal, plan, rollback, `--no-rollback`, `--max-steps`, arguments, output and exit codes. Only the engine differs. Any failure before it runs is `E1050` with the rule and, from the verifier or the loader, where it failed (`the program's bytecode does not verify: <rule> at fn<i>+<pc>`, as `docs/BYTECODE.md` words it); nothing runs, no run is recorded, and the script is never run in its place. Every other function is read, verified and loaded the first time the run enters it, before its first instruction runs, so a start does the work of the functions its command uses and no more; a function that does not verify then is `E1050` at its call, an error of the run (its burns roll back), and none of its instructions run. Only a module whose hash was recomputed after a change can get that far: a changed byte anywhere is refused at the start. `CIG_VALIDATE=1` reads and verifies every function at the start instead, before anything runs. What a start checks, byte by byte: the head's sha256 covers the record and the table entry that says where the `bytecode` body lies, how long it is and how it is stored; the module's header is compared field by field; its BLAKE3 covers the stored hash and every byte after the header. A start does not also hash the body with the table's sha256 (decision 0004, section 5: a start never hashes a large body with sha256); `CIG_VALIDATE=1` and `cigcompile verify` do. The run's record carries the script's sha256 from the program's record, so `cig runs` and `--unburn` see one program at either stage.
 
-`--interp` runs a stage `b` program's script on the tree-walker instead: it reads the `source` body, checks it, and runs it as a stage `a` program runs. On a stage `a` program it changes nothing. The source runs only when asked for: a damaged bytecode is never a reason to run it.
+**A stage `c` program** is a stage `b` program in every way above, with native code beside its bytecode. Its `native` section holds machine code for some of the script's functions, each compiled for one row of argument types (ints, floats, bools and null). When the run calls such a function with arguments of one of its rows, the VM runs the native code; for any other call, and for every other function, it runs the bytecode. **What the program does is the same either way**: its output, an error's code, message and position, the statement the step budget stops on, the call the depth limit stops on. Native code makes no error of its own: where the tree-walker would raise one, it hands the place and the operands back, and the interpreter's own operator makes the error.
+
+- **The code is mapped, not read.** The first time the run calls one of the script's functions, the program reads the section, checks it against the table's sha256, reads its tables, and maps its code from its own file, read and execute, never writable: no memory is ever both. That is why the section lies on a 65,536-byte boundary of the file, the largest unit any target maps files in. A run that calls no function of the script never reads it.
+- **The section must be this program's.** Its footer names the bytecode module it was compiled from, by that module's hash; every entry names a function of that module, with that function's parameter count. A section for another module or another machine, or one whose bytes do not match the table, is not used.
+- **The bytecode is the whole program.** On a machine that cannot map the code (any system but Linux on x86-64 and aarch64 today, a file system mounted `noexec`, a policy that refuses), or with a section that is not usable, the program runs its bytecode and says nothing: nothing it does depends on the native code being used. `--cig-program` says what the section holds and whether this machine runs it. `CIG_VALIDATE=1` loads the section at the start, and a damaged one is `E1050` there.
+- **`CIG_NATIVE=0`** makes a stage `c` program run its bytecode and never load its native code: to see that the two agree, or to run only what the VM verifies.
+- **The stack is checked, not assumed.** Native code is entered only where the stack has room for the deepest chain of calls the depth limit leaves it; otherwise that call runs the bytecode.
+- **A native call needs no registers.** The ceiling on the VM's registers (`E514`, `CIG_MAX_ALLOC`) is the VM's own, which the tree-walker has not: a call that runs as native code does not count toward it.
+
+`--interp` runs a stage `b` or `c` program's script on the tree-walker instead: it reads the `source` body, checks it, and runs it as a stage `a` program runs. On a stage `a` program it changes nothing. The source runs only when asked for: a damaged bytecode is never a reason to run it.
 
 The `source` body of a stage `b` program is read only when something uses it, and checked the first time: `--interp`, `--chains`, `--light` when the name is not a chain the program declared (for the list of chains in the hint), and an error that quotes its line. When an error is reported and the `source` body does not match, the program's own error is still reported, with its position and without the quoted line, followed by `= note: the line is not shown: this program's source section is damaged (E1050): ...` (`note` in `--json`); the exit code is the program's error's.
 
@@ -86,12 +96,12 @@ Leading flags are the run's. The first word that is not a flag, or everything af
 | `--no-doctor` | no automatic diagnosis on errors |
 | `--light <chain>` | runs the program, then lights a chain it declares |
 | `--chains` | lists the chains the program declares |
-| `--interp` | runs a stage `b` program's script on the tree-walker instead of its bytecode; changes nothing on a stage `a` program |
+| `--interp` | runs a stage `b` or `c` program's script on the tree-walker instead of its bytecode; changes nothing on a stage `a` program |
 | `--unburn <run>` | puts back a past run of this program |
 | `--unburn-last N`, `--unburn-since AGE`, `--unburn-to <run>` | puts back a stretch of this program's own runs, newest first, as `cig unburn --last`, `--since` and `--to` do for any: one plan, then run by run, stopping at the first refusal (`cig unburn --continue` carries on) |
 | `--seal-key-fd N` | reads the tin's key from open descriptor `N` (Unix): the key in no file and no environment variable |
 | `--explain <code>` | what an error code means |
-| `--cig-program` | what the program is and what it was compiled from; for format 2 also its stage, level, target, runtime sha256 and section table (id, stored and decoded bytes, encoding, required, sha256), with `--json` as `sections` |
+| `--cig-program` | what the program is and what it was compiled from; for format 2 also its stage, level, target, runtime sha256 and section table (id, stored and decoded bytes, encoding, required, sha256), with `--json` as `sections`; for a stage `c` program, what its native section holds and whether this machine runs it |
 | `--help`, `-h` | the program's usage |
 
 `--max-steps`, `--unburn`, `--unburn-last`, `--unburn-since`, `--unburn-to`, `--explain`, `--light` and `--seal-key-fd` also take `--flag=value`. Exit codes are those of `cig run`: `0` ok, `1` script error, `2` syntax error, `3` usage.
@@ -122,6 +132,8 @@ The same: the kernel, burns, rollback, `--dry-run`, error positions (they point 
 
 The sha256s catch damage and truncation. They do not catch an edit, because anyone can recompute them, and they do not cover the runtime. Programs are unsigned until signing lands (cig-compile#40). A program whose bytes, record, table, sections, format or script do not match refuses to run (`E1050`). A program compiled for another cig refuses too (`E1051`).
 
+**A stage `c` program's native section is machine code.** The VM verifies bytecode before it runs any of it, and bytecode does only what the VM does for it: every effect goes through the kernel and its journal. Native code is run as it is, as the runtime's own code is. cigcompile writes native code that computes on numbers and calls nothing; the format cannot show that a given section is such code, and the sha256s say only that it is whole. So a stage `c` program is as trusted as whoever built it, in the way an executable is and a script is not: `runtime_sha256` names its runtime, not its native code, and reading its script does not tell what it runs. `--cig-program` says when a program holds native code, and `CIG_NATIVE=0` runs it without.
+
 A program knows it is one even when its trailer is gone: its payload starts where its runtime's image ends (the end of the last segment, section or header an ELF, Mach-O, universal or PE header places in the file), so a program cut short, or with bytes written after its trailer, is damaged (`E1050`), never `cig`. Two things may follow a trailer and leave a program whole: zero padding, and a PE certificate table, which Authenticode writes when a Windows program is signed after it is built (cig-compile#10).
 
 ## A program is never a general `cig`
@@ -133,9 +145,9 @@ A program's binary is `cig` for two calls only: the ashtray's background send (`
 
 ## Platforms
 
-- **Linux:** the program reads its own image through `/proc/self/exe`, so replacing or removing its path while it runs changes nothing.
-- **Windows:** it reads the file `current_exe` names.
-- **macOS:** running is tested in CI; signing is cig-compile#40.
+- **Linux:** the program reads its own image through `/proc/self/exe`, so replacing or removing its path while it runs changes nothing. A stage `c` program maps its native code from that image, on x86-64 and aarch64, and only from it: a program that cannot show its file is the image it runs uses its bytecode.
+- **Windows:** it reads the file `current_exe` names. A stage `c` program runs its bytecode.
+- **macOS:** running is tested in CI; signing is cig-compile#40. A stage `c` program runs its bytecode.
 
 ## Codes
 

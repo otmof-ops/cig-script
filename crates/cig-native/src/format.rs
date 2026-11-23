@@ -48,6 +48,10 @@ pub const ALIGN: u64 = 65_536;
 /// The most arguments an entry takes.
 pub const MAX_ARGS: usize = 8;
 
+/// The most entries one function has: the rows of argument types it is
+/// compiled for. A caller looks through them at a call.
+pub const MAX_ROWS: usize = 16;
+
 /// The most stack one call of any function in a section uses, in bytes:
 /// its frame, with the return address and the saved frame pointer. It is
 /// part of interface 1. The code generator compiles no function that
@@ -393,6 +397,11 @@ pub enum FormatError {
         /// The later entry.
         at: usize,
     },
+    /// A function has more than [`MAX_ROWS`] entries.
+    TooManyRows {
+        /// The first entry past the limit.
+        at: usize,
+    },
     /// An entry sorts before the one it follows (by function, then by
     /// argument types).
     EntriesOutOfOrder {
@@ -486,6 +495,11 @@ impl fmt::Display for FormatError {
                 value,
                 align,
             } => write!(f, "{what} ({at}) is {value}, not a multiple of {align}"),
+            TooManyRows { at } => write!(
+                f,
+                "entry {at} is its function's entry number {}, and a function has at most {MAX_ROWS}",
+                MAX_ROWS + 1
+            ),
             ArgCountDiffers { at } => write!(
                 f,
                 "entry {at} has another argument count than the entry before it, of the same function"
@@ -523,7 +537,7 @@ impl std::error::Error for FormatError {}
 /// Entries: at most [`MAX_ARGS`] arguments; an offset inside the code and
 /// a multiple of the architecture's instruction size; sorted by function
 /// and then by argument types, no two alike; one argument count a
-/// function.
+/// function, and at most [`MAX_ROWS`] entries of it.
 ///
 /// Sites: a span that does not end before it starts, and only what its
 /// kind uses, with every other field zero:
@@ -547,6 +561,7 @@ fn check(arch: Arch, code_len: u32, entries: &[Entry], sites: &[Site]) -> Result
         });
     }
     let mut prev: Option<&Entry> = None;
+    let mut rows = 0;
     for (at, e) in entries.iter().enumerate() {
         if e.args.len() > MAX_ARGS {
             return Err(FormatError::TooManyArgs {
@@ -571,7 +586,7 @@ fn check(arch: Arch, code_len: u32, entries: &[Entry], sites: &[Site]) -> Result
         }
         if let Some(p) = prev {
             match p.func.cmp(&e.func) {
-                Ordering::Less => {}
+                Ordering::Less => rows = 0,
                 Ordering::Greater => return Err(FormatError::EntriesOutOfOrder { at }),
                 Ordering::Equal => {
                     if p.args.len() != e.args.len() {
@@ -584,6 +599,10 @@ fn check(arch: Arch, code_len: u32, entries: &[Entry], sites: &[Site]) -> Result
                     }
                 }
             }
+        }
+        rows += 1;
+        if rows > MAX_ROWS {
+            return Err(FormatError::TooManyRows { at });
         }
         prev = Some(e);
     }

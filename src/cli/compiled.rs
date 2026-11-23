@@ -7,7 +7,7 @@
 //! docs/PROGRAMS.md.
 
 use super::{exit, run, Ctx, RunArgs};
-use crate::program::{Loaded, Opened, Stage, Unrunnable};
+use crate::program::{Loaded, Opened, Unrunnable};
 use std::path::PathBuf;
 
 /// What a program's command line asked for.
@@ -322,9 +322,10 @@ pub fn main(p: Opened) -> i32 {
         stats: None,
         args: o.args,
     };
-    // A stage `b` program runs its bytecode on the VM, or its script on
+    // A stage `b` or `c` program runs its bytecode on the VM (a stage
+    // `c` program's native code is called from there), or its script on
     // the tree-walker when `--interp` asks; never one for the other.
-    let engine = if p.stage() == Stage::B && !o.interp {
+    let engine = if p.stage().on_the_vm() && !o.interp {
         run::Engine::Bytecode
     } else {
         run::Engine::Source
@@ -336,7 +337,7 @@ pub fn main(p: Opened) -> i32 {
 
 /// `--cig-program`: the record without the script and, for format 2, the
 /// section table. A format 1 program prints what it always did.
-fn info(ctx: &Ctx, p: &Loaded) {
+fn info(ctx: &Ctx, p: &Opened) {
     let mut v = p.summary();
     v["runtime"] = serde_json::json!(crate::VERSION);
     if p.format() >= 2 {
@@ -371,6 +372,37 @@ fn info(ctx: &Ctx, p: &Loaded) {
             e.sha256_hex()
         );
     }
+    if let Some(n) = native_summary(p) {
+        outln!("  native code    {n}");
+    }
+}
+
+/// What a stage `c` program's native section holds and whether this
+/// machine runs it, in a line: the section is read and checked, and
+/// nothing is mapped. `None` for a program without one.
+fn native_summary(p: &Opened) -> Option<String> {
+    use crate::native::Unused;
+    if p.stage().on_the_vm() && !crate::program::native_by_env() {
+        return p
+            .entry(crate::program::NATIVE_SECTION)
+            .map(|_| "not loaded, CIG_NATIVE=0 says: the bytecode runs".to_string());
+    }
+    let source = crate::native::Source::of(p)?;
+    let arch = |a: cig_native::Arch| match a {
+        cig_native::Arch::X86_64 => "x86-64",
+        cig_native::Arch::Aarch64 => "aarch64",
+    };
+    Some(match source.describe() {
+        Ok((a, n)) if cig_native::Arch::host() == Some(a) => {
+            format!("{n} entries for {}, this machine's", arch(a))
+        }
+        Ok((a, n)) => format!(
+            "{n} entries for {}, not this machine's: the bytecode runs",
+            arch(a)
+        ),
+        Err(Unused::Unsupported) => "not loaded on this system: the bytecode runs".to_string(),
+        Err(e) => format!("{e}: the bytecode runs"),
+    })
 }
 
 /// The diagnostic for a damaged program (E1050).

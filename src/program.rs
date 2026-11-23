@@ -200,6 +200,12 @@ pub const MAX_SECTIONS: u64 = 32;
 pub const MAX_PAYLOAD2: u64 = 64 * 1024 * 1024;
 /// Every body starts at a file offset that is a multiple of this.
 pub const ALIGN: u64 = 16;
+/// The section that holds a stage `c` program's native code.
+pub const NATIVE_SECTION: &str = "native";
+/// Section `native`'s body starts at a file offset that is a multiple of
+/// this instead: the largest unit any target maps a file in, so the
+/// program maps its code where it lies in its own file.
+pub const NATIVE_ALIGN: u64 = cig_native::ALIGN;
 /// A script this long or longer is kept DEFLATE-compressed.
 pub const DEFLATE_FROM: usize = 4096;
 /// The one DEFLATE level the writer uses, so the same text gives the same bytes.
@@ -209,6 +215,9 @@ pub const DEFLATE_LEVEL: u32 = 9;
 pub const KNOWN_SECTIONS: [&str; 5] = ["source", "bytecode", "tree", "snap", "sbom"];
 /// `CIG_VALIDATE=1`: a start hashes and validates every section before it runs.
 pub const VALIDATE_ENV: &str = "CIG_VALIDATE";
+/// `CIG_NATIVE=0`: a stage `c` program runs its bytecode and never loads
+/// its native code.
+pub const NATIVE_ENV: &str = "CIG_NATIVE";
 
 /// Which body a format 2 program runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -219,14 +228,20 @@ pub enum Stage {
     /// The `bytecode` section, on the VM.
     #[serde(rename = "b")]
     B,
+    /// The `bytecode` section, on the VM, which calls the `native`
+    /// section's code for the functions it holds. On a machine that
+    /// cannot map that code the program runs as a stage `b` program.
+    #[serde(rename = "c")]
+    C,
 }
 
 impl Stage {
-    /// `a` or `b`, as the record writes it.
+    /// `a`, `b` or `c`, as the record writes it.
     pub fn as_str(self) -> &'static str {
         match self {
             Stage::A => "a",
             Stage::B => "b",
+            Stage::C => "c",
         }
     }
 
@@ -234,8 +249,22 @@ impl Stage {
     pub fn needs(self) -> &'static str {
         match self {
             Stage::A => "source",
-            Stage::B => "bytecode",
+            Stage::B | Stage::C => "bytecode",
         }
+    }
+
+    /// The program's own code runs on the VM.
+    pub fn on_the_vm(self) -> bool {
+        matches!(self, Stage::B | Stage::C)
+    }
+}
+
+/// The alignment of section `id`'s body in the file.
+fn align_of(id: &str) -> u64 {
+    if id == NATIVE_SECTION {
+        NATIVE_ALIGN
+    } else {
+        ALIGN
     }
 }
 
@@ -554,7 +583,20 @@ pub fn append2(runtime: &[u8], b: &Build) -> Result<Vec<u8>, String> {
         b.source.as_bytes(),
     )?];
     for s in &b.sections {
+        if s.id == NATIVE_SECTION && s.encoding != Encoding::Stored {
+            return Err(
+                "section `native` is stored as it is: a program maps it from its file".to_string(),
+            );
+        }
         bodies.push(place(&s.id, s.version, s.encoding, s.required, &s.bytes)?);
+    }
+    let native = b.sections.iter().any(|s| s.id == NATIVE_SECTION);
+    if native != (b.stage == Stage::C) {
+        return Err(format!(
+            "a stage `{}` program has {} section `native`",
+            b.stage.as_str(),
+            if native { "no" } else { "a" },
+        ));
     }
     for w in bodies.windows(2) {
         if order_key(&w[0].entry.raw_id) >= order_key(&w[1].entry.raw_id) {
@@ -585,7 +627,8 @@ fn assemble(runtime: &[u8], record: &[u8], bodies: Vec<Placed>) -> Result<Vec<u8
     let mut payload = record.to_vec();
     let mut table = Vec::with_capacity(bodies.len() * ENTRY_LEN as usize);
     for mut b in bodies {
-        let pad = (ALIGN - (p + payload.len() as u64) % ALIGN) % ALIGN;
+        let align = align_of(b.entry.id());
+        let pad = (align - (p + payload.len() as u64) % align) % align;
         payload.resize(payload.len() + pad as usize, 0);
         b.entry.offset = payload.len() as u64;
         payload.extend_from_slice(&b.stored);
@@ -891,7 +934,8 @@ impl Loaded {
     /// The table's rules and the stage's sections (a format 1 program was
     /// checked whole when it was read). Each rule refused names itself.
     /// Reads only the zero padding between the record, the bodies and the
-    /// table: at most 15 bytes before each body and before the table.
+    /// table: at most 15 bytes before each body and before the table, and
+    /// less than [`NATIVE_ALIGN`] before section `native`.
     pub fn check<F: Read + Seek>(&mut self, f: &mut F) -> Result<(), String> {
         let start = self.start;
         let Inner::Two(t) = &mut self.inner else {
@@ -958,12 +1002,26 @@ impl Loaded {
             let Some(end) = end else {
                 return Err(format!("section `{id}` runs into the section table"));
             };
-            if start.checked_add(e.offset).map(|o| o % ALIGN) != Some(0) {
+            let align = align_of(id);
+            if start.checked_add(e.offset).map(|o| o % align) != Some(0) {
                 return Err(format!(
-                    "section `{id}` does not start at a file offset that is a multiple of 16"
+                    "section `{id}` does not start at a file offset that is a multiple of {align}"
                 ));
             }
-            zero_gap(f, start, prev_end, e.offset, &format!("section `{id}`"))?;
+            if id == NATIVE_SECTION && encoding != Encoding::Stored {
+                return Err(
+                    "section `native` is not stored as it is, and a program maps it from its file"
+                        .to_string(),
+                );
+            }
+            zero_gap(
+                f,
+                start,
+                prev_end,
+                e.offset,
+                align,
+                &format!("section `{id}`"),
+            )?;
             prev_end = end;
             if id == "source" && e.version != 1 {
                 return Err(format!(
@@ -972,7 +1030,7 @@ impl Loaded {
                 ));
             }
         }
-        zero_gap(f, start, prev_end, t.table_at, "the section table")?;
+        zero_gap(f, start, prev_end, t.table_at, ALIGN, "the section table")?;
         for e in &t.entries {
             if e.required() && !KNOWN_SECTIONS.contains(&e.id()) {
                 return Err(format!(
@@ -986,6 +1044,19 @@ impl Loaded {
             return Err(format!(
                 "a stage `{}` program needs section `{needs}`, and this one has none",
                 t.record.stage.as_str()
+            ));
+        }
+        // Native code is what makes a program stage `c`, and only a
+        // stage `c` program has any. The section is never needed to run
+        // (the bytecode is whole): a machine that cannot map it runs the
+        // program without it.
+        let native = t.entries.iter().any(|e| e.id() == NATIVE_SECTION);
+        if native != (t.record.stage == Stage::C) {
+            return Err(format!(
+                "a stage `{}` program has {} section `native`, and this one has {}",
+                t.record.stage.as_str(),
+                if native { "no" } else { "a" },
+                if native { "one" } else { "none" },
             ));
         }
         t.checked = true;
@@ -1077,7 +1148,11 @@ impl Loaded {
     /// against the record (`CIG_VALIDATE=1`, and `cigcompile verify`).
     pub fn validate<F: Read + Seek>(&self, f: &mut F) -> Result<(), String> {
         for e in self.table() {
-            self.body(f, e.id())?;
+            let body = self.body(f, e.id())?;
+            if e.id() == NATIVE_SECTION {
+                cig_native::Tables::parse(&body)
+                    .map_err(|e| format!("section `native` does not read: {e}"))?;
+            }
         }
         if self.entry("source").is_some() {
             self.source(f)?;
@@ -1087,16 +1162,17 @@ impl Loaded {
 }
 
 /// The zero padding from `from` to `to` (offsets from `start`): shorter
-/// than [`ALIGN`], and all zeros.
+/// than `align`, the alignment of what it lies before, and all zeros.
 fn zero_gap<F: Read + Seek>(
     f: &mut F,
     start: u64,
     from: u64,
     to: u64,
+    align: u64,
     before: &str,
 ) -> Result<(), String> {
     let gap = to - from;
-    if gap >= ALIGN {
+    if gap >= align {
         return Err(format!(
             "{gap} bytes lie before {before}, more than its alignment needs"
         ));
@@ -1168,11 +1244,43 @@ impl Opened {
     pub fn bytecode(&self) -> Result<Vec<u8>, String> {
         self.program.bytecode(&mut &self.file)
     }
+
+    /// Where section `id`'s stored bytes lie in the program's own file,
+    /// with the sha256 the table gives for them: what a section that is
+    /// mapped, not read, is found by. `None` when the checked table has
+    /// no such section.
+    pub fn place(&self, id: &str) -> Option<Place<'_>> {
+        let e = self.program.entry(id)?;
+        Some(Place {
+            file: &self.file,
+            offset: self.program.start.checked_add(e.offset)?,
+            len: e.length,
+            sha256: e.sha256,
+        })
+    }
+}
+
+/// Where a section's stored bytes lie ([`Opened::place`]).
+pub struct Place<'a> {
+    /// The program's own file.
+    pub file: &'a std::fs::File,
+    /// The body's offset in the file.
+    pub offset: u64,
+    /// The body's stored length.
+    pub len: u64,
+    /// sha256 of the stored bytes, as the section table gives it.
+    pub sha256: [u8; 32],
 }
 
 /// `CIG_VALIDATE=1` is set.
 pub fn validate_by_env() -> bool {
     std::env::var_os(VALIDATE_ENV).is_some_and(|v| v == "1")
+}
+
+/// A stage `c` program may run its native code: `CIG_NATIVE=0` is not
+/// set.
+pub fn native_by_env() -> bool {
+    std::env::var_os(NATIVE_ENV).is_none_or(|v| v != "0")
 }
 
 /// Does `bytes` end in a trailer of either format (a program, damaged or not)?
@@ -1322,7 +1430,7 @@ fn at_trailer<F: Read + Seek>(f: &mut F, at: u64, t: &[u8]) -> Result<Loaded, St
 }
 
 /// `len` bytes of `f` from `at`, all of them.
-fn read_at<F: Read + Seek>(f: &mut F, at: u64, len: u64) -> Result<Vec<u8>, String> {
+pub(crate) fn read_at<F: Read + Seek>(f: &mut F, at: u64, len: u64) -> Result<Vec<u8>, String> {
     f.seek(SeekFrom::Start(at)).map_err(|e| e.to_string())?;
     let mut b = Vec::new();
     f.by_ref()
@@ -2381,7 +2489,8 @@ mod tests {
         // either; at the trailer it is refused by its own rule.
         refused(&b, "does not start with {\"format\":");
         let mut b = good.clone();
-        edit_record(&mut b, "\"stage\":\"a\"", "\"stage\":\"c\"");
+        // A stage this cig does not have.
+        edit_record(&mut b, "\"stage\":\"a\"", "\"stage\":\"d\"");
         refused(&b, "the program's record does not read");
         let mut b = good.clone();
         edit_record(&mut b, "{\"format\":2,", "{\"format\":3,");
@@ -2544,6 +2653,129 @@ mod tests {
         let mut b = good;
         b[l.start as usize + extra.offset as usize - 1] = 1;
         refused(&b, "the padding before section `zz-test` is not zero");
+    }
+
+    /// A native section's body that reads: five bytes of code and no
+    /// entry.
+    fn native_body() -> Vec<u8> {
+        cig_native::Section {
+            arch: cig_native::Arch::X86_64,
+            module: [7; 32],
+            code: vec![0xC3; 5],
+            entries: Vec::new(),
+            sites: Vec::new(),
+        }
+        .to_bytes()
+        .unwrap()
+    }
+
+    /// A stage `c` build: `build2` with a `bytecode` and a `native`
+    /// section.
+    fn build_c() -> Build {
+        let mut b = build2();
+        b.stage = Stage::C;
+        for (id, required, bytes) in [
+            ("bytecode", true, b"CIGB".to_vec()),
+            (NATIVE_SECTION, false, native_body()),
+        ] {
+            b.sections.push(Section {
+                id: id.to_string(),
+                version: 1,
+                encoding: Encoding::Stored,
+                required,
+                bytes,
+            });
+        }
+        b
+    }
+
+    #[test]
+    fn rule_native_code_lies_where_it_can_be_mapped() {
+        let good = make2(&build_c());
+        let l = read2(&good).unwrap();
+        assert_eq!(l.stage(), Stage::C);
+        assert_eq!(l.record().unwrap().stage.as_str(), "c");
+        assert!(l.stage().on_the_vm() && Stage::B.on_the_vm() && !Stage::A.on_the_vm());
+        l.validate(&mut Cursor::new(&good)).unwrap();
+        // The table lists it last, after the sections this cig knows.
+        let ids: Vec<&str> = l.table().iter().map(Entry::id).collect();
+        assert_eq!(ids, ["source", "bytecode", NATIVE_SECTION]);
+        let (bc, n) = (
+            l.entry("bytecode").unwrap().clone(),
+            l.entry(NATIVE_SECTION).unwrap().clone(),
+        );
+        // On a 64 KiB boundary of the file, behind zeros that stop short
+        // of 64 KiB; every other body on its 16.
+        assert_eq!((l.start + n.offset) % NATIVE_ALIGN, 0);
+        let gap = n.offset - (bc.offset + bc.length);
+        assert!((ALIGN..NATIVE_ALIGN).contains(&gap), "{gap}");
+        assert_eq!((l.start + bc.offset) % ALIGN, 0);
+        // Sixteen bytes on: where any other body may start, and not this.
+        let mut b = good.clone();
+        set_u64(&mut b, entry_byte(&good, 2, 16), n.offset + 16);
+        set_u64(&mut b, entry_byte(&good, 2, 24), n.length - 16);
+        set_u32(&mut b, entry_byte(&good, 2, 12), n.decoded_len - 16);
+        reseal(&mut b);
+        refused(
+            &b,
+            "section `native` does not start at a file offset that is a multiple of 65536",
+        );
+        // The padding is not hashed: every byte of it is zero.
+        for at in [bc.offset + bc.length, n.offset - 1] {
+            let mut b = good.clone();
+            b[(l.start + at) as usize] = 1;
+            refused(&b, "the padding before section `native` is not zero");
+        }
+        // It is mapped from the file, so it is kept as it is.
+        let mut b = good.clone();
+        b[entry_byte(&good, 2, 10)] = Encoding::Deflate.code();
+        reseal(&mut b);
+        refused(
+            &b,
+            "section `native` is not stored as it is, and a program maps it from its file",
+        );
+    }
+
+    #[test]
+    fn rule_native_code_is_a_stage_c_programs_and_only_its() {
+        // The writer.
+        let made = |b: &Build| append2(&tiny_elf(), b).unwrap_err();
+        let mut b = build_c();
+        b.stage = Stage::B;
+        assert_eq!(made(&b), "a stage `b` program has no section `native`");
+        let mut b = build_c();
+        b.sections.pop();
+        assert_eq!(made(&b), "a stage `c` program has a section `native`");
+        let mut b = build_c();
+        b.sections[1].encoding = Encoding::Deflate;
+        assert_eq!(
+            made(&b),
+            "section `native` is stored as it is: a program maps it from its file"
+        );
+        // The reader, on a record that says the other stage.
+        let mut bytes = make2(&build_c());
+        edit_record(&mut bytes, "\"stage\":\"c\"", "\"stage\":\"b\"");
+        refused(
+            &bytes,
+            "a stage `b` program has no section `native`, and this one has one",
+        );
+        let mut b = build_c();
+        b.stage = Stage::B;
+        b.sections.pop();
+        let mut bytes = make2(&b);
+        edit_record(&mut bytes, "\"stage\":\"b\"", "\"stage\":\"c\"");
+        refused(
+            &bytes,
+            "a stage `c` program has a section `native`, and this one has none",
+        );
+        // A section that does not read is found by the check of every
+        // section, and by nothing before it: a start reads no body.
+        let mut b = build_c();
+        b.sections[1].bytes = b"not a native section".to_vec();
+        let bytes = make2(&b);
+        let l = read2(&bytes).unwrap();
+        let e = l.validate(&mut Cursor::new(&bytes)).unwrap_err();
+        assert!(e.starts_with("section `native` does not read: "), "{e}");
     }
 
     #[test]

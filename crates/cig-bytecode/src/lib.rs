@@ -46,7 +46,7 @@ pub use module::{
     MAX_REG_COUNT, RESERVED_U32,
 };
 pub use opcode::{Op, OpInfo, OperandKind};
-pub use parse::{parse_module, FunctionHead, Reader};
+pub use parse::{module_hash, parse_module, FunctionHead, Reader};
 pub use serialize::serialize_module;
 pub use verify::{
     verify_function, verify_module, verify_upvalues, ParentCounts, Place, Verified,
