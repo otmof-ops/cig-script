@@ -518,6 +518,7 @@ pub fn entry() -> i32 {
     // The mark itself, not its length (a constant LTO folds): its bytes
     // stay in the binary for cigcompile to read.
     std::hint::black_box(crate::program::RUNTIME_MARK);
+    std::hint::black_box(crate::program::STAGES_MARK);
     crate::crash::install_hook();
     let program = crate::program::own();
     if program.is_none() {

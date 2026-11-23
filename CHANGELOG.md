@@ -35,6 +35,9 @@ project follows semantic versioning.
   - `cig-native`: a function has at most 16 entries, and the context's
     `steps_left` is -1 at a budget exit (the mark that spent the budget
     is counted), both now rules the runtime holds native code to.
+  - A cig says in its own bytes which stages of program it runs
+    (`program::runtime_stages`), beside its version, so a compiler does
+    not build a stage `c` program on a runtime that cannot run one.
   - `cigscript::lower::lowered_with_cir` gives a compiler the IR a
     module was lowered from and the IR function behind each of the
     module's functions; `cig_bytecode::module_hash` and `Reader::hash`

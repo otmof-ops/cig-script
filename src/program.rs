@@ -96,6 +96,38 @@ pub fn runtime_version(bytes: &[u8]) -> Option<String> {
     None
 }
 
+/// Every cig says which stages of program it runs in its own bytes,
+/// beside its version, where cigcompile reads it without running the
+/// binary: `\0cig-runtime-stages=abc\0`. A compiler does not build a
+/// program on a runtime that does not run its stage. [`crate::cli::entry`]
+/// reads it once, so no linker drops it.
+pub static STAGES_MARK: &str = "\0cig-runtime-stages=abc\0";
+
+/// The stages a cig binary's bytes say it runs ([`STAGES_MARK`]), as
+/// their letters. A binary without the mark is a cig from before stage
+/// `c`, which runs `a` and `b`.
+pub fn runtime_stages(bytes: &[u8]) -> String {
+    // The mark without its letters: taken from the mark, so this search
+    // adds no second copy of the text for it to find.
+    let needle = &STAGES_MARK.as_bytes()[..STAGES_MARK.len() - 4];
+    for at in memchr::memmem::find_iter(bytes, needle) {
+        let start = at + needle.len();
+        let rest = &bytes[start..bytes.len().min(start + 9)];
+        if let Some(end) = rest.iter().position(|b| *b == 0) {
+            let v = &rest[..end];
+            if !v.is_empty() && v.iter().all(|b| matches!(b, b'a'..=b'c')) {
+                return String::from_utf8_lossy(v).to_string();
+            }
+        }
+    }
+    "ab".to_string()
+}
+
+/// The cig binary in `bytes` runs programs of `stage`.
+pub fn runtime_runs(bytes: &[u8], stage: Stage) -> bool {
+    runtime_stages(bytes).contains(stage.as_str())
+}
+
 static RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Note that this process is a compiled program (the front end calls it
@@ -1881,6 +1913,34 @@ mod tests {
         let back = back.format1().unwrap().clone();
         assert_eq!(back, sample());
         assert_eq!(back.cig, crate::VERSION);
+    }
+
+    #[test]
+    fn a_runtime_says_the_stages_it_runs_in_its_bytes() {
+        // This cig's own mark.
+        let mut bytes = b"junk \0cig-runtime-stages=\x01 more".to_vec();
+        bytes.extend_from_slice(STAGES_MARK.as_bytes());
+        bytes.extend_from_slice(b"tail");
+        assert_eq!(runtime_stages(&bytes), "abc");
+        for stage in [Stage::A, Stage::B, Stage::C] {
+            assert!(runtime_runs(&bytes, stage), "{}", stage.as_str());
+        }
+        // A cig from before the mark runs `a` and `b`.
+        for old in [&b"no mark here"[..], b"\0cig-runtime-version=1.25.0\0"] {
+            assert_eq!(runtime_stages(old), "ab");
+            assert!(runtime_runs(old, Stage::B) && !runtime_runs(old, Stage::C));
+        }
+        // What follows the mark's text is stage letters and a zero, or
+        // it is not the mark.
+        for not in [
+            &b"\0cig-runtime-stages=\0"[..],
+            b"\0cig-runtime-stages=abd\0",
+            b"\0cig-runtime-stages=abc",
+            b"\0cig-runtime-stages=abcabcabcabc\0",
+        ] {
+            assert_eq!(runtime_stages(not), "ab");
+        }
+        assert_eq!(runtime_stages(b"\0cig-runtime-stages=ab\0"), "ab");
     }
 
     #[test]

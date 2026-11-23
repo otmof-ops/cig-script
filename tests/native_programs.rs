@@ -360,6 +360,15 @@ fn prints(rest: &str) -> String {
 
 // ----- the section in the program --------------------------------------
 
+/// The `cig` these programs are built on says, in its bytes, that it
+/// runs stage `c` programs: what a compiler reads before it builds one.
+#[test]
+fn the_cig_binary_says_it_runs_stage_c_programs() {
+    let bytes = fs::read(env!("CARGO_BIN_EXE_cig")).unwrap();
+    assert_eq!(program::runtime_stages(&bytes), "abc");
+    assert!(program::runtime_runs(&bytes, Stage::C));
+}
+
 #[test]
 fn a_programs_native_section_lies_on_a_64_kib_boundary_behind_zeros() {
     let s = Sandbox::new();
