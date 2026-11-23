@@ -382,12 +382,15 @@ fn info(ctx: &Ctx, p: &Opened) {
 /// nothing is mapped. `None` for a program without one.
 fn native_summary(p: &Opened) -> Option<String> {
     use crate::native::Unused;
-    if p.stage().on_the_vm() && !crate::program::native_by_env() {
-        return p
-            .entry(crate::program::NATIVE_SECTION)
-            .map(|_| "not loaded, CIG_NATIVE=0 says: the bytecode runs".to_string());
+    p.entry(crate::program::NATIVE_SECTION)?;
+    if !crate::program::native_by_env() {
+        return Some("not loaded, CIG_NATIVE=0 says: the bytecode runs".to_string());
     }
-    let source = crate::native::Source::of(p)?;
+    // No source: this system has no loader, or the program's file is
+    // not the image it runs.
+    let Some(source) = crate::native::Source::of(p) else {
+        return Some("not loaded on this system: the bytecode runs".to_string());
+    };
     let arch = |a: cig_native::Arch| match a {
         cig_native::Arch::X86_64 => "x86-64",
         cig_native::Arch::Aarch64 => "aarch64",
