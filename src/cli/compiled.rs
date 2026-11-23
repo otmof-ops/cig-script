@@ -395,12 +395,17 @@ fn native_summary(p: &Opened) -> Option<String> {
         cig_native::Arch::X86_64 => "x86-64",
         cig_native::Arch::Aarch64 => "aarch64",
     };
+    let entries = |n: usize| match n {
+        1 => "1 entry".to_string(),
+        n => format!("{n} entries"),
+    };
     Some(match source.describe() {
         Ok((a, n)) if cig_native::Arch::host() == Some(a) => {
-            format!("{n} entries for {}, this machine's", arch(a))
+            format!("{} for {}, this machine's", entries(n), arch(a))
         }
         Ok((a, n)) => format!(
-            "{n} entries for {}, not this machine's: the bytecode runs",
+            "{} for {}, not this machine's: the bytecode runs",
+            entries(n),
             arch(a)
         ),
         Err(Unused::Unsupported) => "not loaded on this system: the bytecode runs".to_string(),

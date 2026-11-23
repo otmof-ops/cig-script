@@ -169,9 +169,15 @@ cough {message: "no space", code: 28} # or a map; extra keys ride along
 try {
   risky()
 } ashtray err {
-  exhale err.message, err.kind, err.line, err.code
+  exhale err.message, err.kind, err.line
+  exhale err?.code                    # an extra key: null when it was raised without one
 }
 ```
+
+A caught error is a map: `message`, `kind` and `line` are always there,
+and the keys of a map it was raised with ride along. Reading a key it
+does not have is an error like any other map's (`E505`), so an extra key
+is read with `?.`.
 
 `finally { }` after the `ashtray` block (or straight after `try`, with no
 `ashtray`) runs whatever happened: after a normal exit, after a caught or
