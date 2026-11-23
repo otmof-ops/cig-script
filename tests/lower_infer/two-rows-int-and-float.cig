@@ -1,0 +1,6 @@
+pull dbl(x) {
+  snuff x + x
+}
+stick a = dbl(2)
+stick b = dbl(2.5)
+exhale a, b

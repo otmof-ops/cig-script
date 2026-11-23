@@ -1,0 +1,7 @@
+pull fib(n) {
+  if n < 2 {
+    snuff n
+  }
+  snuff fib(n - 1) + fib(n - 2)
+}
+exhale fib(10)

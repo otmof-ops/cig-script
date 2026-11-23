@@ -66,6 +66,80 @@ the IR after each pass. A stage `b` program's bytecode is lowered at
 program records the level, so `verify --script` lowers it again the
 same way; a stage `a` program runs the script, whatever the level.
 
+### Types across calls
+
+`cigscript::lower::cir::infer` is an analysis of CIR that assigns a type
+(one of `null`, `bool`, `int`, `float`, `str`, `list`, `map`, `func` or
+`dynamic`, with `dynamic` on top) to every value and slot of every
+function reachable from the top level, under each row of argument types
+the top level makes that function see.
+
+The unit is a specialization: one function and one row of argument types.
+A function keeps at most three rows; when a fourth is asked for, the
+function collapses to a single row of all `dynamic`, and the three
+previous rows are dropped. The cap is cig-compile's
+[decision 0005](https://github.com/otmof-ops/cig-compile/blob/main/docs/decisions/0005-what-goes-native-first.md)'s.
+
+**What a type promises.** When the analysis gives a value, a variable or
+a function's result any type but `dynamic`, then in every run in which
+that function is entered with arguments of that row, it has that type.
+`dynamic` promises nothing. Code compiled from the analysis holds values
+as their type with no check, so wherever a rule cannot be shown to hold
+the answer is `dynamic`.
+
+The analysis is structural. A value's type comes from the operands, by
+the same rule the interpreter follows in `src/interp/ops.rs`: an `Int`
+plus an `Int` is `Int`, an `Int` plus a `Float` is `Float`, an `Int`
+divided by an `Int` is `dynamic` (it is `Int` when the division is exact
+and `Float` when it is not, so neither answer is sound), the orderings
+return `Bool` when they return at all, `==` and `!=` are `Bool` whatever
+the operands. A slot's type in its owner is the join of every `decl` and
+`store` to it in the owner, and for a parameter also its row type. A
+`foreach` variable is `Int` when its iterator is `int..int` and
+`dynamic` otherwise; a `catch` variable is `dynamic`.
+
+Captures follow one rule each, decided from `VarInfo` alone, before any
+walk, so the answer cannot depend on the order the worklist happens to
+process functions in:
+
+- A slot that is **`mutable` and `captured`** is `dynamic` everywhere:
+  in its owner's own slots (set before any walk) and at every `load` of
+  it by any function. A `store` from an inner function to such a slot
+  touches nothing in the inner function's spec (the slot does not
+  belong to it); it does not raise the owner's slot above `dynamic`
+  either, because the owner's slot is already there.
+- A `load` of a slot by a function that does not own it reads the IR's
+  own static type of the slot's one `decl` value
+  (`Func::vals[val].ty`): a constant stays its constant type, a
+  closure is `func`, a list is `list`; anything the lowering could not
+  type statically is `dynamic`. That type depends on no row and no
+  spec, so a later call that gives the owner a new row cannot make the
+  reader go stale. The owner's own loads of the same immutable slot
+  still read the owner's spec slot (which is the `decl`'s value type
+  under the owner's row): V1 and `Builder::early_use`
+  (`src/lower/cir/lower.rs`, "A name read before its declaration")
+  make every such load run after the `decl`.
+
+Recursion and loops reach a fixed point: a specialization under
+inference answers its current return type (which starts as "nothing
+reached yet" and is reported `dynamic` if the walk ends with no result
+reaching it), and dependents are re-walked when the answer moves up.
+Every move is one step up a lattice of height two, and rows are
+capped at three per function, so the walk ends.
+
+A `Spec`'s type for a value or a slot is sound: in every run that
+enters the function with its row of arguments, the value is of the
+listed type (or the type is `dynamic`, which promises nothing). What
+`dynamic` means: the analysis could not prove a single type for every
+run. Code that cannot run is walked (nothing is pruned), and a value
+left at bottom there is reported `dynamic`.
+
+Nothing in `cig run` or stage `a` and stage `b` reads the inference yet:
+stage `c` (otmof-ops/cig-script#256) uses it to pick the
+specializations a program carries native code for; the VM's call
+chooses between the bytecode and a native entry by the tags of the
+arguments, independent of what the inference said.
+
 ### The bytecode lowering
 
 `src/lower/bc` lowers verified IR to the register bytecode of

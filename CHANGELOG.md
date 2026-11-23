@@ -18,6 +18,18 @@ project follows semantic versioning.
   a call is checked against its entry. The loader is built for Linux on
   x86-64 and aarch64, and every `unsafe` block of the crate is in it.
   Nothing in `cig` uses the crate yet.
+- **Types across calls** (`cigscript::lower::cir::infer`,
+  `docs/LOWERING.md`): an analysis of the IR that gives every value and
+  variable of every function a type, for each row of argument types the
+  script calls the function with. A call's argument types are the row
+  its callee is inferred under, and the callee's result is the call's
+  type; a function keeps at most three rows, and a fourth makes it
+  `dynamic` in every argument. A type other than `dynamic` holds in
+  every run: a variable another function can write is `dynamic`
+  everywhere, and an `int` divided by an `int` is `dynamic` (an `int`
+  when it divides, a `float` when it does not). It is what a stage `c`
+  program's native code is compiled from (cig-compile's decision 0005).
+  Nothing in `cig` runs it: no behavior changes.
 - **The engines measured on cig 1.25.0 as released**
   (`docs/ENGINES-1.25.0.md`, `docs/ENGINES-FIRST-RUNS-1.25.0.md`,
   `bench/results/1.25.0-engines/`). The 1.25.0 notes carry figures from a

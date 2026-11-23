@@ -7,6 +7,7 @@
 //! every pass. Stage B's bytecode is lowered from it.
 
 pub mod effects;
+pub mod infer;
 pub mod ir;
 pub mod lower;
 pub mod names;

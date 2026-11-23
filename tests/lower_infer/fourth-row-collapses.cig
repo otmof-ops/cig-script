@@ -1,0 +1,8 @@
+pull pick(x) {
+  snuff x
+}
+stick a = pick(1)
+stick b = pick(1.5)
+stick c = pick("s")
+stick d = pick(true)
+exhale a, b, c, d
