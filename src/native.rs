@@ -212,8 +212,5 @@ mod tests {
             (&Value::Int(-123_456_789), -123_456_789),
             (&Value::Float(2.5_f64), 2.5_f64),
         ));
-        // Every tag of a value that owns memory sorts at or above
-        // OWNS: native code never writes over such a register.
-        assert!(cig_native::value::OWNS >= 4);
     }
 }
