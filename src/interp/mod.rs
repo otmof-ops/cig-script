@@ -5,7 +5,10 @@
 
 pub mod env;
 mod eval;
-pub(crate) mod ops;
+/// The operators on two values, and negation: what `a + b` gives for any
+/// pair, or the error it raises. Public so the compiler can hold its
+/// native code to them in its own tests.
+pub mod ops;
 pub(crate) mod record;
 
 pub(crate) use eval::{

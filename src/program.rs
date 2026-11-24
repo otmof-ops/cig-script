@@ -2724,6 +2724,8 @@ mod tests {
             code: vec![0xC3; 5],
             entries: Vec::new(),
             sites: Vec::new(),
+            bodies: Vec::new(),
+            rule: cig_native::Rule::None,
         }
         .to_bytes()
         .unwrap()

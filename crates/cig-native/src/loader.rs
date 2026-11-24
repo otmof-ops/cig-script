@@ -23,6 +23,94 @@
 use crate::format::{Arch, Tables, MAX_ARGS};
 use crate::Context;
 
+/// How a body, or [`Host::run`], came back: the low 32 bits are a pc,
+/// and the bits from 32 up say what happened there.
+///
+/// | bits 32.. | name          | meaning                                                                                                  |
+/// |---:|---|---|
+/// | 0 | [`Stop::At`]     | the bytecode goes on at this pc. The frame is whole and `steps_left` and `nest` in the context are current |
+/// | 1 | [`Stop::Raised`] | a helper raised while the frame's pc was this one. The host holds the error                              |
+/// | 2 | [`Stop::Defect`] | a register was not of its proven type when native code read it from the frame at this pc: a compiler bug |
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Stop {
+    /// The bytecode goes on at this pc.
+    At(u32),
+    /// A helper raised while the frame's pc was this one.
+    Raised(u32),
+    /// A register was not of its proven type when native code read it
+    /// from the frame at this pc: a defect in the compiler.
+    Defect(u32),
+}
+
+impl Stop {
+    /// The stop's bits: the pc in the low 32, the kind in bits 32 and
+    /// up.
+    pub const fn bits(self) -> u64 {
+        match self {
+            Stop::At(pc) => pc as u64,
+            Stop::Raised(pc) => pc as u64 | (1u64 << 32),
+            Stop::Defect(pc) => pc as u64 | (2u64 << 32),
+        }
+    }
+
+    /// The stop a `u64` names, if it names one: [`None`] when bits 32
+    /// and up are not 0, 1 or 2.
+    pub const fn from_bits(bits: u64) -> Option<Stop> {
+        let pc = bits as u32;
+        match bits >> 32 {
+            0 => Some(Stop::At(pc)),
+            1 => Some(Stop::Raised(pc)),
+            2 => Some(Stop::Defect(pc)),
+            _ => None,
+        }
+    }
+}
+
+/// The runtime's functions a body calls, through the context. Interface
+/// 2 has two.
+///
+/// Each field's offset in this table is part of the interface: a body
+/// loads a function pointer by its offset here and calls through it in
+/// the target's C convention.
+#[repr(C)]
+pub struct Helpers {
+    /// Offset 0. `run(ctx, from, to)`: run the frame's bytecode from
+    /// pc `from` while the pc stays in `from..to`. Returns a stop's
+    /// bits: [`Stop::At`] with the pc it stands at now (outside the
+    /// range, or inside it at an instruction `run` does not run), or
+    /// [`Stop::Raised`].
+    pub run: unsafe extern "C" fn(ctx: *mut Context, from: u32, to: u32) -> u64,
+    /// Offset 8. `list(ctx, reg)`: 1 when register `reg` holds a list
+    /// whose elements native code may read and write where they lie
+    /// until its next call of a helper, with `ctx.left` set to the
+    /// address of the first and `ctx.right` to how many there are; 0
+    /// otherwise, with nothing written.
+    pub list: unsafe extern "C" fn(ctx: *mut Context, reg: u32) -> u32,
+}
+
+// The layout the body is compiled against.
+const _: () = {
+    assert!(core::mem::size_of::<Helpers>() == 16);
+    assert!(core::mem::align_of::<Helpers>() == core::mem::align_of::<usize>());
+    assert!(core::mem::offset_of!(Helpers, run) == 0);
+    assert!(core::mem::offset_of!(Helpers, list) == 8);
+};
+
+/// What the helpers are on the runtime's side: safe code the crate's
+/// `extern "C"` glue calls through [`Code::enter`]. A panic in either
+/// method is caught there, the body is told [`Stop::Raised`] and
+/// [`Code::enter`] resumes the panic once the body has returned.
+pub trait Host {
+    /// Run the frame's bytecode from `from` while the pc stays in
+    /// `from..to`. Returns the stop the body sees. Never [`Stop::Defect`].
+    fn run(&mut self, ctx: &mut Context, from: u32, to: u32) -> Stop;
+    /// Give native code a view on register `reg`'s list, when it holds
+    /// one: set `ctx.left` to the address of its first element and
+    /// `ctx.right` to how many there are, and return `true`. Return
+    /// `false` with nothing written otherwise.
+    fn list(&mut self, ctx: &mut Context, reg: u32) -> bool;
+}
+
 /// Why there is no mapping, or no [`Code`].
 #[derive(Debug)]
 pub enum MapError {
@@ -129,7 +217,8 @@ impl Mapped {
     /// mapping: the tables are for this machine; `code` is as long as
     /// the tables say and as the mapping is; the mapping holds exactly
     /// `code`'s bytes; every entry has at most [`MAX_ARGS`] arguments
-    /// and an offset inside the code, on an instruction boundary.
+    /// and an offset inside the code, on an instruction boundary; every
+    /// body's offset is inside the code, on an instruction boundary.
     ///
     /// # Safety
     ///
@@ -199,9 +288,25 @@ impl Mapped {
                 args,
             });
         }
+        let mut bodies = Vec::with_capacity(tables.bodies.len());
+        for b in &tables.bodies {
+            if b.offset >= tables.code_len {
+                return Err(MapError::Mismatch("a body lies outside the code"));
+            }
+            if b.offset % align != 0 {
+                return Err(MapError::Mismatch(
+                    "a body is not on an instruction boundary",
+                ));
+            }
+            bodies.push(ArmedBody {
+                offset: b.offset,
+                resumes: u32::try_from(b.resumes.len()).unwrap_or(u32::MAX),
+            });
+        }
         Ok(Code {
             inner: self.inner,
             entries,
+            bodies,
         })
     }
 }
@@ -213,11 +318,20 @@ struct Armed {
     args: u8,
 }
 
+/// What `enter` needs of a body: where its code starts and how many
+/// resume points it has.
+#[derive(Clone, Copy)]
+struct ArmedBody {
+    offset: u32,
+    resumes: u32,
+}
+
 /// A section's code, callable: a mapping its caller vouched for
 /// ([`Mapped::arm`]).
 pub struct Code {
     inner: sys::Inner,
     entries: Vec<Armed>,
+    bodies: Vec<ArmedBody>,
 }
 
 impl Code {
@@ -229,6 +343,11 @@ impl Code {
     /// It has no entry.
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+
+    /// How many bodies it has.
+    pub fn bodies(&self) -> usize {
+        self.bodies.len()
     }
 
     /// Call entry `entry` (its index in the tables' entries) with
@@ -250,6 +369,53 @@ impl Code {
         // slots, and `args` holds exactly that many.
         Some(unsafe { self.inner.call(e.offset, ctx, args) })
     }
+
+    /// Enter body `body` (its index in the tables) at its resume point
+    /// `at` (that point's index in the body's `resumes`: 0 is the
+    /// function's start), with `host` behind the helpers. [`None`], with
+    /// nothing run, when there is no such body or that body has no such
+    /// resume point. Sets `ctx.helpers` and `ctx.host`; the caller sets
+    /// every other field.
+    ///
+    /// A panic in a method of `host` is caught, the body is told
+    /// [`Stop::Raised`] and the panic is resumed once the body has
+    /// returned. A stop whose bits are not one of the three kinds comes
+    /// back as [`Stop::Defect`]`(0)`. On a target without a loader this
+    /// is always [`None`].
+    pub fn enter<H: Host>(
+        &self,
+        body: usize,
+        at: u32,
+        ctx: &mut Context,
+        host: &mut H,
+    ) -> Option<Stop> {
+        let b = self.bodies.get(body)?;
+        if at >= b.resumes {
+            return None;
+        }
+        let helpers = Helpers {
+            run: sys::host_run_c::<H>,
+            list: sys::host_list_c::<H>,
+        };
+        ctx.helpers = &helpers as *const Helpers;
+        ctx.host = host as *mut H as *mut core::ffi::c_void;
+        // SAFETY: `b.offset` is a body of the tables this mapping was
+        // armed with, so `arm`'s caller vouched that it starts a body
+        // of the signature `BodyFn`. The helpers struct lives on this
+        // stack frame until `enter_at` returns, and `ctx.host` points
+        // to `host`, which the caller borrows exclusively for the
+        // length of this call.
+        let bits = unsafe { self.inner.enter_at(b.offset, ctx, at) };
+        // Whatever the body returned, clear the pointers so that the
+        // next call of `enter` does not see stale ones.
+        ctx.helpers = core::ptr::null();
+        ctx.host = core::ptr::null_mut();
+        // Resume the panic a helper caught, if any.
+        if let Some(payload) = sys::take_panic() {
+            std::panic::resume_unwind(payload);
+        }
+        Some(Stop::from_bits(bits).unwrap_or(Stop::Defect(0)))
+    }
 }
 
 #[cfg(all(
@@ -257,15 +423,107 @@ impl Code {
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
 mod sys {
-    //! Linux on x86-64 and aarch64: `mmap`, the comparison, the call
-    //! and `munmap`. Every `unsafe` block of the crate is here.
+    //! Linux on x86-64 and aarch64: `mmap`, the comparison, the call,
+    //! `munmap`, and the two `extern "C"` glue functions between a body
+    //! and a [`super::Host`]. Every `unsafe` block of the crate but one
+    //! (the `value::agrees` helper) is here.
 
     use super::MapError;
+    use super::{Host, Stop};
     use crate::Context;
+    use std::any::Any;
+    use std::cell::RefCell;
     use std::os::unix::io::AsRawFd;
+    use std::panic::{catch_unwind, AssertUnwindSafe};
 
     /// An entry, in the target's C convention.
     type Entry = unsafe extern "C" fn(*mut Context, *const u64, *mut u64) -> u32;
+
+    /// A body, in the target's C convention: entered at resume index
+    /// `at` of its function, returns a stop's bits.
+    type BodyFn = unsafe extern "C" fn(*mut Context, u32) -> u64;
+
+    thread_local! {
+        /// Where a helper's panic is kept for [`super::Code::enter`] to
+        /// resume once the body has returned. One payload at a time:
+        /// a second panic is dropped (the body still sees it as
+        /// [`Stop::Raised`]).
+        static CAUGHT: RefCell<Option<Box<dyn Any + Send + 'static>>> =
+            const { RefCell::new(None) };
+    }
+
+    /// Put `payload` aside so [`super::Code::enter`] resumes it after
+    /// the body returns.
+    fn store_panic(payload: Box<dyn Any + Send + 'static>) {
+        CAUGHT.with(|cell| {
+            let mut slot = cell.borrow_mut();
+            // Keep the first; a second panic reaches [`super::Code::enter`]
+            // through the first one's resume.
+            if slot.is_none() {
+                *slot = Some(payload);
+            }
+        });
+    }
+
+    /// Take the panic payload a helper left behind, if any.
+    pub(super) fn take_panic() -> Option<Box<dyn Any + Send + 'static>> {
+        CAUGHT.with(|cell| cell.borrow_mut().take())
+    }
+
+    /// `extern "C"` glue for `Host::run`. Reads `ctx.host` as `&mut H`,
+    /// catches a panic and returns [`Stop::Raised`]`(from)` with the
+    /// panic stashed for [`super::Code::enter`] to resume.
+    pub(super) unsafe extern "C" fn host_run_c<H: Host>(
+        ctx: *mut Context,
+        from: u32,
+        to: u32,
+    ) -> u64 {
+        // SAFETY: `enter`'s caller borrows `host` exclusively for the
+        // length of the body's run, and the body has not returned yet,
+        // so `ctx.host` is a valid `*mut H` to a live `H` (set by
+        // `enter` before the body was entered). `ctx` itself is the
+        // same exclusive borrow.
+        let host_ptr = unsafe { (*ctx).host as *mut H };
+        let ctx_ptr = ctx;
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            // SAFETY: `host_ptr` is a valid `&mut H` for the length of
+            // the call, as above; `ctx_ptr` is `&mut Context`.
+            let host = unsafe { &mut *host_ptr };
+            let cx = unsafe { &mut *ctx_ptr };
+            host.run(cx, from, to)
+        }));
+        match result {
+            Ok(stop) => match stop {
+                Stop::Defect(_) => Stop::Defect(0).bits(),
+                other => other.bits(),
+            },
+            Err(payload) => {
+                store_panic(payload);
+                Stop::Raised(from).bits()
+            }
+        }
+    }
+
+    /// `extern "C"` glue for `Host::list`. On panic, `0` with the
+    /// panic stashed.
+    pub(super) unsafe extern "C" fn host_list_c<H: Host>(ctx: *mut Context, reg: u32) -> u32 {
+        // SAFETY: as in `host_run_c`.
+        let host_ptr = unsafe { (*ctx).host as *mut H };
+        let ctx_ptr = ctx;
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let host = unsafe { &mut *host_ptr };
+            let cx = unsafe { &mut *ctx_ptr };
+            host.list(cx, reg)
+        }));
+        match result {
+            Ok(true) => 1,
+            Ok(false) => 0,
+            Err(payload) => {
+                store_panic(payload);
+                0
+            }
+        }
+    }
 
     /// A mapping: `len` bytes at `ptr`, read and execute, until it is
     /// dropped.
@@ -373,6 +631,25 @@ mod sys {
             let status = unsafe { entry(ctx, args.as_ptr(), &mut result) };
             (status, result)
         }
+
+        /// Enter the body at `offset` at resume index `at`.
+        ///
+        /// # Safety
+        ///
+        /// `offset` is inside the mapping and is the first instruction
+        /// of a body of signature `BodyFn`, as [`super::Mapped::arm`]'s
+        /// caller vouched; `ctx` is borrowed exclusively for the call
+        /// and has `helpers` and `host` set; and the file has not
+        /// changed under the mapping.
+        pub(super) unsafe fn enter_at(&self, offset: u32, ctx: &mut Context, at: u32) -> u64 {
+            // SAFETY: `offset` is inside the mapping, and a function
+            // of the body signature starts there, as above.
+            let body: BodyFn = unsafe {
+                core::mem::transmute::<*mut u8, BodyFn>(self.ptr.cast::<u8>().add(offset as usize))
+            };
+            // SAFETY: the body signature's own terms.
+            unsafe { body(ctx, at) }
+        }
     }
 
     impl Drop for Inner {
@@ -396,8 +673,9 @@ mod sys {
     //! Every other target: there is no mapping, so there is nothing to
     //! compare or call.
 
-    use super::MapError;
+    use super::{Host, MapError};
     use crate::Context;
+    use std::any::Any;
 
     /// No value of it exists: `map` never makes one.
     pub(super) enum Inner {}
@@ -427,6 +705,31 @@ mod sys {
         ) -> (u32, u64) {
             match *self {}
         }
+
+        pub(super) unsafe fn enter_at(&self, _offset: u32, _ctx: &mut Context, _at: u32) -> u64 {
+            match *self {}
+        }
+    }
+
+    pub(super) fn take_panic() -> Option<Box<dyn Any + Send + 'static>> {
+        None
+    }
+
+    /// Only ever read as a function pointer on a target that has a
+    /// loader; its address stays, so this one is never called. The
+    /// type parameter is kept so the signature matches the real glue's.
+    #[allow(clippy::extra_unused_type_parameters)]
+    pub(super) unsafe extern "C" fn host_run_c<H: Host>(
+        _ctx: *mut Context,
+        _from: u32,
+        _to: u32,
+    ) -> u64 {
+        0
+    }
+
+    #[allow(clippy::extra_unused_type_parameters)]
+    pub(super) unsafe extern "C" fn host_list_c<H: Host>(_ctx: *mut Context, _reg: u32) -> u32 {
+        0
     }
 }
 

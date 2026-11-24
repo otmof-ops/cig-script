@@ -73,6 +73,8 @@ fn sample() -> Section {
             },
             site(Exit::Depth, 0, Ty::Null, Ty::Null),
         ],
+        bodies: vec![],
+        rule: Rule::None,
     }
 }
 
@@ -141,6 +143,12 @@ fn the_layout_is_the_documents_byte_for_byte() {
             right: Ty::Int,
             in_loop: true,
         }],
+        bodies: vec![Body {
+            func: 0x0102,
+            offset: 2,
+            resumes: vec![0, 5],
+        }],
+        rule: Rule::Loops,
     };
     #[rustfmt::skip]
     let golden: Vec<u8> = [
@@ -168,20 +176,37 @@ fn the_layout_is_the_documents_byte_for_byte() {
         &[2],
         &[1],
         &[0, 0, 0],
+        // The body: function index, code offset, first resume index,
+        // resume count.
+        &[0x02, 0x01, 0, 0],
+        &[2, 0, 0, 0],
+        &[0, 0, 0, 0],
+        &[2, 0, 0, 0],
+        // The resume table: two pcs, then zero padding to a multiple
+        // of 8.
+        &[0, 0, 0, 0],
+        &[5, 0, 0, 0],
         // The footer: magic, version, architecture, interface version,
-        // code length, entry count, site count, module hash, 16 zeros.
+        // code length, entry count, site count, module hash, body
+        // count, resume count, rule, four zeros.
         b"CIGNATV1",
+        &[2, 0, 0, 0],
         &[1, 0, 0, 0],
-        &[1, 0, 0, 0],
-        &[1, 0, 0, 0],
+        &[2, 0, 0, 0],
         &[3, 0, 0, 0],
         &[1, 0, 0, 0],
         &[1, 0, 0, 0],
         &module()[..],
-        &[0; 16],
+        &[1, 0, 0, 0],
+        &[2, 0, 0, 0],
+        &[1, 0, 0, 0],
+        &[0; 4],
     ]
     .concat();
-    assert_eq!(golden.len(), 3 + 5 + ENTRY_LEN + SITE_LEN + FOOTER_LEN);
+    assert_eq!(
+        golden.len(),
+        3 + 5 + ENTRY_LEN + SITE_LEN + BODY_LEN + 2 * RESUME_LEN + FOOTER_LEN
+    );
     assert_eq!(section.to_bytes().as_deref(), Ok(&golden[..]));
     assert_eq!(Section::parse(&golden), Ok(section));
 }
@@ -189,12 +214,22 @@ fn the_layout_is_the_documents_byte_for_byte() {
 #[test]
 fn the_constants_are_the_layouts() {
     assert_eq!(&MAGIC, b"CIGNATV1");
-    assert_eq!((VERSION, INTERFACE), (1, 1));
-    assert_eq!((ENTRY_LEN, SITE_LEN, FOOTER_LEN), (24, 24, 80));
+    assert_eq!((VERSION, INTERFACE), (2, 2));
     assert_eq!(
-        (ALIGN, MAX_ARGS, MAX_ROWS, MAX_FRAME),
-        (65_536, 8, 16, 4096)
+        (ENTRY_LEN, SITE_LEN, BODY_LEN, RESUME_LEN, FOOTER_LEN),
+        (24, 24, 16, 4, 80)
     );
+    assert_eq!(
+        (ALIGN, MAX_ARGS, MAX_ROWS, MAX_FRAME, MAX_BODY_FRAME),
+        (65_536, 8, 16, 4096, 65_536)
+    );
+    assert_eq!(
+        [Rule::None, Rule::Loops, Rule::Every].map(Rule::as_u32),
+        [0, 1, 2]
+    );
+    for v in 0..=255u32 {
+        assert_eq!(Rule::from_u32(v).map(Rule::as_u32), (v < 3).then_some(v));
+    }
     assert_eq!(
         [Ty::Null, Ty::Bool, Ty::Int, Ty::Float].map(Ty::as_u8),
         [0, 1, 2, 3]
@@ -259,6 +294,8 @@ fn a_section_with_nothing_in_it_is_a_footer() {
         code: vec![],
         entries: vec![],
         sites: vec![],
+        bodies: vec![],
+        rule: Rule::None,
     };
     let b = s.to_bytes().expect("written");
     assert_eq!(b.len(), FOOTER_LEN);
@@ -299,21 +336,32 @@ fn the_reader_refuses_a_wrong_footer() {
             found: *b"cIGNATV1",
         },
     );
-    reader_refuses(
-        |b| put_u32(b, FOOTER_AT + 8, 2),
-        FormatError::BadVersion { found: 2 },
-    );
+    for found in [0, 1, 3, u32::MAX] {
+        reader_refuses(
+            |b| put_u32(b, FOOTER_AT + 8, found),
+            FormatError::BadVersion { found },
+        );
+    }
     for found in [0, 3, u32::MAX] {
         reader_refuses(
             |b| put_u32(b, FOOTER_AT + 12, found),
             FormatError::BadArch { found },
         );
     }
-    reader_refuses(
-        |b| put_u32(b, FOOTER_AT + 16, 2),
-        FormatError::BadInterface { found: 2 },
-    );
-    for offset in 64..FOOTER_LEN {
+    for found in [0, 1, 3, u32::MAX] {
+        reader_refuses(
+            |b| put_u32(b, FOOTER_AT + 16, found),
+            FormatError::BadInterface { found },
+        );
+    }
+    for found in [3, 4, u32::MAX] {
+        reader_refuses(
+            |b| put_u32(b, FOOTER_AT + 72, found),
+            FormatError::BadRule { found },
+        );
+    }
+    // Only the last four bytes of the footer are reserved in v2.
+    for offset in 76..FOOTER_LEN {
         reader_refuses(
             |b| b[FOOTER_AT + offset] = 1,
             FormatError::NonzeroReserved {
@@ -920,12 +968,35 @@ impl Rng {
                 }
             })
             .collect();
+        // Bodies: strictly ascending by func, each with a strictly
+        // ascending resume list starting at 0.
+        let mut bodies = Vec::new();
+        let mut body_func = 0u32;
+        for _ in 0..self.below(5) {
+            body_func += 1 + self.below(3) as u32;
+            let offset = self.below(u64::from(code_len / align)) as u32 * align;
+            let count = 1 + self.below(4);
+            let mut resumes = vec![0u32];
+            let mut pc = 0u32;
+            for _ in 1..count {
+                pc = pc.saturating_add(1 + self.below(50) as u32);
+                resumes.push(pc);
+            }
+            bodies.push(Body {
+                func: body_func,
+                offset,
+                resumes,
+            });
+        }
+        let rule = [Rule::None, Rule::Loops, Rule::Every][self.below(3) as usize];
         Section {
             arch,
             module: core::array::from_fn(|_| self.next() as u8),
             code,
             entries,
             sites,
+            bodies,
+            rule,
         }
     }
 }
@@ -980,16 +1051,270 @@ fn bytes_made_at_random_under_a_real_footer_never_panic() {
         // Tables of random bytes, with a footer whose counts fit them:
         // the reader gets past the lengths and into every field.
         let (entries, sites) = (rng.below(4) as u32, rng.below(4) as u32);
+        let bodies = rng.below(4) as u32;
+        let resumes = rng.below(8) as u32;
         let code_len = rng.below(5) as u32 * 8;
-        let mut b: Vec<u8> = (0..code_len + (entries + sites) * 24)
-            .map(|_| rng.next() as u8 % 12)
-            .collect();
+        let resume_pad_bytes = (8 - (resumes * 4) % 8) % 8;
+        let body_bytes_len =
+            code_len + entries * 24 + sites * 24 + bodies * 16 + resumes * 4 + resume_pad_bytes;
+        let mut b: Vec<u8> = (0..body_bytes_len).map(|_| rng.next() as u8 % 12).collect();
         b.extend_from_slice(&MAGIC);
         for v in [VERSION, 1, INTERFACE, code_len, entries, sites] {
             b.extend_from_slice(&v.to_le_bytes());
         }
-        b.extend_from_slice(&[0; 48]);
+        b.extend_from_slice(&[0; 32]);
+        for v in [bodies, resumes, (rng.below(4)) as u32] {
+            b.extend_from_slice(&v.to_le_bytes());
+        }
+        b.extend_from_slice(&[0; 4]);
         let _ = Tables::parse(&b);
         read_then_written_is_the_same(&b);
     }
+}
+
+// ----- bodies: what the reader and the writer refuse -------------------
+
+/// A section with one body for the top level, two resume points, over
+/// 12 bytes of code: enough to vary.
+fn sample_with_bodies() -> Section {
+    Section {
+        arch: Arch::X86_64,
+        module: module(),
+        code: (0..12u8).collect(),
+        entries: vec![],
+        sites: vec![],
+        bodies: vec![
+            Body {
+                func: 0,
+                offset: 0,
+                resumes: vec![0, 4],
+            },
+            Body {
+                func: 3,
+                offset: 8,
+                resumes: vec![0, 2, 7],
+            },
+        ],
+        rule: Rule::Loops,
+    }
+}
+
+#[test]
+fn a_section_may_have_bodies_only() {
+    let s = sample_with_bodies();
+    let b = s.to_bytes().expect("written");
+    assert_eq!(Section::parse(&b).as_ref(), Ok(&s));
+    let t = Tables::parse(&b).expect("tables");
+    assert_eq!(t.bodies, s.bodies);
+    assert_eq!(t.rule, Rule::Loops);
+}
+
+#[test]
+fn a_section_may_have_entries_only() {
+    // The sample() has four entries and six sites, no bodies.
+    let mut s = sample();
+    s.sites.clear();
+    let b = s.to_bytes().expect("written");
+    assert_eq!(Section::parse(&b).as_ref(), Ok(&s));
+}
+
+#[test]
+fn a_section_may_have_both_entries_and_bodies() {
+    let mut s = sample();
+    s.bodies = vec![
+        Body {
+            func: 0,
+            offset: 0,
+            resumes: vec![0],
+        },
+        Body {
+            func: 2,
+            offset: 8,
+            resumes: vec![0, 3, 11],
+        },
+    ];
+    s.rule = Rule::Every;
+    let b = s.to_bytes().expect("written");
+    assert_eq!(Section::parse(&b).as_ref(), Ok(&s));
+}
+
+#[test]
+fn a_section_may_have_neither() {
+    let s = Section {
+        arch: Arch::X86_64,
+        module: module(),
+        code: vec![],
+        entries: vec![],
+        sites: vec![],
+        bodies: vec![],
+        rule: Rule::None,
+    };
+    let b = s.to_bytes().expect("written");
+    assert_eq!(b.len(), FOOTER_LEN);
+    assert_eq!(Section::parse(&b), Ok(s));
+}
+
+#[test]
+fn a_body_lies_inside_the_code() {
+    let mut s = sample_with_bodies();
+    for offset in [12, 20, u32::MAX] {
+        s.bodies[0].offset = offset;
+        assert_eq!(
+            s.to_bytes(),
+            Err(FormatError::BodyOutsideCode {
+                at: 0,
+                offset,
+                code_len: 12,
+            })
+        );
+    }
+}
+
+#[test]
+fn bodies_are_strictly_ascending_by_function() {
+    // Same function.
+    let mut s = sample_with_bodies();
+    s.bodies[1].func = 0;
+    assert_eq!(s.to_bytes(), Err(FormatError::BodiesOutOfOrder { at: 1 }));
+    // Out of order.
+    let mut s = sample_with_bodies();
+    s.bodies.swap(0, 1);
+    assert_eq!(s.to_bytes(), Err(FormatError::BodiesOutOfOrder { at: 1 }));
+}
+
+#[test]
+fn a_body_has_at_least_one_resume_point_starting_at_pc_zero() {
+    let mut s = sample_with_bodies();
+    s.bodies[0].resumes.clear();
+    assert_eq!(s.to_bytes(), Err(FormatError::BodyWithoutResume { at: 0 }));
+    let mut s = sample_with_bodies();
+    s.bodies[0].resumes = vec![3, 5];
+    assert_eq!(
+        s.to_bytes(),
+        Err(FormatError::BodyFirstResumeNotZero { at: 0, found: 3 })
+    );
+}
+
+#[test]
+fn a_bodys_resume_points_are_strictly_ascending() {
+    let mut s = sample_with_bodies();
+    s.bodies[1].resumes = vec![0, 5, 5];
+    assert_eq!(
+        s.to_bytes(),
+        Err(FormatError::ResumesOutOfOrder { at: 1, pc: 5 })
+    );
+    let mut s = sample_with_bodies();
+    s.bodies[1].resumes = vec![0, 7, 2];
+    assert_eq!(
+        s.to_bytes(),
+        Err(FormatError::ResumesOutOfOrder { at: 1, pc: 2 })
+    );
+}
+
+#[test]
+fn a_reader_refuses_a_resume_run_that_does_not_cover_the_table() {
+    // A body table that says the second body starts at the wrong index
+    // in the resume table. Build a valid section, then change its
+    // body[1].first to a wrong value.
+    let s = sample_with_bodies();
+    let mut b = s.to_bytes().expect("written");
+    // The body table follows the code (12), its padding (4), no
+    // entries, no sites: body[0] at 16, body[1] at 32. first is at
+    // offset 8 inside each body row.
+    let body1_first_at = 16 + BODY_LEN + 8;
+    put_u32(&mut b, body1_first_at, 1);
+    match Tables::parse(&b) {
+        Err(FormatError::ResumeRunMismatch {
+            at,
+            found,
+            expected,
+        }) => {
+            assert_eq!(at, 1);
+            assert_eq!(found, (1, 3));
+            assert_eq!(expected, (2, 3));
+        }
+        other => panic!("{other:?}"),
+    }
+    // Count too big: it overflows what is left.
+    let body0_count_at = 16 + 12;
+    let mut b = s.to_bytes().expect("written");
+    put_u32(&mut b, body0_count_at, 6);
+    match Tables::parse(&b) {
+        Err(FormatError::ResumeRunMismatch {
+            at,
+            found,
+            expected,
+        }) => {
+            assert_eq!(at, 0);
+            assert_eq!(found, (0, 6));
+            assert_eq!(expected, (0, 5));
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn a_reader_refuses_a_rule_that_names_none() {
+    for found in [3, 4, 100, u32::MAX] {
+        reader_refuses(
+            |b| {
+                let rule_at = b.len() - FOOTER_LEN + 72;
+                put_u32(b, rule_at, found);
+            },
+            FormatError::BadRule { found },
+        );
+    }
+}
+
+#[test]
+fn a_body_offset_is_whole_instructions_on_aarch64() {
+    let mut s = sample_with_bodies();
+    s.arch = Arch::Aarch64;
+    // Pad code to multiple of 4 (12 already is).
+    for offset in [1, 2, 3, 5, 7, 11] {
+        s.bodies[0].offset = offset;
+        assert_eq!(
+            s.to_bytes(),
+            Err(FormatError::Misaligned {
+                what: "a body's offset",
+                at: 0,
+                value: offset,
+                align: 4,
+            })
+        );
+    }
+}
+
+#[test]
+fn a_body_with_an_odd_number_of_resume_points_gets_four_padding_bytes() {
+    let s = sample_with_bodies();
+    // Two bodies, 2 + 3 = 5 resume points: an odd number. The resume
+    // table is 20 bytes; four pad to a multiple of 8.
+    let total_resumes = s.bodies.iter().map(|b| b.resumes.len()).sum::<usize>();
+    assert_eq!(total_resumes, 5);
+    let b = s.to_bytes().expect("written");
+    // 12 code + 4 code_pad + 0 entries + 0 sites + 2*16 bodies + 20
+    // resumes + 4 resume_pad + 80 footer = 152.
+    assert_eq!(b.len(), 12 + 4 + 2 * BODY_LEN + 20 + 4 + FOOTER_LEN);
+    assert_eq!(Section::parse(&b).as_ref(), Ok(&s));
+    // Flip a byte in the resume padding (the four bytes just before
+    // the footer).
+    let mut bad = b.clone();
+    let pad_offset = bad.len() - FOOTER_LEN - 1;
+    bad[pad_offset] = 1;
+    match Tables::parse(&bad) {
+        Err(FormatError::NonzeroPadding { offset }) => assert_eq!(offset, pad_offset),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn a_body_for_the_top_level_is_a_body_like_any_other() {
+    // An entry for the top level is refused by the runtime's loader
+    // (program::native), but the format itself takes a body for the
+    // top level (func == 0).
+    let s = sample_with_bodies();
+    assert_eq!(s.bodies[0].func, 0);
+    let b = s.to_bytes().expect("written");
+    assert_eq!(Section::parse(&b).as_ref(), Ok(&s));
 }

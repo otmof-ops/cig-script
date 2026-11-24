@@ -195,3 +195,22 @@ fn running_image(file: &std::fs::File) -> Option<std::fs::File> {
 fn running_image(_file: &std::fs::File) -> Option<std::fs::File> {
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::value::Value;
+
+    /// `cig_native::value`'s constants describe cig's own `Value`: a
+    /// null, a true, an int and a float carry their tag and payload
+    /// where the constants say they do, so native code and the runtime
+    /// read the same bytes for the same values.
+    #[test]
+    fn cigs_value_agrees_with_cig_natives_constants() {
+        assert!(cig_native::value::agrees(
+            &Value::Null,
+            &Value::Bool(true),
+            (&Value::Int(-123_456_789), -123_456_789),
+            (&Value::Float(2.5_f64), 2.5_f64),
+        ));
+    }
+}

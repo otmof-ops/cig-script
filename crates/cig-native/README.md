@@ -6,21 +6,23 @@ the VM, and the loader that maps a section's code from the program's own
 file and calls it.
 
 A program built at stage `c` is a stage `b` program (its script as
-bytecode, run by the VM) with one more section, `native`: machine code
-for some of its functions, each compiled for one row of argument types.
-The VM calls an entry when a call's arguments are of its row. It runs
-the bytecode otherwise, and whenever the code cannot be loaded. The
-design is cig-compile's decisions
+bytecode, run by the VM) with one more section, `native`. Interface 2
+of this crate adds **bodies** beside the entries of interface 1: a
+body is one function's native code, run on the frame the VM pushed,
+and the bytecode goes on wherever it stops. Each body may be entered
+at any of its resume points, and the VM runs the bytecode when no body
+applies. The design is cig-compile's decisions
 [0005](https://github.com/otmof-ops/cig-compile/blob/main/docs/decisions/0005-what-goes-native-first.md),
-[0006](https://github.com/otmof-ops/cig-compile/blob/main/docs/decisions/0006-native-code-in-a-program.md)
+[0006](https://github.com/otmof-ops/cig-compile/blob/main/docs/decisions/0006-native-code-in-a-program.md),
+[0007](https://github.com/otmof-ops/cig-compile/blob/main/docs/decisions/0007-where-the-pieces-live.md)
 and
-[0007](https://github.com/otmof-ops/cig-compile/blob/main/docs/decisions/0007-where-the-pieces-live.md).
+[0008](https://github.com/otmof-ops/cig-compile/blob/main/docs/decisions/0008-native-code-on-the-vms-frame.md).
 
 The compiler writes a section with this crate and the runtime reads it
 with this crate, so the two cannot disagree about a byte. It depends on
 `libc`, on the targets that have a loader, and on nothing else.
 
-## The layout
+## The layout (version 2)
 
 A section's body, every integer little-endian:
 
@@ -29,6 +31,9 @@ code           the machine code, from the body's first byte
 zero padding   to a multiple of 8
 entry table    count x 24 bytes
 site table     count x 24 bytes
+body table     count x 16 bytes:  func u32, offset u32, first u32, count u32
+resume table   count x 4 bytes:   pc u32
+zero padding   to a multiple of 8
 footer         80 bytes, at the body's end
 ```
 
@@ -37,14 +42,17 @@ footer         80 bytes, at the body's end
 | offset | size | field |
 |---:|---:|---|
 | 0 | 8 | magic, ASCII `CIGNATV1` |
-| 8 | 4 | format version: `1` |
+| 8 | 4 | format version: `2` |
 | 12 | 4 | architecture: `1` x86-64, `2` aarch64 |
-| 16 | 4 | interface version: `1` (the context, the entry convention, the frame bound) |
+| 16 | 4 | interface version: `2` (the context, the entry convention, the body signature, the helpers' table) |
 | 20 | 4 | code length |
 | 24 | 4 | entry count |
 | 28 | 4 | site count |
 | 32 | 32 | the BLAKE3 in the header of the bytecode module the code was compiled from |
-| 64 | 16 | zero |
+| 64 | 4 | body count |
+| 68 | 4 | resume count |
+| 72 | 4 | rule: `0` none, `1` loops, `2` every |
+| 76 | 4 | zero |
 
 **An entry:** one function compiled for one row of argument types.
 
@@ -91,6 +99,13 @@ A site says only what its kind uses, and every other field is zero:
 | `4` budget | the step budget is spent | 0 | null | null |
 | `5` depth | the call depth is reached | 0 | null | null |
 
+**A body** is strictly ascending by function; its offset is inside the
+code and on an instruction boundary; its first resume point is pc 0 and
+the resume points are strictly ascending; and the `first`/`count`
+pairs of all bodies run back-to-back over the resume table, covering
+it exactly. A body for the top level (`func` 0) is taken; an entry for
+the top level is not. A section may have no entry, no site and no body.
+
 **There is one encoding of a section.** The writer and the reader apply
 the same rules. What `Section::to_bytes` writes, `Section::parse` reads
 back equal; what `parse` takes, `to_bytes` writes back as the same
@@ -98,7 +113,7 @@ bytes. A body is hostile data to the reader: it never panics, never
 reads out of bounds and allocates nothing the body's own length does not
 bound.
 
-## The context and the entry convention
+## The context, the entry convention and the body signature
 
 An entry has one signature on every target, in the target's C
 convention:
@@ -109,21 +124,60 @@ extern "C" fn(ctx: *mut Context, args: *const u64, ret: *mut u64) -> u32
 
 `args` is one 64-bit slot an argument (an int, a float's bits, a bool as
 0 or 1, zero for null), `ret` one slot for the result, and the status is
-0 or the kind of exit. `Context` is 64 bytes:
+0 or the kind of exit.
+
+A **body** has one signature too:
+
+```rust
+extern "C" fn(ctx: *mut Context, at: u32) -> u64
+```
+
+It is entered at resume point `at` of its function (the index of a pc
+in the body's `resumes`) and returns a **stop**: a `u64` whose low 32
+bits are a pc and whose bits 32 and up say what happened.
+
+| bits 32.. | name     | meaning                                                                             |
+|---:|---|---|
+| 0 | `At`     | the bytecode goes on at this pc. The frame is whole and `steps_left` and `nest` are current |
+| 1 | `Raised` | a helper raised while the frame's pc was this one. The host holds the error        |
+| 2 | `Defect` | a register was not of its proven type: a defect in the compiler                     |
+
+`Context` is 80 bytes (interface 2):
 
 | offset | size | field |
 |---:|---:|---|
-| 0 | 8 | `steps_left`: steps before the budget is spent. Code takes one at each step mark and leaves when that took it below zero, with -1 here |
-| 8 | 8 | `depth_left`: how deep the code's own calls may nest |
-| 16 | 4 | `site`: on an exit, the site it left from |
-| 20 | 4 | `flags`: on an exit, bit 0 when a function on the way out was called from inside a loop |
-| 24 | 8 | `left`: on an exit, the left operand's slot |
-| 32 | 8 | `right`: on an exit, the right operand's slot |
-| 40 | 24 | zero |
+| 0 | 8 | `steps_left`: steps before the budget is spent |
+| 8 | 8 | `depth_left`: how deep an entry's own calls may nest |
+| 16 | 4 | `site`: on an entry's exit, the site it left from |
+| 20 | 4 | `flags`: on an entry's exit, bit 0 when a function on the way out was called from inside a loop |
+| 24 | 8 | `left`: on an entry's exit, the left operand's slot. For a body, `Helpers::list` writes the address of the list's first element |
+| 32 | 8 | `right`: on an entry's exit, the right operand's slot. For a body, `Helpers::list` writes how many elements the list has |
+| 40 | 8 | `frame`: for a body, the address of the frame's R(0). Register `r` is at `frame + r * 24`. Valid until the body's next helper call returns |
+| 48 | 8 | `helpers`: for a body, a pointer to the runtime's helper table |
+| 56 | 8 | `host`: what the helpers find their host by; native code never reads it |
+| 64 | 4 | `nest`: for a body, the frame's loop nesting, as the last `steps` instruction set it |
+| 68 | 4 | zero |
+| 72 | 8 | zero |
 
-One call of any function in a section uses at most `MAX_FRAME` (4,096)
-bytes of stack, so a caller that sets `depth_left` knows how much stack
-it is granting.
+One call of any function in a section through its **entry** uses at most
+`MAX_FRAME` (4,096) bytes of stack, so a caller that sets `depth_left`
+knows how much stack it is granting. One call of any **body** uses at
+most `MAX_BODY_FRAME` (65,536) bytes, and the VM enters a body only
+where the stack has room for it.
+
+## The helpers
+
+Interface 2 has two helper functions a body calls, through its
+`ctx.helpers`:
+
+| offset | signature | what |
+|---:|---|---|
+| 0 | `run(ctx, from, to) -> u64` | runs the frame's bytecode from pc `from` while the pc stays in `from..to`; returns a stop's bits |
+| 8 | `list(ctx, reg) -> u32`      | 1 when register `reg` holds a list whose elements native code may read and write where they lie, with `ctx.left` and `ctx.right` set; 0 otherwise |
+
+A panic in a helper is caught in the crate's `extern "C"` glue, the
+body is told `Stop::Raised(from)` (from `run`) or `0` (from `list`),
+and `Code::enter` resumes the panic once the body has returned.
 
 ## The loader, and who answers for what
 
@@ -139,9 +193,15 @@ safely from what its caller has to answer for:
    the code generator's for this machine, and that the file will not
    change while the code can be called. `arm` checks what can be
    checked: the mapping holds exactly the bytes the caller read and
-   verified, and every entry lies in them, on an instruction boundary.
+   verified, and every entry and every body lies in them, on an
+   instruction boundary.
 3. **`Code::call` is safe.** It takes an entry's index and exactly as
    many argument slots as that entry reads, or it runs nothing.
+4. **`Code::enter` is safe.** It takes a body's index and the index
+   of one of its resume points; it sets `ctx.helpers` and
+   `ctx.host`, enters the body, clears them and returns the stop the
+   body returned. `None` when the body or the resume point does not
+   exist.
 
 A cig program's evidence for step 2 is where the bytes came from: a
 section of its own executable, whose sha256 its section table gives and
