@@ -67,7 +67,7 @@ impl Stop {
 }
 
 /// The runtime's functions a body calls, through the context. Interface
-/// 2 has three.
+/// 2 has six.
 ///
 /// Each field's offset in this table is part of the interface: a body
 /// loads a function pointer by its offset here and calls through it in
@@ -98,15 +98,43 @@ pub struct Helpers {
     /// that stop as it is. The runtime counts these calls, which is how
     /// it finds a body whose guesses keep failing.
     pub again: unsafe extern "C" fn(ctx: *mut Context, pc: u32) -> u64,
+    /// Offset 24. `push(ctx, list, value, dst)`: `list.push(value)` for
+    /// the list in register `list` and the value in register `value`,
+    /// its result (the list) put in register `dst`. 1 when the runtime
+    /// did it; 0, with nothing changed, when register `list` holds no
+    /// list it can add to now. Native code cannot do this where the
+    /// list lies: adding an element may move them all, and a value that
+    /// owns memory is shared by a count only the runtime keeps.
+    pub push: unsafe extern "C" fn(ctx: *mut Context, list: u32, value: u32, dst: u32) -> u32,
+    /// Offset 32. `copy(ctx, dst, src)`: register `dst` takes register
+    /// `src`'s value, whatever either holds: what `mov` does. 1 when
+    /// the runtime did it; 0, with nothing changed, when it cannot (a
+    /// register of the two carries a cell). Native code copies a value
+    /// that owns no memory itself, and asks for this where the value,
+    /// or the one it replaces, owns some: a value that owns memory is
+    /// shared and freed by a count only the runtime keeps. It runs no
+    /// instruction: the frame's address, the steps left and every list
+    /// in view stand, but for a view of register `dst`.
+    pub copy: unsafe extern "C" fn(ctx: *mut Context, dst: u32, src: u32) -> u32,
+    /// Offset 40. `clear(ctx, reg)`: register `reg` holds null, and
+    /// what it held is freed. 1 when the runtime did it; 0, with
+    /// nothing changed, when it cannot (the register carries a cell).
+    /// Native code asks for this before it writes a number over a
+    /// register that holds a value that owns memory. It runs no
+    /// instruction, as `copy` runs none.
+    pub clear: unsafe extern "C" fn(ctx: *mut Context, reg: u32) -> u32,
 }
 
 // The layout the body is compiled against.
 const _: () = {
-    assert!(core::mem::size_of::<Helpers>() == 24);
+    assert!(core::mem::size_of::<Helpers>() == 48);
     assert!(core::mem::align_of::<Helpers>() == core::mem::align_of::<usize>());
     assert!(core::mem::offset_of!(Helpers, run) == 0);
     assert!(core::mem::offset_of!(Helpers, list) == 8);
     assert!(core::mem::offset_of!(Helpers, again) == 16);
+    assert!(core::mem::offset_of!(Helpers, push) == 24);
+    assert!(core::mem::offset_of!(Helpers, copy) == 32);
+    assert!(core::mem::offset_of!(Helpers, clear) == 40);
 };
 
 /// What the helpers are on the runtime's side: safe code the crate's
@@ -131,6 +159,23 @@ pub trait Host {
     /// `pc` itself when the host ran nothing and takes the frame back.
     /// Never [`Stop::Defect`].
     fn again(&mut self, ctx: &mut Context, pc: u32) -> Stop;
+    /// `list.push(value)`, for the list in register `list` and the
+    /// value in register `value`, with the list put in register `dst`
+    /// (the call's result): `true` when it is done. `false`, with
+    /// nothing changed, when register `list` holds no list the host can
+    /// add to now; the body then has the interpreter run the
+    /// instructions. After it, no list is where native code last saw
+    /// it.
+    fn push(&mut self, ctx: &mut Context, list: u32, value: u32, dst: u32) -> bool;
+    /// Register `dst` takes register `src`'s value, as `mov` gives it:
+    /// `true` when it is done, `false` with nothing changed when the
+    /// host cannot (a register of the two carries a cell). It runs no
+    /// instruction, and changes nothing but register `dst`.
+    fn copy(&mut self, ctx: &mut Context, dst: u32, src: u32) -> bool;
+    /// Register `reg` holds null, and what it held is freed: `true`
+    /// when it is done, `false` with nothing changed when the host
+    /// cannot (the register carries a cell). It runs no instruction.
+    fn clear(&mut self, ctx: &mut Context, reg: u32) -> bool;
 }
 
 /// Why there is no mapping, or no [`Code`].
@@ -419,6 +464,9 @@ impl Code {
             run: sys::host_run_c::<H>,
             list: sys::host_list_c::<H>,
             again: sys::host_again_c::<H>,
+            push: sys::host_push_c::<H>,
+            copy: sys::host_copy_c::<H>,
+            clear: sys::host_clear_c::<H>,
         };
         ctx.helpers = &helpers as *const Helpers;
         ctx.host = host as *mut H as *mut core::ffi::c_void;
@@ -567,6 +615,78 @@ mod sys {
             Err(payload) => {
                 store_panic(payload);
                 Stop::Raised(pc).bits()
+            }
+        }
+    }
+
+    /// `extern "C"` glue for `Host::push`. On panic, `0` with the
+    /// panic stashed.
+    pub(super) unsafe extern "C" fn host_push_c<H: Host>(
+        ctx: *mut Context,
+        list: u32,
+        value: u32,
+        dst: u32,
+    ) -> u32 {
+        // SAFETY: as in `host_run_c`.
+        let host_ptr = unsafe { (*ctx).host as *mut H };
+        let ctx_ptr = ctx;
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let host = unsafe { &mut *host_ptr };
+            let cx = unsafe { &mut *ctx_ptr };
+            host.push(cx, list, value, dst)
+        }));
+        match result {
+            Ok(true) => 1,
+            Ok(false) => 0,
+            Err(payload) => {
+                store_panic(payload);
+                0
+            }
+        }
+    }
+
+    /// `extern "C"` glue for `Host::copy`. On panic, `0` with the
+    /// panic stashed.
+    pub(super) unsafe extern "C" fn host_copy_c<H: Host>(
+        ctx: *mut Context,
+        dst: u32,
+        src: u32,
+    ) -> u32 {
+        // SAFETY: as in `host_run_c`.
+        let host_ptr = unsafe { (*ctx).host as *mut H };
+        let ctx_ptr = ctx;
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let host = unsafe { &mut *host_ptr };
+            let cx = unsafe { &mut *ctx_ptr };
+            host.copy(cx, dst, src)
+        }));
+        match result {
+            Ok(true) => 1,
+            Ok(false) => 0,
+            Err(payload) => {
+                store_panic(payload);
+                0
+            }
+        }
+    }
+
+    /// `extern "C"` glue for `Host::clear`. On panic, `0` with the
+    /// panic stashed.
+    pub(super) unsafe extern "C" fn host_clear_c<H: Host>(ctx: *mut Context, reg: u32) -> u32 {
+        // SAFETY: as in `host_run_c`.
+        let host_ptr = unsafe { (*ctx).host as *mut H };
+        let ctx_ptr = ctx;
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let host = unsafe { &mut *host_ptr };
+            let cx = unsafe { &mut *ctx_ptr };
+            host.clear(cx, reg)
+        }));
+        match result {
+            Ok(true) => 1,
+            Ok(false) => 0,
+            Err(payload) => {
+                store_panic(payload);
+                0
             }
         }
     }
@@ -780,6 +900,30 @@ mod sys {
 
     #[allow(clippy::extra_unused_type_parameters)]
     pub(super) unsafe extern "C" fn host_again_c<H: Host>(_ctx: *mut Context, _pc: u32) -> u64 {
+        0
+    }
+
+    #[allow(clippy::extra_unused_type_parameters)]
+    pub(super) unsafe extern "C" fn host_push_c<H: Host>(
+        _ctx: *mut Context,
+        _list: u32,
+        _value: u32,
+        _dst: u32,
+    ) -> u32 {
+        0
+    }
+
+    #[allow(clippy::extra_unused_type_parameters)]
+    pub(super) unsafe extern "C" fn host_copy_c<H: Host>(
+        _ctx: *mut Context,
+        _dst: u32,
+        _src: u32,
+    ) -> u32 {
+        0
+    }
+
+    #[allow(clippy::extra_unused_type_parameters)]
+    pub(super) unsafe extern "C" fn host_clear_c<H: Host>(_ctx: *mut Context, _reg: u32) -> u32 {
         0
     }
 }

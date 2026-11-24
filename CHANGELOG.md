@@ -5,6 +5,19 @@ project follows semantic versioning.
 
 ## Unreleased
 
+- **Native code asks the runtime for what owns memory** (cig-native,
+  interface 2, three functions more: `push`, `copy`, `clear`). A body
+  copies a number over a number itself; a string, a list, a map or a
+  function is shared and freed by a count only the runtime keeps. Until
+  now a body that met one where it moved or wrote over a value had the
+  interpreter run that instruction and counted a failed guess, and a
+  body whose guesses keep failing is given up: one `mov` of a list a
+  turn could take a whole loop back to bytecode. `copy(dst, src)` makes
+  the move, `clear(reg)` frees what a register holds before a number is
+  stored there, and `push(list, value, dst)` is a list's own `push`.
+  None runs an instruction, and none counts as a failed guess. A
+  program built before this runs as it did: it asks for none of them.
+
 - **A call under a body runs to its return there** (cig-compile's
   decision 0008, section 7). A body hands the interpreter a stretch of
   instructions through the runtime's `run`; a `call` of one of the

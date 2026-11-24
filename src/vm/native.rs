@@ -361,6 +361,29 @@ impl Native {
                         return Stop::Defect(pc);
                     }
                     let pc = body.pcs.get(at as usize).copied().unwrap_or(0);
+                    // What a test has its body ask the host for.
+                    if let Some((here, ask, next)) = ASK_AT.with(Cell::get) {
+                        if pc <= here {
+                            // The interpreter runs up to the
+                            // instruction, the host is asked in its
+                            // place, and the interpreter runs the rest
+                            // from where that leaves the bytecode.
+                            let stop = match pc < here {
+                                true => host.run(ctx, pc, here),
+                                false => Stop::At(here),
+                            };
+                            if stop != Stop::At(here) {
+                                return stop;
+                            }
+                            let done = match ask {
+                                Ask::Push(list, value, dst) => host.push(ctx, list, value, dst),
+                                Ask::Copy(dst, src) => host.copy(ctx, dst, src),
+                                Ask::Clear(reg) => host.clear(ctx, reg),
+                            };
+                            let from = if done { next } else { here };
+                            return host.run(ctx, from, body.code_len);
+                        }
+                    }
                     if THROUGH_AGAIN.with(Cell::get) {
                         // One instruction, as a guess that failed.
                         return host.again(ctx, pc);
@@ -595,6 +618,23 @@ thread_local! {
     /// How many calls this thread's bodies carried through to their
     /// return (`run` made the call and ran the callee under the body).
     pub(crate) static CARRIED: Cell<u64> = const { Cell::new(0) };
+    /// The tests' body, when it reaches this pc, asks the host for
+    /// this and, when the host did it, goes on at the last pc: as
+    /// machine code does where it has the runtime do what an
+    /// instruction would.
+    pub(crate) static ASK_AT: Cell<Option<(u32, Ask, u32)>> = const { Cell::new(None) };
+}
+
+/// What a test's body asks its host for ([`ASK_AT`]).
+#[cfg(test)]
+#[derive(Clone, Copy)]
+pub(crate) enum Ask {
+    /// `push(list, value, dst)`.
+    Push(u32, u32, u32),
+    /// `copy(dst, src)`.
+    Copy(u32, u32),
+    /// `clear(reg)`.
+    Clear(u32),
 }
 
 thread_local! {

@@ -407,6 +407,19 @@ mod on_linux {
             0x5D,                               // pop rbp
             0xC3,                               // ret
         ];
+        pub const PUSH_THROUGH: &[u8] = &[
+            0x55,                               // push rbp
+            0x48, 0x89, 0xE5,                   // mov rbp, rsp
+            0x48, 0x8B, 0x47, 0x30,             // mov rax, [rdi+48]      ; helpers
+            0x48, 0x8B, 0x40, 0x18,             // mov rax, [rax+24]      ; helpers->push
+            0xBE, 0x03, 0x00, 0x00, 0x00,       // mov esi, 3             ; list
+            0xBA, 0x05, 0x00, 0x00, 0x00,       // mov edx, 5             ; value
+            0xB9, 0x02, 0x00, 0x00, 0x00,       // mov ecx, 2             ; dst
+            0xFF, 0xD0,                         // call rax
+            0x89, 0xC0,                         // mov eax, eax           ; its 0 or 1, as a stop's bits
+            0x5D,                               // pop rbp
+            0xC3,                               // ret
+        ];
     }
 
     /// AAPCS64: ctx in x0, at in w1, result in x0. Each instruction is
@@ -436,6 +449,19 @@ mod on_linux {
             0x08, 0x09, 0x40, 0xF9, // ldr x8, [x8, #16]
             0xE1, 0x00, 0x80, 0x52, // mov w1, #7
             0x00, 0x01, 0x3F, 0xD6, // blr x8
+            0xFD, 0x7B, 0xC1, 0xA8, // ldp x29, x30, [sp], #16
+            0xC0, 0x03, 0x5F, 0xD6, // ret
+        ];
+        pub const PUSH_THROUGH: &[u8] = &[
+            0xFD, 0x7B, 0xBF, 0xA9, // stp x29, x30, [sp, #-16]!
+            0xFD, 0x03, 0x00, 0x91, // mov x29, sp
+            0x08, 0x18, 0x40, 0xF9, // ldr x8, [x0, #48]
+            0x08, 0x0D, 0x40, 0xF9, // ldr x8, [x8, #24]
+            0x61, 0x00, 0x80, 0x52, // mov w1, #3      ; list
+            0xA2, 0x00, 0x80, 0x52, // mov w2, #5      ; value
+            0x43, 0x00, 0x80, 0x52, // mov w3, #2      ; dst
+            0x00, 0x01, 0x3F, 0xD6, // blr x8
+            0xE0, 0x03, 0x00, 0x2A, // mov w0, w0      ; its 0 or 1, as a stop's bits
             0xFD, 0x7B, 0xC1, 0xA8, // ldp x29, x30, [sp], #16
             0xC0, 0x03, 0x5F, 0xD6, // ret
         ];
@@ -494,6 +520,10 @@ mod on_linux {
         /// The pcs `again` was given, in order: it answers each with
         /// `At(pc + 1)`.
         again_calls: Vec<u32>,
+        /// The registers `push` was given, in order, and what it
+        /// answers.
+        push_calls: Vec<(u32, u32, u32)>,
+        push_returns: bool,
     }
 
     impl Host for Recording {
@@ -518,6 +548,18 @@ mod on_linux {
             self.again_calls.push(pc);
             Stop::At(pc + 1)
         }
+        fn push(&mut self, _ctx: &mut Context, list: u32, value: u32, dst: u32) -> bool {
+            self.push_calls.push((list, value, dst));
+            self.push_returns
+        }
+        fn copy(&mut self, _ctx: &mut Context, dst: u32, src: u32) -> bool {
+            self.push_calls.push((dst, src, u32::MAX));
+            self.push_returns
+        }
+        fn clear(&mut self, _ctx: &mut Context, reg: u32) -> bool {
+            self.push_calls.push((reg, u32::MAX, u32::MAX));
+            self.push_returns
+        }
     }
 
     #[test]
@@ -529,6 +571,8 @@ mod on_linux {
             run_calls: vec![],
             list_returns: vec![],
             again_calls: vec![],
+            push_calls: vec![],
+            push_returns: false,
         };
         let mut ctx = Context::new(100, 10);
         let stop = code.enter(0, 0, &mut ctx, &mut host);
@@ -564,11 +608,54 @@ mod on_linux {
             run_calls: vec![],
             list_returns: vec![],
             again_calls: vec![],
+            push_calls: vec![],
+            push_returns: false,
         };
         let mut ctx = Context::new(100, 10);
         assert_eq!(code.enter(0, 0, &mut ctx, &mut host), Some(Stop::At(8)));
         assert_eq!(host.again_calls, vec![7]);
         assert!(host.run_calls.is_empty());
+    }
+
+    #[test]
+    fn enter_calls_push_through_the_context_with_its_three_registers() {
+        // One body after the entries: it calls
+        // `ctx.helpers->push(ctx, 3, 5, 2)` and returns what that
+        // returns, as a stop's bits.
+        let mut section = section();
+        let offset = (code::ADD.len() + code::MARK.len() + code::TICK.len()) as u32;
+        section.code.extend_from_slice(body_code::PUSH_THROUGH);
+        section.bodies = vec![Body {
+            func: 1,
+            offset,
+            resumes: vec![0],
+        }];
+        section.rule = Rule::Loops;
+        let body = section.to_bytes().expect("a section");
+        let (keep, file) = file_with(65_536, &body);
+        let tables = Tables::parse(&body).expect("its tables");
+        let mapped = Mapped::map(&file, 65_536, tables.code_len as usize).expect("mapped");
+        let bytes = &body[..tables.code_len as usize];
+        // SAFETY: as in `armed`.
+        let code = unsafe { mapped.arm(bytes, &tables) }.expect("armed");
+        drop(keep);
+        for done in [true, false] {
+            let mut host = Recording {
+                run_returns: vec![],
+                run_calls: vec![],
+                list_returns: vec![],
+                again_calls: vec![],
+                push_calls: vec![],
+                push_returns: done,
+            };
+            let mut ctx = Context::new(100, 10);
+            assert_eq!(
+                code.enter(0, 0, &mut ctx, &mut host),
+                Some(Stop::At(u32::from(done)))
+            );
+            assert_eq!(host.push_calls, vec![(3, 5, 2)]);
+            assert!(host.run_calls.is_empty() && host.again_calls.is_empty());
+        }
     }
 
     #[test]
@@ -579,6 +666,8 @@ mod on_linux {
             run_calls: vec![],
             list_returns: vec![],
             again_calls: vec![],
+            push_calls: vec![],
+            push_returns: false,
         };
         let mut ctx = Context::new(50, 5);
         let stop = code.enter(1, 0, &mut ctx, &mut host);
@@ -594,6 +683,8 @@ mod on_linux {
             run_calls: vec![],
             list_returns: vec![],
             again_calls: vec![],
+            push_calls: vec![],
+            push_returns: false,
         };
         let mut ctx = Context::new(100, 10);
         let stop = code.enter(0, 0, &mut ctx, &mut host);
@@ -608,6 +699,8 @@ mod on_linux {
             run_calls: vec![],
             list_returns: vec![],
             again_calls: vec![],
+            push_calls: vec![],
+            push_returns: false,
         };
         let mut ctx = Context::new(100, 10);
         for body in [2usize, 99, usize::MAX] {
@@ -653,6 +746,15 @@ mod on_linux {
             }
             fn again(&mut self, _ctx: &mut Context, _pc: u32) -> Stop {
                 unreachable!("again is not called in this test");
+            }
+            fn push(&mut self, _ctx: &mut Context, _list: u32, _value: u32, _dst: u32) -> bool {
+                unreachable!("push is not called in this test");
+            }
+            fn copy(&mut self, _ctx: &mut Context, _dst: u32, _src: u32) -> bool {
+                unreachable!("copy is not called in this test");
+            }
+            fn clear(&mut self, _ctx: &mut Context, _reg: u32) -> bool {
+                unreachable!("clear is not called in this test");
             }
         }
         let code = armed_with_bodies();
