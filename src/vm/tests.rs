@@ -89,23 +89,47 @@ fn program_with_test_bodies(m: &Module) -> Rc<Program> {
     p
 }
 
-/// `f` on `m` through the driver, in each of the tests' three styles
-/// of body: one that hands the interpreter the rest of the function at
-/// once; one that hands it one instruction and comes back, so the body
-/// and the bytecode take turns at every instruction; and one that
-/// hands it one instruction as a guess that failed (`Host::again`).
+/// `f` on `m` through the driver, in each of the tests' styles of body:
+/// one that hands the interpreter the rest of the function at once,
+/// which carries every call of a compiled function through to its
+/// return under the body; the same with every such call left to the
+/// VM's own loop, as where the stack has no room; one that hands it one
+/// instruction and comes back, so the body and the bytecode take turns
+/// at every instruction; and one that hands it one instruction as a
+/// guess that failed (`Host::again`).
 fn driven<T>(m: &Module, mut f: impl FnMut(&Rc<Program>) -> T) -> Vec<T> {
-    [(false, false), (true, false), (false, true)]
+    STYLES
         .into_iter()
-        .map(|(one, again)| {
-            super::native::ONE_AT_A_TIME.with(|c| c.set(one));
-            super::native::THROUGH_AGAIN.with(|c| c.set(again));
-            let out = f(&program_with_test_bodies(m));
-            super::native::ONE_AT_A_TIME.with(|c| c.set(false));
-            super::native::THROUGH_AGAIN.with(|c| c.set(false));
-            out
-        })
+        .map(|style| in_style(style, || f(&program_with_test_bodies(m))))
         .collect()
+}
+
+/// The tests' styles of body, each by its name: the interpreter is
+/// handed one instruction at a time, it is handed one as a guess that
+/// failed, and calls are left to the VM's own loop.
+const STYLES: [(&str, bool, bool, bool); 4] = [
+    ("the whole function, calls carried", false, false, false),
+    (
+        "the whole function, calls left to the VM",
+        false,
+        false,
+        true,
+    ),
+    ("one instruction at a time", true, false, false),
+    ("one instruction as a failed guess", false, true, false),
+];
+
+/// `f` with the tests' bodies in `style`.
+fn in_style<T>(style: (&str, bool, bool, bool), f: impl FnOnce() -> T) -> T {
+    let (_, one, again, leave) = style;
+    super::native::ONE_AT_A_TIME.with(|c| c.set(one));
+    super::native::THROUGH_AGAIN.with(|c| c.set(again));
+    super::native::LEAVE_AT_CALLS.with(|c| c.set(leave));
+    let out = f();
+    super::native::ONE_AT_A_TIME.with(|c| c.set(false));
+    super::native::THROUGH_AGAIN.with(|c| c.set(false));
+    super::native::LEAVE_AT_CALLS.with(|c| c.set(false));
+    out
 }
 
 /// Run `m`'s top level as today and through the driver, and make sure
@@ -217,6 +241,197 @@ fn a_body_is_not_entered_where_the_stack_has_no_room_and_the_bytecode_runs() {
     r.expect("ran");
     assert_eq!(out, "0\n1\n2\n");
     assert!(entered() > before);
+}
+
+// ----- a call carried through under a body (cig-compile's decision 0008, section 7) -----
+
+/// How many calls this thread's bodies carried through so far.
+fn carried() -> u64 {
+    super::native::CARRIED.with(std::cell::Cell::get)
+}
+
+#[test]
+fn a_call_is_carried_through_under_the_body_that_makes_it() {
+    // Three calls of `f` in a row, each with its own argument; the last
+    // result is the run's.
+    let mut f = main_fn(
+        3,
+        vec![
+            Instr::abx(Op::CLOSURE, 0, 0),
+            abc(Op::MOV, 1, 0, 0),
+            Instr::asbx(Op::LOADINT, 2, 5),
+            abc(Op::CALL, 1, 1, 0),
+            abc(Op::MOV, 1, 0, 0),
+            Instr::asbx(Op::LOADINT, 2, 6),
+            abc(Op::CALL, 1, 1, 0),
+            abc(Op::MOV, 1, 0, 0),
+            Instr::asbx(Op::LOADINT, 2, 7),
+            abc(Op::CALL, 1, 1, 0),
+            ret(1),
+        ],
+    );
+    f.children = vec![child_fn("f", 1, 1, vec![ret(0)])];
+    let m = module(f);
+    // Handed the whole function, the body's `run` makes each call and
+    // the callee runs under it: the top level's body is entered once
+    // and each callee's once.
+    let (e, c) = (entered(), carried());
+    let r = run(&mut interp(), &program_with_test_bodies(&m)).expect("ran");
+    assert_eq!(r.repr(), "7");
+    assert_eq!((entered() - e, carried() - c), (4, 3));
+    // Where the stack has no room to carry a call, `run` stops at it:
+    // the VM's own loop makes the call, and the body is entered again
+    // after each one.
+    super::native::LEAVE_AT_CALLS.with(|c| c.set(true));
+    let (e, c) = (entered(), carried());
+    let r = run(&mut interp(), &program_with_test_bodies(&m));
+    super::native::LEAVE_AT_CALLS.with(|c| c.set(false));
+    assert_eq!(r.expect("ran").repr(), "7");
+    assert_eq!((entered() - e, carried() - c), (7, 0));
+}
+
+#[test]
+fn a_call_is_not_carried_where_the_stack_has_no_room() {
+    let m = recursion_module(false, 30);
+    let p = program_with_test_bodies(&m);
+    // Room for bodies when the run starts, and none said to be left
+    // from the first call on: the top level's body is entered, and
+    // nothing under it.
+    let c = carried();
+    assert_eq!(run(&mut interp(), &p).expect("ran").repr(), "30");
+    assert!(carried() - c >= 30, "carried {}", carried() - c);
+    super::stack_starts_here(0);
+    let c = carried();
+    let r = run(&mut interp(), &p);
+    super::stack_starts_here(2 << 20);
+    assert_eq!(r.expect("ran").repr(), "30");
+    assert_eq!(carried(), c, "a call was carried with no room");
+}
+
+/// What `src` prints and how it ends on the tree-walker, with `budget`
+/// steps (0 for no budget).
+fn walked(src: &str, budget: u64) -> (String, String) {
+    let ast = crate::syntax::parse(src).expect("parses");
+    let report = crate::check::check(&ast, &[]);
+    assert!(report.ok(), "{src}: {:?}", report.errors);
+    let buf = Buf::default();
+    let mut w = interp();
+    w.set_max_steps(budget);
+    w.out = Box::new(buf.clone());
+    let r = w.run_program(&ast).err();
+    (buf.text(), ending(r, w.exit_requested))
+}
+
+/// `src` as the lowering makes it, run on the VM bare and through the
+/// driver in each of the tests' styles: every run prints what the
+/// tree-walker prints and ends as it ends, and gives back the depth and
+/// the loop nesting it took. What was printed.
+fn script_agrees_under_bodies(src: &str, budget: u64) -> String {
+    let want = walked(src, budget);
+    let ast = crate::syntax::parse(src).expect("parses");
+    let bytes = match crate::lower::module_bytes(&ast, "t.cig") {
+        Ok(b) => b,
+        Err(_) => panic!("{src}: does not lower"),
+    };
+    let run_one = |p: &Rc<Program>| {
+        let buf = Buf::default();
+        let mut i = interp();
+        i.set_max_steps(budget);
+        i.out = Box::new(buf.clone());
+        let r = run_script(&mut i, p).err();
+        assert_eq!(i.loop_depth, 0, "{src}: the loop depth is given back");
+        assert_eq!(
+            i.call_depth_for_tests(),
+            0,
+            "{src}: the depth is given back"
+        );
+        (buf.text(), ending(r, i.exit_requested))
+    };
+    let open = |bytes: &[u8]| match super::open(bytes.to_vec()) {
+        Ok(p) => p,
+        Err(e) => panic!("{src}: does not open: {}", e.message),
+    };
+    assert_eq!(run_one(&open(&bytes)), want, "{src}: with no body");
+    for style in STYLES {
+        let got = in_style(style, || {
+            super::stack_starts_here(2 << 20);
+            let p = open(&bytes);
+            p.attach_test_bodies_for_every_pc();
+            run_one(&p)
+        });
+        assert_eq!(got, want, "{src}: {} (budget {budget})", style.0);
+    }
+    want.0
+}
+
+/// Scripts whose calls matter: in loops, nested, recursive, through
+/// closures and builtins' callbacks, and raising where a caller, the
+/// callee itself or nobody catches.
+const CALL_SCRIPTS: [(&str, &str); 9] = [
+    (
+        "pull f(x) {\n  snuff x + 1\n}\nroll t = 0\nfor i in 0..5 {\n  t += f(i)\n}\nexhale t\n",
+        "15\n",
+    ),
+    (
+        "pull fib(n) {\n  if n < 2 {\n    snuff n\n  }\n  snuff fib(n - 1) + fib(n - 2)\n}\nexhale fib(12)\n",
+        "144\n",
+    ),
+    (
+        "pull f(x) {\n  snuff 10 / x\n}\nroll got = 0\ntry {\n  got = f(0)\n} ashtray e {\n  exhale \"caught\"\n}\nexhale got\nexhale f(5)\n",
+        "caught\n0\n2\n",
+    ),
+    (
+        "pull f(x) {\n  try {\n    snuff 10 / x\n  } ashtray e {\n    snuff -1\n  }\n}\nexhale f(0), f(2)\n",
+        "-1 5\n",
+    ),
+    (
+        "pull g(x) {\n  snuff 10 / x\n}\npull f(x) {\n  try {\n    snuff g(x)\n  } finally {\n    exhale \"f done\"\n  }\n}\ntry {\n  exhale f(2)\n  exhale f(0)\n} ashtray e {\n  exhale \"top\"\n}\n",
+        "f done\n5\nf done\ntop\n",
+    ),
+    (
+        "pull g(x) {\n  snuff 10 / x\n}\npull f(x) {\n  snuff g(x) + 1\n}\nexhale f(5)\nexhale f(0)\nexhale \"not reached\"\n",
+        "3\n",
+    ),
+    (
+        "pull counter(start) {\n  roll n = start\n  snuff pack() => n + 1\n}\nroll total = 0\nfor i in 0..6 {\n  stick f = counter(i)\n  total += f()\n}\nexhale total\n",
+        "21\n",
+    ),
+    (
+        "pull dbl(x) {\n  snuff x * 2\n}\nexhale [1, 2, 3].map(dbl)\nexhale [1, 2, 3].map(pack(x) => dbl(x) + 1)\n",
+        "[2, 4, 6]\n[3, 5, 7]\n",
+    ),
+    (
+        "pull even(n) {\n  if n == 0 {\n    snuff true\n  }\n  snuff odd(n - 1)\n}\npull odd(n) {\n  if n == 0 {\n    snuff false\n  }\n  snuff even(n - 1)\n}\nroll hits = 0\nfor i in 0..7 {\n  if even(i) {\n    hits += 1\n  }\n}\nexhale hits\n",
+        "4\n",
+    ),
+];
+
+#[test]
+fn scripts_that_call_run_the_same_with_their_calls_carried_under_bodies() {
+    for (src, printed) in CALL_SCRIPTS {
+        assert_eq!(script_agrees_under_bodies(src, 0), printed, "{src}");
+    }
+}
+
+#[test]
+fn the_step_budget_ends_a_carried_call_at_the_same_step() {
+    // Every budget from one step to past the run's end: wherever the
+    // budget ends (in a caller, in a callee two calls down, in a catch),
+    // each run stops with what the tree-walker printed and its error.
+    for (src, _) in CALL_SCRIPTS {
+        // A smaller recursion: every budget of it is a run.
+        let src = src.replace("fib(12)", "fib(6)");
+        let unbounded = walked(&src, 0);
+        let mut whole = false;
+        for budget in 1..400 {
+            script_agrees_under_bodies(&src, budget);
+            if walked(&src, budget) == unbounded {
+                whole = true;
+                break;
+            }
+        }
+        assert!(whole, "{src}: 400 steps were not enough to finish");
+    }
 }
 
 #[test]

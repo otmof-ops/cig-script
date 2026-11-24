@@ -172,9 +172,18 @@ Interface 2 has three helper functions a body calls, through its
 
 | offset | signature | what |
 |---:|---|---|
-| 0 | `run(ctx, from, to) -> u64` | runs the frame's bytecode from pc `from` while the pc stays in `from..to`; returns a stop's bits |
+| 0 | `run(ctx, from, to) -> u64` | runs the frame's bytecode from pc `from` while the pc stays in `from..to`, a call in it to its return when the runtime can carry it; returns a stop's bits |
 | 8 | `list(ctx, reg) -> u32`      | 1 when register `reg` holds a list whose elements native code may read and write where they lie, with `ctx.left` and `ctx.right` set; 0 otherwise |
 | 16 | `again(ctx, pc) -> u64`     | runs the one instruction at `pc`, whose machine code in the body did not cover the operands it met; returns a stop's bits |
+
+**`run` may carry a call.** Where the range holds a `call`, the runtime
+makes it and runs the callee to its return under the body (on frames
+above the body's, in the callee's own body where it has one), and goes
+on in the range. A runtime that cannot carry one (the callee is not a
+function of the program, the stack has no room) stands `At` the call
+instead, as it stands at a return and a tail call: the body returns
+that stop, and the runtime's own loop makes the call. A body is right
+either way; which one happens is a question of time.
 
 **`again` is how a guess that failed is run, and how it is counted.** A
 body has machine code for an instruction's usual operands (two numbers

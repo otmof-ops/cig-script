@@ -29,11 +29,12 @@ use crate::interp::{depth_exceeded, Interp};
 use crate::syntax::ast::BinOp;
 use crate::syntax::span::Span;
 use crate::value::Value;
+use cig_bytecode::DecodedInstr;
 use cig_native::{
     op, Code, Context, Exit, Host, Rule, Site, Stop, Tables, Ty, MAX_ARGS, MAX_BODY_FRAME,
     MAX_FRAME,
 };
-use std::cell::{Cell, OnceCell};
+use std::cell::{Cell, OnceCell, Ref, RefCell};
 
 /// A pc that is no resume point, in [`BodyEntry::resume_at`]. `u32::MAX`,
 /// so a `.get(pc).copied().filter(...)` is a load and a compare.
@@ -60,6 +61,15 @@ pub(crate) struct BodyEntry {
     /// compare per instruction. A resume point the VM gave up
     /// ([`BodyEntry::missed`]) is [`NO_RESUME`] from then on.
     resume_at: Box<[Cell<u32>]>,
+    /// The function's instructions as the fast loop reads them between
+    /// two resume points: its decoded code, with no instruction where a
+    /// resume point is. The loop stops where it finds none, so it stops
+    /// before a resume point with no test of its own, and a function
+    /// with a body runs the rest of its bytecode at the speed of one
+    /// without. A resume point the VM gave up has its instruction back.
+    between: RefCell<Vec<Option<DecodedInstr>>>,
+    /// For each resume index, the instruction `between` has none for.
+    taken: Vec<Option<DecodedInstr>>,
     /// The guesses of this body that failed since `since`.
     misses: Cell<u32>,
     /// The run's count of steps when `misses` was last zero.
@@ -72,32 +82,40 @@ pub(crate) struct BodyEntry {
 
 impl BodyEntry {
     /// The body with index `code_index` in the mapped code and resume
-    /// points `pcs`, held against its function's instructions:
-    /// `code_len` is how many words the function has and `starts(pc)`
-    /// says whether an instruction starts at `pc`. `None` when a resume
-    /// point starts none: such a body is never entered.
-    fn resolve(
-        code_index: usize,
-        pcs: &[u32],
-        code_len: usize,
-        starts: impl Fn(usize) -> bool,
-    ) -> Option<BodyEntry> {
+    /// points `pcs`, held against its function's instructions: `code`
+    /// is the function's decoded code, one place a word, with an
+    /// instruction where one starts. `None` when a resume point starts
+    /// none: such a body is never entered.
+    fn resolve(code_index: usize, pcs: &[u32], code: &[Option<DecodedInstr>]) -> Option<BodyEntry> {
+        let code_len = code.len();
         let resume_at: Box<[Cell<u32>]> = (0..code_len).map(|_| Cell::new(NO_RESUME)).collect();
+        let mut between = code.to_vec();
+        let mut taken = Vec::with_capacity(pcs.len());
         for (at, pc) in pcs.iter().enumerate() {
             let p = *pc as usize;
-            if !starts(p) {
-                return None;
-            }
+            let here = (*code.get(p)?)?;
             resume_at.get(p)?.set(u32::try_from(at).ok()?);
+            *between.get_mut(p)? = None;
+            taken.push(Some(here));
         }
         Some(BodyEntry {
             code_index,
             pcs: pcs.to_vec(),
             resume_at,
+            between: RefCell::new(between),
+            taken,
             misses: Cell::new(0),
             since: Cell::new(0),
             code_len: u32::try_from(code_len).ok()?,
         })
+    }
+
+    /// The function's instructions with none at a resume point, for the
+    /// fast loop between two of them. `None` while a resume point is
+    /// being given up, which no run of that loop overlaps.
+    #[inline]
+    pub(crate) fn between(&self) -> Option<Ref<'_, Vec<Option<DecodedInstr>>>> {
+        self.between.try_borrow().ok()
     }
 
     /// Count a guess that failed in native code entered at resume index
@@ -128,6 +146,19 @@ impl BodyEntry {
         let pc = self.pcs.get(at as usize).copied();
         if let Some(cell) = pc.and_then(|pc| self.resume_at.get(pc as usize)) {
             cell.set(NO_RESUME);
+        }
+        // The fast loop no longer stops there: the instruction is back.
+        // While that loop holds the table (it runs no body, so it never
+        // does here) the instruction stays out, and the loop stops at a
+        // pc that is no resume point: the VM runs it and goes on.
+        if let (Some(pc), Some(instr), Ok(mut between)) = (
+            pc,
+            self.taken.get(at as usize).copied().flatten(),
+            self.between.try_borrow_mut(),
+        ) {
+            if let Some(slot) = between.get_mut(pc as usize) {
+                *slot = Some(instr);
+            }
         }
         true
     }
@@ -281,30 +312,24 @@ impl Native {
     }
 
     /// The body of function `func`, when it has one that can be
-    /// entered: `code_len` is how many words the function has and
-    /// `starts(pc)` whether an instruction of it starts at `pc`. The
-    /// body is held against them the first time, and found by one load
-    /// after that.
+    /// entered: `code` is the function's decoded code, one place a
+    /// word, with an instruction where one starts. The body is held
+    /// against it the first time, and found by one load after that.
     #[inline]
-    pub(crate) fn body_of(
-        &self,
-        func: usize,
-        code_len: usize,
-        starts: impl Fn(usize) -> bool,
-    ) -> Option<&BodyEntry> {
+    pub(crate) fn body_of(&self, func: usize, code: &[Option<DecodedInstr>]) -> Option<&BodyEntry> {
         self.bodies
             .get(func)?
             .get_or_init(|| {
                 let (index, pcs) = self.raw.get(func)?.as_ref()?;
                 #[cfg(test)]
                 if self.every_pc {
-                    let all: Vec<u32> = (0..code_len)
-                        .filter(|pc| starts(*pc))
+                    let all: Vec<u32> = (0..code.len())
+                        .filter(|pc| code.get(*pc).is_some_and(Option::is_some))
                         .filter_map(|pc| u32::try_from(pc).ok())
                         .collect();
-                    return BodyEntry::resolve(*index, &all, code_len, starts);
+                    return BodyEntry::resolve(*index, &all, code);
                 }
-                BodyEntry::resolve(*index, pcs, code_len, starts)
+                BodyEntry::resolve(*index, pcs, code)
             })
             .as_ref()
     }
@@ -563,6 +588,13 @@ thread_local! {
     /// The tests' bodies are given up when their guesses keep failing,
     /// as a program's are.
     pub(crate) static IMPATIENT: Cell<bool> = const { Cell::new(false) };
+    /// A body's `run` stops at a call of a compiled function instead of
+    /// carrying it through, as it does where the stack has no room: the
+    /// VM's own loop makes every call.
+    pub(crate) static LEAVE_AT_CALLS: Cell<bool> = const { Cell::new(false) };
+    /// How many calls this thread's bodies carried through to their
+    /// return (`run` made the call and ran the callee under the body).
+    pub(crate) static CARRIED: Cell<u64> = const { Cell::new(0) };
 }
 
 thread_local! {
@@ -622,7 +654,14 @@ mod tests {
     /// A body of a ten-word function with resume points at pcs 0, 4
     /// and 7.
     fn entry() -> BodyEntry {
-        BodyEntry::resolve(0, &[0, 4, 7], 10, |_| true).expect("a body")
+        BodyEntry::resolve(0, &[0, 4, 7], &ten_nops()).expect("a body")
+    }
+
+    /// A function of ten `nop`s.
+    fn ten_nops() -> Vec<Option<DecodedInstr>> {
+        let words = vec![cig_bytecode::Instr::abc(cig_bytecode::Op::NOP, 0, 0, 0); 10];
+        let (_, code) = cig_bytecode::decode_table(&words).expect("decodes");
+        code
     }
 
     #[test]
@@ -637,6 +676,41 @@ mod tests {
         assert!(b.missed(1, u64::from(MISS_WINDOW)));
         assert_eq!(b.at(4), None, "the resume point is one no longer");
         assert_eq!((b.at(0), b.at(7)), (Some(0), Some(2)), "the others stay");
+    }
+
+    #[test]
+    fn the_fast_loops_table_has_no_instruction_at_a_resume_point_until_it_is_given_up() {
+        let b = entry();
+        {
+            let table = b.between().expect("nothing holds it");
+            let blank: Vec<usize> = (0..10).filter(|pc| table[*pc].is_none()).collect();
+            assert_eq!(
+                blank,
+                vec![0, 4, 7],
+                "the loop stops before each resume point"
+            );
+        }
+        // The resume point at pc 4 is given up: its instruction is back,
+        // and the loop runs through it.
+        for n in 0..MISS_WINDOW - 1 {
+            assert!(!b.missed(1, u64::from(n)));
+        }
+        assert!(b.missed(1, u64::from(MISS_WINDOW)));
+        let table = b.between().expect("nothing holds it");
+        let blank: Vec<usize> = (0..10).filter(|pc| table[*pc].is_none()).collect();
+        assert_eq!(blank, vec![0, 7]);
+        assert_eq!(table[4].map(|d| d.pc), Some(4));
+    }
+
+    #[test]
+    fn a_body_whose_resume_point_starts_no_instruction_is_not_one() {
+        // The second word of a two-word instruction, and a pc past the
+        // function.
+        let mut code = ten_nops();
+        code[3] = None;
+        assert!(BodyEntry::resolve(0, &[0, 3], &code).is_none());
+        assert!(BodyEntry::resolve(0, &[10], &code).is_none());
+        assert!(BodyEntry::resolve(0, &[0, 4], &code).is_some());
     }
 
     #[test]

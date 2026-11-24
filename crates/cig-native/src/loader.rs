@@ -78,7 +78,10 @@ pub struct Helpers {
     /// pc `from` while the pc stays in `from..to`. Returns a stop's
     /// bits: [`Stop::At`] with the pc it stands at now (outside the
     /// range, or inside it at an instruction `run` does not run), or
-    /// [`Stop::Raised`].
+    /// [`Stop::Raised`]. A call in the range that the runtime can
+    /// carry is made and its callee run to its return before `run`
+    /// goes on; at one it cannot carry, and at what ends the frame (a
+    /// return, a tail call), `run` stands at the instruction.
     pub run: unsafe extern "C" fn(ctx: *mut Context, from: u32, to: u32) -> u64,
     /// Offset 8. `list(ctx, reg)`: 1 when register `reg` holds a list
     /// whose elements native code may read and write where they lie
@@ -112,7 +115,10 @@ const _: () = {
 /// [`Code::enter`] resumes the panic once the body has returned.
 pub trait Host {
     /// Run the frame's bytecode from `from` while the pc stays in
-    /// `from..to`. Returns the stop the body sees. Never [`Stop::Defect`].
+    /// `from..to`. Returns the stop the body sees. Never
+    /// [`Stop::Defect`]. A host may carry a call through to its return
+    /// here, on frames above the body's; when it comes back from one,
+    /// the body's frame is on top again and whole.
     fn run(&mut self, ctx: &mut Context, from: u32, to: u32) -> Stop;
     /// Give native code a view on register `reg`'s list, when it holds
     /// one: set `ctx.left` to the address of its first element and
