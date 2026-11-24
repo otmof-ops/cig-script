@@ -5,6 +5,35 @@ project follows semantic versioning.
 
 ## Unreleased
 
+- **A call under a body runs to its return there** (cig-compile's
+  decision 0008, section 7). A body hands the interpreter a stretch of
+  instructions through the runtime's `run`; a `call` of one of the
+  script's functions in that stretch used to end it, the body returned,
+  the VM's loop made the call and entered the body again after it. `run`
+  now makes the call and runs the callee to its return on frames above
+  the body's, entering the callee's own body where it has one, and goes
+  on. An error is the callee's frames' to catch first and then raised at
+  the call in the body's frame, as at stage `b`; the depth limit, the
+  step budget and the stack's ceiling fall where they fell. Where the
+  stack has no room to carry a call, `run` stops at it as before.
+  Nothing of the interface changes: a program built before this runs as
+  it did.
+- **The VM's calls are cheaper at every stage.** A new frame's
+  registers are set to null without a call a register, and the fast
+  loop no longer asks its second tier about a `call`, a `ret` or a
+  `tailcall`. Counted in instructions on stage `b` programs: `fib`
+  12.7% fewer, `spectral` and `trees` 9.7%, `closures` 6.7%, `dispatch`
+  4.7%; a program made of builtin calls runs up to 1.6% more (`csv`).
+- **A function with a body runs the rest of its bytecode at the speed
+  of one without.** Between two resume points the VM's fast loop tested
+  every instruction it went on to against the body's resume points; it
+  now reads a table of the function's instructions that has none where
+  a resume point is, and stops there by itself. A resume point the VM
+  gives up has its instruction back.
+- **Each of the VM's two machines is a function of its own**
+  (`run_frame_on`), so a change to the machine with bodies moves no
+  line of the code a program without them runs.
+
 - **Benchmarks: stage `c`, measured** (`docs/BENCHMARKS-2026-11-24.md`,
   its raw data in `bench/results/2026-11-24/`). The 25 programs again,
   with a stage `c` program as a side: cig and cigcompile built from
