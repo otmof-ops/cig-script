@@ -30,7 +30,8 @@ use crate::syntax::ast::BinOp;
 use crate::syntax::span::Span;
 use crate::value::Value;
 use cig_native::{
-    op, Code, Context, Exit, Host, Site, Stop, Tables, Ty, MAX_ARGS, MAX_BODY_FRAME, MAX_FRAME,
+    op, Code, Context, Exit, Host, Rule, Site, Stop, Tables, Ty, MAX_ARGS, MAX_BODY_FRAME,
+    MAX_FRAME,
 };
 use std::cell::{Cell, OnceCell};
 
@@ -38,20 +39,31 @@ use std::cell::{Cell, OnceCell};
 /// so a `.get(pc).copied().filter(...)` is a load and a compare.
 pub(crate) const NO_RESUME: u32 = u32::MAX;
 
+/// How many failed guesses of a body are counted before their rate is
+/// looked at.
+const MISS_WINDOW: u32 = 64;
+
+/// A body's guesses fail too often when more than one fails in this
+/// many steps of the run.
+const STEPS_A_MISS: u64 = 16;
+
 /// One function's body as the VM finds it: where it lies in [`Code`], the
 /// pc of each resume point, and (indexed by first-word pc) the resume
 /// index at that pc, or [`NO_RESUME`].
 pub(crate) struct BodyEntry {
     /// The body's index in the mapped code.
     code_index: usize,
-    /// For each resume index, the first-word pc of that resume point:
-    /// where the tests' plain-Rust body starts from.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// For each resume index, the first-word pc of that resume point.
     pcs: Vec<u32>,
     /// For each first-word pc of the function, the resume index at that
     /// pc, else [`NO_RESUME`]: the driver's lookup is one load and one
-    /// compare per instruction.
-    resume_at: Box<[u32]>,
+    /// compare per instruction. A resume point the VM gave up
+    /// ([`BodyEntry::missed`]) is [`NO_RESUME`] from then on.
+    resume_at: Box<[Cell<u32>]>,
+    /// The guesses of this body that failed since `since`.
+    misses: Cell<u32>,
+    /// The run's count of steps when `misses` was last zero.
+    since: Cell<u64>,
     /// How many words the function's code has: where the tests'
     /// plain-Rust body runs to.
     #[cfg_attr(not(test), allow(dead_code))]
@@ -70,27 +82,61 @@ impl BodyEntry {
         code_len: usize,
         starts: impl Fn(usize) -> bool,
     ) -> Option<BodyEntry> {
-        let mut resume_at = vec![NO_RESUME; code_len].into_boxed_slice();
+        let resume_at: Box<[Cell<u32>]> = (0..code_len).map(|_| Cell::new(NO_RESUME)).collect();
         for (at, pc) in pcs.iter().enumerate() {
             let p = *pc as usize;
             if !starts(p) {
                 return None;
             }
-            *resume_at.get_mut(p)? = u32::try_from(at).ok()?;
+            resume_at.get(p)?.set(u32::try_from(at).ok()?);
         }
         Some(BodyEntry {
             code_index,
             pcs: pcs.to_vec(),
             resume_at,
+            misses: Cell::new(0),
+            since: Cell::new(0),
             code_len: u32::try_from(code_len).ok()?,
         })
+    }
+
+    /// Count a guess that failed in native code entered at resume index
+    /// `at` (an inline form met operands it does not cover, and the
+    /// interpreter ran the instruction), with `steps` the steps the run
+    /// has counted so far. `true` when this body's guesses fail too
+    /// often for its machine code to be worth entering there: more than
+    /// one in [`STEPS_A_MISS`] steps, over the last [`MISS_WINDOW`] of
+    /// them. The resume point is then one no longer, and the caller
+    /// gives the frame back to the bytecode.
+    ///
+    /// What a failed guess costs is a call into the runtime where the
+    /// interpreter would have run the instruction in a few nanoseconds;
+    /// a loop that fails one every time round is slower compiled than
+    /// not. So the loss is bounded: at most [`MISS_WINDOW`] such calls
+    /// at that rate, twice over, before the bytecode has the loop back.
+    pub(crate) fn missed(&self, at: u32, steps: u64) -> bool {
+        let n = self.misses.get().saturating_add(1);
+        if n < MISS_WINDOW {
+            self.misses.set(n);
+            return false;
+        }
+        self.misses.set(0);
+        let since = self.since.replace(steps);
+        if steps.saturating_sub(since) >= u64::from(MISS_WINDOW).saturating_mul(STEPS_A_MISS) {
+            return false;
+        }
+        let pc = self.pcs.get(at as usize).copied();
+        if let Some(cell) = pc.and_then(|pc| self.resume_at.get(pc as usize)) {
+            cell.set(NO_RESUME);
+        }
+        true
     }
 
     /// The resume index at `pc`, when `pc` is one of the body's resume
     /// points.
     #[inline(always)]
     pub(crate) fn at(&self, pc: usize) -> Option<u32> {
-        match self.resume_at.get(pc).copied() {
+        match self.resume_at.get(pc).map(Cell::get) {
             Some(x) if x != NO_RESUME => Some(x),
             _ => None,
         }
@@ -121,6 +167,10 @@ pub struct Native {
     /// and verified at its first entry, so its body is looked at then
     /// and not when the section is loaded.
     bodies: Vec<OnceCell<Option<BodyEntry>>>,
+    /// The section was built with a body for every function
+    /// ([`Rule::Every`], a build for tests): its bodies are entered
+    /// whatever their guesses do, so that every one of them runs.
+    patient: bool,
     /// The tests' native code: every function has a body, in plain
     /// Rust, and every instruction of it is a resume point.
     #[cfg(test)]
@@ -141,7 +191,10 @@ impl Native {
             }
         }
         let bodies = (0..funcs).map(|_| OnceCell::new()).collect();
-        Native::build(Some(code), tables.sites, tables.entries, funcs, raw, bodies)
+        let mut native =
+            Native::build(Some(code), tables.sites, tables.entries, funcs, raw, bodies);
+        native.patient = tables.rule == Rule::Every;
+        native
     }
 
     fn build(
@@ -171,6 +224,7 @@ impl Native {
             of,
             raw,
             bodies,
+            patient: false,
             #[cfg(test)]
             every_pc: false,
         }
@@ -190,6 +244,7 @@ impl Native {
         let bodies = (0..funcs).map(|_| OnceCell::new()).collect();
         let mut native = Native::build(None, Vec::new(), Vec::new(), funcs, raw, bodies);
         native.every_pc = true;
+        native.patient = true;
         native
     }
 
@@ -201,6 +256,15 @@ impl Native {
     /// It has no entry.
     pub fn is_empty(&self) -> bool {
         self.rows.is_empty()
+    }
+
+    /// Its bodies are entered whatever their guesses do.
+    pub(crate) fn patient(&self) -> bool {
+        #[cfg(test)]
+        if IMPATIENT.with(Cell::get) {
+            return false;
+        }
+        self.patient
     }
 
     /// How many bodies it has.
@@ -272,6 +336,10 @@ impl Native {
                         return Stop::Defect(pc);
                     }
                     let pc = body.pcs.get(at as usize).copied().unwrap_or(0);
+                    if THROUGH_AGAIN.with(Cell::get) {
+                        // One instruction, as a guess that failed.
+                        return host.again(ctx, pc);
+                    }
                     let to = match ONE_AT_A_TIME.with(Cell::get) {
                         true => pc.saturating_add(1),
                         false => body.code_len,
@@ -489,6 +557,12 @@ thread_local! {
     /// back, instead of the rest of the function: the body and the
     /// bytecode then take turns at every instruction.
     pub(crate) static ONE_AT_A_TIME: Cell<bool> = const { Cell::new(false) };
+    /// The tests' bodies run the instruction they are entered at
+    /// through `Host::again`, as a guess that failed, and come back.
+    pub(crate) static THROUGH_AGAIN: Cell<bool> = const { Cell::new(false) };
+    /// The tests' bodies are given up when their guesses keep failing,
+    /// as a program's are.
+    pub(crate) static IMPATIENT: Cell<bool> = const { Cell::new(false) };
 }
 
 thread_local! {
@@ -544,6 +618,50 @@ pub(super) fn has_body_room() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A body of a ten-word function with resume points at pcs 0, 4
+    /// and 7.
+    fn entry() -> BodyEntry {
+        BodyEntry::resolve(0, &[0, 4, 7], 10, |_| true).expect("a body")
+    }
+
+    #[test]
+    fn a_body_whose_guesses_keep_failing_loses_the_resume_point_it_was_entered_at() {
+        let b = entry();
+        // One short of the window: nothing is decided.
+        for n in 0..MISS_WINDOW - 1 {
+            assert!(!b.missed(1, u64::from(n)), "miss {n}");
+        }
+        assert_eq!(b.at(4), Some(1));
+        // The window's last, with a step a miss: given up.
+        assert!(b.missed(1, u64::from(MISS_WINDOW)));
+        assert_eq!(b.at(4), None, "the resume point is one no longer");
+        assert_eq!((b.at(0), b.at(7)), (Some(0), Some(2)), "the others stay");
+    }
+
+    #[test]
+    fn a_body_whose_guesses_fail_now_and_then_is_kept() {
+        let b = entry();
+        // A miss every STEPS_A_MISS steps, for ten windows: never given
+        // up, and the count starts again each time.
+        let mut steps = 0;
+        for n in 0..u64::from(MISS_WINDOW) * 10 {
+            steps += STEPS_A_MISS;
+            assert!(!b.missed(2, steps), "miss {n} at step {steps}");
+        }
+        assert_eq!(b.at(7), Some(2));
+        // Then one a step: the next full window gives it up.
+        let mut gave_up = false;
+        for _ in 0..MISS_WINDOW * 2 {
+            steps += 1;
+            if b.missed(2, steps) {
+                gave_up = true;
+                break;
+            }
+        }
+        assert!(gave_up);
+        assert_eq!(b.at(7), None);
+    }
 
     const SIZE: usize = 64 << 20;
 

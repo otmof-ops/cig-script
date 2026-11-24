@@ -240,9 +240,13 @@ pub mod op {
 pub enum Rule {
     /// No function has a body.
     None = 0,
-    /// Every function with a backward jump has a body.
+    /// A function has a body when one of its loops is faster as machine
+    /// code, by the compiler's own reckoning, and the body is entered
+    /// at those loops.
     Loops = 1,
-    /// Every function has a body.
+    /// Every function has a body, entered at every resume point the
+    /// bytecode has: a build for tests, where every body should run. A
+    /// runtime enters such a body whatever its guesses do.
     Every = 2,
 }
 
@@ -534,13 +538,6 @@ pub enum FormatError {
         /// The body.
         at: usize,
     },
-    /// A body's first resume point is not pc 0.
-    BodyFirstResumeNotZero {
-        /// The body.
-        at: usize,
-        /// The pc that was first.
-        found: u32,
-    },
     /// A body's resume points are not strictly ascending.
     ResumesOutOfOrder {
         /// The body.
@@ -659,10 +656,6 @@ impl fmt::Display for FormatError {
                 "body {at} sorts before the body it follows, or shares its function"
             ),
             BodyWithoutResume { at } => write!(f, "body {at} has no resume point"),
-            BodyFirstResumeNotZero { at, found } => write!(
-                f,
-                "body {at}'s first resume point is pc {found}, not 0"
-            ),
             ResumesOutOfOrder { at, pc } => write!(
                 f,
                 "body {at}'s resume point {pc} sorts before the pc it follows"
@@ -709,7 +702,7 @@ impl std::error::Error for FormatError {}
 ///
 /// Bodies: strictly ascending by function; an offset inside the code and
 /// a multiple of the architecture's instruction size; at least one
-/// resume point whose first is pc 0, and strictly ascending; with their
+/// resume point, and strictly ascending; with their
 /// `first` and `count` running back-to-back over the resume table and
 /// covering it exactly.
 fn check(
@@ -821,12 +814,6 @@ fn check(
         }
         if b.resumes.is_empty() {
             return Err(FormatError::BodyWithoutResume { at });
-        }
-        if b.resumes[0] != 0 {
-            return Err(FormatError::BodyFirstResumeNotZero {
-                at,
-                found: b.resumes[0],
-            });
         }
         for w in b.resumes.windows(2) {
             if w[1] <= w[0] {
@@ -1245,9 +1232,9 @@ impl Tables {
                 word.copy_from_slice(chunk);
                 resumes.push(u32::from_le_bytes(word));
             }
-            // `check` below catches an empty resume list, a first that
-            // is not 0, and resume points out of order; here we build
-            // the list and `check` sees it like any other.
+            // `check` below catches an empty resume list and resume
+            // points out of order; here we build the list and `check`
+            // sees it like any other.
             let _ = at;
             bodies.push(Body {
                 func,

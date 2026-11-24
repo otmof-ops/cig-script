@@ -16,14 +16,22 @@ project follows semantic versioning.
   is still made by the interpreter (it runs the instruction the body
   stopped at), the step budget is exact, and calls, tries and burns are
   the VM's own instructions.
-  - The VM enters a body at the function's start, after each call, at
-    each loop's start and at each `catch` and `finally`, where the stack
-    has room; elsewhere, and with `CIG_NATIVE=0`, the bytecode runs.
+  - The VM enters a body at its resume points, which the compiler
+    lists (a loop's start, the instruction after a call), where the
+    stack has room; elsewhere, and with `CIG_NATIVE=0`, the bytecode
+    runs, on the VM's fast loop as in a function without a body.
+  - A body's machine code for an instruction covers its usual operands
+    and tests for them; for any others the interpreter runs the
+    instruction. A body whose tests keep failing (more than one in 16
+    steps, over 64 failures) is no longer entered at that resume point,
+    so a wrong guess costs a bounded amount and the loop then runs as
+    bytecode.
   - `cig-native` is at version 2 and interface 2: the section gains a
     body table, a resume table and the rule the build chose bodies by;
-    the context gains the frame's address, the runtime's functions and
-    the frame's loop nesting. `Value` has a stated layout (a tag byte,
-    then the payload); its size is unchanged.
+    the context gains the frame's address, the runtime's three
+    functions (`run`, `list`, `again`) and the frame's loop nesting.
+    `Value` has a stated layout (a tag byte, then the payload); its
+    size is unchanged.
   - `--cig-program` counts bodies beside entries
     (`2 bodies and 6 entries for x86-64, this machine's`).
   - A program with a body loads its native code before its first

@@ -1206,16 +1206,17 @@ fn bodies_are_strictly_ascending_by_function() {
 }
 
 #[test]
-fn a_body_has_at_least_one_resume_point_starting_at_pc_zero() {
+fn a_body_has_at_least_one_resume_point_wherever_its_first_is() {
     let mut s = sample_with_bodies();
     s.bodies[0].resumes.clear();
     assert_eq!(s.to_bytes(), Err(FormatError::BodyWithoutResume { at: 0 }));
+    // A body need not be entered at its function's start: one that
+    // holds a loop's machine code and nothing else is entered at the
+    // loop.
     let mut s = sample_with_bodies();
     s.bodies[0].resumes = vec![3, 5];
-    assert_eq!(
-        s.to_bytes(),
-        Err(FormatError::BodyFirstResumeNotZero { at: 0, found: 3 })
-    );
+    let bytes = s.to_bytes().expect("written");
+    assert_eq!(Section::parse(&bytes).expect("read"), s);
 }
 
 #[test]

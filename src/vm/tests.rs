@@ -89,17 +89,20 @@ fn program_with_test_bodies(m: &Module) -> Rc<Program> {
     p
 }
 
-/// `f` on `m` through the driver, in each of the tests' two styles of
-/// body: one that hands the interpreter the rest of the function at
-/// once, and one that hands it one instruction and comes back, so the
-/// body and the bytecode take turns at every instruction.
+/// `f` on `m` through the driver, in each of the tests' three styles
+/// of body: one that hands the interpreter the rest of the function at
+/// once; one that hands it one instruction and comes back, so the body
+/// and the bytecode take turns at every instruction; and one that
+/// hands it one instruction as a guess that failed (`Host::again`).
 fn driven<T>(m: &Module, mut f: impl FnMut(&Rc<Program>) -> T) -> Vec<T> {
-    [false, true]
+    [(false, false), (true, false), (false, true)]
         .into_iter()
-        .map(|one| {
+        .map(|(one, again)| {
             super::native::ONE_AT_A_TIME.with(|c| c.set(one));
+            super::native::THROUGH_AGAIN.with(|c| c.set(again));
             let out = f(&program_with_test_bodies(m));
             super::native::ONE_AT_A_TIME.with(|c| c.set(false));
+            super::native::THROUGH_AGAIN.with(|c| c.set(false));
             out
         })
         .collect()
@@ -160,6 +163,39 @@ fn a_driven_run_enters_a_body_at_every_instruction_it_goes_on_from() {
         entered() - before >= 8,
         "entered {} bodies",
         entered() - before
+    );
+}
+
+#[test]
+fn a_body_whose_guesses_keep_failing_is_given_up_and_the_bytecode_runs_the_rest() {
+    // A counted loop of 500 turns, three instructions a turn, every
+    // other one entered as a guess that failed (the VM runs the one a
+    // body comes back to): three failures in two steps.
+    let m = for_module(1);
+    let run_it = |p: &Rc<Program>| vm_run_bare(p, vec![Value::Int(0), Value::Int(500)]);
+    let want: String = (0..500).map(|n| format!("{n}\n")).collect();
+    super::native::THROUGH_AGAIN.with(|c| c.set(true));
+    // A build for tests is entered whatever its guesses do.
+    let before = entered();
+    let (out, r) = run_it(&program_with_test_bodies(&m));
+    r.expect("ran");
+    assert_eq!(out, want);
+    let patient = entered() - before;
+    assert!(patient >= 700, "entered {patient} bodies");
+    // A program's bodies are given up: each of the loop's three resume
+    // points after a window of failures, and the bytecode runs the
+    // rest of the turns on its own.
+    super::native::IMPATIENT.with(|c| c.set(true));
+    let before = entered();
+    let (out, r) = run_it(&program_with_test_bodies(&m));
+    super::native::IMPATIENT.with(|c| c.set(false));
+    super::native::THROUGH_AGAIN.with(|c| c.set(false));
+    r.expect("ran");
+    assert_eq!(out, want, "the same run");
+    let impatient = entered() - before;
+    assert!(
+        (64..=64 * 3 + 16).contains(&impatient),
+        "entered {impatient} bodies"
     );
 }
 

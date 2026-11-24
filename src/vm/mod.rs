@@ -684,9 +684,10 @@ impl Program {
 /// the body calls `run` and `list` through it.
 ///
 /// `run(ctx, from, to)` runs the frame's bytecode from pc `from` while
-/// the pc stays in `from..to`, with the VM's own code one instruction
-/// at a time; it stops `At` a `ret`, a `tailcall`, or a `call` of a
-/// compiled function of this program, and `Raised(pc)` on an error.
+/// the pc stays in `from..to`, with the VM's own code: its fast loop,
+/// and the general path for what that does not run. It stops `At` a
+/// `ret`, a `tailcall`, or a `call` of a compiled function of this
+/// program, and `Raised(pc)` on an error.
 /// `list(ctx, reg)` gives a view on a list register that carries no
 /// cell and is not borrowed.
 struct BodyHost<'a, 'i, 'p> {
@@ -694,6 +695,13 @@ struct BodyHost<'a, 'i, 'p> {
     program: &'p Rc<Program>,
     proto: &'p Proto,
     base: usize,
+    /// The body that is running, and the resume point it was entered
+    /// at: where its failed guesses are counted.
+    body: &'p BodyEntry,
+    at: u32,
+    /// The body is entered whatever its guesses do
+    /// ([`Native::patient`]).
+    patient: bool,
     /// What was last given to the body as `ctx.steps_left`: the host
     /// counts the difference since, so one mark is never counted twice.
     last_given: i64,
@@ -762,6 +770,23 @@ impl Host for BodyHost<'_, '_, '_> {
             if pc < from || pc >= to {
                 break;
             }
+            // The VM's fast loop first, as in a function without a body:
+            // it comes back at the first instruction it does not run, or
+            // where the pc leaves the range.
+            if self.proto.plain {
+                match self.m.run_fast_inside(self.proto, pc, self.base, from, to) {
+                    Ok(next) => pc = next,
+                    Err(e) => {
+                        // The loop left the frame's pc at the instruction.
+                        let at = self.m.frames.last().map_or(pc, |f| f.pc);
+                        self.raised = Some(e);
+                        return NativeStop::Raised(u32::try_from(at).unwrap_or(u32::MAX));
+                    }
+                }
+                if pc < from || pc >= to {
+                    break;
+                }
+            }
             let Some(Some(d)) = self.proto.code.get(pc) else {
                 // Past the function, a wide's second word, or an invalid
                 // pc: stop At the pc, the driver sees it.
@@ -805,6 +830,31 @@ impl Host for BodyHost<'_, '_, '_> {
         // 2.3: write steps_left, nest and frame to the context again.
         self.refresh_ctx(ctx);
         NativeStop::At(pc as u32)
+    }
+
+    fn again(&mut self, ctx: &mut NativeCtx, pc: u32) -> NativeStop {
+        let at = pc as usize;
+        let Some(Some(d)) = self.proto.code.get(at) else {
+            return NativeStop::At(pc);
+        };
+        // `At(pc)` says "nothing ran", so an instruction that can go on
+        // at its own pc is never run here: the VM's loop runs it.
+        if jump_target(d) == Some(at) {
+            self.absorb_ctx(ctx);
+            self.refresh_ctx(ctx);
+            return NativeStop::At(pc);
+        }
+        if !self.patient {
+            self.absorb_ctx(ctx);
+            if self.body.missed(self.at, self.m.interp.steps) {
+                // The guesses of this body keep failing: the bytecode
+                // has the frame back, and the body is not entered at
+                // that resume point again.
+                self.refresh_ctx(ctx);
+                return NativeStop::At(pc);
+            }
+        }
+        self.run(ctx, pc, pc.saturating_add(d.width))
     }
 
     fn list(&mut self, ctx: &mut NativeCtx, reg: u32) -> bool {
@@ -1282,6 +1332,16 @@ enum Pending {
 trait Tier: Sized {
     /// The machine's loop looks for a body when a frame comes on top.
     const BODIED: bool;
+    /// The fast loop from `pc` in a function with a body: as
+    /// [`Machine::run_fast`], and it stops before a resume point of the
+    /// body as well. Only a bodied machine is ever asked.
+    fn fast_to_resume(
+        m: &mut Machine<'_, Self>,
+        proto: &Proto,
+        pc: usize,
+        base: usize,
+        body: &BodyEntry,
+    ) -> Result<usize, Fault>;
     /// Enter `body` at its resume point `at`, on the frame on top at
     /// `pc`. Only a bodied machine is ever asked.
     fn enter(
@@ -1304,6 +1364,17 @@ struct Bodied;
 impl Tier for Plain {
     const BODIED: bool = false;
 
+    fn fast_to_resume(
+        _: &mut Machine<'_, Self>,
+        _: &Proto,
+        pc: usize,
+        _: usize,
+        _: &BodyEntry,
+    ) -> Result<usize, Fault> {
+        // Never asked: the general path runs the instruction.
+        Ok(pc)
+    }
+
     fn enter(
         _: &mut Machine<'_, Self>,
         _: &Rc<Program>,
@@ -1320,6 +1391,16 @@ impl Tier for Plain {
 
 impl Tier for Bodied {
     const BODIED: bool = true;
+
+    fn fast_to_resume(
+        m: &mut Machine<'_, Self>,
+        proto: &Proto,
+        pc: usize,
+        base: usize,
+        body: &BodyEntry,
+    ) -> Result<usize, Fault> {
+        m.run_fast_between(proto, pc, base, body)
+    }
 
     fn enter(
         m: &mut Machine<'_, Self>,
@@ -1427,6 +1508,131 @@ fn frame_r0(stack: &mut [Value], base: usize) -> Option<*mut u8> {
 }
 
 impl Machine<'_, Bodied> {
+    /// [`Machine::run_fast`], stopping as well where `stops` says: the
+    /// instruction at `pc` always runs (when the fast path runs it), and
+    /// the loop stops before the first instruction after it that
+    /// `stops` names. A second copy of that function, on this machine
+    /// alone: the one a program without bodies runs on is the code it
+    /// was before there were bodies, instruction for instruction. The
+    /// tests hold the two to each other (every VM test runs on both).
+    #[inline(always)]
+    fn run_fast_to<S: StopAt>(
+        &mut self,
+        proto: &Proto,
+        mut pc: usize,
+        base: usize,
+        stops: &S,
+    ) -> Result<usize, Fault> {
+        let end = base.saturating_add(REG_WINDOW);
+        if self.window && self.stack.len() < end {
+            // Once for each new depth a run reaches. Refused (the ceiling
+            // on the registers' memory), the checked registers serve, and
+            // the machine stops asking: every later entry would be
+            // refused the same way, at the price of an error built and
+            // dropped each time.
+            if self.grow_to(end, Span::default()).is_err() {
+                self.window = false;
+            }
+        }
+        let Machine {
+            interp,
+            stack,
+            frames,
+            upvals,
+            ..
+        } = self;
+        let interp: &mut Interp = interp;
+        let Some(frame) = frames.last_mut() else {
+            return Ok(pc);
+        };
+        // The frame's closure's upvalues, found through the frame once
+        // here (none when it captured nothing): a call, a return and a
+        // tail call all leave this loop, so the frame is the same one
+        // until it does.
+        let upvals: &[Cell] = if frame.up == NO_UPVALS {
+            &[]
+        } else {
+            upvals.get(frame.up as usize).map_or(&[], |u| u)
+        };
+        loop {
+            let stop = match stack
+                .get_mut(base..end)
+                .and_then(|s| <&mut Window>::try_from(s).ok())
+            {
+                Some(w) => fast_run_to(w, interp, frame, proto, pc, upvals, stops),
+                None => match stack.get_mut(base..) {
+                    Some(regs) => fast_run_to(regs, interp, frame, proto, pc, upvals, stops),
+                    None => Stop::Here(pc),
+                },
+            };
+            match stop {
+                Stop::Here(at) => return Ok(at),
+                // A two-word instruction names registers past a byte: it
+                // runs on the checked registers, and the window again
+                // after it.
+                Stop::Wide(at) => {
+                    let (Some(regs), Some(Some(d))) = (stack.get_mut(base..), proto.code.get(at))
+                    else {
+                        return Ok(at);
+                    };
+                    #[cfg(feature = "bench-stats")]
+                    let timer = stats::start(d.op);
+                    let done = fast_one(regs, interp, frame, proto, d, upvals);
+                    #[cfg(feature = "bench-stats")]
+                    if done.is_some() {
+                        stats::stop(timer);
+                    }
+                    match done {
+                        Some(Ok(next)) => {
+                            pc = next;
+                            if stops.stops(pc) {
+                                return Ok(pc);
+                            }
+                        }
+                        Some(Err(e)) => {
+                            frame.pc = at;
+                            return Err(e);
+                        }
+                        None => return Ok(at),
+                    }
+                }
+                // As on the general path: the frame's pc is where the
+                // error is offered to the tries.
+                Stop::Raised(at, e) => {
+                    frame.pc = at;
+                    return Err(e);
+                }
+            }
+        }
+    }
+
+    /// The fast loop of a function with a body, between two resume
+    /// points of it. A function of its own, as [`Machine::run_fast`] is.
+    #[inline(never)]
+    fn run_fast_between(
+        &mut self,
+        proto: &Proto,
+        pc: usize,
+        base: usize,
+        body: &BodyEntry,
+    ) -> Result<usize, Fault> {
+        self.run_fast_to(proto, pc, base, body)
+    }
+
+    /// The fast loop inside `from..to`, for a body's `run`: it stops
+    /// where the pc leaves the range, either way.
+    #[inline(never)]
+    fn run_fast_inside(
+        &mut self,
+        proto: &Proto,
+        pc: usize,
+        base: usize,
+        from: usize,
+        to: usize,
+    ) -> Result<usize, Fault> {
+        self.run_fast_to(proto, pc, base, &Outside { from, to })
+    }
+
     /// Enter the body `body` at resume index `at` on the frame on top,
     /// at pc `pc`, and come back with how it stopped (2.3, 2.4).
     ///
@@ -1480,6 +1686,9 @@ impl Machine<'_, Bodied> {
                 program,
                 proto,
                 base,
+                body,
+                at,
+                patient: native.patient(),
                 last_given: budget,
                 raised: None,
             };
@@ -1782,10 +1991,11 @@ impl<T: Tier> Machine<'_, T> {
     /// and its pc is a resume point of it, the VM enters the body at that
     /// pc (2.1), except right after a body returned [`Stop::At`] at this
     /// pc (2.4): so one instruction runs between the body's stop and the
-    /// next entry. A function with a body never runs through
-    /// [`Machine::run_fast`], which would run past resume points. The test
-    /// for "has this function a body" is done when the frame on top
-    /// changes, not per instruction.
+    /// next entry. Between two resume points a function with a body
+    /// runs on the same fast loop as one without
+    /// ([`Machine::run_fast_between`]), which stops before a resume
+    /// point as well. The test for "has this function a body" is done
+    /// when the frame on top changes, not per instruction.
     fn run_frame_code(&mut self, program: &Rc<Program>) -> Result<Option<Value>, Fault> {
         let (mut pc, mut base, mut proto) = self.top(program)?;
         let mut body = match T::BODIED {
@@ -1819,10 +2029,22 @@ impl<T: Tier> Machine<'_, T> {
                 }
                 just_at = None;
             }
-            // A function with a body is run one instruction at a time by
-            // the general path between resume points.
-            if proto.plain && body.is_none() {
-                pc = self.run_fast(proto, pc, base)?;
+            if proto.plain {
+                match body {
+                    None => pc = self.run_fast(proto, pc, base)?,
+                    // A function with a body: the same loop, which stops
+                    // before the next resume point as well. The
+                    // instruction at `pc` runs first, whatever `pc` is:
+                    // the body was not entered here (it has just come
+                    // back to this pc, or the stack has no room).
+                    Some(b) => {
+                        let from = pc;
+                        pc = T::fast_to_resume(self, proto, pc, base, b)?;
+                        if pc != from && b.at(pc).is_some() {
+                            continue;
+                        }
+                    }
+                }
             }
             let Some(Some(d)) = proto.code.get(pc) else {
                 let span = proto.spans.get(pc).copied().unwrap_or_default();
@@ -3716,6 +3938,35 @@ impl FrameRegs for [Value] {
     }
 }
 
+/// Where the fast loop of a function with a body stops beside the
+/// instructions it does not run: asked of the pc each instruction it
+/// ran goes on to.
+trait StopAt {
+    fn stops(&self, pc: usize) -> bool;
+}
+
+/// At a resume point of the function's body, where the body is entered.
+impl StopAt for BodyEntry {
+    #[inline(always)]
+    fn stops(&self, pc: usize) -> bool {
+        self.at(pc).is_some()
+    }
+}
+
+/// Where the pc leaves a range of instructions, by its end or back past
+/// its start: what a body's `run` runs.
+struct Outside {
+    from: usize,
+    to: usize,
+}
+
+impl StopAt for Outside {
+    #[inline(always)]
+    fn stops(&self, pc: usize) -> bool {
+        pc < self.from || pc >= self.to
+    }
+}
+
 /// Where a run of the fast loop stopped.
 enum Stop {
     /// At this pc: an instruction the fast path does not run here (the
@@ -3755,6 +4006,48 @@ fn fast_run<R: FrameRegs + ?Sized>(
         }
         match done {
             Some(Ok(next)) => pc = next,
+            Some(Err(e)) => return Stop::Raised(pc, e),
+            None => return Stop::Here(pc),
+        }
+    }
+}
+
+/// [`fast_run`], stopping as well where `stops` says: before the first
+/// instruction after the one at `pc` that it names. A second copy of
+/// the loop, so the one a function without a body runs on is the code
+/// it was before there were bodies.
+#[inline(always)]
+fn fast_run_to<R: FrameRegs + ?Sized, S: StopAt>(
+    regs: &mut R,
+    interp: &mut Interp,
+    frame: &mut Frame,
+    proto: &Proto,
+    mut pc: usize,
+    upvals: &[Cell],
+    stops: &S,
+) -> Stop {
+    loop {
+        let Some(Some(d)) = proto.code.get(pc) else {
+            return Stop::Here(pc);
+        };
+        if R::BYTE_INDEXED && d.wide {
+            return Stop::Wide(pc);
+        }
+        #[cfg(feature = "bench-stats")]
+        let timer = stats::start(d.op);
+        let done = fast_one(regs, interp, frame, proto, d, upvals);
+        // An instruction left to the general path is counted there, once.
+        #[cfg(feature = "bench-stats")]
+        if done.is_some() {
+            stats::stop(timer);
+        }
+        match done {
+            Some(Ok(next)) => {
+                pc = next;
+                if stops.stops(pc) {
+                    return Stop::Here(pc);
+                }
+            }
             Some(Err(e)) => return Stop::Raised(pc, e),
             None => return Stop::Here(pc),
         }
@@ -4082,6 +4375,19 @@ fn nest_frame(depth: &mut u32, f: &mut Frame, nest: u32) {
 #[inline(always)]
 fn fast_jump(pc: usize, offset: i32) -> Option<usize> {
     usize::try_from((pc as i64) + 1 + i64::from(offset)).ok()
+}
+
+/// The pc an instruction goes on at when it jumps: `None` for one that
+/// never jumps, and for a target before the first instruction.
+fn jump_target(d: &DecodedInstr) -> Option<usize> {
+    let pc = d.pc as usize;
+    match d.op {
+        Op::JMP | Op::LOOP | Op::TEST | Op::TESTN | Op::FORPREP | Op::FORLOOP | Op::ITERNEXT => {
+            fast_jump(pc, d.b_s)
+        }
+        Op::TESTSET | Op::EQJ | Op::NEJ | Op::LTJ | Op::LEJ => fast_jump(pc, d.c_s),
+        _ => None,
+    }
 }
 
 /// An int and a float, in either order, as the two floats `binary`
