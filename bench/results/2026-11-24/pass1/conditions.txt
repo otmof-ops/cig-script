@@ -1,0 +1,200 @@
+date_utc	2026-11-24T13:30:10Z
+cpu	Intel(R) Core(TM) Ultra 7 255H
+cores	16
+kernel	6.17.0-1033-oem
+driver	intel_pstate
+governor	powersave
+epp	performance
+no_turbo	0
+max_mhz	5100
+profile	performance
+transparent_hugepages	always [madvise] never
+mains	1
+load_average	1.16 1.66 1.91 2/1056 2350729
+temp_c	72
+history	0
+harness	Python 3.12.3
+rounds	21
+seed	1
+cpus	2
+floor_ms	1.008	0.770	2.965
+side	cig	`cig run`	cig 1.25.0
+command	cig	cig run {name}.cig
+env	cig	CIG_DOCTOR=0
+env	cig	CIG_MAX_STEPS=0
+env	cig	CIG_REPORTS=never
+env	cig	CIG_SEAL_KEY=file
+env	cig	NO_COLOR=1
+sha256	cig	cig	1ef685ba42a285dab15059eb0223ea5004917671e5b62a784deb49f8a9440f8d
+side	cig-dry	`cig run --dry-run`	cig 1.25.0
+command	cig-dry	cig run --dry-run {name}.cig
+env	cig-dry	CIG_DOCTOR=0
+env	cig-dry	CIG_MAX_STEPS=0
+env	cig-dry	CIG_REPORTS=never
+env	cig-dry	CIG_SEAL_KEY=file
+env	cig-dry	NO_COLOR=1
+side	cig-first	`cig run`, in a new folder each time	cig 1.25.0
+command	cig-first	cig run {name}.cig
+env	cig-first	CIG_DOCTOR=0
+env	cig-first	CIG_MAX_STEPS=0
+env	cig-first	CIG_REPORTS=never
+env	cig-first	CIG_SEAL_KEY=file
+env	cig-first	NO_COLOR=1
+side	cig-tree	`cig run --engine tree`	cig 1.25.0
+command	cig-tree	cig run --engine tree {name}.cig
+env	cig-tree	CIGSCRIPT_HOME=home-cig-tree
+env	cig-tree	CIG_DOCTOR=0
+env	cig-tree	CIG_MAX_STEPS=0
+env	cig-tree	CIG_REPORTS=never
+env	cig-tree	CIG_SEAL_KEY=file
+env	cig-tree	NO_COLOR=1
+side	cig-vm	`cig run --engine vm`	cig 1.25.0
+command	cig-vm	cig run --engine vm {name}.cig
+env	cig-vm	CIGSCRIPT_HOME=home-cig-vm
+env	cig-vm	CIG_DOCTOR=0
+env	cig-vm	CIG_MAX_STEPS=0
+env	cig-vm	CIG_REPORTS=never
+env	cig-vm	CIG_SEAL_KEY=file
+env	cig-vm	NO_COLOR=1
+side	cig-vm-cold	`cig run --engine vm`, nothing in the tin	cig 1.25.0
+command	cig-vm-cold	cig run --engine vm {name}.cig
+env	cig-vm-cold	CIGSCRIPT_HOME=home-cig-vm-cold
+env	cig-vm-cold	CIG_DOCTOR=0
+env	cig-vm-cold	CIG_MAX_STEPS=0
+env	cig-vm-cold	CIG_REPORTS=never
+env	cig-vm-cold	CIG_SEAL_KEY=file
+env	cig-vm-cold	NO_COLOR=1
+side	stage-a	a stage `a` program	cigcompile 0.5.1 (makes programs for cig 1.25.0)
+command	stage-a	{build}/{name}.a
+built_by	stage-a	cigcompile build {name}.cig -o {build}/{name}.a --stage a --runtime cig
+env	stage-a	CIG_DOCTOR=0
+env	stage-a	CIG_MAX_STEPS=0
+env	stage-a	CIG_REPORTS=never
+env	stage-a	CIG_SEAL_KEY=file
+env	stage-a	NO_COLOR=1
+built_with	stage-a	CIGCOMPILE_RUNTIME=cig
+built_with	stage-a	CIG_DOCTOR=0
+built_with	stage-a	CIG_MAX_STEPS=0
+built_with	stage-a	CIG_REPORTS=never
+built_with	stage-a	CIG_SEAL_KEY=file
+built_with	stage-a	NO_COLOR=1
+sha256	stage-a	cigcompile	e527431233da36cc9aad6a0e0bbd7bcb1b5f55708819808cd3952b332fe6aff5
+sha256	stage-a	cig	1ef685ba42a285dab15059eb0223ea5004917671e5b62a784deb49f8a9440f8d
+side	stage-a-dry	a stage `a` program, `--dry-run`	cigcompile 0.5.1 (makes programs for cig 1.25.0)
+command	stage-a-dry	{build}/{name}.a --dry-run
+built_by	stage-a-dry	cigcompile build {name}.cig -o {build}/{name}.a --stage a --runtime cig
+env	stage-a-dry	CIG_DOCTOR=0
+env	stage-a-dry	CIG_MAX_STEPS=0
+env	stage-a-dry	CIG_REPORTS=never
+env	stage-a-dry	CIG_SEAL_KEY=file
+env	stage-a-dry	NO_COLOR=1
+built_with	stage-a-dry	CIGCOMPILE_RUNTIME=cig
+built_with	stage-a-dry	CIG_DOCTOR=0
+built_with	stage-a-dry	CIG_MAX_STEPS=0
+built_with	stage-a-dry	CIG_REPORTS=never
+built_with	stage-a-dry	CIG_SEAL_KEY=file
+built_with	stage-a-dry	NO_COLOR=1
+side	stage-b	a stage `b` program	cigcompile 0.5.1 (makes programs for cig 1.25.0)
+command	stage-b	{build}/{name}.b
+built_by	stage-b	cigcompile build {name}.cig -o {build}/{name}.b --stage b --runtime cig
+env	stage-b	CIG_DOCTOR=0
+env	stage-b	CIG_MAX_STEPS=0
+env	stage-b	CIG_REPORTS=never
+env	stage-b	CIG_SEAL_KEY=file
+env	stage-b	NO_COLOR=1
+built_with	stage-b	CIGCOMPILE_RUNTIME=cig
+built_with	stage-b	CIG_DOCTOR=0
+built_with	stage-b	CIG_MAX_STEPS=0
+built_with	stage-b	CIG_REPORTS=never
+built_with	stage-b	CIG_SEAL_KEY=file
+built_with	stage-b	NO_COLOR=1
+sha256	stage-b	cigcompile	e527431233da36cc9aad6a0e0bbd7bcb1b5f55708819808cd3952b332fe6aff5
+sha256	stage-b	cig	1ef685ba42a285dab15059eb0223ea5004917671e5b62a784deb49f8a9440f8d
+side	stage-b-dry	a stage `b` program, `--dry-run`	cigcompile 0.5.1 (makes programs for cig 1.25.0)
+command	stage-b-dry	{build}/{name}.b --dry-run
+built_by	stage-b-dry	cigcompile build {name}.cig -o {build}/{name}.b --stage b --runtime cig
+env	stage-b-dry	CIG_DOCTOR=0
+env	stage-b-dry	CIG_MAX_STEPS=0
+env	stage-b-dry	CIG_REPORTS=never
+env	stage-b-dry	CIG_SEAL_KEY=file
+env	stage-b-dry	NO_COLOR=1
+built_with	stage-b-dry	CIGCOMPILE_RUNTIME=cig
+built_with	stage-b-dry	CIG_DOCTOR=0
+built_with	stage-b-dry	CIG_MAX_STEPS=0
+built_with	stage-b-dry	CIG_REPORTS=never
+built_with	stage-b-dry	CIG_SEAL_KEY=file
+built_with	stage-b-dry	NO_COLOR=1
+side	stage-c	a stage `c` program	cigcompile 0.5.1 (makes programs for cig 1.25.0)
+command	stage-c	{build}/{name}.c
+built_by	stage-c	cigcompile --json build {name}.cig -o {build}/{name}.c --stage c --runtime cig
+env	stage-c	CIG_DOCTOR=0
+env	stage-c	CIG_MAX_STEPS=0
+env	stage-c	CIG_REPORTS=never
+env	stage-c	CIG_SEAL_KEY=file
+env	stage-c	NO_COLOR=1
+built_with	stage-c	CIGCOMPILE_RUNTIME=cig
+built_with	stage-c	CIG_DOCTOR=0
+built_with	stage-c	CIG_MAX_STEPS=0
+built_with	stage-c	CIG_REPORTS=never
+built_with	stage-c	CIG_SEAL_KEY=file
+built_with	stage-c	NO_COLOR=1
+sha256	stage-c	cigcompile	e527431233da36cc9aad6a0e0bbd7bcb1b5f55708819808cd3952b332fe6aff5
+sha256	stage-c	cig	1ef685ba42a285dab15059eb0223ea5004917671e5b62a784deb49f8a9440f8d
+side	stage-c-dry	a stage `c` program, `--dry-run`	cigcompile 0.5.1 (makes programs for cig 1.25.0)
+command	stage-c-dry	{build}/{name}.c --dry-run
+built_by	stage-c-dry	cigcompile --json build {name}.cig -o {build}/{name}.c --stage c --runtime cig
+env	stage-c-dry	CIG_DOCTOR=0
+env	stage-c-dry	CIG_MAX_STEPS=0
+env	stage-c-dry	CIG_REPORTS=never
+env	stage-c-dry	CIG_SEAL_KEY=file
+env	stage-c-dry	NO_COLOR=1
+built_with	stage-c-dry	CIGCOMPILE_RUNTIME=cig
+built_with	stage-c-dry	CIG_DOCTOR=0
+built_with	stage-c-dry	CIG_MAX_STEPS=0
+built_with	stage-c-dry	CIG_REPORTS=never
+built_with	stage-c-dry	CIG_SEAL_KEY=file
+built_with	stage-c-dry	NO_COLOR=1
+side	stage-c-off	a stage `c` program, `CIG_NATIVE=0`	cigcompile 0.5.1 (makes programs for cig 1.25.0)
+command	stage-c-off	{build}/{name}.c
+built_by	stage-c-off	cigcompile --json build {name}.cig -o {build}/{name}.c --stage c --runtime cig
+env	stage-c-off	CIG_DOCTOR=0
+env	stage-c-off	CIG_MAX_STEPS=0
+env	stage-c-off	CIG_NATIVE=0
+env	stage-c-off	CIG_REPORTS=never
+env	stage-c-off	CIG_SEAL_KEY=file
+env	stage-c-off	NO_COLOR=1
+built_with	stage-c-off	CIGCOMPILE_RUNTIME=cig
+built_with	stage-c-off	CIG_DOCTOR=0
+built_with	stage-c-off	CIG_MAX_STEPS=0
+built_with	stage-c-off	CIG_REPORTS=never
+built_with	stage-c-off	CIG_SEAL_KEY=file
+built_with	stage-c-off	NO_COLOR=1
+side	lua	Lua	Lua 5.4.9  Copyright (C) 1994-2026 Lua.org, PUC-Rio
+command	lua	lua {name}.lua
+sha256	lua	lua	e00e7038402bdb1adaac94c6b88d4f3f201accc6f84d28e3f918dbc6d428e56e
+side	luajit-off	LuaJIT, its interpreter alone (`-joff`)	LuaJIT 2.1.1794386141 -- Copyright (C) 2005-2026 Mike Pall. https://luajit.org/
+command	luajit-off	luajit -joff {name}.lua
+sha256	luajit-off	luajit	e505ab009c3220cd4d7fd9936c0926d4a01ba885001e0ac4e0ec768473d87872
+side	luajit	LuaJIT	LuaJIT 2.1.1794386141 -- Copyright (C) 2005-2026 Mike Pall. https://luajit.org/
+command	luajit	luajit {name}.lua
+sha256	luajit	luajit	e505ab009c3220cd4d7fd9936c0926d4a01ba885001e0ac4e0ec768473d87872
+side	python	CPython	Python 3.12.3
+command	python	python3 main.py
+sha256	python	python3	e50d468e8b0adfb05733f5b87b3cff34829c4a8c1aea50c865aa8bdfe4bb150f
+side	python-idiom	CPython, the idiomatic variant	Python 3.12.3
+command	python-idiom	python3 main.py
+sha256	python-idiom	python3	e50d468e8b0adfb05733f5b87b3cff34829c4a8c1aea50c865aa8bdfe4bb150f
+side	node	Node	v18.19.1
+command	node	node {name}.js
+sha256	node	node	f3f93db342d5ac5bb61656d0599a603a73779e98befd9342171e550002725f4d
+side	node-idiom	Node, the idiomatic variant	v18.19.1
+command	node-idiom	node {name}.js
+sha256	node-idiom	node	f3f93db342d5ac5bb61656d0599a603a73779e98befd9342171e550002725f4d
+side	rust	Rust (`rustc -C opt-level=3`)	rustc 1.99.1 (58cf8f9c3 2026-10-13)
+command	rust	{build}/{name}.rust
+built_by	rust	rustc -C opt-level=3 --edition 2021 -o {build}/{name}.rust {name}.rs
+sha256	rust	rustc	b53b780f77f952062f8ca8a3b70aef2390b1e45ad91939be94afdc9543026853
+side	rust-idiom	Rust, the idiomatic variant	rustc 1.99.1 (58cf8f9c3 2026-10-13)
+command	rust-idiom	{build}/{name}.rust-idiom
+built_by	rust-idiom	rustc -C opt-level=3 --edition 2021 -o {build}/{name}.rust-idiom {name}.rs
+sha256	rust-idiom	rustc	b53b780f77f952062f8ca8a3b70aef2390b1e45ad91939be94afdc9543026853
