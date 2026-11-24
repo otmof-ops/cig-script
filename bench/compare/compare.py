@@ -4,7 +4,7 @@
 """compare.py: time the programs of bench/compute on cig and on other languages.
 
     compare.py --out DIR [--rounds N] [--seed N] [--work DIR] [--only NAMES] [--sides NAMES]
-               [--cig PATH] [--cigcompile PATH]
+               [--cig PATH] [--cigcompile PATH] [--runtime PATH] [--cpus LIST]
                [--lua CMD] [--luajit CMD] [--python CMD] [--node CMD] [--rustc CMD]
 
 What is measured is a whole process, from just before it is started until it
@@ -43,6 +43,13 @@ How a number is made:
 The wait for a process blocks on its pidfd: Python's `Popen.wait(timeout)`
 polls with sleeps that grow from 0.5 to 50 ms, which would add up to 50 ms to
 a run. Linux only (the pidfd, and peak memory read from /proc at exit).
+
+`--cpus LIST` pins every measured process (every side, every round, builds
+excepted) to those CPUs, in `taskset -c` style (`2`, `0-5`, `0-3,8`). The
+affinity is set in the child before exec with `os.sched_setaffinity(0, ...)`,
+so nothing of this harness is counted. When the flag is not given nothing is
+pinned, and `conditions.txt` says so. The flag is a condition of a pass, not
+a number.
 
 DIR gets samples.tsv, checks.tsv, memory.tsv, rounds.tsv, inputs.tsv,
 conditions.txt and spec.json.
@@ -96,6 +103,49 @@ def find(given, names):
         if path:
             return os.path.abspath(path)
     return None
+
+
+def parse_cpus(spec):
+    """A taskset-style list (`2`, `0-5`, `0-3,8`) as a sorted tuple of CPU indices.
+
+    Empty, whitespace or missing parts are errors; so is a CPU not on this host.
+    """
+    if spec is None:
+        return None
+    out = set()
+    host = os.cpu_count() or 0
+    for piece in spec.split(","):
+        piece = piece.strip()
+        if not piece:
+            raise SystemExit("--cpus: empty piece in %r" % spec)
+        if "-" in piece:
+            a, b = piece.split("-", 1)
+            lo, hi = int(a), int(b)
+            if lo > hi:
+                raise SystemExit("--cpus: range %s has its ends the wrong way" % piece)
+            out.update(range(lo, hi + 1))
+        else:
+            out.add(int(piece))
+    for cpu in out:
+        if cpu < 0 or cpu >= host:
+            raise SystemExit("--cpus: CPU %d is not on this host (0..%d)" % (cpu, host - 1))
+    return tuple(sorted(out))
+
+
+def format_cpus(cpus):
+    """The canonical taskset-style text for a tuple of CPU indices (ranges joined by commas)."""
+    if not cpus:
+        return ""
+    parts = []
+    cpus = sorted(cpus)
+    i = 0
+    while i < len(cpus):
+        j = i
+        while j + 1 < len(cpus) and cpus[j + 1] == cpus[j] + 1:
+            j += 1
+        parts.append(str(cpus[i]) if j == i else "%d-%d" % (cpus[i], cpus[j]))
+        i = j + 1
+    return ",".join(parts)
 
 
 def engines(cig):
@@ -165,22 +215,44 @@ def build_spec(args):
     else:
         missing.append("cig")
     cigcompile = find(args.cigcompile, ["cigcompile"])
+    runtime = find(args.runtime, []) if args.runtime else None
     build_env = dict(CIG_ENV)
-    if cig:
-        # The runtime a program is built on: the cig being measured, so every cig side is one cig.
-        build_env["CIGCOMPILE_RUNTIME"] = cig
+    runtime_for_build = runtime or cig
+    if runtime_for_build:
+        # The runtime a program is built on: the cig being measured by default, so every cig
+        # side is one cig. `--runtime` overrides it for all builds and names the one tool.
+        build_env["CIGCOMPILE_RUNTIME"] = runtime_for_build
     if cigcompile:
-        for stage in ("a", "b"):
+        runtime_flag = ["--runtime", runtime] if runtime else []
+        for stage in ("a", "b", "c"):
             program = "{build}/{name}." + stage
-            build_it = [cigcompile, "build", script, "-o", program, "--stage", stage]
+            # Stage `c` builds with `--json`, so the build's output lists the stage the program
+            # came out as and the native-code counts (`native.tsv`). `--json` is global, so it
+            # goes before the subcommand.
+            build_it = [cigcompile] + (["--json"] if stage == "c" else []) + \
+                ["build", script, "-o", program, "--stage", stage] + runtime_flag
+            build_sha = [cigcompile] + ([runtime] if runtime else [])
             side("stage-" + stage, "cig", "a stage `%s` program" % stage,
-                 version=[cigcompile, "--version"], sha256=[cigcompile],
+                 version=[cigcompile, "--version"], sha256=build_sha,
                  prepare=build_it, prepare_env=build_env, creates=program, run=[program],
-                 env=CIG_ENV, stderr=CIG_RUN_STDERR)
+                 env=CIG_ENV, stderr=CIG_RUN_STDERR,
+                 native=(stage == "c"))
             side("stage-%s-dry" % stage, "cig", "a stage `%s` program, `--dry-run`" % stage,
                  version=[cigcompile, "--version"], prepare=build_it, prepare_env=build_env,
                  creates=program, run=[program, "--dry-run"], env=CIG_ENV, skip=burns,
                  stderr=CIG_DRY_STDERR)
+        # `stage-c-off` runs the stage-c program with CIG_NATIVE=0 in its environment, so it
+        # runs its bytecode and never loads the native code. It is the same built program as
+        # `stage-c` (same prepare command, same `creates` path), so one build serves all three
+        # stage-c sides: whichever of them runs first builds, and the others find the program
+        # on disk and skip the build.
+        program_c = "{build}/{name}.c"
+        side("stage-c-off", "cig", "a stage `c` program, `CIG_NATIVE=0`",
+             version=[cigcompile, "--version"],
+             prepare=[cigcompile, "--json", "build", script, "-o", program_c,
+                      "--stage", "c"] + runtime_flag,
+             prepare_env=build_env, creates=program_c, run=[program_c],
+             env=dict(CIG_ENV, CIG_NATIVE="0"), stderr=CIG_RUN_STDERR)
     else:
         missing.append("cigcompile")
 
@@ -283,7 +355,7 @@ def wait_for(proc, timeout):
 class Run:
     """One (program, side) pair: the command, its environment and its folder."""
 
-    def __init__(self, side, prog, work, build, scratch):
+    def __init__(self, side, prog, work, build, scratch, cpus=None):
         name = prog["name"]
         self.side = side
         self.program = name
@@ -291,6 +363,9 @@ class Run:
         self.cmd = fill(side["run"], name, build)
         self.env = dict(os.environ)
         self.env.update(side.get("env") or {})
+        # CPUs to pin every measured process to, or None for no pinning. Set in the
+        # child before exec, so nothing of this harness is in the measurement.
+        self.cpus = cpus
         # What is copied into the folder: a path keeps its file name, a [path, name]
         # pair is copied under that name.
         self.files = []
@@ -353,10 +428,12 @@ class Run:
             if changed:
                 os.sync()
             before = resource.getrusage(resource.RUSAGE_CHILDREN)
+            pin = (lambda cpus=self.cpus: os.sched_setaffinity(0, cpus)) if self.cpus else None
             start = time.perf_counter()
             try:
                 proc = subprocess.Popen(self.cmd, cwd=self.where, env=self.env,
-                                        stdin=subprocess.DEVNULL, stdout=out, stderr=err)
+                                        stdin=subprocess.DEVNULL, stdout=out, stderr=err,
+                                        preexec_fn=pin)
             except OSError as e:
                 return 0.0, 127, b"", str(e).encode(), 0.0
             code = wait_for(proc, TIMEOUT_S)
@@ -401,6 +478,8 @@ class Run:
         pid = os.fork()
         if pid == 0:
             try:
+                if self.cpus:
+                    os.sched_setaffinity(0, self.cpus)
                 os.chdir(self.where)
                 null = os.open(os.devnull, os.O_RDWR)
                 for fd in (0, 1, 2):
@@ -516,7 +595,7 @@ def platform_profile():
         return "unknown"
 
 
-def conditions(spec, out_dir, floor):
+def conditions(spec, out_dir, floor, cpus=None):
     cpu = "unknown"
     for line in read("/proc/cpuinfo").splitlines():
         if line.startswith("model name"):
@@ -543,6 +622,7 @@ def conditions(spec, out_dir, floor):
         "harness\tPython " + sys.version.split()[0],
         "rounds\t%d" % spec["rounds"],
         "seed\t%d" % spec["seed"],
+        "cpus\t" + (format_cpus(cpus) if cpus else "(not pinned)"),
         "floor_ms\t%.3f\t%.3f\t%.3f" % floor,
     ]
     for tool in spec.get("not_installed") or []:
@@ -566,15 +646,16 @@ def conditions(spec, out_dir, floor):
         f.write("\n".join(lines) + "\n")
 
 
-def measure_floor(work, build, scratch):
+def measure_floor(work, build, scratch, cpus=None):
     """What starting, waiting for and reaping a process costs here: `true`, 50 times,
-    run exactly as every side is."""
+    run exactly as every side is (same CPU pinning if any)."""
     true = shutil.which("true")
     if not true:
         return (0.0, 0.0, 0.0)
     expect = os.path.join(work, "floor.expect")
     open(expect, "wb").close()
-    run = Run({"name": "floor", "run": [true]}, {"name": "floor", "expect": expect}, work, build, scratch)
+    run = Run({"name": "floor", "run": [true]}, {"name": "floor", "expect": expect},
+              work, build, scratch, cpus=cpus)
     times = [run.once()[0] for _ in range(50)]
     return (statistics.median(times), min(times), max(times))
 
@@ -592,7 +673,12 @@ def main():
     ap.add_argument("--ref", default=os.path.join(BENCH, "ref"))
     for tool in ("cig", "cigcompile", "lua", "luajit", "python", "node", "rustc"):
         ap.add_argument("--" + tool, help="the %s to use (default: the one on PATH)" % tool)
+    ap.add_argument("--runtime", help="the cig a program is built on (also sets CIGCOMPILE_RUNTIME "
+                    "for every `cigcompile build`); default: the cig named by --cig")
+    ap.add_argument("--cpus", help="pin every measured process to this taskset-style CPU list "
+                    "(for example `2` or `0-5`); builds are not pinned. Default: not pinned.")
     args = ap.parse_args()
+    cpus = parse_cpus(args.cpus)
 
     out_dir = os.path.abspath(args.out)
     work = os.path.abspath(args.work) if args.work else os.path.join(out_dir, "work")
@@ -610,18 +696,21 @@ def main():
     rounds = int(spec["rounds"])
     with open(os.path.join(out_dir, "spec.json"), "w") as f:
         json.dump(spec, f, indent=1)
-    conditions(spec, out_dir, measure_floor(work, build, scratch))
+    conditions(spec, out_dir, measure_floor(work, build, scratch, cpus=cpus), cpus=cpus)
 
     samples = open(os.path.join(out_dir, "samples.tsv"), "w")
     checks = open(os.path.join(out_dir, "checks.tsv"), "w")
     memory = open(os.path.join(out_dir, "memory.tsv"), "w")
     round_log = open(os.path.join(out_dir, "rounds.tsv"), "w")
     inputs = open(os.path.join(out_dir, "inputs.tsv"), "w")
+    native_tsv = open(os.path.join(out_dir, "native.tsv"), "w")
     samples.write("program\tside\tround\tms\tcpu_ms\n")
     checks.write("program\tside\tstatus\tdetail\n")
     memory.write("program\tside\treading\tpeak_kb\tanon_kb\tfile_kb\n")
     round_log.write("round\tstarted_utc\tcpu_mhz\ttemp_c\thistory\n")
     inputs.write("kind\tname\tsha256\n")
+    native_tsv.write("program\tstage\tcompiled\tleft\ttop\n")
+    native_written = 0
     failed = 0
     hashed = set()
 
@@ -650,23 +739,55 @@ def main():
                 continue
             if needs:
                 record_input("reference", needs.replace("{name}", name))
-            run = Run(side, prog, work, build, scratch)
+            run = Run(side, prog, work, build, scratch, cpus=cpus)
             creates = fill([side["creates"]], name, build)[0] if side.get("creates") else None
             if side.get("prepare") and not (creates and os.path.exists(creates)):
                 os.makedirs(run.where, exist_ok=True)
                 env = dict(os.environ)
                 env.update(side.get("prepare_env") or side.get("env") or {})
+                want_json = bool(side.get("native"))
                 p = subprocess.run(fill(side["prepare"], name, build), cwd=run.where, env=env,
                                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                   stderr=subprocess.STDOUT)
+                                   stderr=subprocess.PIPE if want_json else subprocess.STDOUT)
                 if p.returncode != 0:
-                    tail = (p.stdout.decode(errors="replace").strip().splitlines() or [""])[-1]
+                    out = p.stdout + (p.stderr or b"") if want_json else p.stdout
+                    tail = (out.decode(errors="replace").strip().splitlines() or [""])[-1]
                     checks.write("%s\t%s\tfailed\tbuild exit %d: %s\n"
                                  % (name, side["name"], p.returncode, tail[:200]))
                     print("FAILED %s %s: build exit %d: %s" % (name, side["name"], p.returncode, tail[:200]),
                           flush=True)
                     failed += 1
                     continue
+                if want_json:
+                    # `cigcompile --json build` prints one JSON object a script. Its `stage`
+                    # is `a`, `b` or `c`; its `native`, when the build has native code, is a
+                    # map with `compiled` and `left` (the script's functions with native code
+                    # and without) and `top` (whether the top level has native code: the top
+                    # level is no function to those two counts). A `--stage c` build without
+                    # native code exits 0, comes out as `b` and has `native: null` and a
+                    # stage-b warning.
+                    stage_out, compiled, left, top = "unknown", "unknown", "unknown", "unknown"
+                    for line in p.stdout.decode(errors="replace").splitlines():
+                        line = line.strip()
+                        if not line.startswith("{"):
+                            continue
+                        try:
+                            obj = json.loads(line)
+                        except ValueError:
+                            continue
+                        if obj.get("name") != name and "stage" not in obj:
+                            continue
+                        stage_out = obj.get("stage") or "unknown"
+                        native = obj.get("native") or {}
+                        if isinstance(native, dict):
+                            compiled = str(native.get("compiled", "unknown"))
+                            left = str(native.get("left", "unknown"))
+                            if isinstance(native.get("top"), bool):
+                                top = "yes" if native["top"] else "no"
+                        break
+                    native_tsv.write("%s\t%s\t%s\t%s\t%s\n" % (name, stage_out, compiled, left, top))
+                    native_tsv.flush()
+                    native_written += 1
             if creates:
                 record_input("built", creates)
             _, code, got, said, _ = run.once()
@@ -719,6 +840,14 @@ def main():
         memory.flush()
     for f in (samples, checks, memory, round_log):
         f.close()
+    native_tsv.close()
+    if native_written == 0:
+        # A run with no stage `c` builds leaves no `native.tsv`, so a pass that never saw
+        # stage `c` is the same on disk as it was before stage `c` was a side.
+        try:
+            os.unlink(os.path.join(out_dir, "native.tsv"))
+        except OSError:
+            pass
     shutil.rmtree(work, ignore_errors=True)
     shutil.rmtree(scratch, ignore_errors=True)
     if live and not readings:

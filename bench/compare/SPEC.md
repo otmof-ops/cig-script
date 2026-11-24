@@ -16,11 +16,14 @@ A run is one or more **passes**, given in order (`--pass DIR`, repeated): pass 1
 | `checks.tsv` | `program side status` | one (program, side) pair's check; `status` is `ok`, `WRONG` or `failed`. A pair can have more than one line |
 | `memory.tsv` | `program side reading peak_kb anon_kb` | one reading of a pair's peak memory: `reading` is 1, 2, 3, ...; `peak_kb` the peak resident set and `anon_kb` the anonymous part at exit, in kB (integers). A pair has a line per reading |
 | `rounds.tsv` | `round started_utc cpu_mhz temp_c history` | one round: its number, the time it started, the mean CPU clock in MHz, the package temperature in °C, and how many run records cig keeps, each an integer or `unknown` |
+| `native.tsv` (optional) | `program stage compiled left top` | one program the pass built at `--stage c`: the program name, the stage the build came out as (`b` or `c`), how many of its functions have native code and how many were left to the bytecode, and whether its top level has native code (the top level is no function to the two counts). Each of `compiled` and `left` is a non-negative integer, or the literal `unknown` when the build's JSON output had no `native` field (a stage `b` result); `top` is `yes`, `no`, or `unknown` the same way. A program has at most one line a pass |
 | `conditions.txt` | (no header) | `KEY` then one or more tab-separated values; a key can repeat (`side`, `command`, `env`, `sha256`, ...) |
 
 `condition(pass, KEY)` is the values of the **first** line of that pass's `conditions.txt` whose first field is `KEY` (a list of strings), or nothing.
 
-The `conditions.txt` lines this spec reads: `date_utc`, `cpu`, `cores`, `max_mhz`, `kernel`, `driver`, `governor`, `epp`, `no_turbo`, `profile`, `transparent_hugepages`, `mains`, `load_average`, `temp_c`, `history`, `harness`, `rounds`, `seed`, `floor_ms` (each `KEY<TAB>VALUE...`); `side<TAB>NAME<TAB>LABEL<TAB>VERSION`; and `sha256<TAB>SIDE<TAB>FILE<TAB>HEX`.
+The `conditions.txt` lines this spec reads: `date_utc`, `cpu`, `cores`, `max_mhz`, `kernel`, `driver`, `governor`, `epp`, `no_turbo`, `profile`, `transparent_hugepages`, `mains`, `load_average`, `temp_c`, `history`, `harness`, `rounds`, `seed`, `cpus`, `floor_ms` (each `KEY<TAB>VALUE...`); `side<TAB>NAME<TAB>LABEL<TAB>VERSION`; and `sha256<TAB>SIDE<TAB>FILE<TAB>HEX`.
+
+`cpus` names a condition of the pass, not a number. Its one value is either `(not pinned)` (the whole literal, with parentheses and a space, when `compare.py` was not given `--cpus`) or a `taskset -c`-style list of CPU indices (the canonical form `A`, `A-B` or ranges and lone values joined by commas, lowest first: for example `2`, `0-5`, `0-3,8`). When pinned, every measured process of the pass (every timed run of every side in every round, the floor measurement included, builds excepted) was started with its own CPU affinity set to that list before `exec`, with `os.sched_setaffinity(0, cpus)` in the child. A pass is pinned or not; a pass does not mix the two.
 
 ## 2. Programs and sides
 
@@ -30,14 +33,18 @@ The `conditions.txt` lines this spec reads: `date_utc`, `cpu`, `cores`, `max_mhz
 - **The order of programs** in every table and list is the compute set, then the start-up set.
 - **Sides:** every side name that appears in any pass's `samples.tsv`.
 
+Wherever a table's columns or rows are "the label of each side in GROUP" (`MAIN`, `LANGUAGES`, `ENGINES`, `IDIOMS`, `CIG_SIDES` or a list of side names), only the sides of that group that are among the sides of the run (above) contribute: a side that appears in no pass's `samples.tsv` adds no column and no row. The order of the remaining sides is the group's. A table whose group has no present side is left out of its rendering (`{{table:NAME}}` still renders it as an empty header only when the name is defined; a template whose paper has no use for the table simply does not reference it).
+
 Named groups of sides (each in this order):
 
-- `CIG_SIDES` = `cig`, `stage-a`, `stage-b`, `cig-dry`, `stage-a-dry`, `stage-b-dry`
+- `CIG_SIDES` = `cig`, `stage-a`, `stage-b`, `stage-c`, `cig-dry`, `stage-a-dry`, `stage-b-dry`, `stage-c-dry`
 - `LANGUAGES` = `lua`, `luajit-off`, `luajit`, `python`, `node`, `rust`
 - `IDIOMS` = `python-idiom` (its base is `python`), `node-idiom` (base `node`), `rust-idiom` (base `rust`)
 - `ENGINES` = `cig-tree`, `cig-vm`, `cig-vm-cold`: `cig run` under each engine, with the script's module in the tin and with nothing in the tin
-- `MAIN` = `cig`, `stage-b`, then `LANGUAGES`
-- `ALL` = `CIG_SIDES`, then `cig-first`, then `ENGINES`, then `LANGUAGES`, then the three of `IDIOMS`
+- `MAIN` = `cig`, `stage-b`, `stage-c`, then `LANGUAGES`
+- `ALL` = `CIG_SIDES`, then `stage-c-off`, then `cig-first`, then `ENGINES`, then `LANGUAGES`, then the three of `IDIOMS`
+
+`stage-c` and `stage-c-dry` go in each group right after their stage `b` twin, so the order stays `stage-b, stage-c` and `stage-b-dry, stage-c-dry`. `stage-c-off` has no twin: it is a side of `ALL` only, right after `stage-c-dry`, and is not in `MAIN` or `CIG_SIDES`. A `stage-c` run is a program `cigcompile build --stage c` built; a `stage-c-dry` run is the same program with `--dry-run`; a `stage-c-off` run is the **same stage `c` program as `stage-c`** started with `CIG_NATIVE=0` in its environment, so it runs its bytecode and never loads its native code. A build at `--stage c` whose script has no function that compiles to native code exits 0 and comes out as a stage `b` program with a note; the program is still timed on the `stage-c` (and `stage-c-dry` and `stage-c-off`) sides, which is what a person asking for stage `c` gets.
 
 ## 3. Which numbers exist: a valid pair
 
@@ -58,6 +65,8 @@ A **geometric mean** of a list of ratios is `math.exp(math.fsum(math.log(r) for 
 
 On a set of programs, with the ratios of A to B on the programs of the set (in the order of section 2) where both pairs are valid: **faster** counts the ratios below `0.97`, **slower** those above `1.03`, and **level** the rest (`n - faster - slower`).
 
+**`native(p)`.** For a program p whose last pass has a `native.tsv` line for p, the four fields `(stage, compiled, left, top)`: `stage` is the string in the second field, exactly as written (`b` or `c`); `compiled` and `left` are the third and fourth fields, each an `int` where it is digits only, else the string `unknown`; `top` is the fifth field, exactly as written (`yes`, `no` or `unknown`). `native(p)` is **from the last pass**. If an earlier pass also has a `native.tsv` line for p and its (stage, compiled, left, top) is not the same strings as the last pass's, that is an error: `report.py` and `check.py` stop with a message naming p and the passes that disagree. The native set is the compute-set programs for which `native(p)` exists and its `stage` is `c`.
+
 ## 5. Display formats
 
 | kind | format |
@@ -72,7 +81,7 @@ On a set of programs, with the ratios of A to B on the programs of the set (in t
 
 `numbers.json` is one JSON object: each key maps to `{"text": TEXT, "value": VALUE}`, written as `json.dump(obj, f, indent=1, sort_keys=True)` followed by one newline. `value` is the unrounded number (a float or an int) or, for a date, the string. `check.py` holds each `text` exactly, an int `value` exactly, and a float `value` to within a relative difference of 1e-9.
 
-In what follows, `p` is a program, `s` a side, `k` a pass number from 1 (written `passK`, for example `pass1`), `SET` is `compute` or `start`, and `A`, `B` are sides.
+In what follows, `p` is a program, `s` a side, `k` a pass number from 1 (written `passK`, for example `pass1`), `SET` is `compute`, `start` or `native` (the native set of section 4), and `A`, `B` are sides.
 
 **Per pair** (for each valid (p, s)):
 
@@ -99,19 +108,33 @@ In what follows, `p` is a program, `s` a side, `k` a pass number from 1 (written
 **PAIRS**, in this order (the order changes no number; each key is made once):
 
 1. (A, B) for each A in `CIG_SIDES`, for each B in `LANGUAGES`;
-2. (`stage-b`, `cig`), (`stage-a`, `cig`), (`stage-b-dry`, `cig-dry`);
+2. (`stage-b`, `cig`), (`stage-c`, `stage-b`), (`stage-c`, `cig`), (`stage-a`, `cig`), (`stage-b-dry`, `cig-dry`), (`stage-c-dry`, `cig-dry`);
 3. (`python-idiom`, `python`), (`node-idiom`, `node`), (`rust-idiom`, `rust`);
-4. (`stage-b`, `python-idiom`), (`stage-b`, `node-idiom`), (`stage-b`, `rust-idiom`);
-5. (`cig-vm`, `cig-tree`), (`cig-vm-cold`, `cig-tree`), (`cig-vm`, `stage-b`);
-6. (`cig-vm`, B) for each B in `LANGUAGES`.
+4. (`stage-b`, `python-idiom`), (`stage-c`, `python-idiom`), (`stage-b`, `node-idiom`), (`stage-c`, `node-idiom`), (`stage-b`, `rust-idiom`), (`stage-c`, `rust-idiom`);
+5. (`cig-vm`, `cig-tree`), (`cig-vm-cold`, `cig-tree`), (`cig-vm`, `stage-b`), (`cig-vm`, `stage-c`);
+6. (`cig-vm`, B) for each B in `LANGUAGES`;
+7. (`stage-c`, `stage-c-off`).
 
-**The run record**, for R in `cig`, `stage-a`, `stage-b`, with R-dry being R followed by `-dry`, over the programs (in the order of section 2) where (p, R) and (p, R-dry) are both valid, when there is at least one:
+For SET = `native` (the native set of section 4), `geomean.native.A.B` and its companions exist only for (A, B) = (`stage-c`, `stage-b`): they are the geometric mean and the faster/level/slower counts of the ratios `median(p, stage-c) / median(p, stage-b)` over the native set's programs where both pairs are valid.
+
+**The run record**, for R in `cig`, `stage-a`, `stage-b`, `stage-c`, with R-dry being R followed by `-dry`, over the programs (in the order of section 2) where (p, R) and (p, R-dry) are both valid, when there is at least one:
 
 | key | value | text |
 |---|---|---|
 | `record.n.R` | how many such programs | count |
 | `record.ratio.R` | the geometric mean of `median(p, R) / median(p, R-dry)` | ratio |
 | `record.extra.R` | `statistics.median` of the list of `median(p, R) - median(p, R-dry)` | ms |
+
+**Per program from a stage `c` build**, for each program p whose `native(p)` exists (section 4):
+
+| key | value | text |
+|---|---|---|
+| `native.stage.p` | the string `stage` of `native(p)` | the same string |
+| `native.compiled.p` | the `int` `compiled` of `native(p)` when it is an int, else the string `unknown` | `str(value)` when it is an int, else the string `unknown` |
+| `native.left.p` | `left` of `native(p)`, the same way | the same way |
+| `native.total.p` | exists when `compiled` and `left` are both ints: their sum | `str(value)` |
+| `native.top.p` | the string `top` of `native(p)` | the same string |
+| `native.summary.p` | what of the program has native code, in words. Make a list of parts: first `the top level` when `top` is `yes`; then `C of T functions` when `compiled` and `left` are both ints and their sum is more than 0 (`C` the text of `native.compiled.p`, `T` of `native.total.p`, the word `functions` whatever `T` is). The value is `"none"` when `native(p).stage == "b"`; else, when the stage is `c` and the list is not empty, the parts joined by `", "` (for example `the top level`, `1 of 2 functions`, `the top level, 2 of 3 functions`); else `"unknown"` | the same string |
 
 **Per side**, for each side s with at least one valid pair; "its programs" are the programs (in order) where (p, s) is valid:
 
@@ -136,7 +159,7 @@ In what follows, `p` is a program, `s` a side, `k` a pass number from 1 (written
 | `mhz.min.passK`, `mhz.max.passK` | at least one data line of pass k's `rounds.tsv` has a `cpu_mhz` of digits only | the smallest and the largest such value, as ints | count |
 | `temp.max.passK` | at least one data line has a `temp_c` that is digits, perhaps after one `-` | the largest such value, as an int | count |
 
-**For the whole run:** `passes` (the number of passes), `programs.compute` and `programs.start` (the sizes of the two sets): each a count.
+**For the whole run:** `passes` (the number of passes), `programs.compute` and `programs.start` (the sizes of the two sets): each a count. `programs.native` (the size of the native set) exists when any pass has a `native.tsv`: a count.
 
 ## 7. The tables
 
@@ -158,6 +181,9 @@ A cell that names a key is that key's text, or `–` when the key does not exist
 | `stage-a-dry` | stage a, `` `--dry-run` `` |
 | `stage-b` | stage b |
 | `stage-b-dry` | stage b, `` `--dry-run` `` |
+| `stage-c` | stage c |
+| `stage-c-dry` | stage c, `` `--dry-run` `` |
+| `stage-c-off` | stage c, `` `CIG_NATIVE=0` `` |
 | `lua` | Lua |
 | `luajit-off` | LuaJIT `` `-joff` `` |
 | `luajit` | LuaJIT |
@@ -168,27 +194,28 @@ A cell that names a key is that key's text, or `–` when the key does not exist
 | `node-idiom` | Node, idiomatic |
 | `rust-idiom` | Rust, idiomatic |
 
-In plain characters: `cig`'s label is backtick, `cig run`, backtick; `cig-dry`'s is backtick, `cig run --dry-run`, backtick; `cig-first`'s is backtick, `cig run`, backtick, `, new folder`; `cig-tree`'s is backtick, `cig run --engine tree`, backtick; `cig-vm`'s is backtick, `cig run --engine vm`, backtick; `cig-vm-cold`'s is backtick, `cig run --engine vm`, backtick, `, empty tin`; `stage-a-dry`'s is `stage a, ` then backtick, `--dry-run`, backtick (and `stage-b-dry`'s the same with `b`); `luajit-off`'s is `LuaJIT ` then backtick, `-joff`, backtick.
+In plain characters: `cig`'s label is backtick, `cig run`, backtick; `cig-dry`'s is backtick, `cig run --dry-run`, backtick; `cig-first`'s is backtick, `cig run`, backtick, `, new folder`; `cig-tree`'s is backtick, `cig run --engine tree`, backtick; `cig-vm`'s is backtick, `cig run --engine vm`, backtick; `cig-vm-cold`'s is backtick, `cig run --engine vm`, backtick, `, empty tin`; `stage-a-dry`'s is `stage a, ` then backtick, `--dry-run`, backtick (and `stage-b-dry`'s and `stage-c-dry`'s the same with `b` and `c`); `stage-c-off`'s is `stage c, ` then backtick, `CIG_NATIVE=0`, backtick; `luajit-off`'s is `LuaJIT ` then backtick, `-joff`, backtick.
 
 | name | header | rows (in order) | cells |
 |---|---|---|---|
 | `medians` | `program`, then the label of each side in `MAIN` | each program | `median.p.s` for each side in `MAIN` |
-| `medians-cig` | `program`, then the labels of `cig`, `cig-dry`, `stage-a`, `stage-a-dry`, `stage-b`, `stage-b-dry` | each program | `median.p.s` for each of those sides |
+| `medians-cig` | `program`, then the labels of `cig`, `cig-dry`, `stage-a`, `stage-a-dry`, `stage-b`, `stage-b-dry`, `stage-c`, `stage-c-dry` | each program | `median.p.s` for each of those sides |
 | `spread` | `program`, then the label of each side in `MAIN` | each program | `P10–P90` (the texts of `p10.p.s` and `p90.p.s` joined by U+2013), or `–` when `p10.p.s` does not exist |
-| `ratios-compute` | `time ÷ theirs`, then the label of each side in `LANGUAGES` | the labels of `cig`, `stage-a`, `stage-b` | for row side A and column side B: `G (F/L/S)`, the texts of `geomean.compute.A.B`, `faster.compute.A.B`, `level.compute.A.B`, `slower.compute.A.B`; or `–` when `geomean.compute.A.B` does not exist |
+| `ratios-compute` | `time ÷ theirs`, then the label of each side in `LANGUAGES` | the labels of `cig`, `stage-a`, `stage-b`, `stage-c` | for row side A and column side B: `G (F/L/S)`, the texts of `geomean.compute.A.B`, `faster.compute.A.B`, `level.compute.A.B`, `slower.compute.A.B`; or `–` when `geomean.compute.A.B` does not exist |
 | `ratios-start` | as `ratios-compute` | as `ratios-compute` | as `ratios-compute`, with `start` for `compute` |
-| `ratios-compute-dry` | as `ratios-compute` | the labels of `cig-dry`, `stage-a-dry`, `stage-b-dry` | as `ratios-compute` |
+| `ratios-compute-dry` | as `ratios-compute` | the labels of `cig-dry`, `stage-a-dry`, `stage-b-dry`, `stage-c-dry` | as `ratios-compute` |
+| `native` | `program`, `native`, `stage b, ms`, `stage c, ms`, `stage c ÷ stage b`. **Two text columns** (`program` and `native`); the three others are numbers. | **first**, the per-program rows: for each program p of the compute set, in order, where (p, `stage-b`) and (p, `stage-c`) are both valid, one row of `` `p` ``, `native.summary.p` (or `–` when the key does not exist), `median.p.stage-b`, `median.p.stage-c`, `ratio.p.stage-c.stage-b`. **Then**, in order, one summary row for each SET in (`compute`, `native`) for which `geomean.SET.stage-c.stage-b` exists: the label `**all compute programs**` or `**programs with native code**`, `–` in the `native` column, the text of `n.SET.stage-c.stage-b` in the `stage b, ms` column, `–` in the `stage c, ms` column, and `G (F/L/S)` in the `stage c ÷ stage b` column (the texts of `geomean.SET.stage-c.stage-b`, `faster.SET.stage-c.stage-b`, `level.SET.stage-c.stage-b`, `slower.SET.stage-c.stage-b`). A summary row is kept by section 7's "every number cell is `–`" rule because its `stage b, ms` and `stage c ÷ stage b` cells carry text that is not `–` | see left |
 | `memory` | `program`, then the label of each side in `MAIN` | each program | `peak.p.s` for each side in `MAIN` |
 | `memory-own` | as `memory` | each program | `anon.p.s` for each side in `MAIN` |
-| `record` | (an empty string), `programs`, `run ÷ dry run`, `run − dry run, median ms` | for R in `cig`, `stage-a`, `stage-b` where `record.n.R` exists | the label of R, `record.n.R`, `record.ratio.R`, `record.extra.R` |
+| `record` | (an empty string), `programs`, `run ÷ dry run`, `run − dry run, median ms` | for R in `cig`, `stage-a`, `stage-b`, `stage-c` where `record.n.R` exists | the label of R, `record.n.R`, `record.ratio.R`, `record.extra.R` |
 | `idiom` | `program`, `language`, `translation, ms`, `idiomatic, ms`, `idiomatic ÷ translation`, `stage b ÷ idiomatic`. **Two text columns.** | for each idiom side I in `IDIOMS` order, for each program p in order, where (p, I) and (p, base) are both valid | `` `p` ``, the label of the base side, `median.p.base`, `median.p.I`, `ratio.p.I.base`, `ratio.p.stage-b.I` |
-| `passes` | `compute set`, then for A in `cig`, `stage-b`, for each pass k: the label of A, then ` ÷, pass `, then k | the label of each side in `LANGUAGES` | for A in `cig`, `stage-b`, for each pass k: `geomean.passK.compute.A.B` |
+| `passes` | `compute set`, then for A in `cig`, `stage-b`, `stage-c`, for each pass k: the label of A, then ` ÷, pass `, then k | the label of each side in `LANGUAGES` | for A in `cig`, `stage-b`, `stage-c`, for each pass k: `geomean.passK.compute.A.B` |
 | `moved` | `program`, `side`, then for each pass k: `pass k, ms`. **Two text columns.** | for each program p in order, for each side s in `ALL` where (p, s) is valid and the largest of its `median_k` over the passes divided by the smallest is above `1.10` | `` `p` ``, the label of s, then `median.passK.p.s` for each pass k |
 | `stability` | `side`, `programs`, then for each pass k from 2: `pass k ÷ pass 1`; then for each pass k: `last third ÷ first third, pass k`; then for each pass k: `CV over 5%, pass k` | for each side s in `ALL` where `programs.s` exists | the label of s, `programs.s`, then `repeat.passK.s` for each k from 2, `drift.passK.s` for each k, `noisy.passK.s` for each k |
 | `engines` | `program`, then the labels of `cig-tree`, `cig-vm`, `cig-vm-cold`, then `vm ÷ tree`, then `vm, empty tin ÷ tree` | each program | `median.p.cig-tree`, `median.p.cig-vm`, `median.p.cig-vm-cold`, `ratio.p.cig-vm.cig-tree`, `ratio.p.cig-vm-cold.cig-tree` |
 | `conditions` | (an empty string), then `pass k` for each pass. **Every column is text**, so no row is left out. | see below | see below |
 
-**`conditions`, its rows in order.** First, for each (KEY, label) below, a row: the label, then for each pass the shown value of `condition(pass, KEY)[0]`, or `–` when the pass has no such line:
+**`conditions`, its rows in order.** First, for each (KEY, label) below, a row: the label, then for each pass the shown value of `condition(pass, KEY)[0]`, or `–` when the pass has no such line; the row is kept only when at least one pass has that line:
 
 | KEY | label | shown value |
 |---|---|---|
@@ -210,6 +237,7 @@ In plain characters: `cig`'s label is backtick, `cig run`, backtick; `cig-dry`'s
 | `harness` | `harness` | as written |
 | `rounds` | `rounds` | as written |
 | `seed` | `seed of the rounds' order` | as written |
+| `cpus` | `pinned to CPUs` | as written |
 | `floor_ms` | `` `true`, median ms `` | as written |
 
 Then four rows, each the label then, for each pass k, the text of a key (or `–`): `cig's run records at the last round` (`history.last.passK`); `mean clock at a round's start, lowest, MHz` (`mhz.min.passK`); `mean clock at a round's start, highest, MHz` (`mhz.max.passK`); `package °C at a round's start, highest` (`temp.max.passK`).

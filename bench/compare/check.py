@@ -24,13 +24,14 @@ DIV = "÷"
 MINUS = "−"
 
 START_SET = ["hello", "startup-0", "startup-1", "startup-10"]
-CIG_SIDES = ["cig", "stage-a", "stage-b", "cig-dry", "stage-a-dry", "stage-b-dry"]
+CIG_SIDES = ["cig", "stage-a", "stage-b", "stage-c",
+             "cig-dry", "stage-a-dry", "stage-b-dry", "stage-c-dry"]
 LANGUAGES = ["lua", "luajit-off", "luajit", "python", "node", "rust"]
 IDIOMS = [("python-idiom", "python"), ("node-idiom", "node"), ("rust-idiom", "rust")]
 IDIOM_SIDES = [i for i, _ in IDIOMS]
 ENGINES = ["cig-tree", "cig-vm", "cig-vm-cold"]
-MAIN = ["cig", "stage-b"] + LANGUAGES
-ALL = CIG_SIDES + ["cig-first"] + ENGINES + LANGUAGES + IDIOM_SIDES
+MAIN = ["cig", "stage-b", "stage-c"] + LANGUAGES
+ALL = CIG_SIDES + ["stage-c-off"] + ["cig-first"] + ENGINES + LANGUAGES + IDIOM_SIDES
 
 LABELS = {
     "cig": "`cig run`",
@@ -43,6 +44,9 @@ LABELS = {
     "stage-a-dry": "stage a, `--dry-run`",
     "stage-b": "stage b",
     "stage-b-dry": "stage b, `--dry-run`",
+    "stage-c": "stage c",
+    "stage-c-dry": "stage c, `--dry-run`",
+    "stage-c-off": "stage c, `CIG_NATIVE=0`",
     "lua": "Lua",
     "luajit-off": "LuaJIT `-joff`",
     "luajit": "LuaJIT",
@@ -119,6 +123,13 @@ class Pass:
         self.rounds = read_rows(os.path.join(folder, "rounds.tsv"),
                                 ["round", "started_utc", "cpu_mhz", "temp_c", "history"],
                                 optional=True)
+        # native.tsv is optional: a pass may or may not have one.
+        self.has_native_tsv = os.path.exists(os.path.join(folder, "native.tsv"))
+        self.native_rows = {}   # program -> (stage, compiled_str, left_str, top_str)
+        if self.has_native_tsv:
+            for f in read_rows(os.path.join(folder, "native.tsv"),
+                               ["program", "stage", "compiled", "left", "top"]):
+                self.native_rows[f[0]] = (f[1], f[2], f[3], f[4])
         self.cond = []         # every conditions line, as a list of fields
         try:
             with open(os.path.join(folder, "conditions.txt"), "rb") as fh:
@@ -186,7 +197,55 @@ class Model:
         self.sides = sides
         self._valid = {}
         self.keys = {}
+        self._build_native()
         self.build()
+
+    # ------------------------------------------------- native.tsv modelling
+
+    def _build_native(self):
+        """Build native(p) info from the last pass that has a line for p.
+
+        Spec section 1 and 4. `native_info[p]` is a dict with keys
+        stage, compiled, left, top: `stage` and `top` are the exact strings
+        from the file; `compiled` and `left` are `int` where the field is
+        digits only, else the literal string `unknown`.
+
+        Earlier passes that also have a line for p must give the same four
+        strings as the last pass, else it is an error.
+        """
+        self.has_native = any(p.has_native_tsv for p in self.passes)
+        self.native_info = {}
+        self.native_set = []
+        if not self.has_native:
+            return
+        progs_with_native = set()
+        for p in self.passes:
+            progs_with_native.update(p.native_rows)
+        for prog in progs_with_native:
+            indexed = [(i, p.native_rows[prog]) for i, p in enumerate(self.passes)
+                       if prog in p.native_rows]
+            last_idx, last_row = indexed[-1]
+            for i, row in indexed[:-1]:
+                if row != last_row:
+                    raise Fatal(
+                        "program %s has differing native.tsv rows: "
+                        "pass %d %r vs pass %d %r"
+                        % (prog, i + 1, row, last_idx + 1, last_row)
+                    )
+            stage, compiled_s, left_s, top_s = last_row
+            compiled_v = int(compiled_s) if re.fullmatch(r"[0-9]+", compiled_s) else "unknown"
+            left_v = int(left_s) if re.fullmatch(r"[0-9]+", left_s) else "unknown"
+            self.native_info[prog] = {
+                "stage": stage,
+                "compiled": compiled_v,
+                "left": left_v,
+                "top": top_s,
+            }
+        self.native_set = [p for p in self.compute
+                           if p in self.native_info
+                           and self.native_info[p]["stage"] == "c"]
+
+    # ------------------------------------------------- pair/sample helpers
 
     def valid(self, prog, side):
         pair = (prog, side)
@@ -211,16 +270,27 @@ class Model:
     def put(self, key, text, value):
         self.keys[key] = (text, value)
 
+    def present(self, group):
+        """Sides of the group that appear in at least one pass's samples.tsv."""
+        return [s for s in group if s in self.sides]
+
     def pairs(self):
         out = []
         for a in CIG_SIDES:
             for b in LANGUAGES:
                 out.append((a, b))
-        out += [("stage-b", "cig"), ("stage-a", "cig"), ("stage-b-dry", "cig-dry")]
-        out += [("python-idiom", "python"), ("node-idiom", "node"), ("rust-idiom", "rust")]
-        out += [("stage-b", "python-idiom"), ("stage-b", "node-idiom"), ("stage-b", "rust-idiom")]
-        out += [("cig-vm", "cig-tree"), ("cig-vm-cold", "cig-tree"), ("cig-vm", "stage-b")]
+        out += [("stage-b", "cig"), ("stage-c", "stage-b"), ("stage-c", "cig"),
+                ("stage-a", "cig"), ("stage-b-dry", "cig-dry"),
+                ("stage-c-dry", "cig-dry")]
+        out += [("python-idiom", "python"), ("node-idiom", "node"),
+                ("rust-idiom", "rust")]
+        out += [("stage-b", "python-idiom"), ("stage-c", "python-idiom"),
+                ("stage-b", "node-idiom"), ("stage-c", "node-idiom"),
+                ("stage-b", "rust-idiom"), ("stage-c", "rust-idiom")]
+        out += [("cig-vm", "cig-tree"), ("cig-vm-cold", "cig-tree"),
+                ("cig-vm", "stage-b"), ("cig-vm", "stage-c")]
         out += [("cig-vm", b) for b in LANGUAGES]
+        out += [("stage-c", "stage-c-off")]
         return out
 
     def build(self):
@@ -254,16 +324,19 @@ class Model:
                 if self.valid(prog, a) and self.valid(prog, b):
                     r = self.median(prog, a) / self.median(prog, b)
                     self.put("ratio.%s.%s.%s" % (prog, a, b), fmt_ratio(r), r)
-            for setname, members in (("compute", self.compute), ("start", self.start)):
+            sets = [("compute", self.compute), ("start", self.start)]
+            if (a, b) == ("stage-c", "stage-b"):
+                sets.append(("native", self.native_set))
+            for setname, members in sets:
                 use = [p for p in members if self.valid(p, a) and self.valid(p, b)]
                 if not use:
                     continue
-                g = geomean([self.median(p, a) / self.median(p, b) for p in use])
+                rs = [self.median(p, a) / self.median(p, b) for p in use]
+                g = geomean(rs)
                 tag = "%s.%s.%s" % (setname, a, b)
                 self.put("geomean." + tag, fmt_ratio(g), g)
                 inv = 1 / g
                 self.put("inverse." + tag, fmt_ratio(inv), inv)
-                rs = [self.median(p, a) / self.median(p, b) for p in use]
                 fa = sum(1 for r in rs if r < 0.97)
                 sl = sum(1 for r in rs if r > 1.03)
                 self.put("faster." + tag, fmt_count(fa), fa)
@@ -283,7 +356,7 @@ class Model:
                                   for p in use])
                     self.put("geomean.pass%d.%s" % (k, tag), fmt_ratio(gk), gk)
         # dry-run records
-        for r in ("cig", "stage-a", "stage-b"):
+        for r in ("cig", "stage-a", "stage-b", "stage-c"):
             dry = r + "-dry"
             use = [p for p in self.programs if self.valid(p, r) and self.valid(p, dry)]
             if not use:
@@ -294,6 +367,41 @@ class Model:
             self.put("record.ratio." + r, fmt_ratio(g), g)
             e = statistics.median([self.median(p, r) - self.median(p, dry) for p in use])
             self.put("record.extra." + r, fmt_ms(e), e)
+        # per-program native keys
+        for prog in self.programs:
+            if prog not in self.native_info:
+                continue
+            info = self.native_info[prog]
+            stage = info["stage"]
+            compiled = info["compiled"]
+            left = info["left"]
+            top = info["top"]
+            self.put("native.stage.%s" % prog, stage, stage)
+            if isinstance(compiled, int):
+                self.put("native.compiled.%s" % prog, str(compiled), compiled)
+            else:
+                self.put("native.compiled.%s" % prog, "unknown", "unknown")
+            if isinstance(left, int):
+                self.put("native.left.%s" % prog, str(left), left)
+            else:
+                self.put("native.left.%s" % prog, "unknown", "unknown")
+            if isinstance(compiled, int) and isinstance(left, int):
+                total = compiled + left
+                self.put("native.total.%s" % prog, str(total), total)
+            self.put("native.top.%s" % prog, top, top)
+            if stage == "b":
+                summary = "none"
+            elif stage == "c":
+                parts = []
+                if top == "yes":
+                    parts.append("the top level")
+                if (isinstance(compiled, int) and isinstance(left, int)
+                        and compiled + left > 0):
+                    parts.append("%s of %s functions" % (compiled, compiled + left))
+                summary = ", ".join(parts) if parts else "unknown"
+            else:
+                summary = "unknown"
+            self.put("native.summary.%s" % prog, summary, summary)
         # per-side figures
         for side in sorted(self.sides):
             use = [p for p in self.programs if self.valid(p, side)]
@@ -365,6 +473,9 @@ class Model:
         self.put("passes", fmt_count(npass), npass)
         self.put("programs.compute", fmt_count(len(self.compute)), len(self.compute))
         self.put("programs.start", fmt_count(len(self.start)), len(self.start))
+        if self.has_native:
+            self.put("programs.native", fmt_count(len(self.native_set)),
+                     len(self.native_set))
 
     def text(self, key):
         """Text of a key, or the dash when it does not exist."""
@@ -386,17 +497,18 @@ class Model:
     def table(self, name):
         t = self.text
         if name == "spread":
-            header = ["program"] + [LABELS[s] for s in MAIN]
+            main = self.present(MAIN)
+            header = ["program"] + [LABELS[s] for s in main]
             rows = []
             for p in self.programs:
                 row = ["`%s`" % p]
-                for s in MAIN:
+                for s in main:
                     if "p10.%s.%s" % (p, s) in self.keys:
                         row.append(t("p10.%s.%s" % (p, s)) + DASH + t("p90.%s.%s" % (p, s)))
                     else:
                         row.append(DASH)
                 rows.append(row)
-            return self.render_table(header, [False] + [True] * len(MAIN), rows)
+            return self.render_table(header, [False] + [True] * len(main), rows)
         if name == "moved":
             n = len(self.passes)
             header = ["program", "side"] + ["pass %d, ms" % k for k in range(1, n + 1)]
@@ -413,25 +525,31 @@ class Model:
             return self.render_table(header, [False, False] + [True] * n, rows)
         if name in ("medians", "memory", "memory-own"):
             what = {"medians": "median", "memory": "peak", "memory-own": "anon"}[name]
-            header = ["program"] + [LABELS[s] for s in MAIN]
-            rows = [["`%s`" % p] + [t("%s.%s.%s" % (what, p, s)) for s in MAIN]
+            main = self.present(MAIN)
+            header = ["program"] + [LABELS[s] for s in main]
+            rows = [["`%s`" % p] + [t("%s.%s.%s" % (what, p, s)) for s in main]
                     for p in self.programs]
-            return self.render_table(header, [False] + [True] * len(MAIN), rows)
+            return self.render_table(header, [False] + [True] * len(main), rows)
         if name == "medians-cig":
-            sides = ["cig", "cig-dry", "stage-a", "stage-a-dry", "stage-b", "stage-b-dry"]
+            sides = self.present(["cig", "cig-dry", "stage-a", "stage-a-dry",
+                                  "stage-b", "stage-b-dry", "stage-c", "stage-c-dry"])
             header = ["program"] + [LABELS[s] for s in sides]
             rows = [["`%s`" % p] + [t("median.%s.%s" % (p, s)) for s in sides]
                     for p in self.programs]
             return self.render_table(header, [False] + [True] * len(sides), rows)
         if name in ("ratios-compute", "ratios-start", "ratios-compute-dry"):
             setname = "start" if name == "ratios-start" else "compute"
-            rowsides = (["cig-dry", "stage-a-dry", "stage-b-dry"]
-                        if name == "ratios-compute-dry" else ["cig", "stage-a", "stage-b"])
-            header = ["time " + DIV + " theirs"] + [LABELS[s] for s in LANGUAGES]
+            if name == "ratios-compute-dry":
+                rowsides = self.present(["cig-dry", "stage-a-dry",
+                                         "stage-b-dry", "stage-c-dry"])
+            else:
+                rowsides = self.present(["cig", "stage-a", "stage-b", "stage-c"])
+            cols = self.present(LANGUAGES)
+            header = ["time " + DIV + " theirs"] + [LABELS[s] for s in cols]
             rows = []
             for a in rowsides:
                 row = [LABELS[a]]
-                for b in LANGUAGES:
+                for b in cols:
                     tag = "%s.%s.%s" % (setname, a, b)
                     if "geomean." + tag in self.keys:
                         row.append("%s (%s/%s/%s)" % (t("geomean." + tag), t("faster." + tag),
@@ -439,13 +557,16 @@ class Model:
                     else:
                         row.append(DASH)
                 rows.append(row)
-            return self.render_table(header, [False] + [True] * len(LANGUAGES), rows)
+            return self.render_table(header, [False] + [True] * len(cols), rows)
+        if name == "native":
+            return self.native_table()
         if name == "record":
             header = ["", "programs", "run " + DIV + " dry run",
                       "run " + MINUS + " dry run, median ms"]
             rows = [[LABELS[r], t("record.n." + r), t("record.ratio." + r),
                      t("record.extra." + r)]
-                    for r in ("cig", "stage-a", "stage-b") if "record.n." + r in self.keys]
+                    for r in ("cig", "stage-a", "stage-b", "stage-c")
+                    if "record.n." + r in self.keys]
             return self.render_table(header, [False, True, True, True], rows)
         if name == "idiom":
             header = ["program", "language", "translation, ms", "idiomatic, ms",
@@ -461,10 +582,12 @@ class Model:
             return self.render_table(header, [False, False, True, True, True, True], rows)
         if name == "passes":
             n = len(self.passes)
-            cols = [(a, k) for a in ("cig", "stage-b") for k in range(1, n + 1)]
+            rowsides = self.present(["cig", "stage-b", "stage-c"])
+            cols = [(a, k) for a in rowsides for k in range(1, n + 1)]
+            langs = self.present(LANGUAGES)
             header = ["compute set"] + ["%s %s, pass %d" % (LABELS[a], DIV, k) for a, k in cols]
             rows = [[LABELS[b]] + [t("geomean.pass%d.compute.%s.%s" % (k, a, b))
-                                   for a, k in cols] for b in LANGUAGES]
+                                   for a, k in cols] for b in langs]
             return self.render_table(header, [False] + [True] * len(cols), rows)
         if name == "stability":
             n = len(self.passes)
@@ -483,17 +606,47 @@ class Model:
                 rows.append(row)
             return self.render_table(header, [False] + [True] * (len(header) - 1), rows)
         if name == "engines":
-            header = ["program"] + [LABELS[s] for s in ENGINES] + [
+            engines = self.present(ENGINES)
+            header = ["program"] + [LABELS[s] for s in engines] + [
                 "vm " + DIV + " tree", "vm, empty tin " + DIV + " tree"]
             rows = [["`%s`" % p]
-                    + [t("median.%s.%s" % (p, s)) for s in ENGINES]
+                    + [t("median.%s.%s" % (p, s)) for s in engines]
                     + [t("ratio.%s.cig-vm.cig-tree" % p),
                        t("ratio.%s.cig-vm-cold.cig-tree" % p)]
                     for p in self.programs]
-            return self.render_table(header, [False] + [True] * 5, rows)
+            return self.render_table(header, [False] + [True] * (len(engines) + 2), rows)
         if name == "conditions":
             return self.conditions_table()
         raise Fatal("unknown table %r" % name)
+
+    def native_table(self):
+        t = self.text
+        header = ["program", "native", "stage b, ms", "stage c, ms",
+                  "stage c " + DIV + " stage b"]
+        numeric = [False, False, True, True, True]
+        rows = []
+        for p in self.compute:
+            if not (self.valid(p, "stage-b") and self.valid(p, "stage-c")):
+                continue
+            summary = t("native.summary.%s" % p)
+            rows.append(["`%s`" % p, summary,
+                         t("median.%s.stage-b" % p),
+                         t("median.%s.stage-c" % p),
+                         t("ratio.%s.stage-c.stage-b" % p)])
+        for setname, label in (("compute", "**all compute programs**"),
+                               ("native", "**programs with native code**")):
+            key = "geomean.%s.stage-c.stage-b" % setname
+            if key not in self.keys:
+                continue
+            ratio_cell = "%s (%s/%s/%s)" % (
+                t("geomean.%s.stage-c.stage-b" % setname),
+                t("faster.%s.stage-c.stage-b" % setname),
+                t("level.%s.stage-c.stage-b" % setname),
+                t("slower.%s.stage-c.stage-b" % setname),
+            )
+            rows.append([label, DASH,
+                         t("n.%s.stage-c.stage-b" % setname), DASH, ratio_cell])
+        return self.render_table(header, numeric, rows)
 
     def conditions_table(self):
         n = len(self.passes)
@@ -511,12 +664,15 @@ class Model:
                   ("no_turbo", "turbo"), ("profile", "power profile"),
                   ("transparent_hugepages", "transparent huge pages"),
                   ("mains", "on mains power"), ("load_average", "load average at the start"),
-                  ("temp_c", "package \u00b0C at the start"),
+                  ("temp_c", "package °C at the start"),
                   ("history", "cig's run records at the start"),
                   ("harness", "harness"), ("rounds", "rounds"),
                   ("seed", "seed of the rounds' order"),
+                  ("cpus", "pinned to CPUs"),
                   ("floor_ms", "`true`, median ms")]
         for key, label in simple:
+            if not any(ps.condition(key) is not None for ps in self.passes):
+                continue
             row = [label]
             for ps in self.passes:
                 v = first(ps, key)
@@ -534,7 +690,7 @@ class Model:
         for label, kname in (("cig's run records at the last round", "history.last"),
                              ("mean clock at a round's start, lowest, MHz", "mhz.min"),
                              ("mean clock at a round's start, highest, MHz", "mhz.max"),
-                             ("package \u00b0C at a round's start, highest", "temp.max")):
+                             ("package °C at a round's start, highest", "temp.max")):
             rows.append([label] + [self.text("%s.pass%d" % (kname, k)) for k in range(1, n + 1)])
         for side, label in (("cig", "cig"), ("stage-a", "cigcompile"), ("lua", "Lua"),
                             ("luajit", "LuaJIT"), ("python", "CPython"), ("node", "Node"),
