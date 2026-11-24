@@ -74,8 +74,8 @@ pub mod value;
 
 pub use context::Context;
 pub use format::{
-    op, Arch, Body, Entry, Exit, FormatError, Op, Rule, Section, Site, Tables, Ty, ALIGN, BODY_LEN,
-    ENTRY_LEN, FOOTER_LEN, INTERFACE, MAGIC, MAX_ARGS, MAX_BODY_FRAME, MAX_FRAME, MAX_ROWS,
-    RESUME_LEN, SITE_LEN, VERSION,
+    bodies_in, op, Arch, Body, Entry, Exit, FormatError, Op, Rule, Section, Site, Tables, Ty,
+    ALIGN, BODY_LEN, ENTRY_LEN, FOOTER_LEN, INTERFACE, MAGIC, MAX_ARGS, MAX_BODY_FRAME, MAX_FRAME,
+    MAX_ROWS, RESUME_LEN, SITE_LEN, VERSION,
 };
 pub use loader::{Code, Helpers, Host, MapError, Mapped, Stop};

@@ -29,12 +29,81 @@ use crate::interp::{depth_exceeded, Interp};
 use crate::syntax::ast::BinOp;
 use crate::syntax::span::Span;
 use crate::value::Value;
-use cig_native::{op, Code, Context, Exit, Site, Tables, Ty, MAX_ARGS, MAX_FRAME};
-use std::cell::Cell;
+use cig_native::{
+    op, Code, Context, Exit, Host, Site, Stop, Tables, Ty, MAX_ARGS, MAX_BODY_FRAME, MAX_FRAME,
+};
+use std::cell::{Cell, OnceCell};
+
+/// A pc that is no resume point, in [`BodyEntry::resume_at`]. `u32::MAX`,
+/// so a `.get(pc).copied().filter(...)` is a load and a compare.
+pub(crate) const NO_RESUME: u32 = u32::MAX;
+
+/// One function's body as the VM finds it: where it lies in [`Code`], the
+/// pc of each resume point, and (indexed by first-word pc) the resume
+/// index at that pc, or [`NO_RESUME`].
+pub(crate) struct BodyEntry {
+    /// The body's index in the mapped code.
+    code_index: usize,
+    /// For each resume index, the first-word pc of that resume point:
+    /// where the tests' plain-Rust body starts from.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pcs: Vec<u32>,
+    /// For each first-word pc of the function, the resume index at that
+    /// pc, else [`NO_RESUME`]: the driver's lookup is one load and one
+    /// compare per instruction.
+    resume_at: Box<[u32]>,
+    /// How many words the function's code has: where the tests'
+    /// plain-Rust body runs to.
+    #[cfg_attr(not(test), allow(dead_code))]
+    code_len: u32,
+}
+
+impl BodyEntry {
+    /// The body with index `code_index` in the mapped code and resume
+    /// points `pcs`, held against its function's instructions:
+    /// `code_len` is how many words the function has and `starts(pc)`
+    /// says whether an instruction starts at `pc`. `None` when a resume
+    /// point starts none: such a body is never entered.
+    fn resolve(
+        code_index: usize,
+        pcs: &[u32],
+        code_len: usize,
+        starts: impl Fn(usize) -> bool,
+    ) -> Option<BodyEntry> {
+        let mut resume_at = vec![NO_RESUME; code_len].into_boxed_slice();
+        for (at, pc) in pcs.iter().enumerate() {
+            let p = *pc as usize;
+            if !starts(p) {
+                return None;
+            }
+            *resume_at.get_mut(p)? = u32::try_from(at).ok()?;
+        }
+        Some(BodyEntry {
+            code_index,
+            pcs: pcs.to_vec(),
+            resume_at,
+            code_len: u32::try_from(code_len).ok()?,
+        })
+    }
+
+    /// The resume index at `pc`, when `pc` is one of the body's resume
+    /// points.
+    #[inline(always)]
+    pub(crate) fn at(&self, pc: usize) -> Option<u32> {
+        match self.resume_at.get(pc).copied() {
+            Some(x) if x != NO_RESUME => Some(x),
+            _ => None,
+        }
+    }
+}
 
 /// A program's native code, as the VM calls it.
 pub struct Native {
-    code: Code,
+    /// The code mapped from the section, when there is one: entries
+    /// ([`Code::call`]) and bodies ([`Code::enter`]). `None` in a
+    /// test-only [`Native`] that holds no machine code and runs its
+    /// bodies as plain Rust.
+    code: Option<Code>,
     sites: Vec<Site>,
     /// Every entry's row and result type, in the tables' order: an
     /// entry's index here is its index for [`Code::call`].
@@ -42,17 +111,50 @@ pub struct Native {
     /// For each function of the module, where its entries start in
     /// `rows` and how many it has: none, for most.
     of: Vec<(usize, usize)>,
+    /// For each function of the module, its body as the section gives
+    /// it: its index in the mapped code and its resume points.
+    raw: Vec<Option<(usize, Vec<u32>)>>,
+    /// For each function, its body held against the function's own
+    /// instructions, the first time a frame of it is on top: `None`
+    /// when one of its resume points starts no instruction of the
+    /// function, and the body is then never entered. A function is read
+    /// and verified at its first entry, so its body is looked at then
+    /// and not when the section is loaded.
+    bodies: Vec<OnceCell<Option<BodyEntry>>>,
+    /// The tests' native code: every function has a body, in plain
+    /// Rust, and every instruction of it is a resume point.
+    #[cfg(test)]
+    every_pc: bool,
 }
 
 impl Native {
     /// `code` armed with `tables`, for a module of `funcs` functions.
     /// The tables were checked against that module when they were
     /// loaded (`crate::native::Source::load`): every entry is for one of
-    /// its functions, with that function's parameter count.
-    pub fn new(code: Code, tables: Tables, funcs: usize) -> Native {
+    /// its functions, with that function's parameter count, and every
+    /// body is for one of its functions.
+    pub(crate) fn new(code: Code, tables: Tables, funcs: usize) -> Native {
+        let mut raw: Vec<Option<(usize, Vec<u32>)>> = (0..funcs).map(|_| None).collect();
+        for (index, body) in tables.bodies.into_iter().enumerate() {
+            if let Some(slot) = raw.get_mut(body.func as usize) {
+                *slot = Some((index, body.resumes));
+            }
+        }
+        let bodies = (0..funcs).map(|_| OnceCell::new()).collect();
+        Native::build(Some(code), tables.sites, tables.entries, funcs, raw, bodies)
+    }
+
+    fn build(
+        code: Option<Code>,
+        sites: Vec<Site>,
+        entries: Vec<cig_native::Entry>,
+        funcs: usize,
+        raw: Vec<Option<(usize, Vec<u32>)>>,
+        bodies: Vec<OnceCell<Option<BodyEntry>>>,
+    ) -> Native {
         let mut of = vec![(0, 0); funcs];
-        let mut rows = Vec::with_capacity(tables.entries.len());
-        for (i, e) in tables.entries.into_iter().enumerate() {
+        let mut rows = Vec::with_capacity(entries.len());
+        for (i, e) in entries.into_iter().enumerate() {
             // Entries are sorted by function: one function's are one run.
             if let Some((first, count)) = of.get_mut(e.func as usize) {
                 if *count == 0 {
@@ -64,10 +166,31 @@ impl Native {
         }
         Native {
             code,
-            sites: tables.sites,
+            sites,
             rows,
             of,
+            raw,
+            bodies,
+            #[cfg(test)]
+            every_pc: false,
         }
+    }
+
+    /// The tests' [`Native`], for a module of `funcs` functions: no
+    /// mapped code, and for every function a body in plain Rust that
+    /// has the interpreter run everything (one call of `Host::run` from
+    /// where it is entered to the function's end). Every pc that starts
+    /// an instruction is a resume point, so every instruction the VM
+    /// runs is reached through the driver. A function's body is made
+    /// when a frame of it first comes on top, as a mapped body's table
+    /// is: nothing is read or verified earlier than without it.
+    #[cfg(test)]
+    pub(crate) fn for_tests_every_pc(funcs: usize) -> Native {
+        let raw = (0..funcs).map(|i| Some((i, Vec::new()))).collect();
+        let bodies = (0..funcs).map(|_| OnceCell::new()).collect();
+        let mut native = Native::build(None, Vec::new(), Vec::new(), funcs, raw, bodies);
+        native.every_pc = true;
+        native
     }
 
     /// How many entries it has.
@@ -78,6 +201,90 @@ impl Native {
     /// It has no entry.
     pub fn is_empty(&self) -> bool {
         self.rows.is_empty()
+    }
+
+    /// How many bodies it has.
+    pub fn bodies(&self) -> usize {
+        self.raw.iter().filter(|b| b.is_some()).count()
+    }
+
+    /// The functions that have a body.
+    pub(crate) fn with_bodies(&self) -> impl Iterator<Item = usize> + '_ {
+        self.raw
+            .iter()
+            .enumerate()
+            .filter_map(|(func, b)| b.as_ref().map(|_| func))
+    }
+
+    /// The body of function `func`, when it has one that can be
+    /// entered: `code_len` is how many words the function has and
+    /// `starts(pc)` whether an instruction of it starts at `pc`. The
+    /// body is held against them the first time, and found by one load
+    /// after that.
+    #[inline]
+    pub(crate) fn body_of(
+        &self,
+        func: usize,
+        code_len: usize,
+        starts: impl Fn(usize) -> bool,
+    ) -> Option<&BodyEntry> {
+        self.bodies
+            .get(func)?
+            .get_or_init(|| {
+                let (index, pcs) = self.raw.get(func)?.as_ref()?;
+                #[cfg(test)]
+                if self.every_pc {
+                    let all: Vec<u32> = (0..code_len)
+                        .filter(|pc| starts(*pc))
+                        .filter_map(|pc| u32::try_from(pc).ok())
+                        .collect();
+                    return BodyEntry::resolve(*index, &all, code_len, starts);
+                }
+                BodyEntry::resolve(*index, pcs, code_len, starts)
+            })
+            .as_ref()
+    }
+
+    /// Enter `body` at resume index `at`: machine code when a section
+    /// is mapped, or a plain-Rust body (test-only) otherwise. Returns
+    /// the stop the body stopped with. A stop's bits that are no stop
+    /// come back as [`Stop::Defect`]`(0)`.
+    #[inline]
+    pub(crate) fn enter_body<H: Host>(
+        &self,
+        body: &BodyEntry,
+        at: u32,
+        ctx: &mut Context,
+        host: &mut H,
+    ) -> Stop {
+        match &self.code {
+            Some(code) => code
+                .enter(body.code_index, at, ctx, host)
+                .unwrap_or(Stop::Defect(0)),
+            None => {
+                // Test-only body: the interpreter runs everything, again
+                // from wherever `run` stops inside the function's range.
+                // Every pc is a resume point for the driver; one call of
+                // `host.run` from the entered pc covers the function.
+                #[cfg(test)]
+                {
+                    if let Some(pc) = DEFECT.with(Cell::take) {
+                        return Stop::Defect(pc);
+                    }
+                    let pc = body.pcs.get(at as usize).copied().unwrap_or(0);
+                    let to = match ONE_AT_A_TIME.with(Cell::get) {
+                        true => pc.saturating_add(1),
+                        false => body.code_len,
+                    };
+                    host.run(ctx, pc, to)
+                }
+                #[cfg(not(test))]
+                {
+                    let _ = (body, at, ctx, host);
+                    Stop::Defect(0)
+                }
+            }
+        }
     }
 
     /// The entry of function `func` that takes the `n` arguments
@@ -122,15 +329,15 @@ impl Native {
         ret: Ty,
         args: &[u64],
     ) -> Result<Value, Diagnostic> {
-        // The steps left of the budget: all there are, when there is no
-        // budget or more is left than a count holds.
-        let budget = match interp.max_steps {
-            0 => i64::MAX,
-            max => i64::try_from(max.saturating_sub(interp.steps)).unwrap_or(i64::MAX),
-        };
+        let budget = budget_for(interp);
         let depth = i64::try_from(interp.calls_left()).unwrap_or(i64::MAX);
         let mut ctx = Context::new(budget, depth);
-        let Some((status, slot)) = self.code.call(entry, &mut ctx, args) else {
+        let Some(code) = self.code.as_ref() else {
+            return Err(internal(
+                "the VM called a native entry on a code mapping it does not have".to_string(),
+            ));
+        };
+        let Some((status, slot)) = code.call(entry, &mut ctx, args) else {
             return Err(internal(format!(
                 "the VM called native entry {entry} with {} arguments it does not take",
                 args.len()
@@ -217,6 +424,16 @@ impl Native {
     }
 }
 
+/// The steps left of the budget as native code sees it: all there are
+/// when there is no budget or more is left than a count holds. `Native`
+/// gives this to an entry at a call and to a body at [`enter_body`].
+pub(crate) fn budget_for(interp: &Interp) -> i64 {
+    match interp.max_steps {
+        0 => i64::MAX,
+        max => i64::try_from(max.saturating_sub(interp.steps)).unwrap_or(i64::MAX),
+    }
+}
+
 /// A slot's bits as an int.
 fn int(slot: u64) -> i64 {
     i64::from_ne_bytes(slot.to_ne_bytes())
@@ -260,6 +477,20 @@ fn bin_op(o: cig_native::Op) -> Option<BinOp> {
     })
 }
 
+#[cfg(test)]
+thread_local! {
+    /// How many times this thread entered a body: a test that runs a
+    /// program through the driver reads it to know the driver ran.
+    pub(crate) static ENTERED: Cell<u64> = const { Cell::new(0) };
+    /// A pc the tests' body reports a defect at, once, when it is next
+    /// entered: how a test sees what the VM does with one.
+    pub(crate) static DEFECT: Cell<Option<u32>> = const { Cell::new(None) };
+    /// The tests' body hands the interpreter one instruction and comes
+    /// back, instead of the rest of the function: the body and the
+    /// bytecode then take turns at every instruction.
+    pub(crate) static ONE_AT_A_TIME: Cell<bool> = const { Cell::new(false) };
+}
+
 thread_local! {
     /// Where this thread's stack starts and how long it is, once the
     /// thread has said ([`stack_starts_here`]).
@@ -280,12 +511,10 @@ pub fn stack_starts_here(size: usize) {
     STACK.with(|s| s.set(Some((here, size))));
 }
 
-/// The stack has room for native code whose calls nest `calls` deep, at
-/// [`MAX_FRAME`] bytes a call, with [`SPARE`] to spare. Native code is
-/// entered only when it has: its depth is not cut to fit (that would
-/// move E506), so a call that finds no room runs the bytecode.
+/// The stack has room for `bytes` of native code and [`SPARE`] to
+/// spare under it, from here down.
 #[inline(never)]
-pub(super) fn has_room(calls: usize) -> bool {
+fn has_room_for(bytes: usize) -> bool {
     let mark = 0u8;
     let here = std::ptr::addr_of!(mark) as usize;
     let Some((start, size)) = STACK.with(Cell::get) else {
@@ -293,7 +522,23 @@ pub(super) fn has_room(calls: usize) -> bool {
     };
     // The stack grows down from its start.
     let left = size.saturating_sub(start.saturating_sub(here));
-    left >= calls.saturating_mul(MAX_FRAME).saturating_add(SPARE)
+    left >= bytes.saturating_add(SPARE)
+}
+
+/// The stack has room for native code whose calls nest `calls` deep, at
+/// [`MAX_FRAME`] bytes a call, with [`SPARE`] to spare. Native code is
+/// entered only when it has: its depth is not cut to fit (that would
+/// move E506), so a call that finds no room runs the bytecode.
+#[inline]
+pub(super) fn has_room(calls: usize) -> bool {
+    has_room_for(calls.saturating_mul(MAX_FRAME))
+}
+
+/// The stack has room for one body's call, at [`MAX_BODY_FRAME`] bytes,
+/// with [`SPARE`] to spare. A body is entered only where it has.
+#[inline]
+pub(super) fn has_body_room() -> bool {
+    has_room_for(MAX_BODY_FRAME)
 }
 
 #[cfg(test)]

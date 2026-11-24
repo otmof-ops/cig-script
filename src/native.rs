@@ -85,10 +85,26 @@ impl Source {
     }
 
     /// What the section holds, read and checked, without loading it:
-    /// the machine its code is for, and how many entries it has.
-    pub fn describe(&self) -> Result<(Arch, usize), Unused> {
+    /// the machine its code is for, how many entries it has and how
+    /// many bodies.
+    pub fn describe(&self) -> Result<(Arch, usize, usize), Unused> {
         let (_, tables) = self.read()?;
-        Ok((tables.arch, tables.entries.len()))
+        Ok((tables.arch, tables.entries.len(), tables.bodies.len()))
+    }
+
+    /// How many bodies the section's footer says it has, from one read
+    /// of the footer alone: 0 when it cannot be read or is no footer.
+    /// Nothing is trusted on this number; it only says whether the
+    /// section is worth loading before a call asks for it.
+    pub fn bodies(&self) -> usize {
+        let len = cig_native::FOOTER_LEN as u64;
+        let Some(at) = self.len.checked_sub(len) else {
+            return 0;
+        };
+        crate::program::read_at(&mut &self.file, self.offset + at, len)
+            .ok()
+            .and_then(|footer| cig_native::bodies_in(&footer))
+            .map_or(0, |n| n as usize)
     }
 
     /// Load the section for the module this process runs: `module` is
@@ -133,6 +149,14 @@ impl Source {
                     ))
                 }
                 Some(_) => {}
+            }
+        }
+        for (at, b) in tables.bodies.iter().enumerate() {
+            if arity(b.func).is_none() {
+                return damaged(format!(
+                    "body {at} is for function {}, which the module does not have",
+                    b.func
+                ));
             }
         }
         let code_len = tables.code_len as usize;

@@ -5,6 +5,30 @@ project follows semantic versioning.
 
 ## Unreleased
 
+- **Stage `c` programs: a function's body, run on the VM's frame**
+  (cig-compile's decision 0008). A program's `native` section may now
+  hold, beside its entries, a **body** for any function, the top level
+  included: the function's own machine code, run on the frame the VM
+  made for it. A body can stop at any instruction and the bytecode goes
+  on from there, and whatever it has no machine code for the
+  interpreter runs on the same frame, so every construct of the
+  language is in every body. What a program does is unchanged: an error
+  is still made by the interpreter (it runs the instruction the body
+  stopped at), the step budget is exact, and calls, tries and burns are
+  the VM's own instructions.
+  - The VM enters a body at the function's start, after each call, at
+    each loop's start and at each `catch` and `finally`, where the stack
+    has room; elsewhere, and with `CIG_NATIVE=0`, the bytecode runs.
+  - `cig-native` is at version 2 and interface 2: the section gains a
+    body table, a resume table and the rule the build chose bodies by;
+    the context gains the frame's address, the runtime's functions and
+    the frame's loop nesting. `Value` has a stated layout (a tag byte,
+    then the payload); its size is unchanged.
+  - `--cig-program` counts bodies beside entries
+    (`2 bodies and 6 entries for x86-64, this machine's`).
+  - A program with a body loads its native code before its first
+    statement; one with entries alone at its first call, as before.
+
 - **Stage `c` programs: native code under the VM** (cig-compile's
   decisions 0005 and 0006). A program may now hold a `native` section:
   machine code for some of its functions, each compiled for one row of

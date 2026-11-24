@@ -424,6 +424,115 @@ fn the_program_says_what_its_native_section_holds() {
     assert_eq!(line.trim(), format!("native code    {want}"));
 }
 
+// ----- bodies ----------------------------------------------------------
+
+/// A body that stops at once: `xor eax, eax; ret` is `At(0)`, "the
+/// bytecode goes on at pc 0".
+const AT_ZERO: &[u8] = &[0x31, 0xC0, 0xC3];
+
+/// A body that reports a defect at pc 3: `movabs rax, (2 << 32) | 3; ret`.
+const DEFECT_AT_3: &[u8] = &[0x48, 0xB8, 0x03, 0, 0, 0, 0x02, 0, 0, 0, 0xC3];
+
+/// The program of `rest` whose native section also holds a body for
+/// function `func`, made of `code`, with the resume points `resumes`.
+fn program_with_body(s: &Sandbox, rest: &str, func: u32, code: &[u8], resumes: &[u32]) -> PathBuf {
+    let source = format!("{SCRIPT}{rest}");
+    let l = lower(&source);
+    let mut section = section(&source, &l);
+    let offset = section.code.len() as u32;
+    section.code.extend_from_slice(code);
+    section.bodies.push(native::Body {
+        func,
+        offset,
+        resumes: resumes.to_vec(),
+    });
+    section.rule = native::Rule::Every;
+    s.compile(
+        "p",
+        &source,
+        &section.to_bytes().expect("a section"),
+        &l.module,
+    )
+}
+
+#[test]
+fn a_body_is_entered_and_the_bytecode_goes_on_where_it_stops() {
+    if !NATIVE {
+        return;
+    }
+    let s = Sandbox::new();
+    let rest = "exhale add(40, 2)\n";
+    // The top level's body says "go on at pc 0": the bytecode runs it.
+    let exe = program_with_body(&s, rest, 0, AT_ZERO, &[0]);
+    for validate in [false, true] {
+        let mut c = s.command(&exe);
+        if validate {
+            c.env(program::VALIDATE_ENV, "1");
+        }
+        let out = output(&mut c).unwrap();
+        assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+        assert_eq!(text(&out.stdout), "42\n");
+    }
+    let said = text(&s.prog(&exe, &["--cig-program"]).stdout);
+    assert!(
+        said.contains("native code    1 body and 6 entries for x86-64, this machine's"),
+        "{said}"
+    );
+    // That the body is entered, not passed over: one that reports a
+    // defect stops the run before anything is printed.
+    let exe = program_with_body(&s, rest, 0, DEFECT_AT_3, &[0]);
+    let out = s.prog(&exe, &[]);
+    assert_ne!(out.status.code(), Some(0));
+    assert_eq!(text(&out.stdout), "");
+    let err = text(&out.stderr);
+    assert!(
+        err.contains("the native body of fn0") && err.contains("at pc 3"),
+        "{err}"
+    );
+    // Without its native code the same program runs its bytecode.
+    let out = output(s.command(&exe).env("CIG_NATIVE", "0")).unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(text(&out.stdout), "42\n");
+}
+
+#[test]
+fn a_body_that_cannot_be_entered_is_not_used_and_is_damage_when_checked() {
+    if !NATIVE {
+        return;
+    }
+    let s = Sandbox::new();
+    let rest = "exhale add(40, 2)\n";
+    for (what, func, resumes, said) in [
+        (
+            "a resume point past the function",
+            0u32,
+            vec![0u32, 9_999],
+            "the body of fn0 has a resume point that starts no instruction of it",
+        ),
+        (
+            "a function the module does not have",
+            900,
+            vec![0],
+            "body 0 is for function 900, which the module does not have",
+        ),
+    ] {
+        // The body would report a defect if it were entered.
+        let exe = program_with_body(&s, rest, func, DEFECT_AT_3, &resumes);
+        let plain = s.prog(&exe, &[]);
+        assert_eq!(
+            plain.status.code(),
+            Some(0),
+            "{what}: {}",
+            text(&plain.stderr)
+        );
+        assert_eq!(text(&plain.stdout), "42\n", "{what}");
+        let checked = output(s.command(&exe).env(program::VALIDATE_ENV, "1")).unwrap();
+        assert_eq!(checked.status.code(), Some(3), "{what}");
+        let err = text(&checked.stderr);
+        assert!(err.contains("E1050") && err.contains(said), "{what}: {err}");
+    }
+}
+
 // ----- which code runs -------------------------------------------------
 
 #[test]

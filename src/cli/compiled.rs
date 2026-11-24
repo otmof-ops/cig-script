@@ -395,17 +395,30 @@ fn native_summary(p: &Opened) -> Option<String> {
         cig_native::Arch::X86_64 => "x86-64",
         cig_native::Arch::Aarch64 => "aarch64",
     };
-    let entries = |n: usize| match n {
-        1 => "1 entry".to_string(),
-        n => format!("{n} entries"),
+    // What it holds: bodies (a function's code, run on its frame) and
+    // entries (a function's code for one row of argument types).
+    let holds = |entries: usize, bodies: usize| {
+        let count = |n: usize, one: &str, many: &str| match n {
+            1 => format!("1 {one}"),
+            n => format!("{n} {many}"),
+        };
+        match (bodies, entries) {
+            (0, e) => count(e, "entry", "entries"),
+            (b, 0) => count(b, "body", "bodies"),
+            (b, e) => format!(
+                "{} and {}",
+                count(b, "body", "bodies"),
+                count(e, "entry", "entries")
+            ),
+        }
     };
     Some(match source.describe() {
-        Ok((a, n)) if cig_native::Arch::host() == Some(a) => {
-            format!("{} for {}, this machine's", entries(n), arch(a))
+        Ok((a, n, b)) if cig_native::Arch::host() == Some(a) => {
+            format!("{} for {}, this machine's", holds(n, b), arch(a))
         }
-        Ok((a, n)) => format!(
+        Ok((a, n, b)) => format!(
             "{} for {}, not this machine's: the bytecode runs",
-            entries(n),
+            holds(n, b),
             arch(a)
         ),
         Err(Unused::Unsupported) => "not loaded on this system: the bytecode runs".to_string(),

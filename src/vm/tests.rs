@@ -77,12 +77,245 @@ fn program(m: &Module) -> Rc<Program> {
     load(v).unwrap_or_else(|e| panic!("does not load: {}", e.message))
 }
 
+/// A program whose every function has a plain-Rust body for the test
+/// driver (every first-word pc is a resume point).
+fn program_with_test_bodies(m: &Module) -> Rc<Program> {
+    // A body is entered only where the stack is known to have room
+    // (`native::has_body_room`): a test's thread says where its stack
+    // is, as a run's thread does. Two mebibytes is a test thread's.
+    super::stack_starts_here(2 << 20);
+    let p = program(m);
+    p.attach_test_bodies_for_every_pc();
+    p
+}
+
+/// `f` on `m` through the driver, in each of the tests' two styles of
+/// body: one that hands the interpreter the rest of the function at
+/// once, and one that hands it one instruction and comes back, so the
+/// body and the bytecode take turns at every instruction.
+fn driven<T>(m: &Module, mut f: impl FnMut(&Rc<Program>) -> T) -> Vec<T> {
+    [false, true]
+        .into_iter()
+        .map(|one| {
+            super::native::ONE_AT_A_TIME.with(|c| c.set(one));
+            let out = f(&program_with_test_bodies(m));
+            super::native::ONE_AT_A_TIME.with(|c| c.set(false));
+            out
+        })
+        .collect()
+}
+
+/// Run `m`'s top level as today and through the driver, and make sure
+/// they agree. Returns the bare run's result.
 fn exec(m: &Module) -> Result<Value, Diagnostic> {
-    run(&mut interp(), &program(m))
+    let bare = run(&mut interp(), &program(m));
+    for d in driven(m, |p| run(&mut interp(), p)) {
+        assert_results_agree(&bare, &d);
+    }
+    bare
 }
 
 fn exec_with(m: &Module, args: Vec<Value>) -> Result<Value, Diagnostic> {
-    run_function(&mut interp(), &program(m), 0, args)
+    // A driven run gets values of its own: a run that changes a list or
+    // a map it was given must not hand another run the result.
+    let theirs = driven(m, |p| {
+        run_function(&mut interp(), p, 0, args.iter().map(fresh).collect())
+    });
+    let bare = run_function(&mut interp(), &program(m), 0, args);
+    for d in &theirs {
+        assert_results_agree(&bare, d);
+    }
+    bare
+}
+
+// ----- the driver: a function's body under the VM (cig-compile's decision 0008) -----
+
+/// How many bodies this thread has entered so far.
+fn entered() -> u64 {
+    super::native::ENTERED.with(std::cell::Cell::get)
+}
+
+#[test]
+fn a_driven_run_enters_a_body_at_every_instruction_it_goes_on_from() {
+    // A counted loop of four turns that prints its number: three
+    // instructions a turn.
+    let m = for_module(1);
+    let run_it = |p: &Rc<Program>| vm_run_bare(p, vec![Value::Int(0), Value::Int(4)]);
+    // Handed the whole function, the interpreter runs to the return:
+    // one entry, and the return is the bytecode's.
+    let before = entered();
+    let (out, r) = run_it(&program_with_test_bodies(&m));
+    r.expect("ran");
+    assert_eq!(out, "0\n1\n2\n3\n");
+    assert_eq!(entered() - before, 1);
+    // Handed one instruction at a time, the body and the bytecode take
+    // turns: an entry at every other instruction the run executes.
+    super::native::ONE_AT_A_TIME.with(|c| c.set(true));
+    let before = entered();
+    let (out, r) = run_it(&program_with_test_bodies(&m));
+    super::native::ONE_AT_A_TIME.with(|c| c.set(false));
+    r.expect("ran");
+    assert_eq!(out, "0\n1\n2\n3\n");
+    assert!(
+        entered() - before >= 8,
+        "entered {} bodies",
+        entered() - before
+    );
+}
+
+#[test]
+fn a_body_is_not_entered_where_the_stack_has_no_room_and_the_bytecode_runs() {
+    let m = for_module(1);
+    let run_it = |p: &Rc<Program>| vm_run_bare(p, vec![Value::Int(0), Value::Int(3)]);
+    let driven = program_with_test_bodies(&m);
+    // A stack said to have no room at all.
+    super::stack_starts_here(0);
+    let before = entered();
+    let (out, r) = run_it(&driven);
+    r.expect("ran");
+    assert_eq!(out, "0\n1\n2\n");
+    assert_eq!(entered(), before, "a body was entered with no room");
+    // With room, the same program goes through its bodies.
+    super::stack_starts_here(2 << 20);
+    let (out, r) = run_it(&program_with_test_bodies(&m));
+    r.expect("ran");
+    assert_eq!(out, "0\n1\n2\n");
+    assert!(entered() > before);
+}
+
+#[test]
+fn a_defect_a_body_reports_stops_the_run_with_an_internal_error() {
+    let m = for_module(1);
+    let p = program_with_test_bodies(&m);
+    super::native::DEFECT.with(|d| d.set(Some(2)));
+    let (out, r) = vm_run_bare(&p, vec![Value::Int(0), Value::Int(3)]);
+    let Err(e) = r else {
+        panic!("a defect is an error of the run");
+    };
+    assert_eq!(out, "", "nothing ran");
+    assert!(
+        e.message.contains("fn0") && e.message.contains("pc 2"),
+        "{}",
+        e.message
+    );
+    assert_eq!(e.kind, crate::diagnostics::Kind::Internal, "{:?}", e.kind);
+}
+
+/// A copy of `v` that shares no list and no map with it, all the way
+/// down. A list or a map met again (a value that holds itself, or one
+/// held twice) is the copy made the first time, so the copy has the
+/// shape of the original.
+fn fresh(v: &Value) -> Value {
+    fn copy(v: &Value, made: &mut Vec<(usize, Value)>) -> Value {
+        let known = |made: &Vec<(usize, Value)>, at: usize| {
+            made.iter().find(|(p, _)| *p == at).map(|(_, c)| c.clone())
+        };
+        match v {
+            Value::List(l) => {
+                let at = Rc::as_ptr(l) as usize;
+                if let Some(c) = known(made, at) {
+                    return c;
+                }
+                let out = Value::list(Vec::new());
+                made.push((at, out.clone()));
+                let parts: Vec<Value> = l.borrow().iter().map(|x| copy(x, made)).collect();
+                if let Value::List(o) = &out {
+                    *o.borrow_mut() = parts;
+                }
+                out
+            }
+            Value::Map(m) => {
+                let at = Rc::as_ptr(m) as usize;
+                if let Some(c) = known(made, at) {
+                    return c;
+                }
+                let out = Value::map(Default::default());
+                made.push((at, out.clone()));
+                let parts: Vec<(String, Value)> = m
+                    .borrow()
+                    .iter()
+                    .map(|(k, x)| (k.clone(), copy(x, made)))
+                    .collect();
+                if let Value::Map(o) = &out {
+                    o.borrow_mut().extend(parts);
+                }
+                out
+            }
+            other => other.clone(),
+        }
+    }
+    copy(v, &mut Vec::new())
+}
+
+/// Two runs of one program give the same result: either both `Err` with
+/// the same code, message, kind, hint and position, or both `Ok` with
+/// equal values.
+fn assert_results_agree(a: &Result<Value, Diagnostic>, b: &Result<Value, Diagnostic>) {
+    match (a, b) {
+        (Ok(av), Ok(bv)) => assert!(
+            same(av, bv, &mut Vec::new()),
+            "bare and driven runs gave different values ({} and {})",
+            av.type_name(),
+            bv.type_name()
+        ),
+        (Err(ae), Err(be)) => assert_eq!(
+            (&ae.code, ae.kind, &ae.message, &ae.hint, ae.span),
+            (&be.code, be.kind, &be.message, &be.hint, be.span),
+            "bare and driven runs raised different errors"
+        ),
+        (Ok(v), Err(e)) => panic!(
+            "bare ran to {} and driven raised {} {}",
+            v.type_name(),
+            e.code,
+            e.message
+        ),
+        (Err(e), Ok(v)) => panic!(
+            "bare raised {} {} and driven ran to {}",
+            e.code,
+            e.message,
+            v.type_name()
+        ),
+    }
+}
+
+/// Two values of two runs are the same value: a float by its bits (a
+/// NaN is itself here), a list or a map part by part, and a function,
+/// which is only ever equal to itself, by what it prints as. A pair of
+/// lists or maps already being compared further up counts as the same,
+/// so a value that holds itself (`r.push(r)`) ends the walk.
+fn same(x: &Value, y: &Value, seen: &mut Vec<(usize, usize)>) -> bool {
+    let mut again = |a: usize, b: usize| {
+        let hit = seen.contains(&(a, b));
+        if !hit {
+            seen.push((a, b));
+        }
+        hit
+    };
+    match (x, y) {
+        (Value::Float(p), Value::Float(q)) => p.to_bits() == q.to_bits(),
+        (Value::List(p), Value::List(q)) => {
+            if again(Rc::as_ptr(p) as usize, Rc::as_ptr(q) as usize) {
+                return true;
+            }
+            let (p, q) = (p.borrow(), q.borrow());
+            p.len() == q.len() && p.iter().zip(q.iter()).all(|(a, b)| same(a, b, seen))
+        }
+        (Value::Map(p), Value::Map(q)) => {
+            if again(Rc::as_ptr(p) as usize, Rc::as_ptr(q) as usize) {
+                return true;
+            }
+            let (p, q) = (p.borrow(), q.borrow());
+            p.len() == q.len()
+                && p.iter()
+                    .zip(q.iter())
+                    .all(|((k, a), (l, b))| k == l && same(a, b, seen))
+        }
+        (
+            Value::Func(_) | Value::Builtin(_) | Value::Module(_) | Value::Chain(_),
+            Value::Func(_) | Value::Builtin(_) | Value::Module(_) | Value::Chain(_),
+        ) => x.repr() == y.repr(),
+        _ => x.equals(y),
+    }
 }
 
 fn ok(m: &Module) -> String {
@@ -1316,12 +1549,22 @@ fn walker_stop(src: &str, budget: u64) -> (Option<Diagnostic>, u64) {
 }
 
 fn vm_stop(m: &Module, budget: u64) -> (Option<Diagnostic>, u64) {
-    let mut i = interp();
-    i.set_max_steps(budget);
-    let r = run(&mut i, &program(m));
-    assert_eq!(i.loop_depth, 0, "the loop depth is given back");
-    assert_eq!(i.call_depth_for_tests(), 0, "the call depth is given back");
-    (r.err(), i.steps)
+    let stop = |program: &Rc<Program>| {
+        let mut i = interp();
+        i.set_max_steps(budget);
+        let r = run(&mut i, program);
+        assert_eq!(i.loop_depth, 0, "the loop depth is given back");
+        assert_eq!(i.call_depth_for_tests(), 0, "the call depth is given back");
+        (r, i.steps)
+    };
+    // As today, and through the driver: the same end, the same error
+    // at the same place, and the same count of steps.
+    let (bare, steps) = stop(&program(m));
+    for (d, d_steps) in driven(m, stop) {
+        assert_results_agree(&bare, &d);
+        assert_eq!(steps, d_steps, "the driven run counted other steps");
+    }
+    (bare.err(), steps)
 }
 
 fn same_stop(src: &str, m: &Module) -> u64 {
@@ -2051,12 +2294,28 @@ fn walker_run(src: &str, vars: &[(&str, Value)]) -> (String, Option<Diagnostic>)
     (buf.text(), r.err())
 }
 
-/// Run `m`'s top level with `args`: what it printed, and how it ended.
+/// Run `m`'s top level with `args` twice, once as today and once
+/// through the driver with a test body for every function, and make
+/// sure the two agree on their output and result. Returns the bare
+/// run's pair.
 fn vm_run(m: &Module, args: Vec<Value>) -> (String, Result<Value, Diagnostic>) {
+    let theirs = driven(m, |p| vm_run_bare(p, args.iter().map(fresh).collect()));
+    let (bare_out, bare_res) = vm_run_bare(&program(m), args);
+    for (out, res) in &theirs {
+        assert_eq!(
+            &bare_out, out,
+            "bare and driven runs printed different text"
+        );
+        assert_results_agree(&bare_res, res);
+    }
+    (bare_out, bare_res)
+}
+
+fn vm_run_bare(program: &Rc<Program>, args: Vec<Value>) -> (String, Result<Value, Diagnostic>) {
     let buf = Buf::default();
     let mut i = interp();
     i.out = Box::new(buf.clone());
-    let r = run_function(&mut i, &program(m), 0, args);
+    let r = run_function(&mut i, program, 0, args);
     assert_eq!(i.loop_depth, 0, "the loop depth is given back");
     assert_eq!(i.call_depth_for_tests(), 0, "the call depth is given back");
     (buf.text(), r)

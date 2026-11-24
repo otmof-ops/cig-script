@@ -1100,6 +1100,29 @@ fn sample_with_bodies() -> Section {
 }
 
 #[test]
+fn a_footer_alone_says_how_many_bodies_its_section_has() {
+    let s = sample_with_bodies();
+    let b = s.to_bytes().expect("written");
+    let footer = &b[b.len() - FOOTER_LEN..];
+    assert_eq!(bodies_in(footer), Some(s.bodies.len() as u32));
+    // A section without bodies says none.
+    let mut none = s.clone();
+    none.bodies.clear();
+    none.rule = Rule::None;
+    let nb = none.to_bytes().expect("written");
+    assert_eq!(bodies_in(&nb[nb.len() - FOOTER_LEN..]), Some(0));
+    // Anything that is not this version's footer says nothing.
+    assert_eq!(bodies_in(&footer[1..]), None);
+    assert_eq!(bodies_in(&b), None);
+    let mut other = footer.to_vec();
+    other[0] ^= 1;
+    assert_eq!(bodies_in(&other), None);
+    let mut older = footer.to_vec();
+    older[8] = 1;
+    assert_eq!(bodies_in(&older), None);
+}
+
+#[test]
 fn a_section_may_have_bodies_only() {
     let s = sample_with_bodies();
     let b = s.to_bytes().expect("written");

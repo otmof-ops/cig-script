@@ -1081,6 +1081,19 @@ impl Section {
     }
 }
 
+/// How many bodies a section's footer says the section has: `footer`
+/// is the section's last [`FOOTER_LEN`] bytes. `None` when they are not
+/// a footer of this version. Nothing else of the section is looked at:
+/// a caller that goes on to use the section reads it whole
+/// ([`Tables::parse`]).
+pub fn bodies_in(footer: &[u8]) -> Option<u32> {
+    let footer: &[u8; FOOTER_LEN] = footer.try_into().ok()?;
+    if footer[..8] != MAGIC || u32_at(footer, 8) != VERSION {
+        return None;
+    }
+    Some(u32_at(footer, 64))
+}
+
 impl Tables {
     /// A body's tables, without its code. Refuses a body that is not
     /// exactly what [`Section::to_bytes`] writes for some section: a
