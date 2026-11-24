@@ -11,6 +11,14 @@
 //! is a cache miss: the index is rebuilt from the run folders (and said
 //! so once), then the fresh view is written back.
 //!
+//! A start reads none of that (#252). What a start asks of the index is
+//! which runs may hold box layers ([`boxed_runs`], every start) and a
+//! script's last good run ([`last_good_candidates`], `cig run`). Each is
+//! answered from a mark (`runs-index.boxed`, `runs-index.good`: how far
+//! a scan of the index had read, and what it had gathered by then) and
+//! the lines appended since. So a start costs the same at ten runs as at
+//! ten thousand.
+//!
 //! Every write takes an exclusive advisory lock on `runs-index.lock`, so
 //! two concurrent runs never interleave. Reads are lockless: an append
 //! under the lock is either fully there or not at all, and the tail line
@@ -18,7 +26,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -573,6 +581,9 @@ pub fn write_fresh(view: &[RunRecord]) -> io::Result<()> {
     f.sync_all()?;
     drop(f);
     fs::rename(&tmp, &p)?;
+    // A mark was of the file this one replaces.
+    let _ = fs::remove_file(boxed_mark_path());
+    let _ = fs::remove_file(good_mark_path());
     super::journal::sync_dir_pub(&home)?;
     // The size this write left, for `compact_if_grown`. Best effort: a
     // missing or stale number only makes the next compaction early.
@@ -631,15 +642,40 @@ fn text_field<'a>(raw: &'a str, key: &str) -> Option<&'a str> {
     Some(&raw[at..at + end])
 }
 
-/// Candidates for a script's last good run, newest first by start time,
-/// read from the index without parsing a line: each is tested for the
-/// script's hash, status and mode as text, so the cost is a memory scan,
-/// not a parse and an allocation per run. `confirm` is given each
-/// candidate's record in turn, read from the run's own `run.json` (the
-/// folder is the truth), and the first `Some` wins. The outer `None`
-/// means the index cannot be trusted and the caller must scan the
-/// folders.
+/// A script's last good run: the newest, by start time, of its runs
+/// whose latest line says it went through, as `confirm` finds it in the
+/// run's own `run.json` (the folder is the truth). `cig run` asks at
+/// every start, so the answer comes from a mark and the lines appended
+/// since (#252), and one `run.json` is read. Where the run the lines name
+/// is no longer the one (`confirm` says no, or it was removed), the index
+/// is read whole for the next ([`last_good_by_scan`]).
+///
+/// The outer `None` means the index cannot be trusted and the caller
+/// must scan the folders.
 pub fn last_good_candidates<T>(
+    script_sha256: &str,
+    mut confirm: impl FnMut(&str) -> Option<T>,
+) -> Option<Option<T>> {
+    let good: Good = from_mark(&good_mark_path(), fold_good)?;
+    match good.get(script_sha256) {
+        // No run of this script ever went through.
+        None => Some(None),
+        Some(best) if !best.id.is_empty() => match confirm(&best.id) {
+            Some(hit) => Some(Some(hit)),
+            None => last_good_by_scan(script_sha256, confirm),
+        },
+        Some(_) => last_good_by_scan(script_sha256, confirm),
+    }
+}
+
+/// Candidates for a script's last good run, newest first by start time,
+/// read from the whole index without parsing a line: each is tested for
+/// the script's hash, status and mode as text, so the cost is a memory
+/// scan, not a parse and an allocation per run. `confirm` is given each
+/// candidate's record in turn, and the first `Some` wins. The outer
+/// `None` means the index cannot be trusted and the caller must scan the
+/// folders.
+fn last_good_by_scan<T>(
     script_sha256: &str,
     mut confirm: impl FnMut(&str) -> Option<T>,
 ) -> Option<Option<T>> {
@@ -741,31 +777,329 @@ pub fn list_recent(n: usize) -> Option<Vec<RunRecord>> {
     Some(out.into_iter().map(|(rec, _, _)| rec).collect())
 }
 
-/// The runs flagged as possibly holding box layers, or `None` when the
-/// folder scan must stand in. Only lines that can change a flag are
-/// parsed.
-pub fn boxed_runs() -> Option<Vec<String>> {
-    let text = trusted_text()?;
-    let mut flagged: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+/// Where a scan of the index left off, and what it had gathered by
+/// then: a start reads the index from there, not from its first line
+/// (#252).
+#[derive(Serialize, Deserialize)]
+struct Mark<S> {
+    /// How many bytes of the index the scan had read: the end of a line.
+    len: u64,
+    /// The index's last bytes before `len`. A mark is of the index it is
+    /// held against only where the index has these bytes there.
+    tail: Vec<u8>,
+    /// Which file the index was ([`file_id`]): one written afresh is
+    /// another.
+    file: u64,
+    /// What the lines up to `len` say, of what the scan looks for.
+    state: S,
+}
+
+/// The runs flagged as possibly holding box layers.
+type Boxed = std::collections::BTreeSet<String>;
+
+/// For each script (by its sha256), the newest of its runs that went
+/// through.
+type Good = std::collections::BTreeMap<String, Best>;
+
+/// A script's newest good run: when it started and its id. An empty id
+/// says the newest the lines named is one no longer (it was removed, or
+/// its record changed), so the index has to be read whole to name the
+/// next.
+#[derive(Clone, Serialize, Deserialize)]
+struct Best {
+    started: String,
+    id: String,
+}
+
+/// The mark of the scan for boxed runs, beside the index.
+fn boxed_mark_path() -> PathBuf {
+    path().with_extension("boxed")
+}
+
+/// The mark of the scan for each script's newest good run.
+fn good_mark_path() -> PathBuf {
+    path().with_extension("good")
+}
+
+/// How many of the index's last bytes a mark keeps.
+const MARK_TAIL: u64 = 64;
+
+/// A mark is written again once this much of the index has been appended
+/// past it. Below it a start reads what was appended and writes nothing.
+const MARK_SLACK: u64 = 64 * 1024;
+
+/// What tells one index file from the one that replaces it when the
+/// index is written afresh: its inode, or (Windows) when it was created.
+fn file_id(meta: &fs::Metadata) -> u64 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        meta.ino()
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        meta.creation_time()
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = meta;
+        0
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many bytes of the index this thread has read from a mark on.
+    static INDEX_BYTES_READ: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// The index's bytes `from..to`.
+fn read_range(f: &mut fs::File, from: u64, to: u64) -> Option<Vec<u8>> {
+    let n = usize::try_from(to.checked_sub(from)?).ok()?;
+    let mut buf = vec![0u8; n];
+    f.seek(SeekFrom::Start(from)).ok()?;
+    f.read_exact(&mut buf).ok()?;
+    #[cfg(test)]
+    INDEX_BYTES_READ.with(|c| c.set(c.get() + n as u64));
+    Some(buf)
+}
+
+/// The runs folder's stamp a `set` or an `rm` line carries.
+fn stamp_of(raw: &str) -> Option<(u64, u64)> {
+    match serde_json::from_str::<Line>(raw).ok()? {
+        Line::Set {
+            dir_mtime_ns,
+            dir_nlink,
+            ..
+        }
+        | Line::Rm {
+            dir_mtime_ns,
+            dir_nlink,
+            ..
+        } => Some((dir_mtime_ns, dir_nlink)),
+        Line::Box { .. } => None,
+    }
+}
+
+/// A line that carries a stamp: `box` lines do not.
+fn is_stamped(raw: &str) -> bool {
+    raw.starts_with("{\"op\":\"set\"") || raw.starts_with("{\"op\":\"rm\"")
+}
+
+/// The stamp of the last line that carries one before byte `end` of the
+/// index, which ends a line. Read from the end backwards, a piece at a
+/// time: the line is almost always the one just before.
+fn stamp_before(f: &mut fs::File, end: u64) -> Option<(u64, u64)> {
+    let mut piece: u64 = 8 * 1024;
+    loop {
+        let from = end.saturating_sub(piece);
+        let bytes = read_range(f, from, end)?;
+        let text = String::from_utf8_lossy(&bytes);
+        let mut lines = text.lines();
+        // A piece that does not start the file starts mid-line.
+        if from > 0 {
+            lines.next();
+        }
+        if let Some(raw) = lines.rfind(|l| is_stamped(l)) {
+            return stamp_of(raw);
+        }
+        if from == 0 {
+            return None;
+        }
+        piece = piece.saturating_mul(4);
+    }
+}
+
+/// The mark at `at`, when it is of the index `f` is: the same file, at
+/// least as long, with the mark's last bytes where the mark ends.
+fn read_mark<S: serde::de::DeserializeOwned>(
+    at: &Path,
+    f: &mut fs::File,
+    meta: &fs::Metadata,
+) -> Option<Mark<S>> {
+    let text = fs::read_to_string(at).ok()?;
+    let mark: Mark<S> = serde_json::from_str(&text).ok()?;
+    let n = mark.tail.len() as u64;
+    if mark.file != file_id(meta)
+        || mark.len > meta.len()
+        || n == 0
+        || n > mark.len
+        || mark.tail.last() != Some(&b'\n')
+    {
+        return None;
+    }
+    let there = read_range(f, mark.len - n, mark.len)?;
+    (there == mark.tail).then_some(mark)
+}
+
+/// Leave a mark at `at` for byte `len` of the index, which ends a line.
+/// Best effort: without one the next start reads the index from its
+/// start.
+fn write_mark<S: Serialize>(at: &Path, f: &mut fs::File, meta: &fs::Metadata, len: u64, state: S) {
+    let Some(tail) = read_range(f, len.saturating_sub(MARK_TAIL), len) else {
+        return;
+    };
+    let mark = Mark {
+        len,
+        tail,
+        file: file_id(meta),
+        state,
+    };
+    let Ok(text) = serde_json::to_string(&mark) else {
+        return;
+    };
+    // A name of this process's own, so two starts never write one file.
+    let mut name = at.as_os_str().to_owned();
+    name.push(format!(".{}.tmp", std::process::id()));
+    let tmp = PathBuf::from(name);
+    let mut opts = fs::OpenOptions::new();
+    opts.create(true).write(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let written = opts
+        .open(&tmp)
+        .and_then(|mut t| t.write_all(text.as_bytes()));
+    if written.is_err() || fs::rename(&tmp, at).is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+}
+
+/// What the index says of something a start asks, read from the mark at
+/// `at` on: the state the mark holds, with `fold` given each line
+/// appended since. The first start, and one after the index was written
+/// afresh, reads all of it and leaves a mark; so does one that has read
+/// more than [`MARK_SLACK`] past the last.
+///
+/// `None` when the index cannot stand in for a look at the runs folder:
+/// it is missing or empty, an append was cut short, a line `fold` reads
+/// does not parse, or its last stamp is not the runs folder's stamp now
+/// (something was added or removed outside the index).
+fn from_mark<S>(at: &Path, mut fold: impl FnMut(&mut S, &str) -> Option<()>) -> Option<S>
+where
+    S: Default + Serialize + serde::de::DeserializeOwned,
+{
+    let mut f = fs::File::open(path()).ok()?;
+    let meta = f.metadata().ok()?;
+    let len = meta.len();
+    if len == 0 {
+        return None;
+    }
+    let mark: Option<Mark<S>> = read_mark(at, &mut f, &meta);
+    let marked = mark.is_some();
+    let (from, mut state) = match mark {
+        Some(m) => (m.len, m.state),
+        None => (0, S::default()),
+    };
+    let bytes = read_range(&mut f, from, len)?;
+    let text = std::str::from_utf8(&bytes).ok()?;
+    // An append cut short: the index ends mid-line.
+    if !text.is_empty() && !text.ends_with('\n') {
+        return None;
+    }
+    let mut stamped: Option<&str> = None;
     for raw in text.lines() {
+        if is_stamped(raw) {
+            stamped = Some(raw);
+        }
+        fold(&mut state, raw)?;
+    }
+    // The index's last stamp: in what was just read, or before it.
+    let stamp = match stamped {
+        Some(raw) => stamp_of(raw)?,
+        None => stamp_before(&mut f, from)?,
+    };
+    if stamp.0 == 0 || stamp != dir_stamp() {
+        return None;
+    }
+    if !marked || len - from > MARK_SLACK {
+        write_mark(at, &mut f, &meta, len, &state);
+    }
+    Some(state)
+}
+
+/// The runs flagged as possibly holding box layers, or `None` when the
+/// folder scan must stand in. Every start asks (`sweep_dead_layers`), so
+/// it reads the index from a mark, not from its first line (#252). Only
+/// lines that can change a flag are parsed.
+pub fn boxed_runs() -> Option<Vec<String>> {
+    let flagged: Boxed = from_mark(&boxed_mark_path(), |flagged: &mut Boxed, raw| {
         if raw.starts_with("{\"op\":\"box\"") || raw.starts_with("{\"op\":\"rm\"") {
         } else if !(raw.starts_with("{\"op\":\"set\"") && raw.contains("\"boxed\":true")) {
-            continue;
+            return Some(());
         }
-        match serde_json::from_str::<Line>(raw) {
-            Ok(Line::Box { id, on: true }) => {
+        match serde_json::from_str::<Line>(raw).ok()? {
+            Line::Box { id, on: true } => {
                 flagged.insert(id);
             }
-            Ok(Line::Box { id, on: false }) | Ok(Line::Rm { id, .. }) => {
+            Line::Box { id, on: false } | Line::Rm { id, .. } => {
                 flagged.remove(&id);
             }
-            Ok(Line::Set { rec, .. }) => {
+            Line::Set { rec, .. } => {
                 flagged.insert(rec.id.clone());
             }
-            Err(_) => return None,
         }
-    }
+        Some(())
+    })?;
     Some(flagged.into_iter().collect())
+}
+
+/// One line of the index, for each script's newest good run. No line is
+/// parsed: a run's id, start, script and whether it went through are
+/// read as text.
+fn fold_good(good: &mut Good, raw: &str) -> Option<()> {
+    if raw.starts_with("{\"op\":\"rm\"") {
+        // The run is gone: a script whose newest it was has another, or
+        // none, and the lines read so far do not say which.
+        if let Some(id) = text_field(raw, "id") {
+            for best in good.values_mut().filter(|b| b.id == id) {
+                best.id.clear();
+            }
+        }
+        return Some(());
+    }
+    if !raw.starts_with("{\"op\":\"set\"") {
+        return Some(());
+    }
+    let (Some(script), Some(id), Some(started)) = (
+        text_field(raw, "script_sha256"),
+        text_field(raw, "id"),
+        text_field(raw, "started"),
+    ) else {
+        return Some(());
+    };
+    let went_through = raw.contains("\"status\":\"ok\"") && raw.contains("\"mode\":\"run\"");
+    match (went_through, good.get_mut(script)) {
+        (true, None) => {
+            good.insert(
+                script.to_string(),
+                Best {
+                    started: started.to_string(),
+                    id: id.to_string(),
+                },
+            );
+        }
+        // Newer than the newest so far. Where that one is not known any
+        // more, a newer run does not settle which of the older ones is
+        // next after it, so the entry stays as it is.
+        (true, Some(best)) => {
+            if !best.id.is_empty() && (started, id) > (best.started.as_str(), best.id.as_str()) {
+                best.started = started.to_string();
+                best.id = id.to_string();
+            }
+        }
+        // The script's newest good run is good no longer.
+        (false, Some(best)) => {
+            if best.id == id {
+                best.id.clear();
+            }
+        }
+        (false, None) => {}
+    }
+    Some(())
 }
 
 /// Append one line under the exclusive index lock, fsync, release.
@@ -908,6 +1242,345 @@ mod tests {
     /// interrupted once: the verdict is kept in the index, and the next
     /// listing does not ask the system about that pid again (cigo#119: on
     /// Windows each ask was a PowerShell start, per dead record, per listing).
+    /// A scratch home for the length of a test, and the old one back
+    /// after it.
+    struct Home {
+        _tmp: tempfile::TempDir,
+        _guard: std::sync::MutexGuard<'static, ()>,
+        old: Option<std::ffi::OsString>,
+    }
+
+    impl Home {
+        fn new() -> Home {
+            let tmp = tempfile::tempdir().unwrap();
+            let guard = crate::burn::test_env_lock();
+            let old = std::env::var_os("CIGSCRIPT_HOME");
+            std::env::set_var("CIGSCRIPT_HOME", tmp.path().join("home"));
+            Home {
+                _tmp: tmp,
+                _guard: guard,
+                old,
+            }
+        }
+    }
+
+    impl Drop for Home {
+        fn drop(&mut self) {
+            match self.old.take() {
+                Some(v) => std::env::set_var("CIGSCRIPT_HOME", v),
+                None => std::env::remove_var("CIGSCRIPT_HOME"),
+            }
+        }
+    }
+
+    /// A finished run, saved: its folder, its record and its index line.
+    fn saved(n: u32) -> RunRecord {
+        let mut rec = RunRecord::damaged(
+            &format!("20260101T{:06}-{:06x}", n, n),
+            &io::Error::other("stub"),
+        );
+        rec.format = crate::burn::runs::RECORD_FORMAT;
+        rec.status = "ok".to_string();
+        rec.started = format!("2026-01-01T00:{:02}:{:02}.000Z", n / 60 % 60, n % 60);
+        rec.error = None;
+        rec.save().unwrap();
+        rec
+    }
+
+    /// How many bytes of the index `boxed_runs` reads, and what it says.
+    fn asked() -> (u64, Option<Vec<String>>) {
+        let before = INDEX_BYTES_READ.with(std::cell::Cell::get);
+        let flagged = boxed_runs();
+        (
+            INDEX_BYTES_READ.with(std::cell::Cell::get) - before,
+            flagged,
+        )
+    }
+
+    #[test]
+    fn a_start_reads_what_was_appended_since_its_mark_and_not_the_whole_index() {
+        let _home = Home::new();
+        for n in 0..400 {
+            saved(n);
+        }
+        let len = fs::metadata(path()).unwrap().len();
+        assert!(len > 100 * 1024, "an index of {len} bytes");
+        // The first start reads all of it, and leaves a mark.
+        let (read, flagged) = asked();
+        assert_eq!(flagged, Some(vec![]));
+        assert!(read >= len, "read {read} of {len}");
+        assert!(boxed_mark_path().exists());
+        // The next reads the mark's last bytes and the last line with a
+        // stamp, whatever the index's length.
+        let (read, flagged) = asked();
+        assert_eq!(flagged, Some(vec![]));
+        assert!(read < 16 * 1024, "read {read} of {len}");
+        // Three runs later: those three lines, and the mark's bytes.
+        for n in 400..403 {
+            saved(n);
+        }
+        let grown = fs::metadata(path()).unwrap().len() - len;
+        let (read, flagged) = asked();
+        assert_eq!(flagged, Some(vec![]));
+        assert_eq!(
+            read,
+            grown + MARK_TAIL,
+            "the lines appended and the mark's bytes"
+        );
+        // Past the slack the mark moves up, and the start after that
+        // reads next to nothing again.
+        let mut n = 403;
+        while fs::metadata(path()).unwrap().len() - len <= MARK_SLACK {
+            saved(n);
+            n += 1;
+        }
+        let (read, _) = asked();
+        assert!(read > MARK_SLACK, "read {read}");
+        let (read, flagged) = asked();
+        assert_eq!(flagged, Some(vec![]));
+        assert!(read < 16 * 1024, "read {read}");
+    }
+
+    #[test]
+    fn a_flag_is_found_on_either_side_of_the_mark() {
+        let _home = Home::new();
+        let ids: Vec<String> = (0..6).map(|n| saved(n).id).collect();
+        // Flagged before the first start: the mark holds it.
+        mark_boxed(&ids[1], true);
+        assert_eq!(boxed_runs(), Some(vec![ids[1].clone()]));
+        // Flagged after it: read from the lines appended since.
+        mark_boxed(&ids[4], true);
+        assert_eq!(boxed_runs(), Some(vec![ids[1].clone(), ids[4].clone()]));
+        // A flag the mark holds comes off by a line after it,
+        mark_boxed(&ids[1], false);
+        assert_eq!(boxed_runs(), Some(vec![ids[4].clone()]));
+        // and a run that is removed is flagged no longer.
+        fs::remove_dir_all(runs_dir().join(&ids[4])).unwrap();
+        remove(&ids[4]);
+        assert_eq!(boxed_runs(), Some(vec![]));
+        // A record that says so itself (the index written afresh from
+        // the folders carries the flag in the run's own line).
+        fs::create_dir_all(runs_dir().join(&ids[2]).join("box")).unwrap();
+        rebuild_from_folders().unwrap();
+        assert!(
+            !boxed_mark_path().exists(),
+            "the mark was of the file replaced"
+        );
+        assert_eq!(boxed_runs(), Some(vec![ids[2].clone()]));
+        assert!(boxed_mark_path().exists());
+        assert_eq!(boxed_runs(), Some(vec![ids[2].clone()]));
+    }
+
+    #[test]
+    fn a_mark_that_is_not_of_this_index_is_not_believed() {
+        let _home = Home::new();
+        let ids: Vec<String> = (0..5).map(|n| saved(n).id).collect();
+        mark_boxed(&ids[0], true);
+        assert_eq!(boxed_runs(), Some(vec![ids[0].clone()]));
+        let good = fs::read_to_string(boxed_mark_path()).unwrap();
+        let len = fs::metadata(path()).unwrap().len();
+        // Cut short, not JSON, of another file, past the index's end, or
+        // with other bytes where it ends: each is passed over, and the
+        // index is read from its start.
+        let mut other: Mark<Boxed> = serde_json::from_str(&good).unwrap();
+        other.state = Boxed::from(["20990101T000000-ffffff".to_string()]);
+        let mut of_another_file = other_mark(&other);
+        of_another_file.file = of_another_file.file.wrapping_add(1);
+        let mut past_the_end = other_mark(&other);
+        past_the_end.len = len + 1;
+        let mut other_bytes = other_mark(&other);
+        other_bytes.tail[0] ^= 1;
+        let mut mid_line = other_mark(&other);
+        mid_line.len -= 1;
+        mid_line.tail.pop();
+        let bad = [
+            good[..good.len() / 2].to_string(),
+            "not a mark".to_string(),
+            serde_json::to_string(&of_another_file).unwrap(),
+            serde_json::to_string(&past_the_end).unwrap(),
+            serde_json::to_string(&other_bytes).unwrap(),
+            serde_json::to_string(&mid_line).unwrap(),
+        ];
+        for text in bad {
+            fs::write(boxed_mark_path(), &text).unwrap();
+            let (read, flagged) = asked();
+            assert_eq!(flagged, Some(vec![ids[0].clone()]), "{text}");
+            assert!(read >= len, "{text}: read {read} of {len}");
+        }
+    }
+
+    /// A copy of a mark.
+    fn other_mark(m: &Mark<Boxed>) -> Mark<Boxed> {
+        Mark {
+            len: m.len,
+            tail: m.tail.clone(),
+            file: m.file,
+            state: m.state.clone(),
+        }
+    }
+
+    #[test]
+    fn an_index_that_cannot_stand_in_for_the_folder_still_sends_the_sweep_to_it() {
+        let _home = Home::new();
+        let ids: Vec<String> = (0..5).map(|n| saved(n).id).collect();
+        assert_eq!(boxed_runs(), Some(vec![]));
+        // A run folder made behind the index's back, mark or no mark.
+        fs::create_dir_all(runs_dir().join("20270101T000000-abcdef")).unwrap();
+        assert_eq!(boxed_runs(), None);
+        fs::remove_dir_all(runs_dir().join("20270101T000000-abcdef")).unwrap();
+        // The folder's stamp moved and came back differently: a record
+        // saved through the index brings the two level again.
+        saved(9);
+        assert_eq!(boxed_runs(), Some(vec![]));
+        // An append cut short after the mark.
+        let mut f = fs::OpenOptions::new().append(true).open(path()).unwrap();
+        f.write_all(b"{\"op\":\"box\",\"id\":\"x").unwrap();
+        drop(f);
+        assert_eq!(boxed_runs(), None);
+        let _ = ids;
+    }
+
+    /// A run of the script `script` that ended `status`, saved.
+    fn run_of(n: u32, script: &str, status: &str) -> RunRecord {
+        let mut rec = RunRecord::damaged(
+            &format!("20260101T{:06}-{:06x}", n, n),
+            &io::Error::other("stub"),
+        );
+        rec.format = crate::burn::runs::RECORD_FORMAT;
+        rec.script_sha256 = script.to_string();
+        rec.status = status.to_string();
+        rec.mode = "run".to_string();
+        rec.started = format!("2026-01-01T00:{:02}:{:02}.000Z", n / 60 % 60, n % 60);
+        rec.error = None;
+        rec.save().unwrap();
+        rec
+    }
+
+    /// A script's last good run by the mark, and how many bytes of the
+    /// index that read; every run the index names is taken at its word.
+    fn last_good_of(script: &str) -> (u64, Option<String>) {
+        let before = INDEX_BYTES_READ.with(std::cell::Cell::get);
+        let hit = last_good_candidates(script, |id| Some(id.to_string()))
+            .expect("the index stands in for the folder");
+        (INDEX_BYTES_READ.with(std::cell::Cell::get) - before, hit)
+    }
+
+    #[test]
+    fn a_scripts_last_good_run_is_found_from_the_mark_and_what_was_appended_since() {
+        let _home = Home::new();
+        let mut ids = Vec::new();
+        for n in 0..300 {
+            let script = ["aaa", "bbb", "ccc"][n as usize % 3];
+            ids.push(run_of(n, script, "ok").id);
+        }
+        let len = fs::metadata(path()).unwrap().len();
+        // The first start reads the index whole and leaves a mark; the
+        // next reads its last bytes.
+        let (read, hit) = last_good_of("bbb");
+        assert_eq!(hit.as_deref(), Some(ids[298].as_str()));
+        assert!(read >= len);
+        let (read, hit) = last_good_of("bbb");
+        assert_eq!(hit.as_deref(), Some(ids[298].as_str()));
+        assert!(read < 16 * 1024, "read {read} of {len}");
+        // Another script's, and one that never ran, from the same mark.
+        assert_eq!(last_good_of("aaa").1.as_deref(), Some(ids[297].as_str()));
+        let (read, hit) = last_good_of("zzz");
+        assert_eq!(hit, None);
+        assert!(read < 16 * 1024, "read {read}");
+        // A newer run that went through, appended since.
+        let newer = run_of(300, "bbb", "ok").id;
+        assert_eq!(last_good_of("bbb").1, Some(newer.clone()));
+        // A newer run that did not is no good run.
+        run_of(301, "bbb", "failed");
+        assert_eq!(last_good_of("bbb").1, Some(newer.clone()));
+        // The newest is good no longer (its record was saved again, with
+        // another status): the index is read whole for the next.
+        run_of(300, "bbb", "unburned");
+        assert_eq!(last_good_of("bbb").1.as_deref(), Some(ids[298].as_str()));
+        // And one that was removed.
+        fs::remove_dir_all(runs_dir().join(&ids[297])).unwrap();
+        remove(&ids[297]);
+        assert_eq!(last_good_of("aaa").1.as_deref(), Some(ids[294].as_str()));
+    }
+
+    #[test]
+    fn a_run_the_folder_no_longer_confirms_sends_the_search_to_the_next() {
+        let _home = Home::new();
+        let ids: Vec<String> = (0..6).map(|n| run_of(n, "aaa", "ok").id).collect();
+        assert_eq!(last_good_of("aaa").1.as_deref(), Some(ids[5].as_str()));
+        // `confirm` is the folder's word: it turns down the two newest.
+        let asked = std::cell::RefCell::new(Vec::new());
+        let hit = last_good_candidates("aaa", |id| {
+            asked.borrow_mut().push(id.to_string());
+            (id != ids[5] && id != ids[4]).then(|| id.to_string())
+        })
+        .unwrap();
+        assert_eq!(hit.as_deref(), Some(ids[3].as_str()));
+        // The newest by the mark, then the whole index's, newest first.
+        assert_eq!(
+            *asked.borrow(),
+            vec![
+                ids[5].clone(),
+                ids[5].clone(),
+                ids[4].clone(),
+                ids[3].clone()
+            ]
+        );
+    }
+
+    #[test]
+    fn the_mark_names_the_run_the_whole_index_names_whatever_was_appended() {
+        // Three scripts, and a few hundred lines in an order made by a
+        // fixed rule: runs that go through and runs that do not, a run
+        // saved again with another status, a run removed. After each
+        // the mark's answer is held to the whole index's, for every
+        // script, with a mark left wherever the last ask left one.
+        let _home = Home::new();
+        let scripts = ["aaa", "bbb", "ccc"];
+        let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut next = |n: u64| {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) % n
+        };
+        let mut live: Vec<(u32, &str)> = Vec::new();
+        for n in 0..240u32 {
+            let script = scripts[next(3) as usize];
+            match next(10) {
+                // Saved again, with a status that is not good.
+                0 | 1 if !live.is_empty() => {
+                    let (m, s) = live[next(live.len() as u64) as usize];
+                    run_of(m, s, "failed");
+                }
+                // Removed.
+                2 if !live.is_empty() => {
+                    let at = next(live.len() as u64) as usize;
+                    let (m, _) = live.remove(at);
+                    let id = format!("20260101T{:06}-{:06x}", m, m);
+                    fs::remove_dir_all(runs_dir().join(&id)).unwrap();
+                    remove(&id);
+                }
+                3 => {
+                    run_of(n, script, "failed");
+                    live.push((n, script));
+                }
+                _ => {
+                    run_of(n, script, "ok");
+                    live.push((n, script));
+                }
+            }
+            // Not every time: a mark that is behind is the usual case.
+            if next(3) == 0 {
+                continue;
+            }
+            for script in scripts {
+                let whole = last_good_by_scan(script, |id| Some(id.to_string())).unwrap();
+                assert_eq!(last_good_of(script).1, whole, "{script} after line {n}");
+            }
+        }
+    }
+
     #[test]
     fn a_dead_runs_verdict_is_asked_once_and_kept() {
         use std::sync::atomic::Ordering;

@@ -18,6 +18,21 @@ project follows semantic versioning.
   None runs an instruction, and none counts as a failed guess. A
   program built before this runs as it did: it asks for none of them.
 
+- **Starting a run no longer gets slower as the run history grows**
+  (#252). Every start read the whole run index to learn which runs may
+  still hold a boxed hop's layers, and `cig run` read it again for the
+  script's last good run; the index gains two lines a run, so a start
+  cost more with every run ever made. Both are now answered from a mark
+  beside the index (how far a scan had read, and what it had gathered)
+  and the lines appended since. At 5,000 past runs `cig run hello.cig`
+  went from 7.9 ms to 1.6 ms (81 to 5.1 million instructions) and a
+  compiled `hello` from 3.0 ms to 1.3 ms (16.6 to 3.0 million), which is
+  what each takes with no history. A mark is believed only for
+  the file it was made from (the index's inode and its bytes where the
+  mark ends); without one, and after the index is written afresh, the
+  index is read whole once. An index that cannot stand in for the runs
+  folder still sends a start to the folder, as before.
+
 - **A call under a body runs to its return there** (cig-compile's
   decision 0008, section 7). A body hands the interpreter a stretch of
   instructions through the runtime's `run`; a `call` of one of the
