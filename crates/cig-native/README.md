@@ -167,7 +167,7 @@ where the stack has room for it.
 
 ## The helpers
 
-Interface 2 has three helper functions a body calls, through its
+Interface 2 has six helper functions a body calls, through its
 `ctx.helpers`:
 
 | offset | signature | what |
@@ -175,6 +175,9 @@ Interface 2 has three helper functions a body calls, through its
 | 0 | `run(ctx, from, to) -> u64` | runs the frame's bytecode from pc `from` while the pc stays in `from..to`, a call in it to its return when the runtime can carry it; returns a stop's bits |
 | 8 | `list(ctx, reg) -> u32`      | 1 when register `reg` holds a list whose elements native code may read and write where they lie, with `ctx.left` and `ctx.right` set; 0 otherwise |
 | 16 | `again(ctx, pc) -> u64`     | runs the one instruction at `pc`, whose machine code in the body did not cover the operands it met; returns a stop's bits |
+| 24 | `push(ctx, list, value, dst) -> u32` | `list.push(value)` for the list in register `list` and the value in register `value`, with the list put in register `dst`; 1 when done, 0 with nothing changed |
+| 32 | `copy(ctx, dst, src) -> u32` | register `dst` takes register `src`'s value, whatever either holds, as `mov` gives it; 1 when done, 0 with nothing changed |
+| 40 | `clear(ctx, reg) -> u32`    | register `reg` holds null, and what it held is freed; 1 when done, 0 with nothing changed |
 
 **`run` may carry a call.** Where the range holds a `call`, the runtime
 makes it and runs the callee to its return under the body (on frames
@@ -194,10 +197,24 @@ nothing and takes the frame back: the body returns that stop as it is.
 A runtime does that when the same body's guesses keep failing, and
 stops entering the body there.
 
+**`push`, `copy` and `clear` are for what owns memory.** A string, a
+list, a map or a function is shared by a count, and freed when the
+count runs out; only the runtime keeps it. Native code copies a number
+over a number itself. Where the value it moves, or the one it writes
+over, owns memory, it asks: `copy` shares the one and frees the other,
+`clear` frees what a register holds before a number is stored there,
+and `push` adds to a list, which may move every element. None of the
+three runs an instruction: the frame's address and the steps left
+stand after them, and so does every list in view after `copy` and
+`clear`, but for one in the register they wrote. After `push` no list
+is in view. Each returns 0, having changed nothing, where the runtime
+cannot (a register that carries a cell, a list something is walking),
+and the body then has the interpreter run the instruction.
+
 A panic in a helper is caught in the crate's `extern "C"` glue, the
 body is told `Stop::Raised(from)` (from `run`), `Stop::Raised(pc)` (from
-`again`) or `0` (from `list`), and `Code::enter` resumes the panic once
-the body has returned.
+`again`) or `0` (from `list`, `push`, `copy` and `clear`), and
+`Code::enter` resumes the panic once the body has returned.
 
 ## The loader, and who answers for what
 

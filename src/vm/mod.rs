@@ -692,7 +692,12 @@ impl Program {
 /// stack has no room to carry it (the VM's own loop then makes it), and
 /// `Raised(pc)` on an error.
 /// `list(ctx, reg)` gives a view on a list register that carries no
-/// cell and is not borrowed.
+/// cell and is not borrowed. `push(ctx, list, value, dst)` is
+/// `list.push(value)` with the list in `dst` after it, for registers
+/// that carry no cell and a list nothing is walking. `copy(ctx, dst,
+/// src)` is `mov` and `clear(ctx, reg)` sets a register to null, both
+/// for registers that carry no cell: where native code would have to
+/// share or free a value that owns memory, which is the runtime's.
 struct BodyHost<'a, 'i, 'p> {
     m: &'a mut Machine<'i, Bodied>,
     program: &'p Rc<Program>,
@@ -962,6 +967,79 @@ impl Host for BodyHost<'_, '_, '_> {
         ctx.left = ptr;
         ctx.right = len;
         true
+    }
+
+    fn push(&mut self, _ctx: &mut NativeCtx, list: u32, value: u32, dst: u32) -> bool {
+        let at = |r: u32| self.base.saturating_add(r as usize);
+        let (list, value, dst) = (at(list), at(value), at(dst));
+        // A register that carries a cell is read and written through
+        // it: the interpreter's.
+        if !self.proto.plain
+            && [list, value, dst]
+                .iter()
+                .any(|i| matches!(self.m.cells.get(*i), Some(Some(_))))
+        {
+            return false;
+        }
+        let Some(Value::List(items)) = self.m.stack.get(list) else {
+            return false;
+        };
+        let items = Rc::clone(items);
+        let Some(v) = self.m.stack.get(value).cloned() else {
+            return false;
+        };
+        if dst >= self.m.stack.len() {
+            return false;
+        }
+        // What the list's own `push` does with one value. A list
+        // something is walking is the interpreter's to answer for.
+        match items.try_borrow_mut() {
+            Ok(mut elements) => elements.push(v),
+            Err(_) => return false,
+        }
+        // `list.push(v)` is the list: the call's register holds it.
+        if let Some(slot) = self.m.stack.get_mut(dst) {
+            *slot = Value::List(items);
+        }
+        true
+    }
+
+    fn copy(&mut self, _ctx: &mut NativeCtx, dst: u32, src: u32) -> bool {
+        let (dst, src) = (
+            self.base.saturating_add(dst as usize),
+            self.base.saturating_add(src as usize),
+        );
+        if !self.proto.plain
+            && [dst, src]
+                .iter()
+                .any(|i| matches!(self.m.cells.get(*i), Some(Some(_))))
+        {
+            return false;
+        }
+        let Some(v) = self.m.stack.get(src).cloned() else {
+            return false;
+        };
+        match self.m.stack.get_mut(dst) {
+            Some(slot) => {
+                *slot = v;
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn clear(&mut self, _ctx: &mut NativeCtx, reg: u32) -> bool {
+        let reg = self.base.saturating_add(reg as usize);
+        if !self.proto.plain && matches!(self.m.cells.get(reg), Some(Some(_))) {
+            return false;
+        }
+        match self.m.stack.get_mut(reg) {
+            Some(slot) => {
+                *slot = Value::Null;
+                true
+            }
+            None => false,
+        }
     }
 }
 

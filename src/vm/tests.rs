@@ -434,6 +434,118 @@ fn the_step_budget_ends_a_carried_call_at_the_same_step() {
     }
 }
 
+// ----- what machine code has the runtime do for it: push, copy, clear -----
+
+/// `m`'s top level with the tests' body asking its host for `ask` at
+/// `pc` and going on at `next` when the host did it.
+fn asked(m: &Module, pc: u32, ask: super::native::Ask, next: u32) -> Result<Value, Diagnostic> {
+    super::native::ASK_AT.with(|c| c.set(Some((pc, ask, next))));
+    let r = run(&mut interp(), &program_with_test_bodies(m));
+    super::native::ASK_AT.with(|c| c.set(None));
+    r
+}
+
+#[test]
+fn the_hosts_push_is_the_lists_own_push() {
+    use super::native::Ask;
+    // `xs = []; v = 7; t = xs; t.push(v); return [xs, t]`, the receiver
+    // moved to the call's register first, as the lowering has it.
+    let mut f = main_fn(
+        5,
+        vec![
+            abc(Op::NEWLIST, 0, 0, 0),
+            Instr::asbx(Op::LOADINT, 2, 7),
+            abc(Op::MOV, 1, 0, 0),
+            abc(Op::CALLM, 1, 0, 1),
+            abc(Op::NEWLIST, 3, 0, 0),
+            abc(Op::APPENDLIST, 3, 0, 0),
+            abc(Op::APPENDLIST, 3, 1, 0),
+            ret(3),
+        ],
+    );
+    f.constants = vec![Constant::Str("push".to_string())];
+    let m = module(f);
+    let want = exec(&m).expect("ran").repr();
+    assert_eq!(want, "[[7], [7]]");
+    // The host makes the push in place of the `callm`: the same list
+    // in both registers, with the value at its end.
+    let got = asked(&m, 3, Ask::Push(1, 2, 1), 4).expect("ran");
+    assert_eq!(got.repr(), want);
+    // And in place of the `mov` and the `callm` together, reading the
+    // list from where it was moved from.
+    let got = asked(&m, 2, Ask::Push(0, 2, 1), 4).expect("ran");
+    assert_eq!(got.repr(), want);
+    // A register that holds no list is not the host's: the interpreter
+    // runs the call, and raises what it raises.
+    let mut f = main_fn(
+        3,
+        vec![
+            Instr::asbx(Op::LOADINT, 1, 3),
+            Instr::asbx(Op::LOADINT, 2, 7),
+            abc(Op::CALLM, 1, 0, 1),
+            ret(1),
+        ],
+    );
+    f.constants = vec![Constant::Str("push".to_string())];
+    let m = module(f);
+    let bare = run(&mut interp(), &program(&m))
+        .err()
+        .expect("an int has no push");
+    let e = asked(&m, 2, Ask::Push(1, 2, 1), 3)
+        .err()
+        .expect("the interpreter's error");
+    assert_eq!(said(&e), said(&bare));
+    assert_eq!(e.code, "E404");
+}
+
+#[test]
+fn the_hosts_copy_and_clear_share_and_free_what_machine_code_may_not() {
+    use super::native::Ask;
+    // `xs = [1]; ys = xs; return ys`: the host makes the move.
+    let f = main_fn(
+        3,
+        vec![
+            abc(Op::NEWLIST, 0, 0, 0),
+            Instr::asbx(Op::LOADINT, 2, 1),
+            abc(Op::APPENDLIST, 0, 2, 0),
+            abc(Op::MOV, 1, 0, 0),
+            ret(1),
+        ],
+    );
+    let m = module(f);
+    let want = exec(&m).expect("ran").repr();
+    assert_eq!(want, "[1]");
+    assert_eq!(asked(&m, 3, Ask::Copy(1, 0), 4).expect("ran").repr(), want);
+    // Over a register that holds a list, too: what it held is freed.
+    assert_eq!(
+        asked(&m, 3, Ask::Copy(0, 2), 4).expect("ran").repr(),
+        "null"
+    );
+    // `clear`: the register holds null after it, whatever it held.
+    assert_eq!(asked(&m, 4, Ask::Clear(1), 4).expect("ran").repr(), "null");
+    assert_eq!(asked(&m, 3, Ask::Clear(0), 3).expect("ran").repr(), "null");
+    // A register that carries a cell is the interpreter's: the host
+    // does nothing, and the run is the bytecode's.
+    let f = main_fn(
+        2,
+        vec![
+            Instr::asbx(Op::LOADINT, 0, 4),
+            abc(Op::CELLNEW, 0, 0, 0),
+            Instr::asbx(Op::LOADINT, 0, 6),
+            abc(Op::MOV, 1, 0, 0),
+            ret(1),
+        ],
+    );
+    let m = module(f);
+    assert_eq!(exec(&m).expect("ran").repr(), "6");
+    assert_eq!(asked(&m, 3, Ask::Copy(1, 0), 4).expect("ran").repr(), "6");
+    assert_eq!(asked(&m, 4, Ask::Clear(0), 4).expect("ran").repr(), "6");
+    assert_eq!(
+        asked(&m, 3, Ask::Push(0, 1, 1), 4).expect("ran").repr(),
+        "6"
+    );
+}
+
 #[test]
 fn a_defect_a_body_reports_stops_the_run_with_an_internal_error() {
     let m = for_module(1);
