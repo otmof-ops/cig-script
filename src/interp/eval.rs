@@ -967,6 +967,25 @@ impl Interp {
         Ok(())
     }
 
+    /// [`Interp::enter_call`] for a caller that leaves `E506` to another
+    /// path: `false`, with nothing counted, when the stack is already
+    /// [`MAX_CALL_DEPTH`] deep.
+    #[inline(always)]
+    pub(crate) fn try_enter_call(&mut self) -> bool {
+        if self.call_depth >= MAX_CALL_DEPTH {
+            return false;
+        }
+        self.call_depth += 1;
+        true
+    }
+
+    /// The `n` calls [`Interp::enter_call`] counted for one frame have
+    /// returned.
+    #[inline(always)]
+    pub(crate) fn leave_calls(&mut self, n: u32) {
+        self.call_depth -= n as usize;
+    }
+
     /// How many more script calls [`Interp::enter_call`] takes before
     /// E506: what native code, which counts its own calls, is given.
     pub(crate) fn calls_left(&self) -> usize {

@@ -888,6 +888,21 @@ open. A lowering writes to them.
   zero divisor, a NaN in an ordering and any other type take the
   general path. A register that held a null, a bool, an int or a float
   is overwritten without the call that drops a value.
+
+  **A call and a return beside the loop.** `call` and `ret` are not
+  instructions the loop runs, but they do not need the general path
+  either when nothing about them is out of the ordinary. A `call` from
+  a frame in the fast loop switches frames there when `R(A)` holds a
+  function of the module that is loaded, takes the call's `B` arguments
+  and has no native entry, the depth has room for one more call and the
+  stack already holds the callee's registers. A `ret` does when its
+  frame has no burn to close and returns to a frame whose function has
+  no `cellnew` either. The loop then goes on in the frame on top, when
+  that frame is the loop's to run. Any other call or return (a wrong
+  count of arguments, the depth at its limit, a stack that has to grow,
+  the run's first frame, a caller with cells, a frame native code is
+  waiting on) is left unchanged for the general path, which makes it or
+  raises its error where it always did.
 - **Errors and handlers.** Each frame keeps the tries it has opened and
   not left, innermost last. `try.enter H` opens handler `H` in its body
   and records the frame's loop nesting; opening `H` again (a loop around
