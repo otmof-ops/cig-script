@@ -1,0 +1,17 @@
+### Stage c: native code for loops (on `main`)
+
+[cigcompile](https://github.com/otmof-ops/cig-compile) can build a script with native code for its loops and for its functions on numbers (`cigcompile build --stage c`). The native code runs on the same registers as cig's VM, so it sits beside anything a script does: what it has no machine code for, the interpreter runs, and a loop is compiled only where that comes out ahead. It is on `main` and in no release yet, so this is a run of the source, on another machine than the table above ([the paper](docs/BENCHMARKS-2026-11-24.md)): the same 25 programs, every side in the same rounds, pinned to one core.
+
+| program | stage b, ms | stage c, ms | stage c ÷ stage b | Lua 5.4, ms | CPython 3.12, ms |
+|---|---:|---:|---:|---:|---:|
+| `mandel` | {{median.mandel.stage-b}} | {{median.mandel.stage-c}} | {{ratio.mandel.stage-c.stage-b}} | {{median.mandel.lua}} | {{median.mandel.python}} |
+| `fib` | {{median.fib.stage-b}} | {{median.fib.stage-c}} | {{ratio.fib.stage-c.stage-b}} | {{median.fib.lua}} | {{median.fib.python}} |
+| `fannkuch` | {{median.fannkuch.stage-b}} | {{median.fannkuch.stage-c}} | {{ratio.fannkuch.stage-c.stage-b}} | {{median.fannkuch.lua}} | {{median.fannkuch.python}} |
+| `loop` | {{median.loop.stage-b}} | {{median.loop.stage-c}} | {{ratio.loop.stage-c.stage-b}} | {{median.loop.lua}} | {{median.loop.python}} |
+| `sieve` | {{median.sieve.stage-b}} | {{median.sieve.stage-c}} | {{ratio.sieve.stage-c.stage-b}} | {{median.sieve.lua}} | {{median.sieve.python}} |
+
+- **Where a program has native code it takes {{geomean.native.stage-c.stage-b}} of its stage b time** ({{n.native.stage-c.stage-b}} of the {{programs.compute}} compute programs have some; the five above gain most), and {{geomean.compute.stage-c.stage-b}} over all {{programs.compute}}: faster on {{faster.compute.stage-c.stage-b}}, level on {{level.compute.stage-c.stage-b}}, slower on {{slower.compute.stage-c.stage-b}}. A program with nothing worth compiling is its stage b program.
+- **Against the other languages**, a stage c program takes {{geomean.compute.stage-c.python}} of CPython 3.12's time over the compute programs (stage b: {{geomean.compute.stage-b.python}}), {{geomean.compute.stage-c.lua}} times Lua 5.4's (stage b: {{geomean.compute.stage-b.lua}}) and {{geomean.compute.stage-c.luajit}} times LuaJIT's (stage b: {{geomean.compute.stage-b.luajit}}).
+- **What is not compiled yet**: a loop that calls a function, reads a map's field or builds a string each turn. Those run as stage b does.
+
+Whole processes, start-up included ({{median.hello.stage-c}} ms for `hello`), on a 2025 laptop on mains power.

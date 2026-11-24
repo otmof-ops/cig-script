@@ -5,6 +5,23 @@ project follows semantic versioning.
 
 ## Unreleased
 
+- **Benchmarks: stage `c`, measured** (`docs/BENCHMARKS-2026-11-24.md`,
+  its raw data in `bench/results/2026-11-24/`). The 25 programs again,
+  with a stage `c` program as a side: cig and cigcompile built from
+  `main`, one laptop, every process pinned to one core. Where a program
+  has native code it takes 0.52 of its stage `b` time (`mandel` 0.18,
+  `fib` 0.26, `fannkuch` 0.30, `loop` 0.50, `sieve` 0.78), and 0.78 over
+  all 21 compute programs: faster on 7, level on 14, slower on none. A
+  stage `c` program takes 0.66 of CPython 3.12's time over those
+  programs and 1.37 times Lua 5.4's. The README has the table.
+- **`bench/compare` takes stage `c` as a side** (`stage-c`,
+  `stage-c-dry`, and `stage-c-off` for the same program with
+  `CIG_NATIVE=0`), records what of each program got native code
+  (`native.tsv`), renders "stage c against stage b", and pins every
+  measured process to the CPUs `--cpus` names. `check.py` was written
+  again from `SPEC.md` alone; the two scripts agree on every number of
+  the 2026-11-15 run, which renders unchanged, and of the new one.
+
 - **Stage `c` programs: a function's body, run on the VM's frame**
   (cig-compile's decision 0008). A program's `native` section may now
   hold, beside its entries, a **body** for any function, the top level
