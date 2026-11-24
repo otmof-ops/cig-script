@@ -67,7 +67,7 @@ impl Stop {
 }
 
 /// The runtime's functions a body calls, through the context. Interface
-/// 2 has two.
+/// 2 has three.
 ///
 /// Each field's offset in this table is part of the interface: a body
 /// loads a function pointer by its offset here and calls through it in
@@ -86,18 +86,28 @@ pub struct Helpers {
     /// address of the first and `ctx.right` to how many there are; 0
     /// otherwise, with nothing written.
     pub list: unsafe extern "C" fn(ctx: *mut Context, reg: u32) -> u32,
+    /// Offset 16. `again(ctx, pc)`: the instruction at `pc` has machine
+    /// code in the body for some operands, and these are not among
+    /// them: run that one instruction. Returns a stop's bits:
+    /// [`Stop::At`] with the pc the bytecode goes on at, or
+    /// [`Stop::Raised`]. When the stop is [`Stop::At`]`(pc)` itself the
+    /// runtime ran nothing and takes the frame back: the body returns
+    /// that stop as it is. The runtime counts these calls, which is how
+    /// it finds a body whose guesses keep failing.
+    pub again: unsafe extern "C" fn(ctx: *mut Context, pc: u32) -> u64,
 }
 
 // The layout the body is compiled against.
 const _: () = {
-    assert!(core::mem::size_of::<Helpers>() == 16);
+    assert!(core::mem::size_of::<Helpers>() == 24);
     assert!(core::mem::align_of::<Helpers>() == core::mem::align_of::<usize>());
     assert!(core::mem::offset_of!(Helpers, run) == 0);
     assert!(core::mem::offset_of!(Helpers, list) == 8);
+    assert!(core::mem::offset_of!(Helpers, again) == 16);
 };
 
 /// What the helpers are on the runtime's side: safe code the crate's
-/// `extern "C"` glue calls through [`Code::enter`]. A panic in either
+/// `extern "C"` glue calls through [`Code::enter`]. A panic in any
 /// method is caught there, the body is told [`Stop::Raised`] and
 /// [`Code::enter`] resumes the panic once the body has returned.
 pub trait Host {
@@ -109,6 +119,12 @@ pub trait Host {
     /// `ctx.right` to how many there are, and return `true`. Return
     /// `false` with nothing written otherwise.
     fn list(&mut self, ctx: &mut Context, reg: u32) -> bool;
+    /// Run the one instruction at `pc`, whose machine code in the body
+    /// did not cover the operands it met. Returns the stop the body
+    /// sees: [`Stop::At`] with the pc the bytecode goes on at, or with
+    /// `pc` itself when the host ran nothing and takes the frame back.
+    /// Never [`Stop::Defect`].
+    fn again(&mut self, ctx: &mut Context, pc: u32) -> Stop;
 }
 
 /// Why there is no mapping, or no [`Code`].
@@ -371,8 +387,8 @@ impl Code {
     }
 
     /// Enter body `body` (its index in the tables) at its resume point
-    /// `at` (that point's index in the body's `resumes`: 0 is the
-    /// function's start), with `host` behind the helpers. [`None`], with
+    /// `at` (that point's index in the body's `resumes`), with `host`
+    /// behind the helpers. [`None`], with
     /// nothing run, when there is no such body or that body has no such
     /// resume point. Sets `ctx.helpers` and `ctx.host`; the caller sets
     /// every other field.
@@ -396,6 +412,7 @@ impl Code {
         let helpers = Helpers {
             run: sys::host_run_c::<H>,
             list: sys::host_list_c::<H>,
+            again: sys::host_again_c::<H>,
         };
         ctx.helpers = &helpers as *const Helpers;
         ctx.host = host as *mut H as *mut core::ffi::c_void;
@@ -521,6 +538,29 @@ mod sys {
             Err(payload) => {
                 store_panic(payload);
                 0
+            }
+        }
+    }
+
+    /// `extern "C"` glue for `Host::again`: as [`host_run_c`], and a
+    /// panic comes back as [`Stop::Raised`]`(pc)`.
+    pub(super) unsafe extern "C" fn host_again_c<H: Host>(ctx: *mut Context, pc: u32) -> u64 {
+        // SAFETY: as in `host_run_c`.
+        let host_ptr = unsafe { (*ctx).host as *mut H };
+        let ctx_ptr = ctx;
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let host = unsafe { &mut *host_ptr };
+            let cx = unsafe { &mut *ctx_ptr };
+            host.again(cx, pc)
+        }));
+        match result {
+            Ok(stop) => match stop {
+                Stop::Defect(_) => Stop::Defect(0).bits(),
+                other => other.bits(),
+            },
+            Err(payload) => {
+                store_panic(payload);
+                Stop::Raised(pc).bits()
             }
         }
     }
@@ -729,6 +769,11 @@ mod sys {
 
     #[allow(clippy::extra_unused_type_parameters)]
     pub(super) unsafe extern "C" fn host_list_c<H: Host>(_ctx: *mut Context, _reg: u32) -> u32 {
+        0
+    }
+
+    #[allow(clippy::extra_unused_type_parameters)]
+    pub(super) unsafe extern "C" fn host_again_c<H: Host>(_ctx: *mut Context, _pc: u32) -> u64 {
         0
     }
 }

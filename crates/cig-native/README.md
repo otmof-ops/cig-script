@@ -100,8 +100,8 @@ A site says only what its kind uses, and every other field is zero:
 | `5` depth | the call depth is reached | 0 | null | null |
 
 **A body** is strictly ascending by function; its offset is inside the
-code and on an instruction boundary; its first resume point is pc 0 and
-the resume points are strictly ascending; and the `first`/`count`
+code and on an instruction boundary; it has at least one resume point,
+and its resume points are strictly ascending; and the `first`/`count`
 pairs of all bodies run back-to-back over the resume table, covering
 it exactly. A body for the top level (`func` 0) is taken; an entry for
 the top level is not. A section may have no entry, no site and no body.
@@ -167,17 +167,28 @@ where the stack has room for it.
 
 ## The helpers
 
-Interface 2 has two helper functions a body calls, through its
+Interface 2 has three helper functions a body calls, through its
 `ctx.helpers`:
 
 | offset | signature | what |
 |---:|---|---|
 | 0 | `run(ctx, from, to) -> u64` | runs the frame's bytecode from pc `from` while the pc stays in `from..to`; returns a stop's bits |
 | 8 | `list(ctx, reg) -> u32`      | 1 when register `reg` holds a list whose elements native code may read and write where they lie, with `ctx.left` and `ctx.right` set; 0 otherwise |
+| 16 | `again(ctx, pc) -> u64`     | runs the one instruction at `pc`, whose machine code in the body did not cover the operands it met; returns a stop's bits |
+
+**`again` is how a guess that failed is run, and how it is counted.** A
+body has machine code for an instruction's usual operands (two numbers
+for `+`) and tests for them; for any others it calls `again`, and the
+runtime runs the instruction as the interpreter does. The stop says
+where the bytecode goes on. When it is `At(pc)` itself, the runtime ran
+nothing and takes the frame back: the body returns that stop as it is.
+A runtime does that when the same body's guesses keep failing, and
+stops entering the body there.
 
 A panic in a helper is caught in the crate's `extern "C"` glue, the
-body is told `Stop::Raised(from)` (from `run`) or `0` (from `list`),
-and `Code::enter` resumes the panic once the body has returned.
+body is told `Stop::Raised(from)` (from `run`), `Stop::Raised(pc)` (from
+`again`) or `0` (from `list`), and `Code::enter` resumes the panic once
+the body has returned.
 
 ## The loader, and who answers for what
 
