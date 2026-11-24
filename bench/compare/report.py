@@ -26,18 +26,20 @@ import statistics
 import sys
 
 START = ["hello", "startup-0", "startup-1", "startup-10"]
-CIG_SIDES = ["cig", "stage-a", "stage-b", "cig-dry", "stage-a-dry", "stage-b-dry"]
+CIG_SIDES = ["cig", "stage-a", "stage-b", "stage-c", "cig-dry", "stage-a-dry", "stage-b-dry", "stage-c-dry"]
 LANGUAGES = ["lua", "luajit-off", "luajit", "python", "node", "rust"]
 IDIOMS = {"python-idiom": "python", "node-idiom": "node", "rust-idiom": "rust"}
 ENGINES = ["cig-tree", "cig-vm", "cig-vm-cold"]
-MAIN = ["cig", "stage-b"] + LANGUAGES
-ALL = CIG_SIDES + ["cig-first"] + ENGINES + LANGUAGES + list(IDIOMS)
+MAIN = ["cig", "stage-b", "stage-c"] + LANGUAGES
+ALL = CIG_SIDES + ["stage-c-off", "cig-first"] + ENGINES + LANGUAGES + list(IDIOMS)
 LABEL = {
     "cig": "`cig run`", "cig-dry": "`cig run --dry-run`", "cig-first": "`cig run`, new folder",
     "cig-tree": "`cig run --engine tree`", "cig-vm": "`cig run --engine vm`",
     "cig-vm-cold": "`cig run --engine vm`, empty tin",
     "stage-a": "stage a", "stage-a-dry": "stage a, `--dry-run`",
     "stage-b": "stage b", "stage-b-dry": "stage b, `--dry-run`",
+    "stage-c": "stage c", "stage-c-dry": "stage c, `--dry-run`",
+    "stage-c-off": "stage c, `CIG_NATIVE=0`",
     "lua": "Lua", "luajit-off": "LuaJIT `-joff`", "luajit": "LuaJIT",
     "python": "CPython", "node": "Node", "rust": "Rust",
     "python-idiom": "CPython, idiomatic", "node-idiom": "Node, idiomatic", "rust-idiom": "Rust, idiomatic",
@@ -102,6 +104,13 @@ class Pass:
             for line in f:
                 if line.strip():
                     self.conditions.append(line.rstrip("\n").split("\t"))
+        # `native.tsv` is optional: a pass without stage `c` builds has no such file.
+        self.native = {}
+        native_path = os.path.join(folder, "native.tsv")
+        if os.path.exists(native_path):
+            _, rows = read_tsv(native_path)
+            for r in rows:
+                self.native[r[0]] = (r[1], r[2], r[3], r[4])
 
     def condition(self, key):
         for fields in self.conditions:
@@ -122,6 +131,26 @@ class Numbers:
         self.compute = [p for p in programs if p not in START]
         self.programs = self.compute + self.start
         self.sides = sorted({s for ps in passes for _, s in ps.samples})
+        self._present = set(self.sides)
+        # `native(p)`: the (stage, compiled, left, top) fields from the LAST pass to list p. If
+        # an earlier pass lists p with other fields, that is an error.
+        self.native_info = {}
+        for p in self.programs:
+            triples = [(k, ps.native[p]) for k, ps in enumerate(self.passes) if p in ps.native]
+            if not triples:
+                continue
+            first = triples[0][1]
+            for k, triple in triples[1:]:
+                if triple != first:
+                    disagree = ", ".join("pass %d %s" % (kk + 1, "/".join(t)) for kk, t in triples)
+                    raise SystemExit("passes disagree on native(%s): %s" % (p, disagree))
+            self.native_info[p] = triples[-1][1]
+        # The native set: compute-set programs whose native(p) exists and says stage `c`.
+        self.native_set = [p for p in self.compute if self.native_info.get(p, ("",))[0] == "c"]
+
+    def visible(self, sides):
+        """`sides` filtered to those the run has samples for, in the given order."""
+        return [s for s in sides if s in self._present]
 
     def put(self, key, value, text):
         if key in self.keys:
@@ -144,7 +173,13 @@ class Numbers:
         return statistics.median(self.passes[k].times(program, side))
 
     def program_set(self, name):
-        return self.compute if name == "compute" else self.start
+        if name == "compute":
+            return self.compute
+        if name == "start":
+            return self.start
+        if name == "native":
+            return self.native_set
+        raise SystemExit("no program set named " + name)
 
     def compare(self, a, b, set_name, k=None):
         """(geometric mean of a's median over b's, faster, level, slower, programs, the
@@ -178,17 +213,27 @@ class Numbers:
                     self.put("peak.%s.%s" % (p, s), peak, fmt_mb(peak))
                     self.put("anon.%s.%s" % (p, s), anon, fmt_mb(anon))
         pairs = [(a, b) for a in CIG_SIDES for b in LANGUAGES]
-        pairs += [("stage-b", "cig"), ("stage-a", "cig"), ("stage-b-dry", "cig-dry")]
+        pairs += [("stage-b", "cig"), ("stage-c", "stage-b"), ("stage-c", "cig"),
+                  ("stage-a", "cig"), ("stage-b-dry", "cig-dry"), ("stage-c-dry", "cig-dry")]
         pairs += [(i, base) for i, base in IDIOMS.items()]
-        pairs += [("stage-b", i) for i in IDIOMS]
-        pairs += [("cig-vm", "cig-tree"), ("cig-vm-cold", "cig-tree"), ("cig-vm", "stage-b")]
+        for i in IDIOMS:
+            pairs += [("stage-b", i), ("stage-c", i)]
+        pairs += [("cig-vm", "cig-tree"), ("cig-vm-cold", "cig-tree"),
+                  ("cig-vm", "stage-b"), ("cig-vm", "stage-c")]
         pairs += [("cig-vm", b) for b in LANGUAGES]
+        pairs += [("stage-c", "stage-c-off")]
+        # For each pair, we make per-program `ratio` keys, then geometric means and
+        # faster/level/slower counts over the compute set and the start set. For the one
+        # pair (stage-c, stage-b) we also make them over the native set.
         for a, b in pairs:
             for p in self.programs:
                 if self.valid(p, a) and self.valid(p, b):
                     r = self.median(p, a) / self.median(p, b)
                     self.put("ratio.%s.%s.%s" % (p, a, b), r, fmt_ratio(r))
-            for set_name in ("compute", "start"):
+            set_names = ["compute", "start"]
+            if (a, b) == ("stage-c", "stage-b") and self.native_set:
+                set_names.append("native")
+            for set_name in set_names:
                 got = self.compare(a, b, set_name)
                 if got is None:
                     continue
@@ -208,7 +253,7 @@ class Numbers:
                     gk = self.compare(a, b, set_name, k)[0]
                     self.put("geomean.pass%d.%s" % (k + 1, tag), gk, fmt_ratio(gk))
         # The run record: what a run costs over a dry run of the same program.
-        for real in ("cig", "stage-a", "stage-b"):
+        for real in ("cig", "stage-a", "stage-b", "stage-c"):
             dry = real + "-dry"
             both = [p for p in self.programs if self.valid(p, real) and self.valid(p, dry)]
             if not both:
@@ -264,9 +309,39 @@ class Numbers:
                 self.put("mhz.max.%s" % tag, max(mhz), str(max(mhz)))
             if temp:
                 self.put("temp.max.%s" % tag, max(temp), str(max(temp)))
+        # Per-program native info, from the last pass that reported it. For each key we
+        # write a value an int when the JSON field was an int and the string `unknown`
+        # otherwise; `native.summary.p` is the one cell the `native` table uses.
+        for p, (stage_out, compiled, left, top) in self.native_info.items():
+            self.put("native.stage.%s" % p, stage_out, stage_out)
+            self.put("native.top.%s" % p, top, top)
+            c_int = int(compiled) if compiled.lstrip("-").isdigit() else None
+            l_int = int(left) if left.lstrip("-").isdigit() else None
+            self.put("native.compiled.%s" % p, c_int if c_int is not None else "unknown",
+                     str(c_int) if c_int is not None else "unknown")
+            self.put("native.left.%s" % p, l_int if l_int is not None else "unknown",
+                     str(l_int) if l_int is not None else "unknown")
+            if c_int is not None and l_int is not None:
+                self.put("native.total.%s" % p, c_int + l_int, str(c_int + l_int))
+            # What of the program has native code, in words: its top level, so many of its
+            # functions, both, or (a stage `b` result) nothing.
+            parts = []
+            if top == "yes":
+                parts.append("the top level")
+            if c_int is not None and l_int is not None and c_int + l_int > 0:
+                parts.append("%d of %d functions" % (c_int, c_int + l_int))
+            if stage_out == "b":
+                summary = "none"
+            elif stage_out == "c" and parts:
+                summary = ", ".join(parts)
+            else:
+                summary = "unknown"
+            self.put("native.summary.%s" % p, summary, summary)
         self.put("passes", np, str(np))
         self.put("programs.compute", len(self.compute), str(len(self.compute)))
         self.put("programs.start", len(self.start), str(len(self.start)))
+        if any(ps.native for ps in self.passes):
+            self.put("programs.native", len(self.native_set), str(len(self.native_set)))
         return self
 
     # ---- tables -------------------------------------------------------------------
@@ -281,11 +356,13 @@ class Numbers:
         return "\n".join(out)
 
     def table_by_program(self, prefix, sides):
+        sides = self.visible(sides)
         head = ["program"] + [LABEL[s] for s in sides]
         rows = [["`%s`" % p] + [self.text("%s.%s.%s" % (prefix, p, s)) for s in sides] for p in self.programs]
         return self.grid(head, rows)
 
     def table_spread(self, sides):
+        sides = self.visible(sides)
         head = ["program"] + [LABEL[s] for s in sides]
         rows = []
         for p in self.programs:
@@ -299,6 +376,7 @@ class Numbers:
         return self.grid(head, rows)
 
     def table_ratios(self, rows_sides, set_name):
+        rows_sides = self.visible(rows_sides)
         head = ["time ÷ theirs"] + [LABEL[b] for b in LANGUAGES]
         rows = []
         for a in rows_sides:
@@ -316,7 +394,7 @@ class Numbers:
     def table_record(self):
         head = ["", "programs", "run ÷ dry run", "run − dry run, median ms"]
         rows = []
-        for real in ("cig", "stage-a", "stage-b"):
+        for real in ("cig", "stage-a", "stage-b", "stage-c"):
             if "record.n." + real in self.keys:
                 rows.append([LABEL[real], self.text("record.n." + real), self.text("record.ratio." + real),
                              self.text("record.extra." + real)])
@@ -337,17 +415,40 @@ class Numbers:
 
     def table_passes(self):
         np = len(self.passes)
+        tops = self.visible(["cig", "stage-b", "stage-c"])
         head = ["compute set"]
-        for a in ("cig", "stage-b"):
+        for a in tops:
             head += ["%s ÷, pass %d" % (LABEL[a], k + 1) for k in range(np)]
         rows = []
         for b in LANGUAGES:
             cells = []
-            for a in ("cig", "stage-b"):
+            for a in tops:
                 for k in range(np):
                     cells.append(self.text("geomean.pass%d.compute.%s.%s" % (k + 1, a, b)))
             rows.append([LABEL[b]] + cells)
         return self.grid(head, rows)
+
+    def table_native(self):
+        """stage c against stage b: one row per program where both pairs are valid, then two
+        summary rows (all compute programs; programs with native code) with their geomean and
+        the faster/level/slower counts. `program` and `native` are text columns; the three
+        middle ones are numbers."""
+        head = ["program", "native", "stage b, ms", "stage c, ms", "stage c ÷ stage b"]
+        rows = []
+        for p in self.compute:
+            if self.valid(p, "stage-b") and self.valid(p, "stage-c"):
+                rows.append(["`%s`" % p, self.text("native.summary.%s" % p),
+                             self.text("median.%s.stage-b" % p),
+                             self.text("median.%s.stage-c" % p),
+                             self.text("ratio.%s.stage-c.stage-b" % p)])
+        for set_name, label in (("compute", "**all compute programs**"),
+                                ("native", "**programs with native code**")):
+            tag = "%s.stage-c.stage-b" % set_name
+            if "geomean." + tag in self.keys:
+                summary = "%s (%s/%s/%s)" % (self.text("geomean." + tag), self.text("faster." + tag),
+                                             self.text("level." + tag), self.text("slower." + tag))
+                rows.append([label, DASH, self.text("n." + tag), DASH, summary])
+        return self.grid(head, rows, text_columns=2)
 
     def table_moved(self):
         np = len(self.passes)
@@ -395,12 +496,13 @@ class Numbers:
                            ("load_average", "load average at the start"), ("temp_c", "package °C at the start"),
                            ("history", "cig's run records at the start"), ("harness", "harness"),
                            ("rounds", "rounds"), ("seed", "seed of the rounds' order"),
-                           ("floor_ms", "`true`, median ms")):
+                           ("cpus", "pinned to CPUs"), ("floor_ms", "`true`, median ms")):
             row = [label]
             for ps in self.passes:
                 got = ps.condition(key)
                 row.append(shown.get(key, lambda v: v)(got[0]) if got else DASH)
-            rows.append(row)
+            if any(c != DASH for c in row[1:]):
+                rows.append(row)
         for key, label in (("history.last", "cig's run records at the last round"),
                            ("mhz.min", "mean clock at a round's start, lowest, MHz"),
                            ("mhz.max", "mean clock at a round's start, highest, MHz"),
@@ -434,12 +536,13 @@ class Numbers:
         tables = {
             "medians": lambda: self.table_by_program("median", MAIN),
             "medians-cig": lambda: self.table_by_program("median", ["cig", "cig-dry", "stage-a", "stage-a-dry",
-                                                                    "stage-b", "stage-b-dry"]),
+                                                                    "stage-b", "stage-b-dry",
+                                                                    "stage-c", "stage-c-dry"]),
             "spread": lambda: self.table_spread(MAIN),
-            "ratios-compute": lambda: self.table_ratios(["cig", "stage-a", "stage-b"], "compute"),
-            "ratios-start": lambda: self.table_ratios(["cig", "stage-a", "stage-b"], "start"),
-            "ratios-compute-dry": lambda: self.table_ratios(["cig-dry", "stage-a-dry", "stage-b-dry"],
-                                                            "compute"),
+            "ratios-compute": lambda: self.table_ratios(["cig", "stage-a", "stage-b", "stage-c"], "compute"),
+            "ratios-start": lambda: self.table_ratios(["cig", "stage-a", "stage-b", "stage-c"], "start"),
+            "ratios-compute-dry": lambda: self.table_ratios(
+                ["cig-dry", "stage-a-dry", "stage-b-dry", "stage-c-dry"], "compute"),
             "memory": lambda: self.table_by_program("peak", MAIN),
             "memory-own": lambda: self.table_by_program("anon", MAIN),
             "record": self.table_record,
@@ -448,6 +551,7 @@ class Numbers:
             "moved": self.table_moved,
             "stability": self.table_stability,
             "engines": self.table_engines,
+            "native": self.table_native,
             "conditions": self.table_conditions,
         }
         if name not in tables:
