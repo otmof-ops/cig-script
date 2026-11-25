@@ -1,0 +1,5 @@
+**`cig run` runs on the VM by default** on `main` (in no release yet; cig 1.25.0 has the VM behind `cig run --engine vm`, [measured here](docs/ENGINES-1.25.0.md)). A script's first two runs take the tree-walker, the second leaves a `cig __lower` behind that lowers the script and keeps its module in the tin, and every later run takes the VM; `cig run --engine tree` is still there. Measured on another machine than the table above, a run of the source ([the run](docs/ENGINES-2026-11-25.md)): over the 21 compute programs the default takes 0.47 of the tree-walker's time, faster on 19, level on 2 and slower on 0; against `--engine vm` with the module kept, it takes 0.99 on the geometric mean. Against the other languages in the same rounds, cig's time over theirs at the geometric mean, and the programs it is faster on, level on and slower on:
+
+| time ÷ theirs | Lua | LuaJIT `-joff` | LuaJIT | CPython | Node | Rust |
+|---|---:|---:|---:|---:|---:|---:|
+| `cig run` | 1.35 (4/0/14) | 1.55 (5/0/13) | 2.54 (3/0/15) | 0.63 (19/1/1) | 0.22 (18/1/1) | 6.45 (0/0/6) |

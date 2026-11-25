@@ -224,7 +224,7 @@ default. The table:
 | `auto` (new, the default) | the VM | the tree-walker runs it, and the lowering is left to a `cig __lower` process that the script's second run starts |
 
 Under `auto` a script gets to the VM over three runs, and none of them
-waits for the lowering:
+does the lowering itself:
 
 | run of a script under `auto` | what runs it | what else happens |
 |---|---|---|
@@ -243,12 +243,12 @@ differential suites, which is unchanged.
 
 **Why the second run and not the first.** As first built (#285), `auto`
 started `cig __lower` on a script's first run. Measured on `main` at
-`da5cd6f` (2026-11-25, a development machine, whole processes, the
-harness of the benchmark papers), that first run took about 1.1 times
-the tree-walker's time on `hello` and about 1.2 on the 500-line script
-with a CPU free for the process left behind, and about 1.5 and 1.8 with
-both held to one CPU. #259's bar is a first run within 10% of the
-tree-walker's. Three things are in those figures:
+`da5cd6f` ([a script's first runs, 2026-11-25](../ENGINES-FIRST-RUNS-2026-11-25.md),
+a development machine), that first run took 1.22 times the tree-walker's
+time on `hello` and 1.12 on the 500-line script with a CPU free for the
+process left behind, and 1.58 and 1.82 with both held to one CPU. #259's
+bar is a first run within 10% of the tree-walker's. Three things are in
+those figures:
 
 - Starting a process costs a few tenths of a millisecond, which is a
   good part of a run of two.
@@ -258,9 +258,12 @@ tree-walker's. Three things are in those figures:
   never loaded, a process was started for it, and the tin grew.
 
 So a first run only leaves a mark, and the process is started for a
-script that has come back. The second run still pays for starting it,
-and on one CPU still waits behind the lowering; it does so once for
-each text a script has had under one build of cig.
+script that has come back. Measured the same way after the change, a
+first run takes 0.96 of the tree-walker's time on `hello` and 0.97 on the
+500-line script. The second run still pays for starting the process
+(1.13 and 1.10 with a CPU free for it) and on one CPU still waits behind
+the lowering (1.35 and 1.77); it does so once for each text a script has
+had under one build of cig.
 
 **The alternatives, and why each was not taken.**
 

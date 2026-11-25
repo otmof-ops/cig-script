@@ -1,0 +1,59 @@
+# A script's first runs on each engine, 2026-11-25: `hello`, a 500-line script and cigo
+
+<!-- SPDX-License-Identifier: CC-BY-4.0 -->
+
+`cig run --engine vm` lowers a script to bytecode the first time it runs it, and keeps the module in the tin for the runs after. `cig run` on the default (cig-script#259's `auto`) gets a script onto the VM without the user asking and without a run that does the lowering itself:
+
+| run of a script under the default | what runs it | what else happens |
+|---|---|---|
+| first | the tree-walker | an empty mark is left in the tin; nothing is started |
+| second | the tree-walker | a `cig __lower` is left behind, which lowers the script and keeps its module |
+| third and later | the VM | |
+
+This is what each of those runs costs, on three scripts: `hello`, the smallest of [the benchmark programs](../bench/compute/hello.cig); [`bench/engines/lines-500.cig`](../bench/engines/lines-500.cig), 500 lines of small functions; and cigo's `orchestrate.cig`, 20,992 lines (cig-orchestrator at `e0c21a7`, run with no arguments, which prints its help). It was measured for [#254](https://github.com/otmof-ops/cig-script/issues/254) and [#259](https://github.com/otmof-ops/cig-script/issues/259), beside [the benchmark programs](ENGINES-2026-11-25.md), on the same machine with the same cig: commit `7e76bb8` (merged to `main` as `cebd9dd`, [#287](https://github.com/otmof-ops/cig-script/pull/287)), built as a release is.
+
+Every measured number here is made from the samples in [`bench/results/2026-11-25-engines/`](../bench/results/2026-11-25-engines/) (`start/`, and where the text says so `start-one-cpu/`, `before/` and `before-one-cpu/`) by [`bench/compare/report.py`](../bench/compare/report.py), and made again by [`bench/compare/check.py`](../bench/compare/check.py).
+
+## In short
+
+- **A first run under the default is the tree-walker's.** `hello` takes {{median.hello.cig-auto-cold}} ms against the tree-walker's {{median.hello.cig-tree}}, {{ratio.hello.cig-auto-cold.cig-tree}} of the time ({{within10.hello.cig-auto-cold.cig-tree}}); the 500-line script {{median.lines-500.cig-auto-cold}} ms against {{median.lines-500.cig-tree}}, {{ratio.lines-500.cig-auto-cold.cig-tree}} ({{within10.lines-500.cig-auto-cold.cig-tree}}); cigo {{median.orchestrate.cig-auto-cold}} ms against {{median.orchestrate.cig-tree}}, {{ratio.orchestrate.cig-auto-cold.cig-tree}} ({{within10.orchestrate.cig-auto-cold.cig-tree}}). With every process held to one CPU the three come to {{earlier:start-one-cpu:ratio.hello.cig-auto-cold.cig-tree}}, {{earlier:start-one-cpu:ratio.lines-500.cig-auto-cold.cig-tree}} and {{earlier:start-one-cpu:ratio.orchestrate.cig-auto-cold.cig-tree}}. #259's bar for making `auto` the default is a first run within 10% of the tree-walker's.
+- **A second run starts the lowering, and pays for starting it.** The tree-walker runs the script again, and before `cig` returns it starts a `cig __lower`: `hello` takes {{median.hello.cig-auto-second}} ms, {{ratio.hello.cig-auto-second.cig-tree}} of the tree-walker's time; the 500-line script {{median.lines-500.cig-auto-second}} ms, {{ratio.lines-500.cig-auto-second.cig-tree}}; cigo {{median.orchestrate.cig-auto-second}} ms, {{ratio.orchestrate.cig-auto-second.cig-tree}}. That is with a CPU free for the process left behind. Held to one CPU, that process shares it with the run that started it, and the run's exit waits behind the lowering: {{earlier:start-one-cpu:ratio.hello.cig-auto-second.cig-tree}} for `hello`, {{earlier:start-one-cpu:ratio.lines-500.cig-auto-second.cig-tree}} for the 500-line script and {{earlier:start-one-cpu:ratio.orchestrate.cig-auto-second.cig-tree}} for cigo. A script pays it once for each text it has had under one build of cig; `auto_lower = off` turns the lowering off.
+- **From the third run on, the default is on the VM.** It starts cigo in {{median.orchestrate.cig-auto}} ms where the tree-walker takes {{median.orchestrate.cig-tree}}: {{ratio.orchestrate.cig-auto.cig-tree}} of the time. The tree-walker parses and checks the whole script at every start; the VM loads the module it kept. The 500-line script takes {{median.lines-500.cig-auto}} ms against {{median.lines-500.cig-tree}}, {{ratio.lines-500.cig-auto.cig-tree}} of the time. On `hello` the engines take the same time, and its three medians (the tree-walker's {{median.hello.cig-tree}} ms, the VM's by name {{median.hello.cig-vm}}, the default's {{median.hello.cig-auto}}) differ by what copies of one run differ by here.
+- **Asked for by name, the VM lowers a script inside its first run.** `cig run --engine vm` with nothing in the tin: {{median.hello.cig-vm-cold}} ms for `hello`, {{ratio.hello.cig-vm-cold.cig-tree}} times the tree-walker's; {{median.lines-500.cig-vm-cold}} ms for the 500-line script, {{ratio.lines-500.cig-vm-cold.cig-tree}} times; and {{median.orchestrate.cig-vm-cold}} ms for cigo, {{ratio.orchestrate.cig-vm-cold.cig-tree}} times. The default leaves that work to a process of its own, started once the script's own work is done.
+- **Why the lowering waits for the second run.** The build before this one (`main` at `da5cd6f`) started it on a script's first run. Measured the same way, that first run took {{earlier:before:ratio.hello.cig-auto-cold.cig-tree}} of the tree-walker's time on `hello` and {{earlier:before:ratio.lines-500.cig-auto-cold.cig-tree}} on the 500-line script with a CPU free for the process left behind, and {{earlier:before-one-cpu:ratio.hello.cig-auto-cold.cig-tree}} and {{earlier:before-one-cpu:ratio.lines-500.cig-auto-cold.cig-tree}} held to one CPU. Starting a process costs a few tenths of a millisecond, which is little beside most runs and a good part of the smallest; and a script that is run once never gets it back. So a first run now only leaves a mark, and the process is started for a script that has come back.
+
+## Every run
+
+The median time in milliseconds over {{rounds.pass1}} rounds in each of {{passes}} passes, with two CPUs for each measured process:
+
+{{table:engines-first}}
+
+Each of those over the tree-walker's time. Under 1, that run took less time than the tree-walker's:
+
+{{table:engines-first-ratios}}
+
+## How it was measured
+
+As [the benchmark programs' run](ENGINES-2026-11-25.md#how-it-was-measured): whole processes, every output checked, rounds in a random order, a home for each side, the same cig settings. Failed pairs: {{failed.pass1}} in pass 1, {{failed.pass2}} in pass 2. What differs, because these scripts run for a few milliseconds and two of the runs leave a process behind:
+
+- **Two CPUs for each measured process** (`--cpus 2,3`, two performance cores), so a `cig __lower` left behind has one to run on, as it has on any machine with more than one. The figures given for one CPU are from two more passes of the same scripts with `--cpus 2` ([`start-one-cpu/`](../bench/results/2026-11-25-engines/start-one-cpu/)).
+- **Each timed run starts on a busy core.** The harness keeps the first of the measured CPUs busy for 5 ms and starts the run from it (`--warm 5`). A run of two milliseconds started on an idle core is timed as much by how far that core's clock had fallen as by the program. There is no rest between runs; each round began once the CPU package was below 70 °C.
+- **A first run** (`cig-auto-cold`): the tin's modules folder, which holds the marks too, is removed before every timed run, so each is the first run of a script the tin has not seen.
+- **A second run** (`cig-auto-second`): before every timed run the folder is put back as the script's first run left it, from a copy the harness keeps, so each timed run is a script's second and no run of cig comes just before it. Starting `cig __lower` is inside that run; the lowering goes on after `cig` has exited and is not timed.
+- **Later runs** (`cig-auto`): the script is run twice before the rounds and its lowering waited for, so every timed run finds the module.
+- **Nothing left running.** After each run on the default the harness waits until no `cig __lower` is running before the next pair starts. That wait is not timed.
+- **The build before** ([`before/`](../bench/results/2026-11-25-engines/before/) and [`before-one-cpu/`](../bench/results/2026-11-25-engines/before-one-cpu/)): the same passes with cig built from `main` at `da5cd6f`, where `cig-auto-cold` is a first run that starts the lowering.
+
+## Conditions
+
+{{table:conditions}}
+
+## How steady the numbers are
+
+{{table:stability}}
+
+## What this does not show
+
+- **Linux only.** A second run's cost is the cost of starting a process, which differs on macOS and Windows. Nothing here was measured there.
+- **A development machine**, not the benchmark paper's test machine: read the ratios; the times belong to this machine, and to a core whose clock is up. Started from an idle core, the same runs take longer on every side.
+- **Short runs.** On a run of two milliseconds a ratio within a few hundredths of 1 is level here, whichever side of 1 it falls.

@@ -32,12 +32,23 @@ CIG_SIDES = ["cig", "stage-a", "stage-b", "stage-c", "cig-dry", "stage-a-dry", "
 LANGUAGES = ["lua", "luajit-off", "luajit", "python", "node", "rust"]
 IDIOMS = {"python-idiom": "python", "node-idiom": "node", "rust-idiom": "rust"}
 ENGINES = ["cig-tree", "cig-vm", "cig-vm-cold"]
+# The three `auto` sides (cig-script#259): `cig run SCRIPT.cig` on the default
+# with the module kept (`cig-auto`), on a script's first run (`cig-auto-cold`)
+# and on its second (`cig-auto-second`).
+AUTO_ENGINES = ["cig-auto", "cig-auto-cold", "cig-auto-second"]
+# The first-runs tables' columns: the tree-walker, a script's runs under the
+# default in the order they happen, then the VM asked for by name.
+FIRST_RUNS = ["cig-tree", "cig-auto-cold", "cig-auto-second", "cig-auto", "cig-vm-cold", "cig-vm"]
 MAIN = ["cig", "stage-b", "stage-c"] + LANGUAGES
-ALL = CIG_SIDES + ["stage-c-off", "cig-first"] + ENGINES + LANGUAGES + list(IDIOMS)
+ALL = (CIG_SIDES + ["stage-c-off", "cig-first"] + ENGINES + AUTO_ENGINES
+       + LANGUAGES + list(IDIOMS))
 LABEL = {
     "cig": "`cig run`", "cig-dry": "`cig run --dry-run`", "cig-first": "`cig run`, new folder",
     "cig-tree": "`cig run --engine tree`", "cig-vm": "`cig run --engine vm`",
     "cig-vm-cold": "`cig run --engine vm`, empty tin",
+    "cig-auto": "`cig run` (default)",
+    "cig-auto-cold": "`cig run` (default), first run",
+    "cig-auto-second": "`cig run` (default), second run",
     "stage-a": "stage a", "stage-a-dry": "stage a, `--dry-run`",
     "stage-b": "stage b", "stage-b-dry": "stage b, `--dry-run`",
     "stage-c": "stage c", "stage-c-dry": "stage c, `--dry-run`",
@@ -246,6 +257,11 @@ class Numbers:
                   ("cig-vm", "stage-b"), ("cig-vm", "stage-c")]
         pairs += [("cig-vm", b) for b in LANGUAGES]
         pairs += [("stage-c", "stage-c-off")]
+        # `auto` against the tree-walker (cig-script#259's done-when condition)
+        # and against the VM (how much the default costs over asking for the
+        # VM directly, when a module is kept).
+        pairs += [("cig-auto", "cig-tree"), ("cig-auto-cold", "cig-tree"),
+                  ("cig-auto", "cig-vm"), ("cig-auto-second", "cig-tree")]
         # For each pair, we make per-program `ratio` keys, then geometric means and
         # faster/level/slower counts over the compute set and the start set. For the one
         # pair (stage-c, stage-b) we also make them over the native set.
@@ -254,6 +270,13 @@ class Numbers:
                 if self.valid(p, a) and self.valid(p, b):
                     r = self.median(p, a) / self.median(p, b)
                     self.put("ratio.%s.%s.%s" % (p, a, b), r, fmt_ratio(r))
+                    # cig-script#259's gate: a first run on the default is within
+                    # 10% of the tree-walker's when the ratio does not exceed
+                    # 1.10. Faster than the tree-walker is "within 10%": the
+                    # gate is on the slowdown, not on either side of 1.
+                    is_within = 1 if r <= 1.10 else 0
+                    self.put("within10.%s.%s.%s" % (p, a, b), is_within,
+                             "within 10%" if is_within else "past 10%")
             set_names = ["compute", "start"]
             if (a, b) == ("stage-c", "stage-b") and self.native_set:
                 set_names.append("native")
@@ -520,7 +543,12 @@ class Numbers:
                            ("load_average", "load average at the start"), ("temp_c", "package °C at the start"),
                            ("history", "cig's run records at the start"), ("harness", "harness"),
                            ("rounds", "rounds"), ("seed", "seed of the rounds' order"),
-                           ("cpus", "pinned to CPUs"), ("floor_ms", "`true`, median ms")):
+                           ("cpus", "pinned to CPUs"), ("floor_ms", "`true`, median ms"),
+                           ("rest", "rest after each run, times the run's length"),
+                           ("warm", "CPU kept busy before each run, ms"),
+                           ("cool", "a round waits for the package to be below, °C"),
+                           ("hot_rounds", "rounds begun without it"),
+                           ("lowering_timeouts", "waits for a left-behind lowering that gave up")):
             row = [label]
             for ps in self.passes:
                 got = ps.condition(key)
@@ -553,6 +581,42 @@ class Numbers:
         head = ["program"] + [LABEL[s] for s in ENGINES] + ["vm ÷ tree", "vm, empty tin ÷ tree"]
         rows = [["`%s`" % p] + [self.text("median.%s.%s" % (p, s)) for s in ENGINES]
                 + [self.text("ratio.%s.cig-vm.cig-tree" % p), self.text("ratio.%s.cig-vm-cold.cig-tree" % p)]
+                for p in self.programs]
+        return self.grid(head, rows)
+
+    def table_engines_auto(self):
+        """The engines plus `auto`: cig-script#259's measurement of the default.
+
+        Columns: tree, vm, auto, vm-cold, then three ratios against the
+        tree-walker (vm, auto, vm-cold). A script's first and second runs
+        under the default are not here: this table is of runs with the module
+        kept, and the first-runs tables (`engines-first`) have the others.
+        """
+        engines = ["cig-tree", "cig-vm", "cig-auto", "cig-vm-cold"]
+        head = (["program"] + [LABEL[s] for s in engines]
+                + ["vm ÷ tree", "auto ÷ tree", "vm, empty tin ÷ tree"])
+        rows = [["`%s`" % p] + [self.text("median.%s.%s" % (p, s)) for s in engines]
+                + [self.text("ratio.%s.cig-vm.cig-tree" % p),
+                   self.text("ratio.%s.cig-auto.cig-tree" % p),
+                   self.text("ratio.%s.cig-vm-cold.cig-tree" % p)]
+                for p in self.programs]
+        return self.grid(head, rows)
+
+    def table_engines_first(self):
+        """The first-runs doc's medians: the tree-walker, then a script's
+        runs under the default in the order they happen (first, second,
+        later), then the VM asked for by name (first run, later).
+        """
+        head = ["program"] + [LABEL[s] for s in FIRST_RUNS]
+        rows = [["`%s`" % p] + [self.text("median.%s.%s" % (p, s)) for s in FIRST_RUNS]
+                for p in self.programs]
+        return self.grid(head, rows)
+
+    def table_engines_first_ratios(self):
+        """The same sides, each over the tree-walker."""
+        sides = FIRST_RUNS[1:]
+        head = ["program"] + [LABEL[s] for s in sides]
+        rows = [["`%s`" % p] + [self.text("ratio.%s.%s.cig-tree" % (p, s)) for s in sides]
                 for p in self.programs]
         return self.grid(head, rows)
 
@@ -604,6 +668,9 @@ class Numbers:
             "moved": self.table_moved,
             "stability": self.table_stability,
             "engines": self.table_engines,
+            "engines-auto": self.table_engines_auto,
+            "engines-first": self.table_engines_first,
+            "engines-first-ratios": self.table_engines_first_ratios,
             "native": self.table_native,
             "conditions": self.table_conditions,
         }

@@ -1,0 +1,19 @@
+program	side	status	detail
+hello	cig-tree	ok	
+hello	cig-vm	ok	
+hello	cig-vm-cold	ok	
+hello	cig-auto	ok	
+hello	cig-auto-cold	ok	
+hello	cig-auto-second	ok	
+lines-500	cig-tree	ok	
+lines-500	cig-vm	ok	
+lines-500	cig-vm-cold	ok	
+lines-500	cig-auto	ok	
+lines-500	cig-auto-cold	ok	
+lines-500	cig-auto-second	ok	
+orchestrate	cig-tree	ok	
+orchestrate	cig-vm	ok	
+orchestrate	cig-vm-cold	ok	
+orchestrate	cig-auto	ok	
+orchestrate	cig-auto-cold	ok	
+orchestrate	cig-auto-second	ok	

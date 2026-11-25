@@ -31,8 +31,13 @@ LANGUAGES = ["lua", "luajit-off", "luajit", "python", "node", "rust"]
 IDIOMS = [("python-idiom", "python"), ("node-idiom", "node"), ("rust-idiom", "rust")]
 IDIOM_SIDES = [i for i, _ in IDIOMS]
 ENGINES = ["cig-tree", "cig-vm", "cig-vm-cold"]
+# The three `auto` sides: `cig run` on the default (cig-script#259), with the
+# module kept (`cig-auto`), on a script's first run (`cig-auto-cold`) and on
+# its second (`cig-auto-second`).
+AUTO_ENGINES = ["cig-auto", "cig-auto-cold", "cig-auto-second"]
 MAIN = ["cig", "stage-b", "stage-c"] + LANGUAGES
-ALL = CIG_SIDES + ["stage-c-off"] + ["cig-first"] + ENGINES + LANGUAGES + IDIOM_SIDES
+ALL = (CIG_SIDES + ["stage-c-off"] + ["cig-first"] + ENGINES + AUTO_ENGINES
+       + LANGUAGES + IDIOM_SIDES)
 
 LABELS = {
     "cig": "`cig run`",
@@ -41,6 +46,9 @@ LABELS = {
     "cig-tree": "`cig run --engine tree`",
     "cig-vm": "`cig run --engine vm`",
     "cig-vm-cold": "`cig run --engine vm`, empty tin",
+    "cig-auto": "`cig run` (default)",
+    "cig-auto-cold": "`cig run` (default), first run",
+    "cig-auto-second": "`cig run` (default), second run",
     "stage-a": "stage a",
     "stage-a-dry": "stage a, `--dry-run`",
     "stage-b": "stage b",
@@ -293,6 +301,11 @@ class Model:
                 ("cig-vm", "stage-b"), ("cig-vm", "stage-c")]
         out += [("cig-vm", b) for b in LANGUAGES]
         out += [("stage-c", "stage-c-off")]
+        # cig-script#259's pairs: the default against the tree-walker (the
+        # done-when condition) and against the VM (how much the default costs
+        # over asking for the VM directly, with the module kept).
+        out += [("cig-auto", "cig-tree"), ("cig-auto-cold", "cig-tree"),
+                ("cig-auto", "cig-vm"), ("cig-auto-second", "cig-tree")]
         return out
 
     def build(self):
@@ -326,6 +339,14 @@ class Model:
                 if self.valid(prog, a) and self.valid(prog, b):
                     r = self.median(prog, a) / self.median(prog, b)
                     self.put("ratio.%s.%s.%s" % (prog, a, b), fmt_ratio(r), r)
+                    # cig-script#259's "within 10%" gate: a first run on the
+                    # default is within 10% of the tree-walker's when the
+                    # ratio does not exceed 1.10 (a faster first run passes;
+                    # a slower one by more than 10% does not).
+                    is_within = 1 if r <= 1.10 else 0
+                    self.put("within10.%s.%s.%s" % (prog, a, b),
+                             "within 10%" if is_within else "past 10%",
+                             is_within)
             sets = [("compute", self.compute), ("start", self.start)]
             if (a, b) == ("stage-c", "stage-b"):
                 sets.append(("native", self.native_set))
@@ -617,6 +638,36 @@ class Model:
                        t("ratio.%s.cig-vm-cold.cig-tree" % p)]
                     for p in self.programs]
             return self.render_table(header, [False] + [True] * (len(engines) + 2), rows)
+        if name == "engines-auto":
+            # Four engines: the tree-walker, the VM (module kept), the default,
+            # and the VM with nothing in the tin; then three ratios against the
+            # tree-walker. The first-runs doc has its own five-engine table
+            # (`engines-first`) with the cold default too.
+            cols = ["cig-tree", "cig-vm", "cig-auto", "cig-vm-cold"]
+            header = (["program"] + [LABELS[s] for s in cols]
+                      + ["vm " + DIV + " tree",
+                         "auto " + DIV + " tree",
+                         "vm, empty tin " + DIV + " tree"])
+            rows = [["`%s`" % p]
+                    + [t("median.%s.%s" % (p, s)) for s in cols]
+                    + [t("ratio.%s.cig-vm.cig-tree" % p),
+                       t("ratio.%s.cig-auto.cig-tree" % p),
+                       t("ratio.%s.cig-vm-cold.cig-tree" % p)]
+                    for p in self.programs]
+            return self.render_table(header, [False] + [True] * (len(cols) + 3), rows)
+        if name == "engines-first":
+            cols = ["cig-tree", "cig-auto-cold", "cig-auto-second", "cig-auto",
+                    "cig-vm-cold", "cig-vm"]
+            header = ["program"] + [LABELS[s] for s in cols]
+            rows = [["`%s`" % p] + [t("median.%s.%s" % (p, s)) for s in cols]
+                    for p in self.programs]
+            return self.render_table(header, [False] + [True] * len(cols), rows)
+        if name == "engines-first-ratios":
+            cols = ["cig-auto-cold", "cig-auto-second", "cig-auto", "cig-vm-cold", "cig-vm"]
+            header = ["program"] + [LABELS[s] for s in cols]
+            rows = [["`%s`" % p] + [t("ratio.%s.%s.cig-tree" % (p, s)) for s in cols]
+                    for p in self.programs]
+            return self.render_table(header, [False] + [True] * len(cols), rows)
         if name == "conditions":
             return self.conditions_table()
         if name.startswith("since:"):
@@ -710,7 +761,12 @@ class Model:
                   ("harness", "harness"), ("rounds", "rounds"),
                   ("seed", "seed of the rounds' order"),
                   ("cpus", "pinned to CPUs"),
-                  ("floor_ms", "`true`, median ms")]
+                  ("floor_ms", "`true`, median ms"),
+                  ("rest", "rest after each run, times the run's length"),
+                  ("warm", "CPU kept busy before each run, ms"),
+                  ("cool", "a round waits for the package to be below, °C"),
+                  ("hot_rounds", "rounds begun without it"),
+                  ("lowering_timeouts", "waits for a left-behind lowering that gave up")]
         for key, label in simple:
             if not any(ps.condition(key) is not None for ps in self.passes):
                 continue

@@ -5,6 +5,28 @@ project follows semantic versioning.
 
 ## Unreleased
 
+- **The engines measured again on the new default, and `cig run` set
+  against other languages.** Two documents, every figure in them made
+  from the samples under `bench/results/2026-11-25-engines/` and made
+  again by a second program:
+  [`docs/ENGINES-2026-11-25.md`](docs/ENGINES-2026-11-25.md) has the
+  compute programs on the tree-walker, the VM and the default, and
+  `cig run` on the default beside Lua, LuaJIT, CPython, Node and Rust
+  in the same rounds;
+  [`docs/ENGINES-FIRST-RUNS-2026-11-25.md`](docs/ENGINES-FIRST-RUNS-2026-11-25.md)
+  has what a script's first, second and later runs cost under the
+  default, with a CPU free for the process a second run leaves behind
+  and held to one, and the same for the build that lowered a script on
+  its first run. The README's "How fast it is" quotes both. A
+  development machine and builds of the source, not the test machine.
+  `bench/compare/compare.py` gained what the measurement needed: three
+  sides for the default (`cig-auto` with the module kept,
+  `cig-auto-cold` a script's first run, `cig-auto-second` its second);
+  `cig run` itself timed with its module kept on a cig whose default is
+  `auto`; `--warm`, `--rest` and `--cool`, for passes of very short
+  runs or of runs of very different lengths; and a wait between runs
+  until nothing of the measured cig is left running. (#254, #259)
+
 - **Under `auto`, a script is lowered after its second run, not its
   first.** As it was merged (the entry about `auto` further down),
   `auto` started `cig __lower` on a script's first run. Measured, that
