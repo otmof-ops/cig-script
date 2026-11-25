@@ -86,6 +86,7 @@ use crate::interp::{
 use crate::syntax::ast::BinOp;
 use crate::syntax::span::Span;
 use crate::value::{Builtin, FnBody, Function, Value};
+use cig_bytecode::opcode::Fmt;
 use cig_bytecode::{
     decode_table, verify_function, verify_upvalues, Constant, DecodedInstr, FuncKind,
     Function as BcFunction, HandlerEntry, LineEntry, Op, ParseError, Reader, RegionLabel, SpanBase,
@@ -307,6 +308,9 @@ struct Proto {
     /// The decoded instruction at each first-word pc; `None` at the second
     /// word of a `WIDE` pair, which nothing may jump to.
     code: Vec<Option<DecodedInstr>>,
+    /// Each one-word instruction's word, by pc: what the fast loop
+    /// reads ([`Word`]).
+    words: Vec<Word>,
     /// The source position of each pc, from the line table.
     spans: Spans,
     consts: Vec<Value>,
@@ -320,6 +324,17 @@ struct Proto {
     regions: Vec<Region>,
     /// For each constant a `burn.op` names as its callee, the builtin.
     effects: Vec<Option<&'static Builtin>>,
+}
+
+impl Proto {
+    /// The function's instructions as a fast loop reads them.
+    #[inline(always)]
+    fn lines(&self) -> Lines<'_> {
+        Lines {
+            words: &self.words,
+            code: &self.code,
+        }
+    }
 }
 
 /// A function's source positions: one span per line row (the function's
@@ -1195,6 +1210,7 @@ fn build(
         reg_count: f.reg_count as usize,
         arity: f.arity as usize,
         spans: Spans::new(&f.span_base, &f.lines, f.instrs.len()),
+        words: Word::table(&code),
         code,
         consts: f.constants.iter().map(constant).collect(),
         children,
@@ -1685,7 +1701,7 @@ impl Machine<'_, Bodied> {
     fn run_fast_to<S: StopAt>(
         &mut self,
         proto: &Proto,
-        later: &[Option<DecodedInstr>],
+        later: Lines<'_>,
         mut pc: usize,
         base: usize,
         stops: &S,
@@ -1723,7 +1739,7 @@ impl Machine<'_, Bodied> {
         };
         // The first instruction is the function's own, whatever `later`
         // has there.
-        let mut code: &[Option<DecodedInstr>] = &proto.code;
+        let mut code = proto.lines();
         loop {
             let stop = match stack
                 .get_mut(base..end)
@@ -1794,7 +1810,13 @@ impl Machine<'_, Bodied> {
         body: &BodyEntry,
     ) -> Result<usize, Fault> {
         match body.between() {
-            Some(later) => self.run_fast_to(proto, &later, pc, base, &Nowhere),
+            Some(later) => {
+                let later = Lines {
+                    words: &later.words,
+                    code: &later.code,
+                };
+                self.run_fast_to(proto, later, pc, base, &Nowhere)
+            }
             // The table is held elsewhere: the general path runs the
             // instruction at `pc`, which is always right.
             None => Ok(pc),
@@ -1812,7 +1834,7 @@ impl Machine<'_, Bodied> {
         from: usize,
         to: usize,
     ) -> Result<usize, Fault> {
-        self.run_fast_to(proto, &proto.code, pc, base, &Outside { from, to })
+        self.run_fast_to(proto, proto.lines(), pc, base, &Outside { from, to })
     }
 
     /// [`Machine::unwind`] for a call a body's `run` is carrying: the
@@ -4401,6 +4423,153 @@ const REG_WINDOW: usize = 512;
 /// [`REG_WINDOW`] of them there.
 type Window = [Value; REG_WINDOW];
 
+/// One instruction as the fast loop reads it: the instruction's own
+/// word, four bytes, with its opcode decoded. A decoded instruction is
+/// thirty-two bytes of fields widened for the verifier and the general
+/// path; the loop needs a byte of each, so it reads the word, as the
+/// file has it, and widens what an arm uses.
+///
+/// `op` is [`Op::WIDE`] where the loop reads no instruction: both words
+/// of a `WIDE` pair (its operands do not fit a byte; the loop is handed
+/// the decoded instruction), and, in a body's table, a resume point.
+/// `WIDE` is a prefix, never an instruction a frame runs, so the loop's
+/// arms have none for it and it costs the loop no test of its own.
+#[derive(Clone, Copy)]
+struct Word {
+    op: Op,
+    a: u8,
+    b: u8,
+    c: u8,
+}
+
+const _: () = assert!(std::mem::size_of::<Word>() == 4);
+
+impl Word {
+    /// No instruction for the fast loop here.
+    const NONE: Word = Word {
+        op: Op::WIDE,
+        a: 0,
+        b: 0,
+        c: 0,
+    };
+
+    /// The word of a decoded instruction; none for a two-word one.
+    fn of(d: &DecodedInstr) -> Word {
+        if d.wide {
+            return Word::NONE;
+        }
+        // `Bx` lies where `B` and `C` do: its low byte, then its high.
+        let (b, c) = match d.fmt {
+            Fmt::ABC => (d.b_u as u8, d.c as u8),
+            Fmt::ABx | Fmt::AsBx => (d.b_u as u8, (d.b_u >> 8) as u8),
+        };
+        Word {
+            op: d.op,
+            a: d.a as u8,
+            b,
+            c,
+        }
+    }
+
+    /// The words of a decoded function, one a pc.
+    fn table(code: &[Option<DecodedInstr>]) -> Vec<Word> {
+        code.iter()
+            .map(|d| d.as_ref().map_or(Word::NONE, Word::of))
+            .collect()
+    }
+}
+
+/// A function's instructions as a fast loop reads them: each one's
+/// word, and beside it the decoded instruction, for what the word does
+/// not hold.
+#[derive(Clone, Copy)]
+struct Lines<'a> {
+    words: &'a [Word],
+    code: &'a [Option<DecodedInstr>],
+}
+
+/// An instruction's operands as the fast path's arms read them, from
+/// its word or from its decoded form: one source for both, so a
+/// two-word instruction is run by the code a one-word one is.
+trait Operands: Copy {
+    /// `A`.
+    fn a(self) -> u32;
+    /// `B` of an `ABC` instruction.
+    fn b(self) -> u32;
+    /// `C` of an `ABC` instruction.
+    fn c(self) -> u32;
+    /// `Bx` of an `ABx` instruction.
+    fn bx(self) -> u32;
+    /// `sBx` of an `AsBx` instruction.
+    fn sbx(self) -> i32;
+    /// `C` as a signed jump.
+    fn sc(self) -> i32;
+    /// How many words the instruction is.
+    fn width(self) -> usize;
+}
+
+impl Operands for Word {
+    #[inline(always)]
+    fn a(self) -> u32 {
+        u32::from(self.a)
+    }
+    #[inline(always)]
+    fn b(self) -> u32 {
+        u32::from(self.b)
+    }
+    #[inline(always)]
+    fn c(self) -> u32 {
+        u32::from(self.c)
+    }
+    #[inline(always)]
+    fn bx(self) -> u32 {
+        u32::from(u16::from_le_bytes([self.b, self.c]))
+    }
+    #[inline(always)]
+    fn sbx(self) -> i32 {
+        i32::from(i16::from_le_bytes([self.b, self.c]))
+    }
+    #[inline(always)]
+    fn sc(self) -> i32 {
+        i32::from(self.c as i8)
+    }
+    #[inline(always)]
+    fn width(self) -> usize {
+        1
+    }
+}
+
+impl Operands for &DecodedInstr {
+    #[inline(always)]
+    fn a(self) -> u32 {
+        self.a
+    }
+    #[inline(always)]
+    fn b(self) -> u32 {
+        self.b_u
+    }
+    #[inline(always)]
+    fn c(self) -> u32 {
+        self.c
+    }
+    #[inline(always)]
+    fn bx(self) -> u32 {
+        self.b_u
+    }
+    #[inline(always)]
+    fn sbx(self) -> i32 {
+        self.b_s
+    }
+    #[inline(always)]
+    fn sc(self) -> i32 {
+        self.c_s
+    }
+    #[inline(always)]
+    fn width(self) -> usize {
+        self.width as usize
+    }
+}
+
 /// The registers of the running frame, `R(0)` on, as the fast loop reads
 /// and writes them: a [`Window`], or the stack from the frame's base.
 /// The verifier proved every register number of the function below its
@@ -4505,25 +4674,13 @@ fn fast_run<R: FrameRegs + ?Sized>(
     mut pc: usize,
     upvals: &[Cell],
 ) -> Stop {
+    let lines = proto.lines();
     loop {
-        let Some(Some(d)) = proto.code.get(pc) else {
-            return Stop::Here(pc);
-        };
-        if R::BYTE_INDEXED && d.wide {
-            return Stop::Wide(pc);
-        }
-        #[cfg(feature = "bench-stats")]
-        let timer = stats::start(d.op);
-        let done = fast_one(regs, interp, frame, proto, d, upvals);
-        // An instruction left to the general path is counted there, once.
-        #[cfg(feature = "bench-stats")]
-        if done.is_some() {
-            stats::stop(timer);
-        }
-        match done {
-            Some(Ok(next)) => pc = next,
-            Some(Err(e)) => return Stop::Raised(pc, e),
-            None => return Stop::Here(pc),
+        match fast_at(regs, interp, frame, proto, lines, pc, upvals) {
+            Ok(Some(Ok(next))) => pc = next,
+            Ok(Some(Err(e))) => return Stop::Raised(pc, e),
+            Ok(None) => return Stop::Here(pc),
+            Err(stop) => return stop,
         }
     }
 }
@@ -4541,38 +4698,26 @@ fn fast_run_to<R: FrameRegs + ?Sized, S: StopAt>(
     interp: &mut Interp,
     frame: &mut Frame,
     proto: &Proto,
-    first: &[Option<DecodedInstr>],
-    later: &[Option<DecodedInstr>],
+    first: Lines<'_>,
+    later: Lines<'_>,
     mut pc: usize,
     upvals: &[Cell],
     stops: &S,
 ) -> Stop {
-    let mut code = first;
+    let mut lines = first;
     loop {
-        let Some(Some(d)) = code.get(pc) else {
-            return Stop::Here(pc);
-        };
-        code = later;
-        if R::BYTE_INDEXED && d.wide {
-            return Stop::Wide(pc);
-        }
-        #[cfg(feature = "bench-stats")]
-        let timer = stats::start(d.op);
-        let done = fast_one(regs, interp, frame, proto, d, upvals);
-        // An instruction left to the general path is counted there, once.
-        #[cfg(feature = "bench-stats")]
-        if done.is_some() {
-            stats::stop(timer);
-        }
+        let done = fast_at(regs, interp, frame, proto, lines, pc, upvals);
+        lines = later;
         match done {
-            Some(Ok(next)) => {
+            Ok(Some(Ok(next))) => {
                 pc = next;
                 if stops.stops(pc) {
                     return Stop::Here(pc);
                 }
             }
-            Some(Err(e)) => return Stop::Raised(pc, e),
-            None => return Stop::Here(pc),
+            Ok(Some(Err(e))) => return Stop::Raised(pc, e),
+            Ok(None) => return Stop::Here(pc),
+            Err(stop) => return stop,
         }
     }
 }
@@ -4589,7 +4734,7 @@ fn fast_one<R: FrameRegs + ?Sized>(
     d: &DecodedInstr,
     upvals: &[Cell],
 ) -> Option<Result<usize, Fault>> {
-    match fast(regs, interp, frame, proto, d, upvals) {
+    match fast(regs, interp, frame, proto, d.op, d.pc as usize, d, upvals) {
         Some(next) => Some(Ok(next)),
         // What switches frames is the machine's loop's: the second tier
         // has nothing for it, and is not called to say so.
@@ -4598,103 +4743,228 @@ fn fast_one<R: FrameRegs + ?Sized>(
     }
 }
 
-/// The common cases of the hot instructions in a frame whose registers
-/// carry no cell: the next pc when `d` ran here, `None` when it did not
-/// and changed nothing, so the general path runs it from the start and
-/// raises its error, if any, with the tree-walker's code and position.
+/// One instruction of a fast loop, at `pc` of `lines`: read from its
+/// word where it has one, and from its decoded form where it is two
+/// words long and the registers are read with a check. `Err` is where
+/// the loop stops without having run it.
+#[allow(clippy::too_many_arguments)]
 #[inline(always)]
-fn fast<R: FrameRegs + ?Sized>(
+fn fast_at<R: FrameRegs + ?Sized>(
     regs: &mut R,
     interp: &mut Interp,
     frame: &mut Frame,
     proto: &Proto,
-    d: &DecodedInstr,
+    lines: Lines<'_>,
+    pc: usize,
+    upvals: &[Cell],
+) -> Result<Option<Result<usize, Fault>>, Stop> {
+    let Some(w) = lines.words.get(pc) else {
+        return Err(Stop::Here(pc));
+    };
+    #[cfg(feature = "bench-stats")]
+    let timer = (w.op != Op::WIDE).then(|| stats::start(w.op));
+    let done = match fast(regs, interp, frame, proto, w.op, pc, *w, upvals) {
+        Some(next) => Some(Ok(next)),
+        None => fast_rest(regs, interp, frame, proto, lines, pc, w.op, upvals)?,
+    };
+    // An instruction left to the general path is counted there, once.
+    #[cfg(feature = "bench-stats")]
+    if let (Some(timer), true) = (timer, done.is_some()) {
+        stats::stop(timer);
+    }
+    Ok(done)
+}
+
+/// What [`fast_at`] does with an instruction the first tier did not run
+/// from its word: the second tier, which is handed the decoded
+/// instruction; nothing, for what switches frames (that is the
+/// machine's loop's); and, where the word is none, the decoded
+/// instruction of two words on checked registers, or the loop's stop.
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn fast_rest<R: FrameRegs + ?Sized>(
+    regs: &mut R,
+    interp: &mut Interp,
+    frame: &mut Frame,
+    proto: &Proto,
+    lines: Lines<'_>,
+    pc: usize,
+    op: Op,
+    upvals: &[Cell],
+) -> Result<Option<Result<usize, Fault>>, Stop> {
+    match op {
+        Op::CALL | Op::RET | Op::TAILCALL => Ok(None),
+        Op::WIDE => match lines.code.get(pc) {
+            Some(Some(_)) if R::BYTE_INDEXED => Err(Stop::Wide(pc)),
+            Some(Some(d)) => {
+                #[cfg(feature = "bench-stats")]
+                let timer = stats::start(d.op);
+                let done = fast_one(regs, interp, frame, proto, d, upvals);
+                #[cfg(feature = "bench-stats")]
+                if done.is_some() {
+                    stats::stop(timer);
+                }
+                Ok(done)
+            }
+            _ => Err(Stop::Here(pc)),
+        },
+        _ => match proto.code.get(pc) {
+            Some(Some(d)) => Ok(fast_call(regs, interp, proto, d)),
+            _ => Err(Stop::Here(pc)),
+        },
+    }
+}
+
+/// The common cases of the hot instructions in a frame whose registers
+/// carry no cell: the next pc when `d` ran here, `None` when it did not
+/// and changed nothing, so the general path runs it from the start and
+/// raises its error, if any, with the tree-walker's code and position.
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn fast<R: FrameRegs + ?Sized, I: Operands>(
+    regs: &mut R,
+    interp: &mut Interp,
+    frame: &mut Frame,
+    proto: &Proto,
+    op: Op,
+    pc: usize,
+    d: I,
     upvals: &[Cell],
 ) -> Option<usize> {
-    let pc = d.pc as usize;
-    let next = pc + d.width as usize;
-    let v = match d.op {
+    let next = pc + d.width();
+    let v = match op {
         Op::NOP => return Some(next),
-        Op::MOV => regs.reg(d.b_u)?.clone(),
-        Op::LOADK => proto.consts.get(d.b_u as usize)?.clone(),
-        Op::LOADNULL => Value::Null,
-        Op::LOADBOOL => Value::Bool(d.b_u != 0),
-        Op::LOADINT => Value::Int(i64::from(d.b_s)),
+        Op::MOV => regs.reg(d.b())?.clone(),
+        Op::LOADK => proto.consts.get(d.bx() as usize)?.clone(),
+        Op::LOADNULL => return put(regs, d.a(), Value::Null, next),
+        Op::LOADBOOL => return put_bool(regs, d.a(), d.b() != 0, next),
+        Op::LOADINT => return put_num(regs, d.a(), Num::Int(i64::from(d.sbx())), next),
         // Each operator where its opcode is matched, as `op_arith` does
         // in Lua: two ints, two floats, or an int and a float (which
         // `binary` computes as two floats), and `None` for the rest
         // (overflow, a zero divisor, a NaN in an ordering, any other
         // type), which the general path runs with `binary`.
-        Op::ADD => num_add(regs.reg(d.b_u)?, regs.reg(d.c)?)?,
-        Op::SUB => num_sub(regs.reg(d.b_u)?, regs.reg(d.c)?)?,
-        Op::MUL => num_mul(regs.reg(d.b_u)?, regs.reg(d.c)?)?,
-        Op::DIV => num_div(regs.reg(d.b_u)?, regs.reg(d.c)?)?,
-        Op::MOD => num_mod(regs.reg(d.b_u)?, regs.reg(d.c)?)?,
-        Op::EQ => Value::Bool(cmp_eq(regs.reg(d.b_u)?, regs.reg(d.c)?)),
-        Op::LT => Value::Bool(cmp_lt(regs.reg(d.b_u)?, regs.reg(d.c)?)?),
-        Op::LE => Value::Bool(cmp_le(regs.reg(d.b_u)?, regs.reg(d.c)?)?),
-        Op::ADDK => num_add(regs.reg(d.b_u)?, proto.consts.get(d.c as usize)?)?,
-        Op::SUBK => num_sub(regs.reg(d.b_u)?, proto.consts.get(d.c as usize)?)?,
-        Op::MULK => num_mul(regs.reg(d.b_u)?, proto.consts.get(d.c as usize)?)?,
-        Op::DIVK => num_div(regs.reg(d.b_u)?, proto.consts.get(d.c as usize)?)?,
-        Op::MODK => num_mod(regs.reg(d.b_u)?, proto.consts.get(d.c as usize)?)?,
-        Op::EQK => Value::Bool(cmp_eq(regs.reg(d.b_u)?, proto.consts.get(d.c as usize)?)),
-        Op::LTK => Value::Bool(cmp_lt(regs.reg(d.b_u)?, proto.consts.get(d.c as usize)?)?),
-        Op::LEK => Value::Bool(cmp_le(regs.reg(d.b_u)?, proto.consts.get(d.c as usize)?)?),
-        Op::NOT => Value::Bool(!regs.reg(d.b_u)?.truthy()),
+        Op::ADD => {
+            let n = num_add(regs.reg(d.b())?, regs.reg(d.c())?)?;
+            return put_num(regs, d.a(), n, next);
+        }
+        Op::SUB => {
+            let n = num_sub(regs.reg(d.b())?, regs.reg(d.c())?)?;
+            return put_num(regs, d.a(), n, next);
+        }
+        Op::MUL => {
+            let n = num_mul(regs.reg(d.b())?, regs.reg(d.c())?)?;
+            return put_num(regs, d.a(), n, next);
+        }
+        Op::DIV => {
+            let n = num_div(regs.reg(d.b())?, regs.reg(d.c())?)?;
+            return put_num(regs, d.a(), n, next);
+        }
+        Op::MOD => {
+            let n = num_mod(regs.reg(d.b())?, regs.reg(d.c())?)?;
+            return put_num(regs, d.a(), n, next);
+        }
+        Op::EQ => {
+            let t = cmp_eq(regs.reg(d.b())?, regs.reg(d.c())?);
+            return put_bool(regs, d.a(), t, next);
+        }
+        Op::LT => {
+            let t = cmp_lt(regs.reg(d.b())?, regs.reg(d.c())?)?;
+            return put_bool(regs, d.a(), t, next);
+        }
+        Op::LE => {
+            let t = cmp_le(regs.reg(d.b())?, regs.reg(d.c())?)?;
+            return put_bool(regs, d.a(), t, next);
+        }
+        Op::ADDK => {
+            let n = num_add(regs.reg(d.b())?, proto.consts.get(d.c() as usize)?)?;
+            return put_num(regs, d.a(), n, next);
+        }
+        Op::SUBK => {
+            let n = num_sub(regs.reg(d.b())?, proto.consts.get(d.c() as usize)?)?;
+            return put_num(regs, d.a(), n, next);
+        }
+        Op::MULK => {
+            let n = num_mul(regs.reg(d.b())?, proto.consts.get(d.c() as usize)?)?;
+            return put_num(regs, d.a(), n, next);
+        }
+        Op::DIVK => {
+            let n = num_div(regs.reg(d.b())?, proto.consts.get(d.c() as usize)?)?;
+            return put_num(regs, d.a(), n, next);
+        }
+        Op::MODK => {
+            let n = num_mod(regs.reg(d.b())?, proto.consts.get(d.c() as usize)?)?;
+            return put_num(regs, d.a(), n, next);
+        }
+        Op::EQK => {
+            let t = cmp_eq(regs.reg(d.b())?, proto.consts.get(d.c() as usize)?);
+            return put_bool(regs, d.a(), t, next);
+        }
+        Op::LTK => {
+            let t = cmp_lt(regs.reg(d.b())?, proto.consts.get(d.c() as usize)?)?;
+            return put_bool(regs, d.a(), t, next);
+        }
+        Op::LEK => {
+            let t = cmp_le(regs.reg(d.b())?, proto.consts.get(d.c() as usize)?)?;
+            return put_bool(regs, d.a(), t, next);
+        }
+        Op::NOT => {
+            let t = !regs.reg(d.b())?.truthy();
+            return put_bool(regs, d.a(), t, next);
+        }
         Op::EQJ | Op::NEJ | Op::LTJ | Op::LEJ => {
-            let (l, rv) = (regs.reg(d.a)?, regs.reg(d.b_u)?);
-            let t = match d.op {
+            let (l, rv) = (regs.reg(d.a())?, regs.reg(d.b())?);
+            let t = match op {
                 Op::EQJ => cmp_eq(l, rv),
                 Op::NEJ => !cmp_eq(l, rv),
                 Op::LTJ => cmp_lt(l, rv)?,
                 _ => cmp_le(l, rv)?,
             };
-            return if t { fast_jump(pc, d.c_s) } else { Some(next) };
+            return if t { fast_jump(pc, d.sc()) } else { Some(next) };
         }
-        Op::JMP | Op::LOOP => return fast_jump(pc, d.b_s),
+        Op::JMP | Op::LOOP => return fast_jump(pc, d.sbx()),
         Op::TEST | Op::TESTN => {
-            let truthy = regs.reg(d.a)?.truthy();
-            return if truthy == (d.op == Op::TEST) {
-                fast_jump(pc, d.b_s)
+            let truthy = regs.reg(d.a())?.truthy();
+            return if truthy == (op == Op::TEST) {
+                fast_jump(pc, d.sbx())
             } else {
                 Some(next)
             };
         }
         Op::STEPS => {
-            let n = u64::from(d.b_u);
+            let n = u64::from(d.bx());
             if interp.max_steps != 0 && interp.steps.saturating_add(n) > interp.max_steps {
                 return None;
             }
-            nest_frame(&mut interp.loop_depth, frame, d.a);
+            nest_frame(&mut interp.loop_depth, frame, d.a());
             interp.steps += n;
             return Some(next);
         }
         Op::FORLOOP => {
             let (Value::Int(cur), Value::Int(limit), Value::Int(step)) =
-                (regs.reg(d.a)?, regs.reg(d.a + 1)?, regs.reg(d.a + 2)?)
+                (regs.reg(d.a())?, regs.reg(d.a() + 1)?, regs.reg(d.a() + 2)?)
             else {
                 return None;
             };
             let (cur, limit, step) = (*cur, *limit, *step);
-            let target = fast_jump(pc, d.b_s)?;
-            regs.reg(d.a + 3)?;
+            let target = fast_jump(pc, d.sbx())?;
+            regs.reg(d.a() + 3)?;
             let more = cur
                 .checked_add(step)
                 .filter(|n| if step > 0 { *n < limit } else { *n > limit });
             return match more {
                 Some(n) => {
-                    overwrite(regs.reg_mut(d.a)?, Value::Int(n));
-                    overwrite(regs.reg_mut(d.a + 3)?, Value::Int(n));
+                    overwrite(regs.reg_mut(d.a())?, Value::Int(n));
+                    overwrite(regs.reg_mut(d.a() + 3)?, Value::Int(n));
                     Some(target)
                 }
                 None => Some(next),
             };
         }
-        Op::GETUP | Op::CELLGET => upvals.get(d.b_u as usize)?.try_borrow().ok()?.clone(),
+        Op::GETUP | Op::CELLGET => upvals.get(d.b() as usize)?.try_borrow().ok()?.clone(),
         Op::GETINDEX => {
-            let obj = regs.reg(d.b_u)?;
-            let idx = regs.reg(d.c)?;
+            let obj = regs.reg(d.b())?;
+            let idx = regs.reg(d.c())?;
             let v = match (obj, idx) {
                 (Value::List(list), Value::Int(i)) => {
                     let at = usize::try_from(*i).ok()?;
@@ -4703,14 +4973,14 @@ fn fast<R: FrameRegs + ?Sized>(
                 (Value::Map(map), Value::Str(key)) => map.try_borrow().ok()?.get(&**key)?.clone(),
                 _ => return None,
             };
-            overwrite(regs.reg_mut(d.a)?, v);
+            overwrite(regs.reg_mut(d.a())?, v);
             return Some(past_nops(proto, next, 1));
         }
         Op::GETFIELD => {
-            let Value::Map(map) = regs.reg(d.b_u)? else {
+            let Value::Map(map) = regs.reg(d.b())? else {
                 return None;
             };
-            let Value::Str(name) = proto.consts.get(d.c as usize)? else {
+            let Value::Str(name) = proto.consts.get(d.c() as usize)? else {
                 return None;
             };
             let map = map.try_borrow().ok()?;
@@ -4719,13 +4989,13 @@ fn fast<R: FrameRegs + ?Sized>(
             v
         }
         Op::SETFIELD => {
-            let Value::Map(map) = regs.reg(d.a)? else {
+            let Value::Map(map) = regs.reg(d.a())? else {
                 return None;
             };
-            let Value::Str(name) = proto.consts.get(d.b_u as usize)? else {
+            let Value::Str(name) = proto.consts.get(d.b() as usize)? else {
                 return None;
             };
-            let v = regs.reg(d.c)?.clone();
+            let v = regs.reg(d.c())?.clone();
             let mut map = map.try_borrow_mut().ok()?;
             let i = field_index(&map, name, proto.hints.get(pc)?)?;
             let old = std::mem::replace(map.get_index_mut(i)?.1, v);
@@ -4734,11 +5004,11 @@ fn fast<R: FrameRegs + ?Sized>(
             return Some(next);
         }
         Op::SETINDEX => {
-            let (Value::List(list), Value::Int(i)) = (regs.reg(d.a)?, regs.reg(d.b_u)?) else {
+            let (Value::List(list), Value::Int(i)) = (regs.reg(d.a())?, regs.reg(d.b())?) else {
                 return None;
             };
             let at = usize::try_from(*i).ok()?;
-            let v = regs.reg(d.c)?.clone();
+            let v = regs.reg(d.c())?.clone();
             let mut list = list.try_borrow_mut().ok()?;
             let slot = list.get_mut(at)?;
             let old = std::mem::replace(slot, v);
@@ -4748,7 +5018,7 @@ fn fast<R: FrameRegs + ?Sized>(
         }
         _ => return None,
     };
-    overwrite(regs.reg_mut(d.a)?, v);
+    overwrite(regs.reg_mut(d.a())?, v);
     Some(next)
 }
 
@@ -4927,34 +5197,69 @@ fn mixed(l: &Value, r: &Value) -> Option<(f64, f64)> {
     }
 }
 
+/// A number an arithmetic instruction makes, before it is a value in a
+/// register: two scalars the compiler keeps in machine registers, where
+/// a [`Value`] on its way to one was built in memory and copied.
+#[derive(Clone, Copy)]
+enum Num {
+    Int(i64),
+    Float(f64),
+}
+
+/// `R(a) = n`, a number: the kind and the payload are stored, and
+/// nothing else of the register is.
+#[inline(always)]
+fn put_num<R: FrameRegs + ?Sized>(regs: &mut R, a: u32, n: Num, next: usize) -> Option<usize> {
+    let slot = regs.reg_mut(a)?;
+    match n {
+        Num::Int(i) => overwrite(slot, Value::Int(i)),
+        Num::Float(x) => overwrite(slot, Value::Float(x)),
+    }
+    Some(next)
+}
+
+/// `R(a) = t`, a bool.
+#[inline(always)]
+fn put_bool<R: FrameRegs + ?Sized>(regs: &mut R, a: u32, t: bool, next: usize) -> Option<usize> {
+    overwrite(regs.reg_mut(a)?, Value::Bool(t));
+    Some(next)
+}
+
+/// `R(a) = v`.
+#[inline(always)]
+fn put<R: FrameRegs + ?Sized>(regs: &mut R, a: u32, v: Value, next: usize) -> Option<usize> {
+    overwrite(regs.reg_mut(a)?, v);
+    Some(next)
+}
+
 /// `l + r` on numbers, as `binary` gives it: `None` on overflow and for
 /// any operand that is not a number (strings and lists included).
 #[inline(always)]
-fn num_add(l: &Value, r: &Value) -> Option<Value> {
+fn num_add(l: &Value, r: &Value) -> Option<Num> {
     match (l, r) {
-        (Value::Int(a), Value::Int(b)) => a.checked_add(*b).map(Value::Int),
-        (Value::Float(a), Value::Float(b)) => Some(Value::Float(a + b)),
-        _ => mixed(l, r).map(|(a, b)| Value::Float(a + b)),
+        (Value::Int(a), Value::Int(b)) => a.checked_add(*b).map(Num::Int),
+        (Value::Float(a), Value::Float(b)) => Some(Num::Float(a + b)),
+        _ => mixed(l, r).map(|(a, b)| Num::Float(a + b)),
     }
 }
 
 /// `l - r` on numbers, as `binary` gives it.
 #[inline(always)]
-fn num_sub(l: &Value, r: &Value) -> Option<Value> {
+fn num_sub(l: &Value, r: &Value) -> Option<Num> {
     match (l, r) {
-        (Value::Int(a), Value::Int(b)) => a.checked_sub(*b).map(Value::Int),
-        (Value::Float(a), Value::Float(b)) => Some(Value::Float(a - b)),
-        _ => mixed(l, r).map(|(a, b)| Value::Float(a - b)),
+        (Value::Int(a), Value::Int(b)) => a.checked_sub(*b).map(Num::Int),
+        (Value::Float(a), Value::Float(b)) => Some(Num::Float(a - b)),
+        _ => mixed(l, r).map(|(a, b)| Num::Float(a - b)),
     }
 }
 
 /// `l * r` on numbers, as `binary` gives it.
 #[inline(always)]
-fn num_mul(l: &Value, r: &Value) -> Option<Value> {
+fn num_mul(l: &Value, r: &Value) -> Option<Num> {
     match (l, r) {
-        (Value::Int(a), Value::Int(b)) => a.checked_mul(*b).map(Value::Int),
-        (Value::Float(a), Value::Float(b)) => Some(Value::Float(a * b)),
-        _ => mixed(l, r).map(|(a, b)| Value::Float(a * b)),
+        (Value::Int(a), Value::Int(b)) => a.checked_mul(*b).map(Num::Int),
+        (Value::Float(a), Value::Float(b)) => Some(Num::Float(a * b)),
+        _ => mixed(l, r).map(|(a, b)| Num::Float(a * b)),
     }
 }
 
@@ -4962,34 +5267,34 @@ fn num_mul(l: &Value, r: &Value) -> Option<Value> {
 /// exactly, else the floats' quotient; `None` for a zero divisor and for
 /// `i64::MIN / -1`.
 #[inline(always)]
-fn num_div(l: &Value, r: &Value) -> Option<Value> {
+fn num_div(l: &Value, r: &Value) -> Option<Num> {
     let (a, b) = match (l, r) {
         (Value::Int(a), Value::Int(b)) => {
             if *b == 0 || (*a == i64::MIN && *b == -1) {
                 return None;
             }
             if a % b == 0 {
-                return Some(Value::Int(a / b));
+                return Some(Num::Int(a / b));
             }
             (*a as f64, *b as f64)
         }
         (Value::Float(a), Value::Float(b)) => (*a, *b),
         _ => mixed(l, r)?,
     };
-    (b != 0.0).then(|| Value::Float(a / b))
+    (b != 0.0).then(|| Num::Float(a / b))
 }
 
 /// `l % r` on numbers, as `binary` gives it: `None` for a zero divisor.
 #[inline(always)]
-fn num_mod(l: &Value, r: &Value) -> Option<Value> {
+fn num_mod(l: &Value, r: &Value) -> Option<Num> {
     let (a, b) = match (l, r) {
         (Value::Int(a), Value::Int(b)) => {
-            return (*b != 0).then(|| Value::Int(a.wrapping_rem(*b)));
+            return (*b != 0).then(|| Num::Int(a.wrapping_rem(*b)));
         }
         (Value::Float(a), Value::Float(b)) => (*a, *b),
         _ => mixed(l, r)?,
     };
-    (b != 0.0).then(|| Value::Float(a % b))
+    (b != 0.0).then(|| Num::Float(a % b))
 }
 
 /// `l == r` for any two values (`Value::equals`, as `binary` computes it).

@@ -5,6 +5,23 @@ project follows semantic versioning.
 
 ## Unreleased
 
+- **The VM's fast loop reads an instruction's own word.** The loop read
+  each instruction from a decoded record of thirty-two bytes, made for
+  the verifier and the general path, with every operand widened to four
+  bytes. It now reads the word the file holds (the opcode and three
+  operand bytes, four bytes in all) and widens what an arm uses: an
+  eighth of the memory walked, no mask on a register number that is a
+  byte, and one test fewer an instruction (a place the loop reads no
+  word is marked with the `WIDE` prefix's opcode, which no arm has). A
+  two-word instruction is run from its decoded form, by the same arms.
+  **Arithmetic and comparisons store their result in place:** the kind
+  and the payload go straight into the register, where the value was
+  built in memory and copied. Machine instructions executed at stage
+  `b`, against the runtime before: a plain loop 0.71, `mandel` 0.69,
+  `fannkuch` 0.80, `spectral` 0.81, `deltablue` 0.81, `nbody` 0.83,
+  `sieve` 0.86, `richards` 0.88, `dispatch` 0.88, `fib` 0.88, `trees`
+  0.90, `closures` 0.96. Nothing a script can see changes.
+
 - **A call and a return are cheaper on the VM.** `call` of a script's
   function and `ret` are not instructions the VM's fast loop runs, and
   each used to leave the loop for the general path's frame switch and

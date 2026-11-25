@@ -875,6 +875,13 @@ open. A lowering writes to them.
   general path: the fast loop's Rust frame is never on the stack while
   the VM runs again inside a call.
 
+  The loop reads each one-word instruction as the word the file holds:
+  the opcode and three operand bytes, four bytes in all, where the
+  decoded record the verifier and the general path use is thirty-two.
+  A two-word (`wide`) instruction has no such word, and is run from its
+  decoded form. An arithmetic or comparison instruction stores its
+  result's kind and payload straight into the register.
+
   The loop takes the frame's registers once, not at every instruction:
   a run's machine keeps 512 registers in the stack from the running
   frame's base, which a one-word instruction's register numbers (a byte
