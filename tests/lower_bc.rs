@@ -93,7 +93,7 @@ fn outcome(r: Result<(), Diagnostic>, run: &Run) -> (Outcome, u64) {
                 .filter(|_| exit.is_none())
                 .map(|d| (d.code.to_string(), d.message, d.hint, d.line, d.col)),
         },
-        run.interp.steps,
+        run.interp.steps(),
     )
 }
 

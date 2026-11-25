@@ -45,10 +45,28 @@ pub struct Interp {
     pub script_name: Option<String>,
     /// Exit code requested by `exit(n)`, if any.
     pub exit_requested: Option<i32>,
-    /// Statements and loop iterations executed so far.
-    pub steps: u64,
     /// The step budget; 0 means none. `--max-steps` and `CIG_MAX_STEPS`.
-    pub max_steps: u64,
+    /// Private to this module so [`set_max_steps`] is the one writer and
+    /// the count cannot fall behind it. Readers go through [`max_steps`].
+    max_steps: u64,
+    /// The steps the fast paths may still count before they must stop and
+    /// ask. Zero sends the next fast arm (and the next [`tick`]) to the
+    /// general path. With no budget it starts at `u64::MAX` and a run
+    /// would need 2^64 steps to bring it to zero; then `tick` resets it
+    /// from the count. `pub(crate)` for the VM's two fast arms, which
+    /// are the only writers of `left` outside this module and write
+    /// nothing else: the count is derived (see [`base`](Self::base)).
+    pub(crate) left: u64,
+    /// The count's seat: `steps() == base.wrapping_sub(left)`. `base` is
+    /// chosen by every writer so a `left -= n` by a fast arm advances the
+    /// count by `n`, so the fast arms write only `left`. Private to this
+    /// module: outside readers go through [`steps()`](Self::steps);
+    /// outside writers (the general `Op::STEPS` arm, native code, tests)
+    /// go through [`tick`], [`add_steps`], [`set_steps`] or
+    /// [`set_max_steps`]. The invariant
+    /// `left == stop_from_max(max_steps).saturating_sub(steps())` holds
+    /// at every writer boundary.
+    base: u64,
     pub(crate) loop_depth: u32,
     /// Chains being lit right now, outermost first, to catch a chain that
     /// lights itself (E604) and to tag ops with their owner.
@@ -82,6 +100,18 @@ pub fn default_max_steps() -> u64 {
         .unwrap_or(10_000_000)
 }
 
+/// The stop for a given budget: `u64::MAX` with none, the budget otherwise.
+/// The invariant [`Interp::left`] keeps is `left == stop.saturating_sub(steps)`
+/// at every writer boundary.
+#[inline(always)]
+fn stop_from_max(max: u64) -> u64 {
+    if max == 0 {
+        u64::MAX
+    } else {
+        max
+    }
+}
+
 impl Interp {
     pub fn new(kernel: Kernel) -> Self {
         let prelude = Scope::root();
@@ -101,8 +131,9 @@ impl Interp {
             cough_payload: None,
             script_name: None,
             exit_requested: None,
-            steps: 0,
             max_steps: default_max_steps(),
+            left: stop_from_max(default_max_steps()),
+            base: stop_from_max(default_max_steps()),
             loop_depth: 0,
             chain_stack: Vec::new(),
             recs: Vec::new(),
@@ -151,19 +182,94 @@ impl Interp {
         self.call_depth
     }
 
-    /// Set the step budget (0 disables it).
+    /// Set the step budget (0 disables it). The one writer of `max_steps`,
+    /// so the countdown cannot fall behind it. The current count is kept.
     pub fn set_max_steps(&mut self, n: u64) {
+        let s = self.steps();
         self.max_steps = n;
+        self.left = stop_from_max(n).saturating_sub(s);
+        self.base = s.wrapping_add(self.left);
+    }
+
+    /// The current step budget (0 means none).
+    #[inline(always)]
+    pub fn max_steps(&self) -> u64 {
+        self.max_steps
+    }
+
+    /// Statements and loop iterations executed so far. Derived from the
+    /// countdown and its seat: a fast arm's `left -= n` advances it by
+    /// `n` without reading or writing the count.
+    #[inline(always)]
+    pub fn steps(&self) -> u64 {
+        self.base.wrapping_sub(self.left)
+    }
+
+    /// Count `n` steps as a bulk add from native code or the general
+    /// `Op::STEPS` arm: saturates on overflow, which the general path
+    /// then meets as "the budget is spent". Routes through [`set_steps`]
+    /// so `base` and `left` are chosen together.
+    #[inline(always)]
+    pub(crate) fn add_steps(&mut self, n: u64) {
+        let s = self.steps().saturating_add(n);
+        self.set_steps(s);
+    }
+
+    /// Set the step count to `s` (native code's `E515` entry hands the
+    /// budget to `tick` this way; a test may need it for a state built
+    /// directly). Picks `base` and `left` so `steps() == s` and the
+    /// invariant holds.
+    #[inline(always)]
+    pub(crate) fn set_steps(&mut self, s: u64) {
+        self.left = stop_from_max(self.max_steps).saturating_sub(s);
+        self.base = s.wrapping_add(self.left);
+    }
+
+    /// Assert the invariant the fast arms depend on: a writer that forgets
+    /// it is caught by every debug test run. A no-op in release.
+    #[inline(always)]
+    pub(crate) fn debug_check_left(&self) {
+        let s = self.steps();
+        debug_assert_eq!(
+            self.left,
+            stop_from_max(self.max_steps).saturating_sub(s),
+            "left out of step: steps {}, max_steps {}, left {}",
+            s,
+            self.max_steps,
+            self.left,
+        );
     }
 
     /// Count one step; over the budget, the loop (or the script) is stopped
     /// with E515 at `span`.
+    ///
+    /// The countdown is the test: `left` is the distance to the budget's
+    /// end, so the step that finds it at zero is the one that overspends.
+    /// `left -= 1` advances the count because `steps() == base - left`.
     #[inline(always)]
     pub(crate) fn tick(&mut self, span: Span) -> Result<(), Diagnostic> {
-        self.steps += 1;
-        if self.max_steps != 0 && self.steps > self.max_steps {
+        if self.left == 0 {
+            return self.at_the_stop(span);
+        }
+        self.left -= 1;
+        Ok(())
+    }
+
+    /// A step counted with nothing left: past the budget it is `E515`.
+    /// With no budget the countdown has come round (2^64 steps), and it
+    /// is set again from the count. The step is counted either way: with
+    /// `left == 0`, `base += 1` is what the fast arm's `left -= 1` would
+    /// have done.
+    #[cold]
+    #[inline(never)]
+    fn at_the_stop(&mut self, span: Span) -> Result<(), Diagnostic> {
+        self.base = self.base.wrapping_add(1);
+        if self.max_steps != 0 {
             return Err(self.over_budget(span));
         }
+        let s = self.steps();
+        self.left = stop_from_max(self.max_steps).saturating_sub(s);
+        self.base = s.wrapping_add(self.left);
         Ok(())
     }
 

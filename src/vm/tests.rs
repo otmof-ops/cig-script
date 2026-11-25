@@ -543,12 +543,12 @@ fn steps_a_body_counted_before_quick_raised_are_the_runs() {
         super::native::ASK_STEPS.with(|c| c.set(taken));
         super::native::ASK_AT.with(|c| c.set(Some((1, super::native::Ask::Quick, 2))));
         let mut i = interp();
-        let before = i.steps;
+        let before = i.steps();
         let r = run(&mut i, &program_with_test_bodies(&m));
         super::native::ASK_AT.with(|c| c.set(None));
         super::native::ASK_STEPS.with(|c| c.set(0));
         assert!(r.is_err(), "the call raises");
-        i.steps - before
+        i.steps() - before
     };
     assert_eq!(steps_after(0), 0);
     assert_eq!(steps_after(5), 5);
@@ -2744,7 +2744,7 @@ fn walker_stop(src: &str, budget: u64) -> (Option<Diagnostic>, u64) {
     let mut i = interp();
     i.set_max_steps(budget);
     let r = i.run_program(&program);
-    (r.err(), i.steps)
+    (r.err(), i.steps())
 }
 
 fn vm_stop(m: &Module, budget: u64) -> (Option<Diagnostic>, u64) {
@@ -2754,7 +2754,7 @@ fn vm_stop(m: &Module, budget: u64) -> (Option<Diagnostic>, u64) {
         let r = run(&mut i, program);
         assert_eq!(i.loop_depth, 0, "the loop depth is given back");
         assert_eq!(i.call_depth_for_tests(), 0, "the call depth is given back");
-        (r, i.steps)
+        (r, i.steps())
     };
     // As today, and through the driver: the same end, the same error
     // at the same place, and the same count of steps.
@@ -2893,7 +2893,128 @@ fn a_steps_charge_stops_on_its_own_line() {
     assert_eq!(e.code, "E515");
     assert_eq!(e.message, "the script needs more than 2 steps");
     assert_eq!(at_pc(&e), Some(0));
-    assert_eq!(i.steps, 3);
+    assert_eq!(i.steps(), 3);
+}
+
+#[test]
+fn the_countdown_tracks_the_budget_through_every_writer() {
+    // The invariant `left == stop_from_max(max_steps).saturating_sub(steps())`
+    // is kept by every writer in the crate but the two fast arms, which
+    // write `left` only; the count is derived (`steps() == base - left`).
+    let check = |i: &Interp, want_left: u64, want_steps: u64, label: &str| {
+        assert_eq!(i.left, want_left, "{label}: left");
+        assert_eq!(i.steps(), want_steps, "{label}: steps()");
+        i.debug_check_left();
+    };
+    let mut i = Interp::new(Kernel::ephemeral(Mode::Run));
+    // Construction: default budget; the count is zero whether or not a
+    // budget is set.
+    assert!(i.max_steps() > 0, "default budget is set");
+    check(&i, i.max_steps(), 0, "after new (default budget)");
+    // No budget: `left` is `u64::MAX` and the count is still zero.
+    i.set_max_steps(0);
+    check(&i, u64::MAX, 0, "no budget, steps 0");
+    // Budget M with the count at zero: `left == M`.
+    i.set_max_steps(100);
+    check(&i, 100, 0, "budget 100, steps 0");
+    // tick advances the count by one and takes one from the countdown.
+    i.tick(Span::default()).expect("tick 1");
+    check(&i, 99, 1, "after one tick");
+    // add_steps(n): bulk count, bulk take.
+    i.add_steps(10);
+    check(&i, 89, 11, "after add_steps(10)");
+    // set_steps(s): absolute set, `left` and `base` recomputed.
+    i.set_steps(50);
+    check(&i, 50, 50, "after set_steps(50)");
+    // set_max_steps mid-run: `left` follows, the count is kept.
+    i.set_max_steps(200);
+    check(&i, 150, 50, "after raising the budget to 200");
+    i.set_max_steps(30);
+    check(&i, 0, 50, "after lowering the budget below the count");
+    i.set_max_steps(0);
+    check(&i, u64::MAX - 50, 50, "after disabling the budget");
+
+    // ----- the boundary at a budget of M --------------------------------
+    // M + 1 ticks: the first M succeed, the next raises E515 with M + 1
+    // steps counted (the step that overspends is counted). The invariant
+    // holds at every state.
+    const M: u64 = 7;
+    i = Interp::new(Kernel::ephemeral(Mode::Run));
+    i.set_max_steps(M);
+    for step in 1..=M {
+        i.tick(Span::default()).expect("inside the budget");
+        check(&i, M - step, step, &format!("after tick {step}"));
+    }
+    let past = i.tick(Span::default()).expect_err("E515 at M+1");
+    assert_eq!(past.code, "E515", "tick at M+1 raises E515");
+    check(&i, 0, M + 1, "after tick M+1 (caught E515 state)");
+    // Every later tick raises again, each counting its step.
+    let again = i.tick(Span::default()).expect_err("still raising");
+    assert_eq!(again.code, "E515");
+    check(&i, 0, M + 2, "two overspent, still at `left == 0`");
+
+    // Fast arm of Bx = 1 (one STEPS per step), M steps.
+    i = Interp::new(Kernel::ephemeral(Mode::Run));
+    i.set_max_steps(M);
+    for step in 1..=M {
+        assert!(i.left >= 1, "the fast arm would take this one");
+        i.left -= 1; // what the fast arm writes
+        check(&i, M - step, step, &format!("after fast-arm 1 step {step}"));
+    }
+    assert_eq!(i.left, 0, "the fast arm hands to the general path at M+1");
+
+    // Fast arm of Bx = M (one STEPS that covers the whole budget).
+    i = Interp::new(Kernel::ephemeral(Mode::Run));
+    i.set_max_steps(M);
+    assert!(i.left >= M, "the fast arm would take this one");
+    i.left -= M;
+    check(&i, 0, M, "after fast-arm Bx=M");
+
+    // A paired-steps NOP of 3 (Bx=1 + Bx=2), budget M=3.
+    i = Interp::new(Kernel::ephemeral(Mode::Run));
+    i.set_max_steps(3);
+    assert!(i.left >= 3, "a pair of 3 fits in a budget of 3");
+    i.left -= 3;
+    check(&i, 0, 3, "after a paired steps of 3");
+
+    // The no-budget starting state after `set_max_steps(0)` on a fresh
+    // interp: `left == u64::MAX`, `steps() == 0`.
+    i = Interp::new(Kernel::ephemeral(Mode::Run));
+    i.set_max_steps(0);
+    check(&i, u64::MAX, 0, "no budget, fresh");
+}
+
+#[test]
+fn a_fast_steps_with_left_at_zero_goes_to_the_general_path() {
+    // The countdown says "the general path takes the next one" by the
+    // simple expedient of `left == 0`. This happens after a budget is
+    // lowered under the count, or after a caught `E515` where `tick`
+    // saturated `left`. The fast arm returns `None`, the general arm
+    // raises `E515` with the tree-walker's position.
+    let f = main_fn(1, vec![steps(0, 1), ret(0)]);
+    let m = module(f);
+    let prog = program(&m);
+    prog.ready(0, Span::default()).expect("ready");
+    let proto = prog.funcs.get(0).expect("the main function");
+    let d = proto.code[0].expect("a decoded instruction");
+
+    let mut regs: Box<Window> = Box::new(std::array::from_fn(|_| Value::Null));
+    let mut i = interp();
+    i.set_max_steps(5);
+    i.set_steps(10);
+    assert_eq!(i.left, 0, "the budget was lowered below the count");
+    assert_eq!(i.steps(), 10, "the count is 10");
+    let mut f = Frame::new(0, 0, 0, NO_UPVALS, 0, 0);
+    let out = fast_one(&mut *regs, &mut i, &mut f, proto, &d, &[]);
+    assert!(
+        out.is_none(),
+        "the fast arm should hand to the general path"
+    );
+    assert_eq!(
+        (i.steps(), i.left),
+        (10, 0),
+        "neither moves on the hand-off"
+    );
 }
 
 // ----- loading -------------------------------------------------------------------------
@@ -3398,7 +3519,7 @@ fn a_verified_module_never_panics() {
             let _ = run(&mut i, &p);
             let burning = u32::from(i.in_burn()) + u32::from(i.in_unlit());
             (
-                i.steps,
+                i.steps(),
                 i.loop_depth + i.call_depth_for_tests() as u32 + burning,
             )
         }));
@@ -6487,7 +6608,7 @@ fn the_step_budget_stops_on_the_same_line_across_a_burn() {
         };
         assert!(!i.in_burn(), "a burn left open at budget {budget}");
         let plan: Vec<String> = i.kernel.planned.iter().map(|p| p.summary.clone()).collect();
-        (ending(r, None), i.steps, plan)
+        (ending(r, None), i.steps(), plan)
     };
     let (done, total, _) = stop(0, false);
     assert_eq!(done, "ok");
@@ -7895,7 +8016,7 @@ fn the_fast_loop_reaches_the_last_registers_a_byte_names() {
         .err()
         .expect("an error");
     assert_eq!(e.code, "E515");
-    assert_eq!(i.steps, 8, "the step that went over is counted");
+    assert_eq!(i.steps(), 8, "the step that went over is counted");
     assert_eq!(i.loop_depth, 0, "the loop depth is given back");
 }
 
@@ -8122,6 +8243,259 @@ fn the_window_and_the_checked_slice_run_every_fast_operator_alike() {
     assert!(compared > 5_000, "{compared}");
 }
 
+// ----- `iterprep`/`iternext` on the fast path ---------------------------------------
+
+/// A one-instruction harness: builds a module whose function 0 has `first`
+/// at pc 0 and a trailing `ret` (plus whatever else `rest` names for
+/// verification), returns the program and the `DecodedInstr` at pc 0.
+fn fast_instr(regs: u32, first: Instr, rest: Vec<Instr>) -> (Rc<Program>, DecodedInstr) {
+    let mut code = vec![first];
+    code.extend(rest);
+    let mut f = main_fn(regs, code);
+    f.arity = 0;
+    let prog = program(&module(f));
+    prog.ready(0, Span::default()).expect("ready");
+    let proto = prog.funcs.get(0).expect("loaded");
+    let d = proto.code[0].expect("an instruction");
+    (prog, d)
+}
+
+/// The fast `ITERPREP` arm on a list source: `R(A+1)` carries the
+/// snapshot (a fresh list, not the source's `Rc`) and `R(A+2)` is
+/// `Value::Int(0)`. Window and checked slice give the same answer.
+#[test]
+fn fast_iterprep_on_a_list_writes_the_snapshot_and_the_index() {
+    let items = vec![Value::Int(1), Value::str("é"), Value::Int(3)];
+    let src = Value::list(items.clone());
+    let src_rc = match &src {
+        Value::List(l) => Rc::clone(l),
+        _ => unreachable!(),
+    };
+    let (prog, d) = fast_instr(
+        5,
+        abc(Op::ITERPREP, 0, 0, 0),
+        vec![
+            Instr::asbx(Op::ITERNEXT, 0, 2), // pc 1 -> pc 4
+            steps(0, 1),                     // pc 2 (charges the loop's cycle)
+            Instr::asbx(Op::LOOP, 0, -3),    // pc 3 -> pc 1
+            ret(0),                          // pc 4
+        ],
+    );
+    let proto = prog.funcs.get(0).expect("loaded");
+    let want_items: Vec<String> = items.iter().map(|v| v.repr()).collect();
+    let check = |r1: &Value, r2: &Value, where_: &str, is_fresh: bool| {
+        let Value::List(snapshot) = r1 else {
+            panic!("{where_}: R(1) {}", r1.repr());
+        };
+        let got: Vec<String> = snapshot.borrow().iter().map(|v| v.repr()).collect();
+        assert_eq!(got, want_items, "{where_}");
+        if is_fresh {
+            assert!(!Rc::ptr_eq(snapshot, &src_rc), "{where_}: a fresh list");
+        }
+        assert_eq!(r2.repr(), "0", "{where_}: R(2)");
+    };
+    // Window.
+    let mut w: Box<Window> = Box::new(std::array::from_fn(|_| Value::Null));
+    w[0] = src.clone();
+    let mut i = interp();
+    let mut f = Frame::new(0, 0, 0, NO_UPVALS, 0, 0);
+    let out = fast_one(&mut *w, &mut i, &mut f, proto, &d, &[]);
+    assert!(matches!(out, Some(Ok(1))), "went on: {out:?}");
+    check(&w[1], &w[2], "window", true);
+    // Checked slice.
+    let mut s = vec![Value::Null; 5];
+    s[0] = src.clone();
+    let mut i = interp();
+    let mut f = Frame::new(0, 0, 0, NO_UPVALS, 0, 0);
+    let out = fast_one(&mut s[..], &mut i, &mut f, proto, &d, &[]);
+    assert!(matches!(out, Some(Ok(1))), "went on: {out:?}");
+    check(&s[1], &s[2], "slice", true);
+}
+
+/// The fast `ITERPREP` arm falls through for anything that is not a list.
+#[test]
+fn fast_iterprep_leaves_other_kinds_alone() {
+    let (prog, d) = fast_instr(
+        5,
+        abc(Op::ITERPREP, 0, 0, 0),
+        vec![
+            Instr::asbx(Op::ITERNEXT, 0, 2),
+            steps(0, 1),
+            Instr::asbx(Op::LOOP, 0, -3),
+            ret(0),
+        ],
+    );
+    let proto = prog.funcs.get(0).expect("loaded");
+    let mut m = IndexMap::new();
+    m.insert("a".to_string(), Value::Int(1));
+    let left_alone = [
+        Value::map(m),
+        Value::str("abc"),
+        Value::Int(3),
+        Value::Null,
+        Value::Bool(true),
+        Value::Float(1.5),
+    ];
+    for src in left_alone {
+        let mut w: Box<Window> = Box::new(std::array::from_fn(|_| Value::Null));
+        w[0] = src.clone();
+        let (r1_before, r2_before) = (w[1].repr(), w[2].repr());
+        let mut i = interp();
+        let mut f = Frame::new(0, 0, 0, NO_UPVALS, 0, 0);
+        // The fast arm falls through (`fast_one`'s second tier has
+        // nothing for `iterprep` either, so it returns `None`).
+        let out = fast_one(&mut *w, &mut i, &mut f, proto, &d, &[]);
+        assert!(out.is_none(), "{}", src.repr());
+        assert_eq!(w[1].repr(), r1_before, "R(1) unchanged for {}", src.repr());
+        assert_eq!(w[2].repr(), r2_before, "R(2) unchanged for {}", src.repr());
+    }
+}
+
+/// The fast `ITERNEXT` arm with a window `iterprep` left: the item in
+/// `R(A+3)`, the index in `R(A+2)` moved on, the list's `Rc` not cloned.
+#[test]
+fn fast_iternext_steps_through_and_ends() {
+    // `iternext A=0, sBx=2`: jump target = pc 0 + 1 + 2 = pc 3.
+    // The cycle pc 0 -> pc 1 -> pc 2 -> pc 0 is charged by `steps` at pc 1.
+    let (prog, d) = fast_instr(
+        5,
+        Instr::asbx(Op::ITERNEXT, 0, 2),
+        vec![
+            steps(0, 1),                  // pc 1
+            Instr::asbx(Op::LOOP, 0, -3), // pc 2 -> pc 0
+            ret(0),                       // pc 3 (the jump target)
+        ],
+    );
+    let proto = prog.funcs.get(0).expect("loaded");
+    let items = vec![Value::str("a"), Value::str("b")];
+    let list = Value::list(items.clone());
+    let list_rc = match &list {
+        Value::List(l) => l.clone(),
+        _ => unreachable!(),
+    };
+    let mut w: Box<Window> = Box::new(std::array::from_fn(|_| Value::Null));
+    w[1] = list; // moves the one handle in (avoids an extra Rc bump here).
+    w[2] = Value::Int(0);
+    w[3] = Value::str("stale"); // owns memory: must be dropped on a write.
+                                // Two references at this point: `list_rc` and `R(1)`. If the arm
+                                // cloned the list's `Rc` even for a moment, this would read as 3
+                                // during one `fast_one` call; after it, the test still catches a
+                                // leak (the final count is checked at the end too).
+    let starting_count = Rc::strong_count(&list_rc);
+    assert_eq!(starting_count, 2, "sanity: two handles at the start");
+    let mut i = interp();
+    let mut f = Frame::new(0, 0, 0, NO_UPVALS, 0, 0);
+    // Turn 1: item `"a"` lands in R(3), R(2) = 1.
+    let out = fast_one(&mut *w, &mut i, &mut f, proto, &d, &[]);
+    assert!(matches!(out, Some(Ok(1))), "went on to pc 1");
+    assert_eq!(w[2].repr(), "1");
+    assert_eq!(w[3].repr(), "\"a\"");
+    // The list's `Rc` was not cloned in the arm.
+    assert_eq!(
+        Rc::strong_count(&list_rc),
+        starting_count,
+        "R(1) still holds the only extra reference"
+    );
+    // Turn 2.
+    let out = fast_one(&mut *w, &mut i, &mut f, proto, &d, &[]);
+    assert!(matches!(out, Some(Ok(1))));
+    assert_eq!(w[2].repr(), "2");
+    assert_eq!(w[3].repr(), "\"b\"");
+    // Turn 3: end of list, jumps to pc 3, R(2) and R(3) are left as they were.
+    let out = fast_one(&mut *w, &mut i, &mut f, proto, &d, &[]);
+    assert!(matches!(out, Some(Ok(3))), "jumped: got {out:?}");
+    assert_eq!(w[2].repr(), "2");
+    assert_eq!(w[3].repr(), "\"b\"");
+}
+
+/// The fast `ITERNEXT` arm falls through when the window does not hold
+/// `iterprep`'s state (a map in `R(A+1)`, a non-int in `R(A+2)`, a
+/// negative int). A negative index becomes an end-of-loop jump.
+#[test]
+fn fast_iternext_bad_window_falls_through_or_jumps() {
+    let (prog, d) = fast_instr(
+        5,
+        Instr::asbx(Op::ITERNEXT, 0, 2),
+        vec![steps(0, 1), Instr::asbx(Op::LOOP, 0, -3), ret(0)],
+    );
+    let proto = prog.funcs.get(0).expect("loaded");
+    // R(1) is not a list.
+    let mut w: Box<Window> = Box::new(std::array::from_fn(|_| Value::Null));
+    w[1] = Value::Int(5);
+    w[2] = Value::Int(0);
+    let mut i = interp();
+    let mut f = Frame::new(0, 0, 0, NO_UPVALS, 0, 0);
+    let out = fast_one(&mut *w, &mut i, &mut f, proto, &d, &[]);
+    assert!(out.is_none(), "not a list: {out:?}");
+    // R(2) is not an int.
+    let mut w: Box<Window> = Box::new(std::array::from_fn(|_| Value::Null));
+    w[1] = Value::list(vec![Value::Int(1)]);
+    w[2] = Value::str("nope");
+    let out = fast_one(&mut *w, &mut i, &mut f, proto, &d, &[]);
+    assert!(out.is_none(), "not an int: {out:?}");
+    // R(2) < 0: the fast arm jumps as the general path does.
+    let mut w: Box<Window> = Box::new(std::array::from_fn(|_| Value::Null));
+    w[1] = Value::list(vec![Value::Int(1)]);
+    w[2] = Value::Int(-1);
+    let out = fast_one(&mut *w, &mut i, &mut f, proto, &d, &[]);
+    assert!(matches!(out, Some(Ok(3))), "jumped: {out:?}");
+}
+
+/// A list of values that own memory: the old loop variable (a string in
+/// `R(A+3)`) is dropped when the next item is written to it, with no
+/// extra reference to either value kept anywhere.
+#[test]
+fn fast_iternext_drops_the_old_loop_variable() {
+    let (prog, d) = fast_instr(
+        5,
+        Instr::asbx(Op::ITERNEXT, 0, 2),
+        vec![steps(0, 1), Instr::asbx(Op::LOOP, 0, -3), ret(0)],
+    );
+    let proto = prog.funcs.get(0).expect("loaded");
+    // Two items that own memory; each will be in R(3) in turn. The
+    // list is built by moving the values in, so after setup only
+    // `a_rc`/`b_rc` and the list itself hold their `Rc`s (count 2).
+    let a = Value::str("owns-memory-a");
+    let b = Value::str("owns-memory-b");
+    let a_rc = match &a {
+        Value::Str(s) => Rc::clone(s),
+        _ => unreachable!(),
+    };
+    let b_rc = match &b {
+        Value::Str(s) => Rc::clone(s),
+        _ => unreachable!(),
+    };
+    let list = Value::list(vec![a, b]);
+    let mut w: Box<Window> = Box::new(std::array::from_fn(|_| Value::Null));
+    w[1] = list;
+    w[2] = Value::Int(0);
+    w[3] = Value::Null;
+    let start_a = Rc::strong_count(&a_rc);
+    let start_b = Rc::strong_count(&b_rc);
+    assert_eq!((start_a, start_b), (2, 2), "sanity: list + rc handle");
+    let mut i = interp();
+    let mut f = Frame::new(0, 0, 0, NO_UPVALS, 0, 0);
+    // Turn 1: R(3) = a. `a_rc` has one more ref (the window's R(3)).
+    let out = fast_one(&mut *w, &mut i, &mut f, proto, &d, &[]);
+    assert!(matches!(out, Some(Ok(1))));
+    assert_eq!(Rc::strong_count(&a_rc), start_a + 1);
+    assert_eq!(Rc::strong_count(&b_rc), start_b);
+    // Turn 2: R(3) = b. `a`'s extra ref is dropped, `b` gains one.
+    let out = fast_one(&mut *w, &mut i, &mut f, proto, &d, &[]);
+    assert!(matches!(out, Some(Ok(1))));
+    assert_eq!(
+        Rc::strong_count(&a_rc),
+        start_a,
+        "`a` dropped from R(3) on the new write"
+    );
+    assert_eq!(Rc::strong_count(&b_rc), start_b + 1);
+    drop(w);
+    // After dropping the window, R(1)'s list and the item in R(3) are
+    // gone, so both are back to the handle this test still holds.
+    assert_eq!(Rc::strong_count(&a_rc), 1);
+    assert_eq!(Rc::strong_count(&b_rc), 1);
+}
+
 /// `CIG_VM_STATS` counts each instruction a run executes once: two wide
 /// instructions the fast loop runs, one it leaves to the general path,
 /// and the return.
@@ -8182,7 +8556,7 @@ fn a_ceiling_below_the_window_runs_the_checked_registers_alike() {
     let e = run(&mut i, &program(&sum_loop(12, 8, 10)))
         .err()
         .expect("an error");
-    assert_eq!((e.code, i.steps, i.loop_depth), ("E515", 8, 0));
+    assert_eq!((e.code, i.steps(), i.loop_depth), ("E515", 8, 0));
     let e = err(&sum_loop(257, 253, 10));
     assert_eq!(e.code, "E514", "{}", e.message);
 }

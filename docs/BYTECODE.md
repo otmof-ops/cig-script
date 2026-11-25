@@ -859,9 +859,12 @@ open. A lowering writes to them.
   registers directly. It runs the moves, constants, arithmetic and
   compares on numbers, jumps, `steps`, `forloop`, `getup`/`cellget`,
   reads of a list item, a map key or a field, stores into a list item
-  or a field, and, in a second tier, `newlist`, `appendlist`, `newmap`,
-  `insertmap` with a string key, `setindex` on a map with a string key,
-  `interp`, `add` of two strings, and `callb` and `callm` of a builtin that cannot call a
+  or a field, and, in a second tier, `iternext` (whatever the loop
+  walks: `iterprep` leaves a list of what there is to visit),
+  `iterprep` where the source is a list, `newlist`, `appendlist`,
+  `newmap`, `insertmap` with a string key, `setindex` on a map with a
+  string key, `interp`, `add` of two strings, and `callb` and `callm`
+  of a builtin that cannot call a
   script function (every builtin except `map`, `filter`, `reduce`,
   `each`, `any`, `all`, `find`, `sort_by`, `light`, `pass.issue` and
   `pass.memo`; for `callm`, only when the site's method fits the

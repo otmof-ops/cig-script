@@ -967,7 +967,7 @@ fn walker_steps(src: &str, max: u64) -> (u64, Option<(u32, u32, String)>) {
         .run_program(&program)
         .err()
         .map(|d| (d.line.unwrap_or(0), d.col.unwrap_or(0), d.code.to_string()));
-    (interp.steps, stop)
+    (interp.steps(), stop)
 }
 
 #[test]

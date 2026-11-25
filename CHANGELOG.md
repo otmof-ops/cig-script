@@ -60,22 +60,60 @@ project follows semantic versioning.
   and no program more; cycles `loop` 0.90, `sieve` 0.96, `mandel`
   0.97, `fannkuch` 0.97.
 
-- **A function's native code is given up on its own steps, not the
-  run's.** A body whose guesses keep failing is given up at the resume
-  point it was entered at: more than one failure in 16 steps, over 64
-  failures. The steps were the whole run's, so the rest of a program
-  supplied them faster than one body could fail, and the rule protected
-  only a program that is one hot loop. Measured on 2026-11-25 over 111
-  programs built with the compiler's own choice of bodies (121 bodies):
-  two reached the rule's first look, one function of cigo's script
-  that failed a guess at every one of 200 entries in one command and
-  at every one of 123 in another, and both kept their place; no resume
-  point was given up anywhere. The steps are now the ones the body's own machine code
-  counted, which is the work it did in place of the interpreter. A
-  program that is one loop behaves as before, and no body of the 25
-  benchmark programs fails often enough to be looked at (33 failed
-  guesses in 20,026 entries, 30 the most in one body). Nothing a script
-  can observe changes.
+- **Counting a step is one subtraction and a branch, with a step budget
+  or without.** Every statement of a script counts a step. The VM's
+  fast loop did it by testing whether there is a budget and, when there
+  is, comparing the count with it. An ordinary `cig run` has a budget
+  (10 million steps) and every benchmark is measured without one, so
+  what was measured was the cheaper of the two: with a budget
+  `fannkuch` took 5.5% more machine instructions than without,
+  `mandel` 4.0%, `loop` 3.1%. The interpreter now keeps a countdown,
+  the steps that may still be counted before something has to be asked
+  (the budget's end, or never), and derives the count from it. A fast
+  arm subtracts from the countdown and leaves for the general path when
+  it would pass zero; the tree-walker's own step does the same. A
+  budget ends on the step and the line it ended on (`E515` is raised
+  where it was), a caught `E515` goes on as it did, and native code is
+  given its budget as before. Machine instructions against the runtime
+  before, over the 25 programs of `bench/compute`: **on the VM with a
+  budget 0.988** at the geometric mean (`fannkuch` 0.94, `mandel` 0.96,
+  `loop` 0.97, `sieve` 0.97); **with none 0.9992** (`fannkuch` 0.995,
+  `mandel` 0.995; none more than a tenth of a percent: `strbuild`
+  1.0009, `maps` 1.0003, and the four start-up programs at most
+  1.0009); **on the tree-walker 0.996** (`sieve` 0.99, `fannkuch` 0.99).
+
+- **`for x in xs` runs in the VM's fast loop.** A turn of such a loop
+  left the fast loop every time: `iternext` was run by the general
+  path, about 350 machine instructions more than a turn of a counted
+  loop, and entering the loop copied the list through the general path
+  too, about 2,400. Both are now in the fast loop's second tier
+  (`iterprep` where the source is a list; `iternext` whatever is
+  walked). A turn of `for v in xs { n = n + v }` over a list of eight
+  goes from 899 machine instructions to 382, and one over a list of
+  two million, with the `push` that built it, from 1,177 to 753.
+  Over the 25 programs of `bench/compute`, with no budget:
+  `sieve` 0.75, `words` 0.90, `json-deep` 0.95, `nbody` 0.95, `csv` 0.97;
+  17 within a tenth of a percent;
+  `strings` 1.0023, `maps` 1.0017, `regex-ish` 1.0015, which is two more
+  cases in that tier's dispatch (in the first tier the same two cases
+  cost `mandel` and `loop` 4%, so they are not there). A loop still
+  walks its list as it was when the loop began, a source that cannot
+  be walked is the same `E405` at the same place, and no step count
+  changes. `bench/micro/for-in-*.cig` make the figures again, and
+  `tests/scripts/09-for-in.cig` holds whole loops (a list changed in
+  its own loop, nested, `break`, a closure's loop variable, a map, a
+  string) to the tree-walker.
+
+- **Three decision records for cig-cherry** (#279, decisions (b), (c)
+  and (i)). `docs/decisions/0003`: what the VM is to record about a
+  site, and how: outside both fast loops, by an observer on the general
+  path for a short stretch of a run once a function is found warm.
+  `docs/decisions/0004`: how a function is found warm (a sample taken
+  where the countdown above already ends, so the path that takes none
+  costs nothing more) and the profile a run keeps beside its module.
+  `docs/decisions/0005`: one lattice for proven and observed types, a
+  set over a value's run-time tags, to live in `cig-native`. Nothing of
+  them is built yet but the countdown.
 
 - **Nothing compressed is read into memory without a ceiling.** Two
   readers had none. A run's compressed journal (`journal.jsonl.zst`)
