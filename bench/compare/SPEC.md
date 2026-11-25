@@ -246,11 +246,20 @@ Then, for each (SIDE, label) in (`cig`, `cig`), (`stage-a`, `cigcompile`), (`lua
 
 Then, for each `sha256` line of **pass 1** in file order: a row `` sha256 of `FILE` `` (FILE its third field), then for each pass the fourth field (HEX) of that pass's first `sha256` line whose third field is FILE, in backticks, or `–`; a row identical to one already in the table is not added again.
 
+**`since:NAME`, this run against an earlier one.** NAME is everything after `since:`. The table exists only when an earlier run was given under NAME (section 9); `{{table:since:NAME}}` without one is an error.
+
+- **Header:** `program`, then the label of each side in `MAIN`.
+- **A cell** for program p and side s is the ratio format of `median(p, s) / v`, where (p, s) is a valid pair of this run and v is the `value` of the key `median.p.s` in the earlier run's file, when the file has that key and v is a number above 0 (a JSON number, not `true` or `false`); otherwise `–`.
+- **Rows:** each program in order, `` `p` `` then its cells. Then one row more: `**compute programs, geometric mean**`, then for each side s the ratio format of the geometric mean of column s's ratios (the ratios as computed, not their texts) over the programs of the compute set whose cell is a ratio, or `–` when none is. Section 7's rule holds for this row as for any other: it is left out when every one of its cells is `–`.
+
+A cell under 1 says the side took less time in this run than in the earlier one. Whether the two runs can be set side by side (the machine, the pinning, the tools the other languages ran on) is for the document to say; the table only divides.
+
 ## 8. Rendering a template
 
 A template is text. Every match of the regular expression `\{\{([^{}]+)\}\}` is replaced (Python's `re.sub`), with what is inside the braces:
 
 - `table:NAME`: the table NAME of section 7. An unknown NAME is an error.
+- `earlier:NAME:KEY`: the `text` of the key KEY in the file of the earlier run given under NAME (section 9). NAME is what lies between the first colon and the second, KEY everything after the second. A placeholder with no second colon, a NAME no earlier run was given under, or a KEY its file does not hold, is an error.
 - anything else: the text of that key. A key that does not exist is an error.
 
 Nothing else in the template changes.
@@ -259,8 +268,11 @@ Nothing else in the template changes.
 
 ```
 report.py --pass DIR [--pass DIR ...] --numbers OUT.json [--render TEMPLATE OUT ...]
+          [--earlier NAME NUMBERS.json ...]
 check.py  --pass DIR [--pass DIR ...] --numbers OUT.json [--render TEMPLATE OUT ...]
-          [--contains FILE SNIPPET ...]
+          [--contains FILE SNIPPET ...] [--earlier NAME NUMBERS.json ...]
 ```
+
+**An earlier run.** `--earlier NAME NUMBERS.json` names the `numbers.json` that `report.py` wrote for another run, so a document can quote that run's numbers exactly and set this run beside it. It can be given more than once, each time with one NAME and one file. The file is a JSON object whose every member is one key of that run: an object with exactly two members, `text` (a string) and `value`. NAME is not empty and holds no `:`, `{` or `}`. The same NAME given twice is an error, and so is a file that cannot be read or is not such an object. Neither program computes the earlier run's numbers again (that run's own check does that): the file is read as it is given. An earlier run adds nothing to `numbers.json` and changes nothing in it; only `{{earlier:NAME:KEY}}` and `{{table:since:NAME}}` read it.
 
 `check.py` computes the keys itself and compares them with the given `numbers.json`: the same set of keys, each key's text and value as section 6 says, and the file's bytes exactly as section 6 writes it. It renders each TEMPLATE itself and compares the result with OUT, byte for byte. For each `--contains FILE SNIPPET`, both files, it checks that FILE's text contains SNIPPET's text exactly once. It prints every difference it finds (the key, or the first differing line of a document, with both values) and exits 1 when there is any, 0 when there is none, saying how many keys, documents and snippets it checked.

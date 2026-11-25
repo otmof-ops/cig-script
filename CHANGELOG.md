@@ -24,6 +24,28 @@ project follows semantic versioning.
   5.6% more instructions than the stage `b` program and runs 0.7% more
   now.
 
+- **Benchmarks, 2026-11-25** ([the paper](docs/BENCHMARKS-2026-11-25.md),
+  [its data](bench/results/2026-11-25/)): the 25 programs again, a day
+  after the first run with stage `c`, on the same machine, the same
+  core and the same builds of the other languages, with the VM's
+  calls, its four-byte instructions and its start-up reworked and
+  stage `c` reading lists and records. A stage `c` program takes
+  0.98 times Lua 5.4's time at the geometric mean of the compute
+  programs both have (1.37 a day earlier) and 0.48 of CPython
+  3.12's (0.66); a stage `b` program 1.36 times Lua's (1.83)
+  and 0.63 of CPython's (0.84). `hello` takes 2.2 ms as a
+  stage `b` program (4.1), and a run no longer slows as its
+  history grows: the second pass took 0.98 of the first, where it
+  took 1.20. The README's stage `c` section is this run's.
+
+- **The paper tools quote another run exactly.** `report.py` and
+  `check.py` take `--earlier NAME numbers.json`: a template reads that
+  run's numbers with `{{earlier:NAME:KEY}}` and sets this run beside it
+  with `{{table:since:NAME}}`, each side's median time here over its
+  median there. `check.py`'s part was written from
+  `bench/compare/SPEC.md` alone, as the rest of it was, and the two
+  agree byte for byte.
+
 - **Maps carry a shape, and a field is read with one compare.** A map
   a script writes as a record (`{x: 1, y: 2}`, or fields assigned by
   name one at a time) now has a shape beside its entries: a number

@@ -1,0 +1,19 @@
+### Stage c: native code for loops, lists and records (on `main`)
+
+[cigcompile](https://github.com/otmof-ops/cig-compile) can build a script with native code for its loops and for its functions on numbers (`cigcompile build --stage c`). The native code runs on the same registers as cig's VM, so it sits beside anything a script does: what it has no machine code for, the runtime runs, and a loop is compiled only where that comes out ahead. It is on `main` and in no release yet, so this is a run of the source, on another machine than the table above ([the paper](docs/BENCHMARKS-2026-11-25.md)): the same 25 programs, every side in the same rounds, pinned to one core.
+
+| program | stage b, ms | stage c, ms | stage c ÷ stage b | Lua 5.4, ms | CPython 3.12, ms |
+|---|---:|---:|---:|---:|---:|
+| `mandel` | {{median.mandel.stage-b}} | {{median.mandel.stage-c}} | {{ratio.mandel.stage-c.stage-b}} | {{median.mandel.lua}} | {{median.mandel.python}} |
+| `fib` | {{median.fib.stage-b}} | {{median.fib.stage-c}} | {{ratio.fib.stage-c.stage-b}} | {{median.fib.lua}} | {{median.fib.python}} |
+| `fannkuch` | {{median.fannkuch.stage-b}} | {{median.fannkuch.stage-c}} | {{ratio.fannkuch.stage-c.stage-b}} | {{median.fannkuch.lua}} | {{median.fannkuch.python}} |
+| `nbody` | {{median.nbody.stage-b}} | {{median.nbody.stage-c}} | {{ratio.nbody.stage-c.stage-b}} | {{median.nbody.lua}} | {{median.nbody.python}} |
+| `sieve` | {{median.sieve.stage-b}} | {{median.sieve.stage-c}} | {{ratio.sieve.stage-c.stage-b}} | {{median.sieve.lua}} | {{median.sieve.python}} |
+| `loop` | {{median.loop.stage-b}} | {{median.loop.stage-c}} | {{ratio.loop.stage-c.stage-b}} | {{median.loop.lua}} | {{median.loop.python}} |
+| `richards` | {{median.richards.stage-b}} | {{median.richards.stage-c}} | {{ratio.richards.stage-c.stage-b}} | {{median.richards.lua}} | {{median.richards.python}} |
+
+- **A stage c program takes {{geomean.compute.stage-c.lua}} times Lua 5.4's time** at the geometric mean of the compute programs both have, {{geomean.compute.stage-c.python}} of CPython 3.12's and {{geomean.compute.stage-c.luajit}} times LuaJIT's. A day earlier, on the same machine and the same core, it took {{earlier:2026-11-24:geomean.compute.stage-c.lua}}, {{earlier:2026-11-24:geomean.compute.stage-c.python}} and {{earlier:2026-11-24:geomean.compute.stage-c.luajit}}. A stage b program takes {{geomean.compute.stage-b.lua}} times Lua's time ({{earlier:2026-11-24:geomean.compute.stage-b.lua}}) and {{geomean.compute.stage-b.python}} of CPython's ({{earlier:2026-11-24:geomean.compute.stage-b.python}}): the VM itself got faster.
+- **What is compiled**: a loop of arithmetic, a list's elements read and written, a loop over a list and `push`, a record's fields read and written where they lie (`nbody`, `richards`), a function on numbers alone (`fib`). {{n.native.stage-c.stage-b}} of the {{programs.compute}} compute programs have native code; over all {{programs.compute}} a stage c program takes {{geomean.compute.stage-c.stage-b}} of its stage b time: faster on {{faster.compute.stage-c.stage-b}}, level on {{level.compute.stage-c.stage-b}}, slower on {{slower.compute.stage-c.stage-b}} (`json-deep`, three milliseconds long, which has no native code: its two programs are the same file).
+- **What is not faster yet**: a loop whose work is calls, strings or dictionary lookups. Those run as stage b does.
+
+Whole processes, start-up included ({{median.hello.stage-c}} ms for `hello`, where CPython takes {{median.hello.python}}), on a 2025 laptop on mains power.
