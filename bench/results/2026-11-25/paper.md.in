@@ -1,0 +1,168 @@
+# Benchmarks, 2026-11-25: a faster VM, and native code for lists and records
+
+<!-- SPDX-License-Identifier: CC-BY-4.0 -->
+
+The 25 programs of [`bench/compute`](../bench/compute/), each written in CigScript and again in Python (all 25), JavaScript (24: all but `csv`), Lua (21) and Rust (8), timed side by side on one machine, a day after [the first run with stage `c`](BENCHMARKS-2026-11-24.md). Two things changed in that day, and this run measures both:
+
+- **cig's VM runs bytecode faster.** A call between two functions none of whose variables a closure captures is made beside the VM's fast loop, without leaving it for the general path; the loop reads instructions of four bytes; and a run reads what was added to the run index since the last one, not all of it ([#252](https://github.com/otmof-ops/cig-script/issues/252)).
+- **Stage `c` compiles more of a script.** [cigcompile](https://github.com/otmof-ops/cig-compile) gives native code to a loop over a list, to `push` and to a record's fields, which it reads and writes where they lie; and an instruction it has no machine code for costs one call of the runtime, not a trip through the interpreter's loop.
+
+**This is a run of cig's source, not of a release.** None of it is in a release yet, so cig is built here from commit `ed7ad3a` and cigcompile from commit `b0a287b`, cig as its release workflow builds it for Linux (`cargo build --release --target x86_64-unknown-linux-musl`). It is the machine of the run of 2026-11-24, on the same core, with the same harness, the same programs and the same builds of Lua, LuaJIT, CPython, Node and Rust, so [one section](#since-the-last-paper) sets the two runs side by side. Within this one, every side ran in the same rounds.
+
+Every number of the comparison is made from the samples in [`bench/results/2026-11-25/`](../bench/results/2026-11-25/) by [`bench/compare/report.py`](../bench/compare/report.py), and made again by [`bench/compare/check.py`](../bench/compare/check.py), a second program written from the [specification](../bench/compare/SPEC.md) alone; the two agree on every one.
+
+## In short
+
+- **A stage `c` program takes {{geomean.compute.stage-c.lua}} times Lua 5.4's time** at the geometric mean of the {{n.compute.stage-c.lua}} compute programs both have: faster on {{faster.compute.stage-c.lua}}, slower on {{slower.compute.stage-c.lua}}. A day earlier it took {{earlier:2026-11-24:geomean.compute.stage-c.lua}} times. Against CPython 3.12 it takes {{geomean.compute.stage-c.python}} of the time (it took {{earlier:2026-11-24:geomean.compute.stage-c.python}}; faster on {{faster.compute.stage-c.python}} of {{n.compute.stage-c.python}} programs), {{geomean.compute.stage-c.luajit-off}} times LuaJIT's interpreter's ({{earlier:2026-11-24:geomean.compute.stage-c.luajit-off}}), {{geomean.compute.stage-c.luajit}} times LuaJIT's with its compiler on ({{earlier:2026-11-24:geomean.compute.stage-c.luajit}}), and {{geomean.compute.stage-c.rust}} times Rust's over the {{n.compute.stage-c.rust}} programs Rust has ({{earlier:2026-11-24:geomean.compute.stage-c.rust}}). Node 18 takes {{median.hello.node}} ms to start on this machine, which decides its row ({{geomean.compute.stage-c.node}}).
+- **The bytecode alone got faster.** A stage `b` program takes {{geomean.compute.stage-b.lua}} times Lua 5.4's time, where it took {{earlier:2026-11-24:geomean.compute.stage-b.lua}}, and {{geomean.compute.stage-b.python}} of CPython's, where it took {{earlier:2026-11-24:geomean.compute.stage-b.python}}.
+- **Records and lists are native.** `nbody`, whose loops read and write records, takes {{ratio.nbody.stage-c.stage-b}} of its stage `b` time, where it took {{earlier:2026-11-24:ratio.nbody.stage-c.stage-b}} (it had no native code); `sieve`, whose loops walk a list, {{ratio.sieve.stage-c.stage-b}}, where it took {{earlier:2026-11-24:ratio.sieve.stage-c.stage-b}}. The loops of arithmetic were native already: `mandel` {{ratio.mandel.stage-c.stage-b}}, `fib` {{ratio.fib.stage-c.stage-b}}, `fannkuch` {{ratio.fannkuch.stage-c.stage-b}} and `loop` {{ratio.loop.stage-c.stage-b}}, each against a stage `b` program that is itself faster than it was.
+- **Over all {{n.compute.stage-c.stage-b}} compute programs a stage `c` program takes {{geomean.compute.stage-c.stage-b}} of stage `b`'s time**: faster on {{faster.compute.stage-c.stage-b}}, level (within 3%) on {{level.compute.stage-c.stage-b}}, slower on {{slower.compute.stage-c.stage-b}}. {{n.native.stage-c.stage-b}} programs have native code now ({{earlier:2026-11-24:n.native.stage-c.stage-b}} had); the ones it does not speed up are loops of strings, of dictionary lookups and of calls, where one instruction's work is the runtime's either way. The one that comes out slower, `json-deep`, has no native code at all: its two programs are the same file ([below](#stage-c-against-stage-b)).
+- **A stage `b` program takes {{geomean.compute.stage-b.cig}} of `cig run`'s time**, and a stage `c` program {{geomean.compute.stage-c.cig}}.
+- **Start-up is half what it was.** `hello` takes {{median.hello.stage-b}} ms as a stage `b` program, {{median.hello.stage-c}} as a stage `c` one and {{median.hello.cig}} under `cig run`, where it took {{earlier:2026-11-24:median.hello.stage-b}}, {{earlier:2026-11-24:median.hello.stage-c}} and {{earlier:2026-11-24:median.hello.cig}}. CPython takes {{median.hello.python}} ms, Lua {{median.hello.lua}} and Node {{median.hello.node}}.
+
+## Since the last paper
+
+Each side's median time in this run divided by its median in [the run of 2026-11-24](BENCHMARKS-2026-11-24.md). Under 1, the side took less time than it did a day earlier.
+
+{{table:since:2026-11-24}}
+
+- **The other languages are the yardstick.** Lua, LuaJIT, CPython, Node and Rust ran from the same binaries on the same core in both runs, and nothing about them changed: their columns say how far two runs of one thing differ on this machine: within four hundredths wherever the program takes five milliseconds or more, and by more than a tenth on some that take two. Their geometric means are in the last row. What cig's columns show beyond that is cig's.
+- **Start-up.** The four start-up programs take about half the time on every cig side: `hello` under `cig run` took {{earlier:2026-11-24:median.hello.cig}} ms and takes {{median.hello.cig}}. Until now a run read the whole run index before it started; it reads what was appended since the last run.
+- **`cig run`** runs its script on the tree-walker, which did not change: its column is that start-up alone, about three milliseconds, which is most of a small program's time and nothing in a long one's (`trees` {{median.trees.cig}} ms, where it took {{earlier:2026-11-24:median.trees.cig}}).
+- **Calls and the fast loop** are the rest of what the stage `b` column gained: `fib`, `spectral`, `trees`, `closures` and `dispatch` are calls, and the loops of `mandel`, `loop` and `fannkuch` run on the four-byte instructions.
+- **Stage `c`** has the VM's gains under it and its own on top: `nbody` and `richards` for records, `sieve` for a loop over a list. `mandel`, `fib`, `loop` and `fannkuch` were native already, and most of what they gained is the start-up.
+
+## Stage c against stage b
+
+Each program's median time as a stage `b` program and as a stage `c` program, the second divided by the first, and what of the program cigcompile gave native code: its top level, so many of its functions, or nothing. The last two rows are the geometric mean of the ratios over every compute program and over the ones with native code, with how many were faster, level (within 3%) and slower.
+
+{{table:native}}
+
+**What gets native code.** `cigcompile build --stage c` compiles a script's bytecode loop by loop to machine code that runs on the same registers cig's VM uses, so native code can sit beside anything: what it has no machine code for, the runtime runs.
+
+- **A loop of arithmetic** on ints, floats and bools, with a list's elements read and written by an int: `mandel`, `loop`, `fannkuch`, `sieve`.
+- **A loop over a list** (`for x in xs`), and `push`: the list's elements are read where they lie, and an element that owns memory (a string, a list, a record) is put in its register by the runtime.
+- **A record's fields.** A map a script writes as a record has a shape, the runtime keeps for each field instruction the shape it last saw and the field's place, and machine code compares one number and reads or writes the value there: `nbody` {{ratio.nbody.stage-c.stage-b}}, `richards` {{ratio.richards.stage-c.stage-b}}.
+- **A function on numbers alone**, compiled whole for the argument types it is called with: `fib`.
+- **One instruction the runtime runs for it**: a string built or compared, a builtin called, a dictionary read by a computed key. Machine code calls the runtime for that one instruction and goes on, where it used to hand a run of instructions to the interpreter's loop. Such a call costs about what the interpreter takes for the instruction, so a loop made of them is compiled and comes out level or a little ahead: `strings` {{ratio.strings.stage-c.stage-b}}, `words` {{ratio.words.stage-c.stage-b}}, `regex-ish` {{ratio.regex-ish.stage-c.stage-b}}, `maps` {{ratio.maps.stage-c.stage-b}}, `lists` {{ratio.lists.stage-c.stage-b}}.
+- **Not yet:** a loop whose work is calls (`closures`, `dispatch`, `trees`, and the inner loops of `spectral`, whose three functions stay bytecode under a native top level: {{ratio.spectral.stage-c.stage-b}}). A call from native code goes through the VM, which costs more than the interpreter making the call itself, so the compiler leaves such a loop to the bytecode. Nor a type for what a field or an element holds: every `+` on a value read from one still tests its operands.
+
+**None is slower by more than the run can tell.** By its own figures a stage `c` program is never slower than its stage `b` program. One came out past the 3% line here: `json-deep`, at {{ratio.json-deep.stage-c.stage-b}}. It has no native code: its stage `b` and stage `c` programs are one file (one sha256 in [`inputs.tsv`](../bench/results/2026-11-25/pass1/inputs.tsv)), run in the same rounds, so its ratio says what two copies of one program of three milliseconds can differ by in this run. Timed alone with `deltablue` for {{earlier:alone:rounds.pass1}} rounds under each of two other seeds ([`alone/`](../bench/results/2026-11-25/alone/)), the same two files come out at {{earlier:alone:ratio.json-deep.stage-c.stage-b}}, the other way round, and `deltablue`, whose native top level saves it less than a run of two milliseconds can show, at {{earlier:alone:ratio.deltablue.stage-c.stage-b}} ({{ratio.deltablue.stage-c.stage-b}} here).
+
+**What the native code itself adds:** the same stage `c` programs run with `CIG_NATIVE=0`, which makes them run their bytecode and never load their native code, take {{inverse.compute.stage-c.stage-c-off}} times as long at the geometric mean (stage `c` ÷ the same program without its native code: {{geomean.compute.stage-c.stage-c-off}}).
+
+## Against each language
+
+A cell is cig's time divided by the other language's: the geometric mean, over the programs both have, of the ratio of their median times. Under 1, cig took less time. In brackets: how many of those programs cig was faster on, level with (within 3%) and slower on.
+
+{{table:ratios-compute}}
+
+- **`cig run`** is cig's tree-walking interpreter, as `cig run script.cig` runs a script.
+- **A stage `a` program** is what `cigcompile build` makes by default: cig itself with the script inside it, run by the same interpreter.
+- **A stage `b` program** (`cigcompile build --stage b`) runs the script's bytecode on cig's VM.
+- **A stage `c` program** (`cigcompile build --stage c`) is a stage `b` program with native code beside its bytecode.
+
+These are the {{programs.compute}} programs that are not start-up tests; start-up has [its own section](#start-up).
+
+## Every program
+
+The median time of each program on each side, in milliseconds, over {{rounds.pass1}} rounds in each of {{passes}} passes:
+
+{{table:medians}}
+
+From the 10th to the 90th percentile of the same samples:
+
+{{table:spread}}
+
+## Start-up
+
+{{table:ratios-start}}
+
+The four start-up programs, each side's time divided by the other's as above. Their median times are in [Every program](#every-program). `cig run` of `hello` in a new folder each time takes {{median.hello.cig-first}} ms.
+
+## cig's own sides
+
+Every program on each of cig's sides, a run and a dry run (`--dry-run` writes no run record):
+
+{{table:medians-cig}}
+
+`cig run` on each engine: the tree-walker, the VM with the script's module already in the tin, and the VM lowering the script first:
+
+{{table:engines}}
+
+## The programs in the other languages
+
+Each program in [`bench/ref`](../bench/ref/) is held to one rule: the same program as its CigScript twin, statement for statement. The rule, how the set was checked against it, and what is still not the same are in the [paper of 2026-11-15](BENCHMARKS-2026-11-15.md#the-programs-in-the-other-languages); the references have not changed since. Where the usual way to write a step is native code, the idiomatic version is measured beside the translation:
+
+{{table:idiom}}
+
+## Memory
+
+The peak resident memory of each program, in MB, read as it exits (the median of every reading, three in each pass). It counts the pages of the program's own files with its allocations. A stage `c` program maps its native code from its own file, read and execute; none of its memory is ever both writable and executable.
+
+{{table:memory}}
+
+## How steady the numbers are
+
+The geometric means of the compute set, pass by pass:
+
+{{table:passes}}
+
+Each side, pass against pass and within each pass ("last third ÷ first third" compares the median of a pair's last third of rounds with its first), and how many programs had a coefficient of variation over 5%:
+
+{{table:stability}}
+
+What moved during the run, and what no longer does:
+
+- **The machine is a laptop**, and its package reached {{temp.max.pass1}} °C in pass 1 and {{temp.max.pass2}} °C in pass 2. The other languages still repeated where their programs are long: pass 2 against pass 1, Lua {{repeat.pass2.lua}} and CPython {{repeat.pass2.python}}. Rust's eight programs take about two milliseconds each, and came out at {{repeat.pass2.rust}}.
+- **cig's sides no longer slow as its run history grows.** In the run of 2026-11-24 every cig run read the whole run index first, and pass 2 came out at {{earlier:2026-11-24:repeat.pass2.cig}} of pass 1 for `cig run`, {{earlier:2026-11-24:repeat.pass2.stage-b}} for stage `b` and {{earlier:2026-11-24:repeat.pass2.stage-c}} for stage `c`. The history grew as it did then, from {{history.first.pass1}} runs to {{history.last.pass2}}, and pass 2 against pass 1 is now {{repeat.pass2.cig}}, {{repeat.pass2.stage-b}} and {{repeat.pass2.stage-c}} ([#252](https://github.com/otmof-ops/cig-script/issues/252)). Stage `c` against stage `b` is {{geomean.pass1.compute.stage-c.stage-b}} in pass 1 and {{geomean.pass2.compute.stage-c.stage-b}} in pass 2.
+
+The times above pool both passes. A ratio within a few hundredths of 1 is level. The pairs whose medians in the two passes differ by more than 10%:
+
+{{table:moved}}
+
+## How it was measured
+
+- **A whole process.** Each time is the wall time of one process, from just before it is started until it has exited and been reaped: the time a person waits. An interpreter's start-up is part of every number; the four start-up programs show it alone.
+- **Every run checked.** A run counts only if it exits 0, prints exactly the program's `.expect` file, byte for byte, and writes nothing to stderr but cig's own summary of a run.
+- **Rounds in a random order.** A pass is {{rounds.pass1}} rounds. In each round each of the {{pairs.pass1}} program-and-side pairs runs once, in an order drawn from a seeded generator, so the clock and the temperature, as they drift, fall on every program and every side alike.
+- **Two passes**, {{samples.pass1}} samples in the first and {{samples.pass2}} in the second. A time above is the median of a pair's samples over both.
+- **Pinned to one core.** The processor has cores of three kinds (six performance cores, eight efficiency cores, two low-power cores), and the same program takes a different time on each. Every measured process was pinned to one performance core (`--cpus 2`), set in the child before it starts; the builds were not.
+- **A folder per program and side**, at the same path for every run. Before each run the files the last run left there are removed, and when that changes the disk, the disk is synced before the clock starts.
+- **The run record is in the time.** `cig run` and a compiled program write a record of every run: that is part of what running a script with cig costs, so it is in the headline. The same programs as dry runs are in [cig's own sides](#cigs-own-sides).
+- **cig from source, built as a release is.** cig at commit `ed7ad3a` (1.25.0 and what has merged since), built with `cargo build --release --target x86_64-unknown-linux-musl`: a static binary with its own allocator, as the released Linux assets are. cigcompile at commit `b0a287b`, and the programs it builds from the same scripts on that cig, at `--stage a`, `b` and `c`. Every cig side runs with `CIG_SEAL_KEY=file`, `CIG_MAX_STEPS=0`, `CIG_REPORTS=never`, `CIG_DOCTOR=0` and `NO_COLOR=1`.
+- **The others as this machine has them.** Lua 5.4.9 built from its source with the release makefile's flags (`-O2`) and LuaJIT 2.1 with its own makefile's defaults; CPython 3.12.3 and Node 18.19.1 as the machine's distribution ships them; Rust 1.99.1 with `-C opt-level=3`. No runtime was tuned or given flags beyond those.
+
+## Conditions
+
+{{table:conditions}}
+
+## Run it again
+
+```sh
+# one pass (every side whose tool is named; a missing one is said and left out)
+python3 bench/compare/compare.py --out pass1 --seed 1 --rounds 21 \
+  --cig ./cig --cigcompile ./cigcompile --runtime ./cig \
+  --lua ./lua --luajit ./luajit --python python3 --node node --rustc ./rustc --cpus 2
+# this file's numbers, made and checked
+python3 bench/compare/report.py --pass bench/results/2026-11-25/pass1 --pass bench/results/2026-11-25/pass2 \
+  --numbers bench/results/2026-11-25/numbers.json \
+  --earlier 2026-11-24 bench/results/2026-11-24/numbers.json \
+  --earlier alone bench/results/2026-11-25/alone/numbers.json \
+  --render bench/results/2026-11-25/paper.md.in docs/BENCHMARKS-2026-11-25.md
+python3 bench/compare/check.py --pass bench/results/2026-11-25/pass1 --pass bench/results/2026-11-25/pass2 \
+  --numbers bench/results/2026-11-25/numbers.json \
+  --earlier 2026-11-24 bench/results/2026-11-24/numbers.json \
+  --earlier alone bench/results/2026-11-25/alone/numbers.json \
+  --render bench/results/2026-11-25/paper.md.in docs/BENCHMARKS-2026-11-25.md
+```
+
+## What this does not show
+
+- **A release.** cig and cigcompile are built from `main`. The released cig 1.25.0 has none of this; the next release that carries it is measured again, as released.
+- **One machine.** A 2025 laptop processor, on mains power, every run on one performance core: the machine of the run of 2026-11-24, and not the one of 2026-11-15, which was a 2018 laptop on battery, unpinned, with a newer CPython and Node. Neither that run's times nor its ratios against other languages carry over.
+- **Two runs set side by side are two runs.** The table in [Since the last paper](#since-the-last-paper) divides a median of this run by a median of another. The other languages' columns are there to show what that is worth: where they are not 1.00, nothing changed but the day.
+- **Small programs, timed whole.** Most of these programs run for a few milliseconds to a few tens, so start-up is a large part of most of these times. A program whose loop takes a tenth of its stage `b` time is not ten times as fast as a process: `mandel`'s whole process takes {{ratio.mandel.stage-c.stage-b}} of its stage `b` time with its loops native.
+- **Native code where it does not pay yet.** {{programs.native}} of the {{programs.compute}} compute programs have native code and {{faster.native.stage-c.stage-b}} are faster for it. The rest wait for what comes next: a call from native code that does not go through the VM, types for what a field and an element hold, strings.
+- **Not every program in every language.** Rust has eight of the 25 programs; Lua has no `json`, `json-deep`, `csv` or `startup-10`; Node has no `csv`. The three counts beside each geometric mean add up to the programs it covers.
+- **Memory is the peak resident set**, read when the process exits.

@@ -11,6 +11,7 @@ does, 2 on a usage or input error.
 
     check.py --pass DIR [--pass DIR ...] --numbers OUT.json
              [--render TEMPLATE OUT ...] [--contains FILE SNIPPET ...]
+             [--earlier NAME NUMBERS.json ...]
 """
 import json
 import math
@@ -183,8 +184,9 @@ def geomean(ratios):
 
 
 class Model:
-    def __init__(self, passes):
+    def __init__(self, passes, earlier=None):
         self.passes = passes
+        self.earlier = earlier or {}
         progs = set()
         sides = set()
         for p in passes:
@@ -617,6 +619,8 @@ class Model:
             return self.render_table(header, [False] + [True] * (len(engines) + 2), rows)
         if name == "conditions":
             return self.conditions_table()
+        if name.startswith("since:"):
+            return self.since_table(name[len("since:"):])
         raise Fatal("unknown table %r" % name)
 
     def native_table(self):
@@ -646,6 +650,43 @@ class Model:
             )
             rows.append([label, DASH,
                          t("n.%s.stage-c.stage-b" % setname), DASH, ratio_cell])
+        return self.render_table(header, numeric, rows)
+
+    def since_table(self, name):
+        if name not in self.earlier:
+            raise Fatal("template names an earlier run that does not exist: %r" % name)
+        earlier = self.earlier[name]
+        main = self.present(MAIN)
+        header = ["program"] + [LABELS[s] for s in main]
+        numeric = [False] + [True] * len(main)
+        compute_set = set(self.compute)
+        column_ratios = [[] for _ in main]
+        rows = []
+        for p in self.programs:
+            row = ["`%s`" % p]
+            for col_idx, s in enumerate(main):
+                key = "median.%s.%s" % (p, s)
+                cell = DASH
+                if key in self.keys:
+                    entry = earlier.get(key)
+                    if (isinstance(entry, dict) and "value" in entry):
+                        v = entry["value"]
+                        if (not isinstance(v, bool)
+                                and isinstance(v, (int, float))
+                                and v > 0):
+                            r = self.keys[key][1] / v
+                            cell = fmt_ratio(r)
+                            if p in compute_set:
+                                column_ratios[col_idx].append(r)
+                row.append(cell)
+            rows.append(row)
+        summary = ["**compute programs, geometric mean**"]
+        for col_idx in range(len(main)):
+            if column_ratios[col_idx]:
+                summary.append(fmt_ratio(geomean(column_ratios[col_idx])))
+            else:
+                summary.append(DASH)
+        rows.append(summary)
         return self.render_table(header, numeric, rows)
 
     def conditions_table(self):
@@ -729,6 +770,18 @@ class Model:
             inner = m.group(1)
             if inner.startswith("table:"):
                 return self.table(inner[len("table:"):])
+            if inner.startswith("earlier:"):
+                rest = inner[len("earlier:"):]
+                if ":" not in rest:
+                    raise Fatal("template placeholder %r has no second colon" % inner)
+                name, key = rest.split(":", 1)
+                if name not in self.earlier:
+                    raise Fatal("template names an earlier run that does not exist: %r"
+                                % name)
+                if key not in self.earlier[name]:
+                    raise Fatal("template names a key the earlier run %r does not have: %r"
+                                % (name, key))
+                return self.earlier[name][key]["text"]
             if inner not in self.keys:
                 raise Fatal("template names a key that does not exist: %r" % inner)
             return self.keys[inner][0]
@@ -792,8 +845,8 @@ def first_difference(mine, theirs):
 
 
 def parse_args(argv):
-    opts = {"pass": [], "numbers": None, "render": [], "contains": []}
-    known = {"--pass", "--numbers", "--render", "--contains"}
+    opts = {"pass": [], "numbers": None, "render": [], "contains": [], "earlier": []}
+    known = {"--pass", "--numbers", "--render", "--contains", "--earlier"}
     i = 0
     while i < len(argv):
         a = argv[i]
@@ -803,7 +856,7 @@ def parse_args(argv):
         elif a == "--numbers" and i + 1 < len(argv):
             opts["numbers"] = argv[i + 1]
             i += 2
-        elif a in ("--render", "--contains"):
+        elif a in ("--render", "--contains", "--earlier"):
             i += 1
             got = 0
             while i + 1 < len(argv) and (got == 0 or argv[i] not in known):
@@ -816,8 +869,41 @@ def parse_args(argv):
             raise Fatal("unknown or incomplete argument %r" % a)
     if not opts["pass"] or opts["numbers"] is None:
         raise Fatal("usage: check.py --pass DIR [--pass DIR ...] --numbers OUT.json "
-                    "[--render TEMPLATE OUT ...] [--contains FILE SNIPPET ...]")
+                    "[--render TEMPLATE OUT ...] [--contains FILE SNIPPET ...] "
+                    "[--earlier NAME NUMBERS.json ...]")
     return opts
+
+
+def load_earlier(name, path):
+    """Validate and read one --earlier NAME NUMBERS.json.
+
+    Section 9: NAME is not empty and holds no `:`, `{` or `}`. The file is a
+    JSON object whose every member is an object with a `text` (string) and a
+    `value`. Any failure is a Fatal.
+    """
+    if name == "":
+        raise Fatal("--earlier: NAME is empty")
+    for ch in ":{}":
+        if ch in name:
+            raise Fatal("--earlier: NAME %r contains %r" % (name, ch))
+    try:
+        with open(path, "rb") as fh:
+            raw = fh.read().decode("utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise Fatal("--earlier %s: cannot read %s: %s" % (name, path, exc))
+    try:
+        obj = json.loads(raw)
+    except ValueError as exc:
+        raise Fatal("--earlier %s: %s is not JSON: %s" % (name, path, exc))
+    if not isinstance(obj, dict):
+        raise Fatal("--earlier %s: %s is not a JSON object" % (name, path))
+    for k, v in obj.items():
+        if (not isinstance(v, dict)
+                or set(v) != {"text", "value"}
+                or not isinstance(v["text"], str)):
+            raise Fatal("--earlier %s: %s member %r is not {text: string, value: ...}"
+                        % (name, path, k))
+    return obj
 
 
 def read_text(path):
@@ -828,7 +914,12 @@ def read_text(path):
 def main(argv):
     try:
         opts = parse_args(argv)
-        model = Model([Pass(d) for d in opts["pass"]])
+        earlier = {}
+        for name, path in opts["earlier"]:
+            if name in earlier:
+                raise Fatal("--earlier: NAME %r given twice" % name)
+            earlier[name] = load_earlier(name, path)
+        model = Model([Pass(d) for d in opts["pass"]], earlier=earlier)
     except Fatal as exc:
         print("check.py: error: %s" % exc, file=sys.stderr)
         return 2

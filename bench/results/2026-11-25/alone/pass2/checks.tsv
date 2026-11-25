@@ -1,0 +1,7 @@
+program	side	status	detail
+deltablue	stage-b	ok	
+deltablue	stage-c	ok	
+deltablue	stage-c-off	ok	
+json-deep	stage-b	ok	
+json-deep	stage-c	ok	
+json-deep	stage-c-off	ok	

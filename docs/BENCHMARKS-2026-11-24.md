@@ -6,6 +6,8 @@ The 25 programs of [`bench/compute`](../bench/compute/), each written in CigScri
 
 **This is a run of cig's source, not of a release.** Stage `c`'s native code for loops is on `main` and in no release yet, so cig is built here from commit `277e0e2` and cigcompile from commit `be2a18e`, cig as its release workflow builds it for Linux (`cargo build --release --target x86_64-unknown-linux-musl`). It is also another machine than the run of [2026-11-15](BENCHMARKS-2026-11-15.md), which measured cig 1.24.0 as released: a time in one paper is not to be set beside a time in the other. Within this one, every side ran in the same rounds.
 
+> **A day later** the same machine ran the set again, with the VM's calls and start-up reworked and stage `c` reading lists and records: [the paper of 2026-11-25](BENCHMARKS-2026-11-25.md), which sets the two runs side by side.
+
 Every number of the comparison is made from the samples in [`bench/results/2026-11-24/`](../bench/results/2026-11-24/) by [`bench/compare/report.py`](../bench/compare/report.py), and made again by [`bench/compare/check.py`](../bench/compare/check.py), a second program written from the [specification](../bench/compare/SPEC.md) alone; the two agree on every one.
 
 ## In short

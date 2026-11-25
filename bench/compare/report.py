@@ -4,13 +4,15 @@
 """report.py: the numbers of a compare.py run, and the documents that quote them.
 
     report.py --pass DIR [--pass DIR ...] --numbers OUT.json
-              [--render TEMPLATE OUT ...]
+              [--render TEMPLATE OUT ...] [--earlier NAME NUMBERS.json ...]
 
 Every number a document quotes comes from here. A template is Markdown with
-two kinds of placeholder:
+three kinds of placeholder:
 
-    {{KEY}}          the text of one number, as numbers.json holds it
-    {{table:NAME}}   one of the tables, as Markdown
+    {{KEY}}                 the text of one number, as numbers.json holds it
+    {{table:NAME}}          one of the tables, as Markdown
+    {{earlier:NAME:KEY}}    the text of one number of an earlier run, from the
+                            numbers.json given as --earlier NAME FILE
 
 and nothing else in it is a measurement. check.py, written apart from this
 file, computes every key again from the same samples and renders every
@@ -122,9 +124,31 @@ class Pass:
         return [ms for _, ms in self.samples.get((program, side), [])]
 
 
+def read_earlier(pairs):
+    """The earlier runs given as (NAME, numbers.json) pairs: {NAME: that file's keys}."""
+    earlier = {}
+    for name, path in pairs:
+        if not name or any(c in name for c in ":{}"):
+            raise SystemExit("an earlier run's name is not empty and holds no ':', '{' or '}': %r" % name)
+        if name in earlier:
+            raise SystemExit("two earlier runs are named " + name)
+        try:
+            with open(path) as f:
+                keys = json.load(f)
+        except (OSError, ValueError) as e:
+            raise SystemExit("cannot read the earlier run %s: %s" % (path, e))
+        if not isinstance(keys, dict) or not all(
+                isinstance(k, dict) and set(k) == {"text", "value"} and isinstance(k["text"], str)
+                for k in keys.values()):
+            raise SystemExit("%s is not a numbers.json: every member is a key with a text and a value" % path)
+        earlier[name] = keys
+    return earlier
+
+
 class Numbers:
-    def __init__(self, passes):
+    def __init__(self, passes, earlier=None):
         self.passes = passes
+        self.earlier = earlier or {}
         self.keys = {}
         programs = sorted({p for ps in passes for p, _ in ps.samples})
         self.start = [p for p in START if p in programs]
@@ -532,7 +556,36 @@ class Numbers:
                 for p in self.programs]
         return self.grid(head, rows)
 
+    def table_since(self, name):
+        """Each side's median in this run over its median in the earlier run `name`."""
+        if name not in self.earlier:
+            raise SystemExit("the template asks for the table since:%s, and no earlier run is named so" % name)
+        then = self.earlier[name]
+        sides = self.visible(MAIN)
+
+        def ratio(p, s):
+            was = then.get("median.%s.%s" % (p, s))
+            if was is None or not self.valid(p, s):
+                return None
+            v = was["value"]
+            if isinstance(v, bool) or not isinstance(v, (int, float)) or not v > 0:
+                return None
+            return self.median(p, s) / v
+
+        def show(r):
+            return DASH if r is None else fmt_ratio(r)
+
+        rows = [["`%s`" % p] + [show(ratio(p, s)) for s in sides] for p in self.programs]
+        means = []
+        for s in sides:
+            ratios = [r for r in (ratio(p, s) for p in self.compute) if r is not None]
+            means.append(fmt_ratio(geomean(ratios)) if ratios else DASH)
+        rows.append(["**compute programs, geometric mean**"] + means)
+        return self.grid(["program"] + [LABEL[s] for s in sides], rows)
+
     def table(self, name):
+        if name.startswith("since:"):
+            return self.table_since(name[len("since:"):])
         tables = {
             "medians": lambda: self.table_by_program("median", MAIN),
             "medians-cig": lambda: self.table_by_program("median", ["cig", "cig-dry", "stage-a", "stage-a-dry",
@@ -563,6 +616,13 @@ class Numbers:
             key = match.group(1)
             if key.startswith("table:"):
                 return self.table(key[len("table:"):])
+            if key.startswith("earlier:"):
+                name, colon, wanted = key[len("earlier:"):].partition(":")
+                if not colon or name not in self.earlier:
+                    raise SystemExit("the template asks for %s, and no earlier run is named %s" % (key, name))
+                if wanted not in self.earlier[name]:
+                    raise SystemExit("the template asks for %s, which the earlier run has no number for" % key)
+                return self.earlier[name][wanted]["text"]
             if key not in self.keys:
                 raise SystemExit("the template asks for %s, which this run has no number for" % key)
             return self.keys[key]["text"]
@@ -574,8 +634,10 @@ def main():
     ap.add_argument("--pass", dest="passes", action="append", required=True, help="a compare.py output folder")
     ap.add_argument("--numbers", required=True, help="where numbers.json goes")
     ap.add_argument("--render", nargs=2, action="append", default=[], metavar=("TEMPLATE", "OUT"))
+    ap.add_argument("--earlier", nargs=2, action="append", default=[], metavar=("NAME", "NUMBERS"),
+                    help="another run's numbers.json, for {{earlier:NAME:KEY}} and {{table:since:NAME}}")
     args = ap.parse_args()
-    numbers = Numbers([Pass(p) for p in args.passes]).build()
+    numbers = Numbers([Pass(p) for p in args.passes], read_earlier(args.earlier)).build()
     with open(args.numbers, "w") as f:
         json.dump(numbers.keys, f, indent=1, sort_keys=True)
         f.write("\n")
