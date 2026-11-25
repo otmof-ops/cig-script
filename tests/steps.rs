@@ -26,6 +26,7 @@ fn stops(cig: &Path, script: &Path) -> String {
             .current_dir(home.path())
             .env("CIGSCRIPT_HOME", home.path().join("home"))
             .env("CIG_SEAL_KEY", "file")
+            .env("CIG_AUTO_LOWER", "off")
             .env("CIG_DOCTOR", "0")
             .env("NO_COLOR", "1")
             .env("CIG_INTERNAL_TRACKER_DIR", home.path().join("tracker"))

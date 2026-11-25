@@ -60,8 +60,15 @@ const FORMAT: u32 = 1;
 /// The check gave warnings for this script: a run prints them, so it
 /// checks the script again instead of taking the entry on its word alone.
 const FLAG_WARNED: u32 = 1;
+/// The entry's payload is not a module but a refusal: the UTF-8 reason the
+/// lowering did not take this script, so a later run under `auto` picks
+/// the tree-walker without trying it again.
+const FLAG_REFUSED: u32 = 1 << 1;
+/// Every flag the format knows: a bit this build does not recognise is a
+/// miss.
+const KNOWN_FLAGS: u32 = FLAG_WARNED | FLAG_REFUSED;
 const BUILD_LEN: usize = 16;
-/// magic, format, flags, the build, the key, the module's length, the MAC.
+/// magic, format, flags, the build, the key, the payload's length, the MAC.
 const HEADER_LEN: usize = 8 + 4 + 4 + BUILD_LEN + 32 + 8 + 32;
 const MAC_AT: usize = HEADER_LEN - 32;
 /// The optimization level entries are keyed under: the one `cig run`
@@ -71,6 +78,15 @@ const LEVEL: u8 = crate::lower::DEFAULT_LEVEL;
 /// than this, so [`sweep`] can tell an entry in use from one left behind
 /// without a write on every run.
 const TOUCH_AFTER: Duration = Duration::from_secs(24 * 60 * 60);
+/// A refusal message is a short line, not a module: keep an upper bound so
+/// a file put in an entry's place cannot ask for much memory.
+const MAX_REFUSAL: usize = 4096;
+/// The name of the marker [`claim_lowering`] writes beside a module while a
+/// `__lower` subprocess is working on the script. One at a time per script.
+const LOWERING_SUFFIX: &str = ".lowering";
+/// A marker older than this is treated as stale: a `__lower` that crashed,
+/// was killed, or was abandoned should not keep the cache quiet for ever.
+pub const LOWERING_STALE_AFTER: Duration = Duration::from_secs(10 * 60);
 
 /// Where the entries live: `<state>/tin/modules`.
 pub fn root() -> PathBuf {
@@ -127,14 +143,21 @@ pub fn key_for(script_sha256: &str) -> Key {
     Key(h.finalize().into())
 }
 
-/// What a hit gives back.
-pub struct Entry {
+/// What a hit gives back: the module, or a refusal the lowering recorded.
+pub enum Hit {
     /// The module's bytes, for [`crate::vm::open`] and nothing else: the
     /// MAC covers the module's header, and it is `vm::open` that checks
     /// the body against the hash that header carries.
-    pub module: Vec<u8>,
-    /// The check gave warnings when the entry was made.
-    pub warned: bool,
+    Module {
+        module: Vec<u8>,
+        /// The check gave warnings when the entry was made.
+        warned: bool,
+    },
+    /// The lowering did not take this script, and nothing has changed about
+    /// the script or this cig since; the caller runs it on the tree-walker
+    /// and never tries the lowering again until the script or the build
+    /// changes.
+    Refused { reason: String },
 }
 
 fn path_of(key: &Key) -> PathBuf {
@@ -154,11 +177,14 @@ fn header(key: &Key, flags: u32, len: u64) -> [u8; HEADER_LEN] {
 }
 
 /// The MAC over an entry's header (without the MAC's own bytes) and the
-/// module's header, which carries the hash of the module's body.
-fn mac(mac_key: &[u8; 32], header: &[u8; HEADER_LEN], module_head: &[u8]) -> blake3::Hash {
+/// cover bytes that follow it. For a module the cover is the module's own
+/// header, which carries the hash of the module's body; for a refusal it is
+/// the whole payload (the reason text), so no byte of a refusal is left
+/// unchecked.
+fn mac(mac_key: &[u8; 32], header: &[u8; HEADER_LEN], cover: &[u8]) -> blake3::Hash {
     let mut h = blake3::Hasher::new_keyed(mac_key);
     h.update(&header[..MAC_AT]);
-    h.update(module_head);
+    h.update(cover);
     h.finalize()
 }
 
@@ -361,7 +387,7 @@ fn own_dir(path: &Path) -> io::Result<()> {
 
 /// The entry for `key`, when there is one this machine made for this
 /// build.
-pub fn lookup(key: &Key) -> Option<Entry> {
+pub fn lookup(key: &Key) -> Option<Hit> {
     let path = path_of(key);
     if !fs::symlink_metadata(&path).ok()?.file_type().is_file() {
         return None;
@@ -369,40 +395,64 @@ pub fn lookup(key: &Key) -> Option<Entry> {
     let mut file = open_plain(&path).ok()?;
     let meta = file.metadata().ok()?;
     let total = meta.len();
-    if total < (HEADER_LEN + MODULE_HEADER_LEN) as u64 || total > HEADER_LEN as u64 + MAX_MODULE {
+    let mut head = [0u8; HEADER_LEN];
+    if total < HEADER_LEN as u64 {
         return None;
     }
-    let mut head = [0u8; HEADER_LEN];
     file.read_exact(&mut head).ok()?;
     let len = u64::from_le_bytes(head[64..72].try_into().ok()?);
     let flags = u32::from_le_bytes(head[12..16].try_into().ok()?);
+    let refused = flags & FLAG_REFUSED != 0;
+    let payload_max = if refused {
+        MAX_REFUSAL as u64
+    } else {
+        MAX_MODULE
+    };
+    let payload_min = if refused { 0 } else { MODULE_HEADER_LEN as u64 };
     if head[..8] != MAGIC
         || head[8..12] != FORMAT.to_le_bytes()
         || head[16..16 + BUILD_LEN] != build()
         || head[32..64] != key.0
         || len != total - HEADER_LEN as u64
-        || flags & !FLAG_WARNED != 0
+        || len < payload_min
+        || len > payload_max
+        || flags & !KNOWN_FLAGS != 0
     {
         return None;
     }
-    // The MAC before anything else: it covers both headers, so until it
-    // verifies no more of the file is read and no memory is asked for on
-    // the file's word.
-    let mut module = vec![0u8; MODULE_HEADER_LEN];
-    file.read_exact(&mut module).ok()?;
     let mac_key = mac_key(false)?;
-    let want = mac(&mac_key, &head, &module);
-    // `blake3::Hash` compares in constant time.
-    if want != blake3::Hash::from_bytes(head[MAC_AT..].try_into().ok()?) {
-        return None;
+    if refused {
+        // The MAC covers the header and the whole refusal payload: a
+        // refusal's text is short, so the file is read in full before the
+        // MAC is checked.
+        let mut body = vec![0u8; usize::try_from(len).ok()?];
+        file.read_exact(&mut body).ok()?;
+        let want = mac(&mac_key, &head, &body);
+        if want != blake3::Hash::from_bytes(head[MAC_AT..].try_into().ok()?) {
+            return None;
+        }
+        let reason = String::from_utf8(body).ok()?;
+        touch_if_old(&file, &meta);
+        Some(Hit::Refused { reason })
+    } else {
+        // The MAC before anything else: it covers both headers, so until it
+        // verifies no more of the file is read and no memory is asked for on
+        // the file's word.
+        let mut module = vec![0u8; MODULE_HEADER_LEN];
+        file.read_exact(&mut module).ok()?;
+        let want = mac(&mac_key, &head, &module);
+        // `blake3::Hash` compares in constant time.
+        if want != blake3::Hash::from_bytes(head[MAC_AT..].try_into().ok()?) {
+            return None;
+        }
+        module.resize(usize::try_from(len).ok()?, 0);
+        file.read_exact(&mut module[MODULE_HEADER_LEN..]).ok()?;
+        touch_if_old(&file, &meta);
+        Some(Hit::Module {
+            module,
+            warned: flags & FLAG_WARNED != 0,
+        })
     }
-    module.resize(usize::try_from(len).ok()?, 0);
-    file.read_exact(&mut module[MODULE_HEADER_LEN..]).ok()?;
-    touch_if_old(&file, &meta);
-    Some(Entry {
-        module,
-        warned: flags & FLAG_WARNED != 0,
-    })
 }
 
 /// Move an old entry's time forward, through the handle it was read by:
@@ -422,6 +472,34 @@ pub fn store(key: &Key, module: &[u8], warned: bool) -> io::Result<()> {
             "not a module the cache keeps",
         ));
     }
+    let flags = if warned { FLAG_WARNED } else { 0 };
+    write_entry(key, flags, module, &module[..MODULE_HEADER_LEN])
+}
+
+/// Keep a refusal under `key`: the reason the lowering did not take this
+/// script, so a later run under `--engine auto` picks the tree-walker
+/// without starting another lowering until the script or this cig changes.
+/// The reason is trimmed to [`MAX_REFUSAL`] bytes; a shorter one goes in as
+/// it is.
+pub fn store_refusal(key: &Key, reason: &str) -> io::Result<()> {
+    let bytes = reason.as_bytes();
+    let body = if bytes.len() > MAX_REFUSAL {
+        // UTF-8 safe truncation: step back to the last character boundary.
+        let mut end = MAX_REFUSAL;
+        while end > 0 && (bytes[end] & 0xC0) == 0x80 {
+            end -= 1;
+        }
+        &bytes[..end]
+    } else {
+        bytes
+    };
+    write_entry(key, FLAG_REFUSED, body, body)
+}
+
+/// Write an entry (a module or a refusal) atomically: tmp file, rename
+/// into place. `cover` is what the MAC covers after the header: the
+/// module's header for a module, the whole payload for a refusal.
+fn write_entry(key: &Key, flags: u32, payload: &[u8], cover: &[u8]) -> io::Result<()> {
     let mac_key =
         mac_key(true).ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no module key"))?;
     let path = path_of(key);
@@ -429,15 +507,14 @@ pub fn store(key: &Key, module: &[u8], warned: bool) -> io::Result<()> {
     private_dirs().recursive(true).create(super::tin::dir())?;
     own_dir(&root())?;
     own_dir(shard)?;
-    let flags = if warned { FLAG_WARNED } else { 0 };
-    let mut head = header(key, flags, module.len() as u64);
-    let tag = mac(&mac_key, &head, &module[..MODULE_HEADER_LEN]);
+    let mut head = header(key, flags, payload.len() as u64);
+    let tag = mac(&mac_key, &head, cover);
     head[MAC_AT..].copy_from_slice(tag.as_bytes());
     let unique = nonce().ok_or_else(|| io::Error::other("no random number"))?;
     let tmp = shard.join(format!(".{}.{unique}.tmp", key.hex()));
     let written = private_file(&tmp).and_then(|mut f| {
         f.write_all(&head)?;
-        f.write_all(module)
+        f.write_all(payload)
     });
     let placed = written.and_then(|()| fs::rename(&tmp, &path));
     if placed.is_err() {
@@ -446,17 +523,101 @@ pub fn store(key: &Key, module: &[u8], warned: bool) -> io::Result<()> {
     placed
 }
 
-/// What the cache holds: how many entries, and their bytes on disk.
+/// A marker beside the modules that says a `__lower` child is working
+/// on this key, taken with `create_new` and `private_file` (the same way
+/// an entry's temp file is made) so twenty runs that start together
+/// never start twenty lowerings. Gives back a [`LoweringLock`] whose
+/// `Drop` removes the marker.
+///
+/// A marker older than [`LOWERING_STALE_AFTER`] is treated as stale and
+/// taken over: a `__lower` that crashed or was killed never keeps the
+/// cache quiet for ever. A marker whose modified time cannot be read, or
+/// whose modified time is in the future (a clock that went back), is
+/// treated as stale too. Where the state folder cannot be made, this
+/// returns `None` and the caller does not try to lower.
+pub fn claim_lowering(key: &Key) -> Option<LoweringLock> {
+    let path = marker_of(key);
+    let shard = path.parent()?;
+    private_dirs()
+        .recursive(true)
+        .create(super::tin::dir())
+        .ok()?;
+    own_dir(&root()).ok()?;
+    own_dir(shard).ok()?;
+    match private_file(&path) {
+        Ok(_) => Some(LoweringLock { path }),
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+            // The marker is there; take it over if it is older than the
+            // staleness limit or its modified time cannot be read.
+            let stale = match fs::symlink_metadata(&path) {
+                Ok(m) => match age(&m) {
+                    Some(a) => a > LOWERING_STALE_AFTER,
+                    // `age` is `None` for a time in the future (a clock
+                    // that moved back) or one the OS cannot give: treat
+                    // the marker as stale, since a marker that is not
+                    // read is a marker the sweep would clean up anyway.
+                    None => true,
+                },
+                Err(_) => true,
+            };
+            if stale {
+                // Remove it and try once more; a concurrent `create_new`
+                // wins the race if it got there first, and we give up.
+                let _ = fs::remove_file(&path);
+                match private_file(&path) {
+                    Ok(_) => Some(LoweringLock { path }),
+                    Err(_) => None,
+                }
+            } else {
+                None
+            }
+        }
+        Err(_) => None,
+    }
+}
+
+/// A marker whose `Drop` removes the file it took.
+pub struct LoweringLock {
+    path: PathBuf,
+}
+
+impl Drop for LoweringLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+fn marker_of(key: &Key) -> PathBuf {
+    let mut name = key.hex();
+    name.push_str(LOWERING_SUFFIX);
+    root().join(&key.hex()[..2]).join(name)
+}
+
+/// A name the sweep knows: `<hex>.lowering`.
+fn is_marker(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .and_then(|n| n.strip_suffix(LOWERING_SUFFIX))
+        .is_some_and(|key| key.len() == 64 && key.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
+/// What the cache holds: how many modules and refusals, and their bytes
+/// on disk. `entries` counts every entry (modules and refusals), kept so
+/// a reader of the field across cig versions sees the same total; the
+/// two parts are in `modules` and `refusals` for a caller that wants to
+/// say "modules" or distinguish the two.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Stats {
     pub entries: usize,
     pub bytes: u64,
+    pub modules: usize,
+    pub refusals: usize,
 }
 
-/// The cache's own files: an entry, or what a write that never finished
-/// left beside one. Only real folders are entered and only plain files
-/// are listed, never through a link: nothing outside the cache is ever
-/// counted or removed, whatever is put in its place.
+/// The cache's own files: an entry, a lowering marker, or what a write
+/// that never finished left beside one. Only real folders are entered and
+/// only plain files are listed, never through a link: nothing outside the
+/// cache is ever counted or removed, whatever is put in its place.
 fn files() -> Vec<(PathBuf, fs::Metadata)> {
     let mut out = Vec::new();
     let is_dir = |p: &Path| fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_dir());
@@ -475,7 +636,7 @@ fn files() -> Vec<(PathBuf, fs::Metadata)> {
         };
         for f in inner.flatten() {
             let path = f.path();
-            if !(is_entry(&path) || is_leftover(&path)) {
+            if !(is_entry(&path) || is_leftover(&path) || is_marker(&path)) {
                 continue;
             }
             if let Ok(meta) = fs::symlink_metadata(&path) {
@@ -509,13 +670,31 @@ fn is_leftover(path: &Path) -> bool {
         })
 }
 
-/// The entries and their size, for `cig tin` and `cig doctor`.
+/// The entries and their size, for `cig tin` and `cig doctor`. Modules
+/// and refusals are counted apart; `entries` is their sum.
 pub fn stats() -> Stats {
     let mut s = Stats::default();
     for (path, meta) in files() {
-        if is_entry(&path) {
-            s.entries += 1;
-            s.bytes += meta.len();
+        if !is_entry(&path) {
+            continue;
+        }
+        s.entries += 1;
+        s.bytes += meta.len();
+        // Read only the header to tell a module from a refusal: the
+        // body is not touched here, and a file whose header will not
+        // read counts as neither (but its bytes still count).
+        let mut head = [0u8; HEADER_LEN];
+        if open_plain(&path)
+            .and_then(|mut f| f.read_exact(&mut head))
+            .is_ok()
+            && head[..8] == MAGIC
+        {
+            let flags = u32::from_le_bytes(head[12..16].try_into().unwrap_or([0u8; 4]));
+            if flags & FLAG_REFUSED != 0 {
+                s.refusals += 1;
+            } else {
+                s.modules += 1;
+            }
         }
     }
     s
@@ -532,14 +711,19 @@ fn made_by_this_build(path: &Path) -> bool {
 }
 
 /// Remove what this cig will not load again: entries another build made,
-/// entries nobody loaded for [`KEEP`], and files a stopped write left
-/// behind. Returns what was removed. Every entry is safe to remove: its
-/// script is lowered again on its next run.
+/// entries nobody loaded for [`KEEP`], files a stopped write left behind,
+/// and lowering markers older than an hour (a `__lower` that never
+/// finished its work). Returns what was removed. Every entry is safe to
+/// remove: its script is lowered again on its next run.
 pub fn sweep() -> Stats {
     remove_where(|path, meta| {
-        if !is_entry(path) {
-            // A write that never finished; a live one is seconds old.
+        if is_marker(path) || is_leftover(path) {
+            // A marker or a write that never finished; a live one is
+            // seconds old.
             return age(meta).is_some_and(|a| a > Duration::from_secs(3600));
+        }
+        if !is_entry(path) {
+            return false;
         }
         age(meta).is_some_and(|a| a > KEEP) || !made_by_this_build(path)
     })
@@ -643,15 +827,58 @@ mod tests {
         let key = key_for("aa");
         assert!(lookup(&key).is_none(), "nothing stored yet");
         store(&key, &module(7), false).unwrap();
-        let e = lookup(&key).expect("a hit");
-        assert_eq!(e.module, module(7));
-        assert!(!e.warned);
+        let (bytes, warned) = match lookup(&key).expect("a hit") {
+            Hit::Module { module, warned } => (module, warned),
+            Hit::Refused { .. } => panic!("a refusal where a module was stored"),
+        };
+        assert_eq!(bytes, module(7));
+        assert!(!warned);
         store(&key, &module(8), true).unwrap();
-        let e = lookup(&key).expect("a hit");
-        assert_eq!(e.module, module(8));
-        assert!(e.warned);
+        let (bytes, warned) = match lookup(&key).expect("a hit") {
+            Hit::Module { module, warned } => (module, warned),
+            Hit::Refused { .. } => panic!("a refusal where a module was stored"),
+        };
+        assert_eq!(bytes, module(8));
+        assert!(warned);
         assert_eq!(stats().entries, 1);
         assert!(problem().is_none());
+    }
+
+    #[test]
+    fn a_refusal_comes_back_as_a_refusal_and_replaces_a_module() {
+        let _home = Home::new();
+        let key = key_for("aa");
+        store_refusal(&key, "a construct the lowering does not take").unwrap();
+        match lookup(&key).expect("a hit") {
+            Hit::Refused { reason } => {
+                assert_eq!(reason, "a construct the lowering does not take");
+            }
+            Hit::Module { .. } => panic!("a module where a refusal was stored"),
+        }
+        // A later run of the same lowering finds the construct lowers after
+        // all, and the entry is overwritten with the module.
+        store(&key, &module(3), false).unwrap();
+        assert!(matches!(lookup(&key), Some(Hit::Module { .. })));
+        assert_eq!(stats().entries, 1);
+    }
+
+    #[test]
+    fn the_claim_is_one_at_a_time_and_old_markers_are_taken_over() {
+        let _home = Home::new();
+        let key = key_for("aa");
+        let first = claim_lowering(&key).expect("a first claim");
+        assert!(claim_lowering(&key).is_none(), "a second is refused");
+        drop(first);
+        let again = claim_lowering(&key).expect("after the first is dropped");
+        // A stale marker is taken over, not kept for ever.
+        let path = marker_of(&key);
+        set_age(&path, LOWERING_STALE_AFTER + Duration::from_secs(60));
+        drop(again); // Removes the marker; make another, mark it stale.
+        let shard = path.parent().unwrap();
+        fs::create_dir_all(shard).unwrap();
+        fs::write(&path, "").unwrap();
+        set_age(&path, LOWERING_STALE_AFTER + Duration::from_secs(60));
+        assert!(claim_lowering(&key).is_some(), "stale is taken over");
     }
 
     #[test]
@@ -712,12 +939,18 @@ mod tests {
         store(&key, &bytes, false).unwrap();
         let path = path_of(&key);
         let good = fs::read(&path).unwrap();
-        assert!(crate::vm::open(lookup(&key).expect("a hit").module).is_ok());
+        match lookup(&key).expect("a hit") {
+            Hit::Module { module, .. } => assert!(crate::vm::open(module).is_ok()),
+            Hit::Refused { .. } => panic!("a refusal where a module was stored"),
+        }
         for at in HEADER_LEN + MODULE_HEADER_LEN..good.len() {
             let mut bad = good.clone();
             bad[at] ^= 1;
             fs::write(&path, &bad).unwrap();
-            let opened = lookup(&key).map(|e| crate::vm::open(e.module).is_ok());
+            let opened = match lookup(&key) {
+                Some(Hit::Module { module, .. }) => Some(crate::vm::open(module).is_ok()),
+                Some(Hit::Refused { .. }) | None => None,
+            };
             assert_ne!(
                 opened,
                 Some(true),
@@ -809,7 +1042,7 @@ mod tests {
         assert!(lookup(&key).is_none());
         // And the next store puts a real entry back in the link's place.
         store(&key, &module(1), false).unwrap();
-        assert!(lookup(&key).is_some());
+        assert!(matches!(lookup(&key), Some(Hit::Module { .. })));
         assert_eq!(fs::read(&elsewhere).unwrap(), good, "written through");
     }
 
@@ -920,7 +1153,10 @@ mod tests {
         let key = key_for("aa");
         store(&key, &module(1), false).unwrap();
         set_age(&path_of(&key), KEEP + Duration::from_secs(60));
-        assert!(lookup(&key).is_some(), "an old entry still loads");
+        assert!(
+            matches!(lookup(&key), Some(Hit::Module { .. })),
+            "an old entry still loads"
+        );
         assert_eq!(sweep(), Stats::default(), "and loading it kept it");
     }
 
@@ -931,5 +1167,25 @@ mod tests {
         assert!(is_leftover(&name));
         assert!(!is_entry(&name));
         assert!(is_entry(Path::new(&key.hex())));
+        let marker = PathBuf::from(format!("{}{LOWERING_SUFFIX}", key.hex()));
+        assert!(is_marker(&marker));
+        assert!(!is_entry(&marker));
+    }
+
+    #[test]
+    fn an_old_marker_is_swept() {
+        let _home = Home::new();
+        let key = key_for("aa");
+        let locked = claim_lowering(&key).expect("a claim");
+        // Writing the module here would drop the claim, but the sweep is
+        // what we are measuring: age the marker past the hour.
+        let path = marker_of(&key);
+        set_age(&path, Duration::from_secs(2 * 3600));
+        let removed = sweep();
+        // The marker is not an entry, so the Stats are empty, but the
+        // file is gone.
+        assert_eq!(removed, Stats::default());
+        assert!(!path.exists(), "the stale marker was swept");
+        drop(locked); // Already gone; drop is a no-op.
     }
 }

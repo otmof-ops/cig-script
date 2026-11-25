@@ -48,6 +48,7 @@ impl Sandbox {
             .env("XDG_CACHE_HOME", self.path().join("xdg-cache"))
             .env("NO_COLOR", "1")
             .env("CIG_SEAL_KEY", "file")
+            .env("CIG_AUTO_LOWER", "off")
             .env("CIG_BUDGET_SYNC", "1")
             .env("CIG_INTERNAL_TRACKER_DIR", self.path().join("tracker"))
             .env_remove("CI")

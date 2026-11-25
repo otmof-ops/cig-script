@@ -84,6 +84,7 @@ fn run(
         .env("XDG_STATE_HOME", dir.join("state"))
         .env("XDG_CACHE_HOME", dir.join("cache"))
         .env("CIG_SEAL_KEY", "file")
+        .env("CIG_AUTO_LOWER", "off")
         .env("CIG_DOCTOR", "0")
         .env("CIG_REPORTS", "never")
         .env("NO_COLOR", "1")

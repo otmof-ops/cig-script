@@ -33,8 +33,13 @@ pub const KEYS: &[(&str, &str, &str)] = &[
     ),
     (
         "engine",
-        "tree",
-        "which engine `cig run` uses: tree (the tree-walker), or vm (bytecode, lowered once and kept in the tin; a script the lowering does not take runs on the tree-walker and its record says so); `--engine` and CIG_ENGINE choose for one run",
+        "auto",
+        "which engine `cig run` uses: auto (the tree-walker when nothing is kept for the script, with a `__lower` subprocess left behind to lower it for the next run; the VM from then on), vm (lowered now and kept, then on the VM; a script the lowering does not take runs on the tree-walker and its record says so), or tree (the tree-walker, always); `--engine` and CIG_ENGINE choose for one run",
+    ),
+    (
+        "auto_lower",
+        "on",
+        "under `--engine auto`, how the module is made for the next run: on (a `cig __lower` child after the run, never waited for), wait (run `cig __lower` as a child, waited for and reaped, so a test is deterministic), off (no child is started; auto stays the tree-walker until something else keeps a module)",
     ),
     (
         "issues_repo",
@@ -241,8 +246,18 @@ impl Config {
                     "crash_rollback must be ask, always or never, not `{other}`"
                 ))
             }
-            ("engine", "tree" | "vm") => {}
-            ("engine", other) => return Err(format!("engine must be tree or vm, not `{other}`")),
+            ("engine", "tree" | "vm" | "auto") => {}
+            ("engine", other) => {
+                return Err(format!(
+                    "engine must be auto, tree or vm, not `{other}`"
+                ))
+            }
+            ("auto_lower", "on" | "off" | "wait") => {}
+            ("auto_lower", other) => {
+                return Err(format!(
+                    "auto_lower must be on, off or wait, not `{other}`"
+                ))
+            }
             ("trial", "auto" | "always" | "never") => {}
             ("trial", other) => {
                 return Err(format!(

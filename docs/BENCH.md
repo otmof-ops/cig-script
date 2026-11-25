@@ -493,15 +493,22 @@ is set:
 | phase | what it covers |
 |---|---|
 | `start` | from the first instruction of `main` to the start of the run: arguments, configuration, reading the script |
-| `module` | on the VM (`--engine vm`): looking for the script's lowered module in the tin, and loading it when it is there |
+| `module` | on the VM (`--engine vm` or `--engine auto`): looking for the script's lowered module (or a refusal) in the tin; this is the lookup and its MAC check, not the open |
 | `lower` | parsing the source into the program (not written when the run starts from its module in the tin) |
 | `check` | the static check (not written with `--no-check`) |
 | `resolve` | in its place when there is no check (`--no-check`, a compiled program on the tree-walker): resolving the top level's names; a function body's are resolved inside `run`, the first time it is called |
-| `compile` | on the VM, when the tin had no module to start from: lowering the checked script to bytecode, verifying it, loading it and keeping it in the tin |
+| `compile-cir` | lowering the checked script to CIR |
+| `compile-passes` | the CIR passes of the current optimisation level |
+| `compile-bytecode` | lowering CIR to the bytes the VM reads |
+| `compile-verify` | checking the bytes against the VM's rules (stage `b`'s verifier) |
+| `compile-load` | building the VM's `Program` from the verified module, for a fresh lowering; or opening a kept module from its bytes, for a run that starts from the tin (M6's 4.4 ms for cigo) |
+| `compile-keep` | writing the module to the tin, under its key, with a MAC under this machine's module key |
 | `begin` | the trial's plan comparison, the run's record and the kernel |
 | `run` | the interpreter, the script itself |
 | `burn` | what a run leaves behind once the program has ended: rollback, the record, the journal's head, the ledger, the report |
 | `retain` | `keep_runs`, `keep_days` and the history budget |
+
+The `compile-*` phases replace the single `compile` phase earlier builds wrote. What they cover together is: a fresh run that lowers the script and keeps it writes every stage, from `compile-cir` through `compile-keep`; a run that opens a module from the tin writes only `compile-load`. The `module` phase is now the lookup and its MAC alone, which earlier builds folded into `compile`: a reader comparing against those earlier builds should add `module + compile-load` for a kept-module run, and `module + compile-cir + compile-passes + compile-bytecode + compile-verify + compile-load + compile-keep` for a fresh one. Nothing is added to `other` beyond what the move takes out of `compile`.
 
 `--timings` with no `=FD` and no variable writes the lines to stderr; `=FD`
 names a descriptor handed over as `9>file`. With neither the flag nor the

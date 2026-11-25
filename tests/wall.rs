@@ -47,6 +47,7 @@ impl Sandbox {
             .env("CIGSCRIPT_HOME", self.path().join("home"))
             .env("NO_COLOR", "1")
             .env("CIG_SEAL_KEY", "file")
+            .env("CIG_AUTO_LOWER", "off")
             .output()
             .expect("run cig")
     }

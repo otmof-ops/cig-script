@@ -1350,6 +1350,7 @@ fn script_agrees_with(
         .env("XDG_CACHE_HOME", h.join(".cache"))
         .env("XDG_STATE_HOME", h.join(".local/state"))
         .env("CIG_SEAL_KEY", "file")
+        .env("CIG_AUTO_LOWER", "off")
         .output()
         .expect("the test binary runs");
     let out = String::from_utf8_lossy(&o.stdout);

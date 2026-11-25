@@ -99,6 +99,7 @@ fn run(cig: &Path, script: &Path, budget: &str) -> String {
         .env("XDG_STATE_HOME", home.path().join("state"))
         .env("XDG_CACHE_HOME", home.path().join("cache"))
         .env("CIG_SEAL_KEY", "file")
+        .env("CIG_AUTO_LOWER", "off")
         .env("CIG_DOCTOR", "0")
         .env("NO_COLOR", "1")
         .env("CIG_MAX_STEPS", budget)

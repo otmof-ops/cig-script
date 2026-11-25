@@ -58,6 +58,7 @@ impl Sandbox {
             .env("CIGSCRIPT_HOME", self.path().join("home"))
             .env("NO_COLOR", "1")
             .env("CIG_SEAL_KEY", "file")
+            .env("CIG_AUTO_LOWER", "off")
             .env("CIG_DOCTOR", "0")
             .env("CIG_REPORTS", "never")
             .env("CIG_INTERNAL_TRACKER_DIR", self.path().join("tracker"))
