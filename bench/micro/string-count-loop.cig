@@ -1,0 +1,23 @@
+# SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# The loop s.count replaces: a loop over `find` that walks the string
+# with `.slice` (cig's `find` takes no starting offset). Paired with
+# string-count-builtin.cig (#255). The pattern is O(n^2) in the
+# string's length, so the pair is sized to keep each run on the VM
+# under a hundred milliseconds. Needs CIG_MAX_STEPS=0.
+stick s = "abc".repeat(1000)
+roll total = 0
+for _ in 0..30 {
+  roll n = 0
+  roll rest = s
+  while true {
+    stick j = rest.find("abc")
+    if j < 0 {
+      break
+    }
+    n = n + 1
+    rest = rest.slice(j + 3)
+  }
+  total = total + n
+}
+exhale total

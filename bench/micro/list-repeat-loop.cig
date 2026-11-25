@@ -1,0 +1,11 @@
+# SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# The loop list.repeat replaces: a list of n copies of one value,
+# built by push. Paired with list-repeat-builtin.cig (#255). Needs
+# CIG_MAX_STEPS=0 (bench/micro-builtins.sh sets it).
+stick n = 2000000
+roll is = []
+for _ in 0..(n + 1) {
+  is.push(true)
+}
+exhale is.len()

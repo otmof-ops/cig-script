@@ -1,0 +1,10 @@
+# SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# s.count (#255): the same count, done once in Rust. Paired with
+# string-count-loop.cig. Prints the same value.
+stick s = "abc".repeat(1000)
+roll total = 0
+for _ in 0..30 {
+  total = total + s.count("abc")
+}
+exhale total

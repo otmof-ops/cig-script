@@ -11,6 +11,7 @@ use crate::value::{
     expect_func, expect_int, expect_list, expect_map, expect_str, Builtin, Effect, Value,
 };
 use std::cmp::Ordering;
+use std::rc::Rc;
 
 pub static STR: &[Builtin] = &[
     b("string.len", Effect::Pure, 1, Some(1), s_len),
@@ -41,6 +42,7 @@ pub static STR: &[Builtin] = &[
     b("string.is_empty", Effect::Pure, 1, Some(1), s_is_empty),
     b("string.to_int", Effect::Pure, 1, Some(1), s_to_int),
     b("string.to_float", Effect::Pure, 1, Some(1), s_to_float),
+    b("string.count", Effect::Pure, 2, Some(2), s_count),
 ];
 
 pub static LIST: &[Builtin] = &[
@@ -76,6 +78,10 @@ pub static LIST: &[Builtin] = &[
     b("list.enumerate", Effect::Pure, 1, Some(1), l_enumerate),
     b("list.chunks", Effect::Pure, 2, Some(2), l_chunks),
     b("list.copy", Effect::Pure, 1, Some(1), l_copy),
+    b("list.repeat", Effect::Pure, 2, Some(2), l_repeat),
+    b("list.counts", Effect::Pure, 1, Some(1), l_counts),
+    b("list.count", Effect::Pure, 2, Some(2), l_count),
+    b("list.extend", Effect::Pure, 2, Some(2), l_extend),
 ];
 
 pub static MAP: &[Builtin] = &[
@@ -90,6 +96,7 @@ pub static MAP: &[Builtin] = &[
     b("map.remove", Effect::Pure, 2, Some(2), m_remove),
     b("map.merge", Effect::Pure, 2, Some(2), m_merge),
     b("map.copy", Effect::Pure, 1, Some(1), m_copy),
+    b("map.inc", Effect::Pure, 2, Some(3), m_inc),
 ];
 
 /// The row of [`STR`] that holds the string method `name`.
@@ -117,6 +124,7 @@ pub(super) fn str_row(name: &str) -> Option<usize> {
         "is_empty" => 19,
         "to_int" => 20,
         "to_float" => 21,
+        "count" => 22,
         _ => return None,
     })
 }
@@ -156,6 +164,10 @@ pub(super) fn list_row(name: &str) -> Option<usize> {
         "enumerate" => 29,
         "chunks" => 30,
         "copy" => 31,
+        "repeat" => 32,
+        "counts" => 33,
+        "count" => 34,
+        "extend" => 35,
         _ => return None,
     })
 }
@@ -174,6 +186,7 @@ pub(super) fn map_row(name: &str) -> Option<usize> {
         "remove" => 8,
         "merge" => 9,
         "copy" => 10,
+        "inc" => 11,
         _ => return None,
     })
 }
@@ -316,6 +329,18 @@ fn s_to_int(i: &mut Interp, a: &[Value], s: Span) -> Result<Value, Diagnostic> {
 }
 fn s_to_float(i: &mut Interp, a: &[Value], s: Span) -> Result<Value, Diagnostic> {
     super::core::to_float(i, &a[..1], s)
+}
+/// Non-overlapping count of `sub` in the receiver. An empty `sub` is 0:
+/// the alternative, as Python has it, is `len(s) + 1`, which is rarely
+/// what a count asks for and invites a loop that never finishes.
+fn s_count(_: &mut Interp, a: &[Value], s: Span) -> Result<Value, Diagnostic> {
+    let text = expect_str(a, 0, "count", s)?;
+    let sub = expect_str(a, 1, "count", s)?;
+    Ok(Value::Int(if sub.is_empty() {
+        0
+    } else {
+        text.matches(sub).count() as i64
+    }))
 }
 
 /// `(start, end)` for `.slice(start[, end])` with negative indexes counting
@@ -667,6 +692,97 @@ fn l_chunks(_: &mut Interp, a: &[Value], s: Span) -> Result<Value, Diagnostic> {
 fn l_copy(_: &mut Interp, a: &[Value], s: Span) -> Result<Value, Diagnostic> {
     Ok(Value::list(expect_list(a, 0, "copy", s)?.borrow().clone()))
 }
+/// A new list of `n` copies of the receiver end to end, as the string's
+/// `repeat` does to its characters. A negative `n` is the error a
+/// string's `repeat` gives; the value ceiling (E514) stops a request
+/// that would need too much memory before anything is built.
+fn l_repeat(_: &mut Interp, a: &[Value], s: Span) -> Result<Value, Diagnostic> {
+    let n = expect_int(a, 1, "repeat", s)?;
+    if n < 0 {
+        return Err(runtime("repeat: count cannot be negative").at(s));
+    }
+    let list = expect_list(a, 0, "repeat", s)?;
+    let items = list.borrow();
+    // Nothing to copy, or no copies asked for: an empty list at once,
+    // however large the count (a loop of `n` turns over no elements
+    // would otherwise run outside the step budget).
+    if n == 0 || items.is_empty() {
+        return Ok(Value::list(Vec::new()));
+    }
+    let n = n as u128;
+    let len = items.len() as u128;
+    let bytes = len
+        .saturating_mul(n)
+        .saturating_mul(std::mem::size_of::<Value>() as u128);
+    crate::value::check_alloc(bytes, "repeat", s)?;
+    // `.saturating_mul` might have clamped: the ceiling check already
+    // refused anything that big, but a pedantic cast here keeps the
+    // allocation itself from overflowing `usize` on a 32-bit build.
+    let total = (len * n) as usize;
+    let n = n as usize;
+    let mut out = Vec::with_capacity(total);
+    for _ in 0..n {
+        out.extend(items.iter().cloned());
+    }
+    Ok(Value::list(out))
+}
+/// A map from each value in the receiver to how many times it appears,
+/// in first-seen order (cig's maps keep insertion order). A list
+/// element that cannot be a map key is the same type error map keys
+/// give elsewhere (`map keys must be strings, got X`).
+fn l_counts(_: &mut Interp, a: &[Value], s: Span) -> Result<Value, Diagnostic> {
+    let list = expect_list(a, 0, "counts", s)?;
+    let items = list.borrow();
+    let mut out = indexmap::IndexMap::<String, Value>::new();
+    for item in items.iter() {
+        let key = crate::interp::map_key(item.clone(), s)?;
+        match out.get_mut(&key) {
+            // A tally cannot pass the number of elements a list holds.
+            Some(Value::Int(n)) => *n += 1,
+            _ => {
+                out.insert(key, Value::Int(1));
+            }
+        }
+    }
+    Ok(Value::map(out))
+}
+/// How many elements equal `x`, by cig's own equality (ints and floats
+/// compare numerically, as `list.contains` does).
+fn l_count(_: &mut Interp, a: &[Value], s: Span) -> Result<Value, Diagnostic> {
+    Ok(Value::Int(
+        expect_list(a, 0, "count", s)?
+            .borrow()
+            .iter()
+            .filter(|v| v.equals(&a[1]))
+            .count() as i64,
+    ))
+}
+/// Append every element of `ys` to the receiver in place, sized once.
+/// `xs.extend(xs)` works: the elements to append are snapshotted first,
+/// so the loop that places them does not see what it is appending. The
+/// receiver is returned.
+fn l_extend(_: &mut Interp, a: &[Value], s: Span) -> Result<Value, Diagnostic> {
+    let xs = expect_list(a, 0, "extend", s)?;
+    let ys = expect_list(a, 1, "extend", s)?;
+    // The to-append side has to be read first to work with
+    // `xs.extend(xs)`: a `borrow_mut` on `xs` below would refuse the
+    // second borrow, and a `borrow()` on `ys` after it would refuse the
+    // other way round.
+    let appended: Vec<Value> = if Rc::ptr_eq(&xs, &ys) {
+        xs.borrow().clone()
+    } else {
+        ys.borrow().iter().cloned().collect()
+    };
+    let have = xs.borrow().len() as u128;
+    let bytes =
+        (have + appended.len() as u128).saturating_mul(std::mem::size_of::<Value>() as u128);
+    crate::value::check_alloc(bytes, "extend", s)?;
+    let mut inner = xs.borrow_mut();
+    inner.reserve(appended.len());
+    inner.extend(appended);
+    drop(inner);
+    Ok(a[0].clone())
+}
 
 // ----- maps ----------------------------------------------------------------------
 
@@ -740,4 +856,61 @@ fn m_merge(_: &mut Interp, a: &[Value], s: Span) -> Result<Value, Diagnostic> {
 }
 fn m_copy(_: &mut Interp, a: &[Value], s: Span) -> Result<Value, Diagnostic> {
     Ok(Value::record(expect_map(a, 0, "copy", s)?.borrow().clone()))
+}
+/// `m.inc(key)` adds 1, `m.inc(key, by)` adds `by`, to the entry at
+/// `key`. A missing entry is created at 0 first, so one lookup covers
+/// `has`, the read and the write. The new value is returned. An
+/// existing entry that is not a number is the type error map arithmetic
+/// gives elsewhere.
+fn m_inc(_: &mut Interp, a: &[Value], s: Span) -> Result<Value, Diagnostic> {
+    let map = expect_map(a, 0, "inc", s)?;
+    let key = expect_str(a, 1, "inc", s)?;
+    // By default, 1. `by` may be an int or a float.
+    enum By {
+        Int(i64),
+        Float(f64),
+    }
+    let by = match a.get(2) {
+        None => By::Int(1),
+        Some(Value::Int(n)) => By::Int(*n),
+        Some(Value::Float(f)) => By::Float(*f),
+        Some(other) => {
+            return Err(type_error(format!(
+                "inc: argument 3 must be a number, got {} ({})",
+                other.type_name(),
+                crate::value::truncate(&other.repr(), 40)
+            ))
+            .code("E402")
+            .at(s));
+        }
+    };
+    // One lookup: the entry is found (or made, at the end, where a new
+    // key goes) and then read and written by its index.
+    let mut inner = map.borrow_mut();
+    let idx = match inner.get_index_of(key) {
+        Some(idx) => idx,
+        None => inner.insert_full(key.to_string(), Value::Int(0)).0,
+    };
+    let (_, slot) = inner.get_index_mut(idx).expect("just-inserted entry");
+    let new = match (&slot, &by) {
+        (Value::Int(n), By::Int(d)) => Value::Int(
+            n.checked_add(*d)
+                .ok_or_else(|| runtime("inc: integer overflow").code("E503").at(s))?,
+        ),
+        (Value::Int(n), By::Float(d)) => Value::Float(*n as f64 + d),
+        (Value::Float(n), By::Int(d)) => Value::Float(n + *d as f64),
+        (Value::Float(n), By::Float(d)) => Value::Float(n + d),
+        (other, _) => {
+            return Err(type_error(format!(
+                "inc: the entry at {} is {}, not a number ({})",
+                crate::value::truncate(&Value::str(key).repr(), 40),
+                other.type_name(),
+                crate::value::truncate(&other.repr(), 40)
+            ))
+            .code("E402")
+            .at(s));
+        }
+    };
+    *slot = new.clone();
+    Ok(new)
 }

@@ -1,0 +1,10 @@
+# SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# list.counts (#255): the same tally as counts-loop.cig, done once in
+# Rust. Prints the same value.
+roll parts = []
+for i in 0..300000 {
+  parts.push("w${(i * 7919) % 997}")
+}
+roll counts = parts.counts()
+exhale counts.len()

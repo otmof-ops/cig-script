@@ -1,0 +1,13 @@
+# SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# map.inc (#255): one lookup, not three. Paired with map-inc-loop.cig.
+# Prints the same value.
+roll parts = []
+for i in 0..300000 {
+  parts.push("w${(i * 7919) % 997}")
+}
+roll counts = {}
+for w in parts {
+  counts.inc(w)
+}
+exhale counts.len()

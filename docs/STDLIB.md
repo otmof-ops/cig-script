@@ -203,6 +203,7 @@ Reading the environment is free; setting or unsetting it is a burn, journaled as
 | `is_empty` | 0 | pure |
 | `to_int` | 0 | pure |
 | `to_float` | 0 | pure |
+| `count` | 1 | pure |
 
 ## list methods
 
@@ -240,6 +241,10 @@ Reading the environment is free; setting or unsetting it is a burn, journaled as
 | `enumerate` | 0 | pure |
 | `chunks` | 1 | pure |
 | `copy` | 0 | pure |
+| `repeat` | 1 | pure |
+| `counts` | 0 | pure |
+| `count` | 1 | pure |
+| `extend` | 1 | pure |
 
 ## map methods
 
@@ -256,3 +261,4 @@ Reading the environment is free; setting or unsetting it is a burn, journaled as
 | `remove` | 1 | pure |
 | `merge` | 1 | pure |
 | `copy` | 0 | pure |
+| `inc` | 1-2 | pure |
