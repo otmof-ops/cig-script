@@ -23,9 +23,12 @@
 //!   call (interface 2: with the frame, the helpers and the host added
 //!   for bodies).
 //! - [`mod@value`]: what native code knows of a value in a frame
-//!   (interface 2): where its tag and payload are, and the tags of
-//!   null, bool, int and float. [`value::agrees`] holds a runtime's
-//!   value type to these constants.
+//!   (interface 2): where its tag and payload are, and the tag number
+//!   of each kind of value a register can carry. [`value::agrees`]
+//!   holds a runtime's value type to these constants.
+//! - [`mod@tagset`]: a set of value tags in a 16-bit word. One set
+//!   over the eleven tags, with bit-OR for the lattice's join, for the
+//!   proven, observed and guessed types that cross the boundary.
 //! - [`loader`]: [`Mapped`], a section's code mapped read and execute
 //!   from a file, [`Code`], a mapping whose entries and bodies can be
 //!   called, and the helpers' table ([`Helpers`], [`Host`]) that stands
@@ -69,6 +72,7 @@ mod context;
 pub mod format;
 #[allow(unsafe_code)]
 pub mod loader;
+pub mod tagset;
 #[allow(unsafe_code)]
 pub mod value;
 

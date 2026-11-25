@@ -32,13 +32,13 @@ pub enum Value {
     Bool(bool) = cig_native::value::BOOL,
     Int(i64) = cig_native::value::INT,
     Float(f64) = cig_native::value::FLOAT,
-    Str(Rc<str>) = cig_native::value::OWNS,
-    List(List) = cig_native::value::OWNS + 1,
-    Map(Map) = cig_native::value::OWNS + 2,
-    Func(Rc<Function>) = cig_native::value::OWNS + 3,
-    Builtin(Rc<Builtin>) = cig_native::value::OWNS + 4,
-    Module(Rc<Module>) = cig_native::value::OWNS + 5,
-    Chain(Rc<Chain>) = cig_native::value::OWNS + 6,
+    Str(Rc<str>) = cig_native::value::STR,
+    List(List) = cig_native::value::LIST,
+    Map(Map) = cig_native::value::MAP,
+    Func(Rc<Function>) = cig_native::value::FUNC,
+    Builtin(Rc<Builtin>) = cig_native::value::BUILTIN,
+    Module(Rc<Module>) = cig_native::value::MODULE,
+    Chain(Rc<Chain>) = cig_native::value::CHAIN,
 }
 
 // The layout native code is compiled against (cig-native's `value`
@@ -199,6 +199,26 @@ impl Value {
             Value::Func(_) | Value::Builtin(_) => "function",
             Value::Module(_) => "module",
             Value::Chain(_) => "chain",
+        }
+    }
+
+    /// The value's run-time tag: the number [`cig_native::value`] gives
+    /// its kind. `Value` is `#[repr(C, u8)]` with the tag byte at offset
+    /// zero, so native code reads the same number from the register.
+    #[inline]
+    pub fn tag(&self) -> u8 {
+        match self {
+            Value::Null => cig_native::value::NULL,
+            Value::Bool(_) => cig_native::value::BOOL,
+            Value::Int(_) => cig_native::value::INT,
+            Value::Float(_) => cig_native::value::FLOAT,
+            Value::Str(_) => cig_native::value::STR,
+            Value::List(_) => cig_native::value::LIST,
+            Value::Map(_) => cig_native::value::MAP,
+            Value::Func(_) => cig_native::value::FUNC,
+            Value::Builtin(_) => cig_native::value::BUILTIN,
+            Value::Module(_) => cig_native::value::MODULE,
+            Value::Chain(_) => cig_native::value::CHAIN,
         }
     }
 
@@ -673,6 +693,84 @@ mod tests {
         assert!(!Value::list(vec![]).truthy());
         assert!(Value::str("x").truthy());
         assert!(!Value::Null.truthy());
+    }
+
+    fn placeholder_builtin(_: &mut Interp, _: &[Value], _: Span) -> Result<Value, Diagnostic> {
+        Ok(Value::Null)
+    }
+
+    fn sample_values() -> Vec<Value> {
+        use crate::interp::env::Scope;
+        use crate::syntax::ast::{Block, Pending};
+        let empty_block = Rc::new(Block {
+            stmts: Vec::new(),
+            span: Span::default(),
+            pending: Pending::default(),
+        });
+        let func = Rc::new(Function {
+            name: None,
+            params: Vec::new(),
+            body: FnBody::Block(empty_block),
+            closure: Scope::root(),
+        });
+        let builtin = Rc::new(Builtin {
+            name: "noop",
+            effect: Effect::Pure,
+            min_args: 0,
+            max_args: Some(0),
+            func: placeholder_builtin,
+            calls_back: false,
+        });
+        let module = Rc::new(Module {
+            name: "noop",
+            items: IndexMap::new(),
+        });
+        let chain = Rc::new(Chain {
+            name: "noop".to_string(),
+            steps: Vec::new(),
+        });
+        vec![
+            Value::Null,
+            Value::Bool(true),
+            Value::Int(0),
+            Value::Float(0.0),
+            Value::str("x"),
+            Value::list(Vec::new()),
+            Value::map(IndexMap::new()),
+            Value::Func(func),
+            Value::Builtin(builtin),
+            Value::Module(module),
+            Value::Chain(chain),
+        ]
+    }
+
+    #[test]
+    fn tag_agrees_with_cig_native_name() {
+        // Each kind of value reports a tag whose name in cig-native is
+        // the value's own type_name, with the one carve-out: a built-in
+        // function says "function" through type_name but reads as
+        // "builtin" by tag.
+        let values = sample_values();
+        assert_eq!(values.len(), cig_native::value::TAG_COUNT as usize);
+        for v in &values {
+            let tag_name = cig_native::value::name(v.tag());
+            if matches!(v, Value::Builtin(_)) {
+                assert_eq!(tag_name, Some("builtin"));
+                assert_eq!(v.type_name(), "function");
+            } else {
+                assert_eq!(tag_name, Some(v.type_name()));
+            }
+        }
+    }
+
+    #[test]
+    fn tag_has_a_single_bit_set_in_the_lattice() {
+        use cig_native::tagset::TagSet;
+        for v in sample_values() {
+            let s = TagSet::of(v.tag()).expect("every value's tag is a tag");
+            assert_eq!(s.len(), 1);
+            assert!(s.has(v.tag()));
+        }
     }
 }
 

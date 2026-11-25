@@ -108,6 +108,26 @@ pub enum Ty {
     Func,
 }
 
+impl Ty {
+    /// The set of run-time tags a value of this type may carry, as
+    /// decision 0005 section 2 names it: what is read where a proven
+    /// type meets a recorded one.
+    pub fn tags(self) -> cig_native::tagset::TagSet {
+        use cig_native::tagset::TagSet;
+        match self {
+            Ty::Dynamic => TagSet::ALL,
+            Ty::Null => TagSet::NULL,
+            Ty::Bool => TagSet::BOOL,
+            Ty::Int => TagSet::INT,
+            Ty::Float => TagSet::FLOAT,
+            Ty::Str => TagSet::STR,
+            Ty::List => TagSet::LIST,
+            Ty::Map => TagSet::MAP,
+            Ty::Func => TagSet::FUNC,
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct Block {
     pub instrs: Vec<Instr>,
@@ -623,6 +643,38 @@ impl Kind {
             Kind::If { cond, .. } => vec![*cond],
             Kind::ForEach { iter, .. } => vec![*iter],
             Kind::Yield(v) | Kind::Ret(v) | Kind::Throw(v) => vec![*v],
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cig_native::tagset::TagSet;
+    use cig_native::value;
+
+    #[test]
+    fn ty_tags_maps_each_kind_to_its_tag_or_every_tag() {
+        let one = |t: u8| TagSet::of(t).expect("every listed tag is a tag");
+        let cases: [(Ty, TagSet); 9] = [
+            (Ty::Dynamic, TagSet::ALL),
+            (Ty::Null, one(value::NULL)),
+            (Ty::Bool, one(value::BOOL)),
+            (Ty::Int, one(value::INT)),
+            (Ty::Float, one(value::FLOAT)),
+            (Ty::Str, one(value::STR)),
+            (Ty::List, one(value::LIST)),
+            (Ty::Map, one(value::MAP)),
+            (Ty::Func, one(value::FUNC)),
+        ];
+        for (ty, expected) in cases {
+            assert_eq!(ty.tags(), expected, "tags for {ty:?}");
+        }
+        // Dynamic reaches every tag, each singleton reaches one.
+        assert_eq!(Ty::Dynamic.tags().len(), value::TAG_COUNT as u32);
+        for (ty, _) in &cases[1..] {
+            assert_eq!(ty.tags().len(), 1);
+            assert!(ty.tags().within(TagSet::ALL));
         }
     }
 }

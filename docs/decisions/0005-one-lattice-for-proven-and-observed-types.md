@@ -98,7 +98,7 @@ Decision 0004 keeps a file with the recorded sites for each function. A site's r
 
 ## Done when
 
-- [ ] `cig-native` names all eleven tags, and cigscript's `Value` takes every discriminant from them.
-- [ ] `cig-native` gains a module beside `value` with the eleven bits, the five reserved, the join and the membership test over a tag. A `u16` carries one set. No `unsafe`.
+- [x] `cig-native` names all eleven tags, and cigscript's `Value` takes every discriminant from them. (`cig_native::value`: `STR` to `CHAIN` beside the first four, and `TAG_COUNT`.)
+- [x] `cig-native` gains a module beside `value` with the eleven bits, the five reserved, the join and the membership test over a tag. A `u16` carries one set. No `unsafe`. (`cig_native::tagset::TagSet`. It prints a tag by the name `cig_native::value::name` gives it: `string` and `function` where this record writes `str` and `func`, and `builtin` for a built-in function.)
 - [ ] The maps from `cig-codegen`'s `Ty` and the CIR's `Ty` into the lattice are named and read where a proven type crosses into the record (decision 0003) or the profile (decision 0004). `Dynamic` and `Any` map to every bit; `None` to the empty set.
 - [ ] The profile's byte format for a set is this lattice's bits, little-endian, reserved bits zero. Every reader of a profile reads the same constants.

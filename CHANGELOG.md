@@ -121,6 +121,19 @@ project follows semantic versioning.
   its own loop, nested, `break`, a closure's loop variable, a map, a
   string) to the tree-walker.
 
+- **cig-cherry's types, the first code: every value tag has one name,
+  and a set of tags is one type** (#279, decision 0005). `cig-native`
+  names all eleven tags of a value (`STR`, `LIST`, `MAP`, `FUNC`,
+  `BUILTIN`, `MODULE` and `CHAIN` beside the four native code writes,
+  and `TAG_COUNT`), and cig's `Value` takes each of its discriminants
+  from them, so the runtime and the code generator have one list of
+  numbers. `cig_native::tagset::TagSet` is a set of tags in sixteen
+  bits, eleven used and five reserved: what a compiler proved of a
+  register and what a run saw in it are both one of these, joined by
+  OR and stored as two little-endian bytes. `Value::tag()` gives a
+  value's tag and the CIR's `Ty::tags()` the set a proven type is.
+  Nothing reads them yet, and no number and no behavior changes.
+
 - **Three decision records for cig-cherry** (#279, decisions (b), (c)
   and (i)). `docs/decisions/0003`: what the VM is to record about a
   site, and how: outside both fast loops, by an observer on the general

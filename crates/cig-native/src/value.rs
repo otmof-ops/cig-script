@@ -3,8 +3,16 @@
 
 //! What native code knows of a value in a frame (interface 2): a
 //! register's size and alignment, where its tag is, where its number
-//! or bool payload is, and the tags of the four values native code
-//! writes inline.
+//! or bool payload is, and the tag number of each kind of value a
+//! register can carry.
+//!
+//! The tags are a flat numbering from 0 to [`TAG_COUNT`] minus one, so a
+//! tag fits in a `u8` and the set of all tags fits in [`TAG_COUNT`] bits.
+//! The first four ([`NULL`], [`BOOL`], [`INT`], [`FLOAT`]) are the
+//! values native code writes inline; [`OWNS`] is the first tag of a
+//! kind whose payload owns memory, and the owning kinds follow it as
+//! [`STR`], [`LIST`], [`MAP`], [`FUNC`], [`BUILTIN`], [`MODULE`] and
+//! [`CHAIN`].
 //!
 //! A runtime's value type agrees with these constants when the tag byte
 //! of its `null`, its `true`, an `int(i)` and a `float(f)` are
@@ -38,8 +46,76 @@ pub const FLOAT: u8 = 3;
 
 /// The first tag of a value that owns memory. Native code never writes
 /// over a register whose tag is this or more, and never copies such a
-/// value.
+/// value. Equal to [`STR`], the first owning kind.
 pub const OWNS: u8 = 4;
+
+/// The tag of a string. The first tag whose value owns memory, so it
+/// is equal to [`OWNS`].
+pub const STR: u8 = OWNS;
+
+/// The tag of a list.
+pub const LIST: u8 = 5;
+
+/// The tag of a map.
+pub const MAP: u8 = 6;
+
+/// The tag of a script-defined function.
+pub const FUNC: u8 = 7;
+
+/// The tag of a built-in function.
+pub const BUILTIN: u8 = 8;
+
+/// The tag of a module (a namespace of built-ins and values).
+pub const MODULE: u8 = 9;
+
+/// The tag of a chain (an ordered list of named steps).
+pub const CHAIN: u8 = 10;
+
+/// How many tags there are: a tag is a number below this one.
+pub const TAG_COUNT: u8 = 11;
+
+/// The name of a tag: `null`, `bool`, `int`, `float`,
+/// `string`, `list`, `map`, `function`, `builtin`, `module`, `chain`.
+/// `None` for a number that is not a tag.
+///
+/// These are the runtime's own names for the kinds of value, except
+/// that the two function tags take two names: a script-defined function
+/// is `function` and a built-in function is `builtin`.
+pub const fn name(tag: u8) -> Option<&'static str> {
+    match tag {
+        NULL => Some("null"),
+        BOOL => Some("bool"),
+        INT => Some("int"),
+        FLOAT => Some("float"),
+        STR => Some("string"),
+        LIST => Some("list"),
+        MAP => Some("map"),
+        FUNC => Some("function"),
+        BUILTIN => Some("builtin"),
+        MODULE => Some("module"),
+        CHAIN => Some("chain"),
+        _ => None,
+    }
+}
+
+// The eleven tags are 0 to 10 in that order, with no gap, and STR is
+// the first owning tag. Native code reads the tag byte by number, and
+// the set of all tags fits in a `u16` only while this holds.
+const _: () = {
+    assert!(NULL == 0);
+    assert!(BOOL == 1);
+    assert!(INT == 2);
+    assert!(FLOAT == 3);
+    assert!(OWNS == 4);
+    assert!(STR == OWNS);
+    assert!(LIST == 5);
+    assert!(MAP == 6);
+    assert!(FUNC == 7);
+    assert!(BUILTIN == 8);
+    assert!(MODULE == 9);
+    assert!(CHAIN == 10);
+    assert!(TAG_COUNT == 11);
+};
 
 /// A value type agrees with the constants of this module. Given the
 /// type's `null`, its `true`, its `int(i)` and its `float(f)`: it reads
@@ -184,6 +260,29 @@ mod tests {
             (&Good::Int(0), 0),
             (&Good::Float(1.0), 2.0),
         ));
+    }
+
+    #[test]
+    fn name_round_trips_each_tag() {
+        let expected = [
+            (NULL, "null"),
+            (BOOL, "bool"),
+            (INT, "int"),
+            (FLOAT, "float"),
+            (STR, "string"),
+            (LIST, "list"),
+            (MAP, "map"),
+            (FUNC, "function"),
+            (BUILTIN, "builtin"),
+            (MODULE, "module"),
+            (CHAIN, "chain"),
+        ];
+        assert_eq!(expected.len(), TAG_COUNT as usize);
+        for (t, n) in expected {
+            assert_eq!(name(t), Some(n));
+        }
+        assert_eq!(name(TAG_COUNT), None);
+        assert_eq!(name(u8::MAX), None);
     }
 
     #[test]
