@@ -378,7 +378,9 @@ impl Native {
                     let pc = body.pcs.get(at as usize).copied().unwrap_or(0);
                     // What a test has its body ask the host for.
                     if let Some((here, ask, next)) = ASK_AT.with(Cell::get) {
-                        if pc <= here {
+                        let asked_here =
+                            ASK_IN.with(Cell::get).is_none_or(|f| f == body.code_index);
+                        if asked_here && pc <= here {
                             // The interpreter runs up to the
                             // instruction, the host is asked in its
                             // place, and the interpreter runs the rest
@@ -394,6 +396,28 @@ impl Native {
                                 Ask::Push(list, value, dst) => host.push(ctx, list, value, dst),
                                 Ask::Copy(dst, src) => host.copy(ctx, dst, src),
                                 Ask::Clear(reg) => host.clear(ctx, reg),
+                                Ask::Elem(dst, list, index) => host.elem(ctx, dst, list, index),
+                                Ask::Quick => {
+                                    // Steps a body's machine code
+                                    // would have counted by now.
+                                    ctx.steps_left -= ASK_STEPS.with(Cell::get);
+                                    let answer = host.quick(ctx, here);
+                                    QUICK.with(|q| q.set(Some(answer)));
+                                    match answer {
+                                        1 => true,
+                                        2 => return Stop::Raised(here),
+                                        _ => false,
+                                    }
+                                }
+                                Ask::Fields(reg) => {
+                                    let given = host.fields(ctx, reg).then_some((
+                                        ctx.left,
+                                        ctx.right,
+                                        ctx.sites as usize,
+                                    ));
+                                    VIEW.with(|v| v.set(Some(given)));
+                                    false
+                                }
                             };
                             let from = if done { next } else { here };
                             return host.run(ctx, from, body.code_len);
@@ -645,6 +669,20 @@ thread_local! {
     /// machine code does where it has the runtime do what an
     /// instruction would.
     pub(crate) static ASK_AT: Cell<Option<(u32, Ask, u32)>> = const { Cell::new(None) };
+    /// The function whose body asks ([`ASK_AT`]); every function's
+    /// when none is named.
+    pub(crate) static ASK_IN: Cell<Option<usize>> = const { Cell::new(None) };
+    /// How many steps a test's body takes from the context, as its
+    /// machine code would have counted them, before it asks for
+    /// `quick`.
+    pub(crate) static ASK_STEPS: Cell<i64> = const { Cell::new(0) };
+    /// What the host last answered a test's body that asked for
+    /// `quick`.
+    pub(crate) static QUICK: Cell<Option<u32>> = const { Cell::new(None) };
+    /// What the host last answered a test's body that asked for a
+    /// map's `fields`: `None` inside when it gave no view, else
+    /// `ctx.left`, `ctx.right` and the address in `ctx.sites`.
+    pub(crate) static VIEW: Cell<Option<Option<(u64, u64, usize)>>> = const { Cell::new(None) };
 }
 
 /// What a test's body asks its host for ([`ASK_AT`]).
@@ -657,6 +695,14 @@ pub(crate) enum Ask {
     Copy(u32, u32),
     /// `clear(reg)`.
     Clear(u32),
+    /// `quick(pc)`, at the pc the body asks at. What it answered is
+    /// kept in [`QUICK`].
+    Quick,
+    /// `elem(dst, list, index)`.
+    Elem(u32, u32, u32),
+    /// `fields(reg)`: what it gave is kept in [`VIEW`], and the
+    /// bytecode goes on as if the host had done nothing.
+    Fields(u32),
 }
 
 thread_local! {

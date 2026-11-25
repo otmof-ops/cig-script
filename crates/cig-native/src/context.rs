@@ -58,8 +58,13 @@ pub struct Context {
     pub nest: u32,
     /// Zero.
     pub zero: u32,
-    /// Zero.
-    pub reserved: u64,
+    /// Bodies: the address of the function's site cells, one of eight
+    /// bytes for each pc of its code: what a field instruction at that
+    /// pc last found in a map that has a shape, the shape in the high
+    /// half and the field's place among the map's values in the low.
+    /// Zero until the runtime has found one there. Native code reads
+    /// the cells; only the runtime writes them. Null for an entry.
+    pub sites: *const u64,
 }
 
 impl Context {
@@ -78,7 +83,7 @@ impl Context {
             host: core::ptr::null_mut(),
             nest: 0,
             zero: 0,
-            reserved: 0,
+            sites: core::ptr::null(),
         }
     }
 }
@@ -98,7 +103,7 @@ const _: () = {
     assert!(core::mem::offset_of!(Context, host) == 56);
     assert!(core::mem::offset_of!(Context, nest) == 64);
     assert!(core::mem::offset_of!(Context, zero) == 68);
-    assert!(core::mem::offset_of!(Context, reserved) == 72);
+    assert!(core::mem::offset_of!(Context, sites) == 72);
 };
 
 #[cfg(test)]
@@ -113,6 +118,7 @@ mod tests {
         assert!(c.frame.is_null());
         assert!(c.helpers.is_null());
         assert!(c.host.is_null());
-        assert_eq!((c.nest, c.zero, c.reserved), (0, 0, 0));
+        assert_eq!((c.nest, c.zero), (0, 0));
+        assert!(c.sites.is_null());
     }
 }

@@ -1199,9 +1199,13 @@ pub(crate) fn set_field(
         Value::Map(map) => {
             let mut map = map.borrow_mut();
             match field_index(&map, name, hint) {
-                Some(i) => map[i] = new,
+                Some(i) => {
+                    if let Some((_, slot)) = map.get_index_mut(i) {
+                        *slot = new;
+                    }
+                }
                 None => {
-                    map.insert(name.to_string(), new);
+                    map.add_field(name, new);
                 }
             }
             Ok(())

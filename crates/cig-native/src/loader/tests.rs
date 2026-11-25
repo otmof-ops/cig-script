@@ -526,6 +526,12 @@ mod on_linux {
         push_returns: bool,
     }
 
+    /// What [`Recording`] keeps in `push_calls` first for a call of
+    /// `fields`, of `quick` and of `elem`: no register number.
+    const FIELDS: u32 = u32::MAX - 1;
+    const QUICK: u32 = u32::MAX - 2;
+    const ELEM: u32 = u32::MAX - 3;
+
     impl Host for Recording {
         fn run(&mut self, _ctx: &mut Context, from: u32, to: u32) -> Stop {
             self.run_calls.push((from, to));
@@ -558,6 +564,26 @@ mod on_linux {
         }
         fn clear(&mut self, _ctx: &mut Context, reg: u32) -> bool {
             self.push_calls.push((reg, u32::MAX, u32::MAX));
+            self.push_returns
+        }
+        fn fields(&mut self, ctx: &mut Context, reg: u32) -> bool {
+            self.push_calls.push((FIELDS, reg, 0));
+            if self.push_returns {
+                ctx.left = 0x1000;
+                ctx.right = 7 | 56 << 32;
+            }
+            self.push_returns
+        }
+        fn quick(&mut self, _ctx: &mut Context, pc: u32) -> u32 {
+            self.push_calls.push((QUICK, pc, 0));
+            if self.push_returns {
+                1
+            } else {
+                2
+            }
+        }
+        fn elem(&mut self, _ctx: &mut Context, dst: u32, list: u32, index: u32) -> bool {
+            self.push_calls.push((ELEM, dst, list << 8 | index));
             self.push_returns
         }
     }
@@ -658,6 +684,88 @@ mod on_linux {
         }
     }
 
+    /// [`body_code::PUSH_THROUGH`] with the helper it calls read from
+    /// `offset` in the table instead: the same three numbers, 3, 5 and
+    /// 2, in the same registers. A helper that takes fewer reads the
+    /// first of them.
+    fn through(offset: u8) -> Vec<u8> {
+        let mut code = body_code::PUSH_THROUGH.to_vec();
+        #[cfg(target_arch = "x86_64")]
+        {
+            // `mov rax, [rax+disp8]`: the displacement is its last byte.
+            assert_eq!(code[8..12], [0x48, 0x8B, 0x40, 0x18]);
+            code[11] = offset;
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            // `ldr x8, [x8, #offset]`: the offset in units of eight, in
+            // bits 10 to 21.
+            assert_eq!(code[12..16], [0x08, 0x0D, 0x40, 0xF9]);
+            let word = 0xF940_0108u32 | (u32::from(offset) / 8) << 10;
+            code[12..16].copy_from_slice(&word.to_le_bytes());
+        }
+        code
+    }
+
+    #[test]
+    fn enter_calls_fields_quick_and_elem_through_their_places_in_the_table() {
+        // A body for each, after the entries: it calls the helper at
+        // that offset with 3, 5 and 2 and returns what that returns.
+        for (offset, want) in [
+            (48u8, (FIELDS, 3, 0)),
+            (56, (QUICK, 3, 0)),
+            (64, (ELEM, 3, 5 << 8 | 2)),
+        ] {
+            let mut section = section();
+            let at = (code::ADD.len() + code::MARK.len() + code::TICK.len()) as u32;
+            section.code.extend_from_slice(&through(offset));
+            section.bodies = vec![Body {
+                func: 1,
+                offset: at,
+                resumes: vec![0],
+            }];
+            section.rule = Rule::Loops;
+            let body = section.to_bytes().expect("a section");
+            let (keep, file) = file_with(65_536, &body);
+            let tables = Tables::parse(&body).expect("its tables");
+            let mapped = Mapped::map(&file, 65_536, tables.code_len as usize).expect("mapped");
+            let bytes = &body[..tables.code_len as usize];
+            // SAFETY: as in `armed`.
+            let code = unsafe { mapped.arm(bytes, &tables) }.expect("armed");
+            drop(keep);
+            for done in [true, false] {
+                let mut host = Recording {
+                    run_returns: vec![],
+                    run_calls: vec![],
+                    list_returns: vec![],
+                    again_calls: vec![],
+                    push_calls: vec![],
+                    push_returns: done,
+                };
+                let mut ctx = Context::new(100, 10);
+                // `fields` and `elem` answer 1 or 0; `quick` 1, or 2
+                // when the instruction raised.
+                let answer = match (offset, done) {
+                    (_, true) => 1,
+                    (56, false) => 2,
+                    (_, false) => 0,
+                };
+                assert_eq!(
+                    code.enter(0, 0, &mut ctx, &mut host),
+                    Some(Stop::At(answer)),
+                    "the helper at {offset}"
+                );
+                assert_eq!(host.push_calls, vec![want], "the helper at {offset}");
+                assert!(host.run_calls.is_empty() && host.again_calls.is_empty());
+                // `fields` writes its view where the body reads it.
+                if offset == 48 {
+                    let view = if done { (0x1000, 7 | 56 << 32) } else { (0, 0) };
+                    assert_eq!((ctx.left, ctx.right), view);
+                }
+            }
+        }
+    }
+
     #[test]
     fn enter_a_body_that_returns_a_constant_stop() {
         let code = armed_with_bodies();
@@ -755,6 +863,15 @@ mod on_linux {
             }
             fn clear(&mut self, _ctx: &mut Context, _reg: u32) -> bool {
                 unreachable!("clear is not called in this test");
+            }
+            fn fields(&mut self, _ctx: &mut Context, _reg: u32) -> bool {
+                unreachable!("fields is not called in this test");
+            }
+            fn quick(&mut self, _ctx: &mut Context, _pc: u32) -> u32 {
+                unreachable!("quick is not called in this test");
+            }
+            fn elem(&mut self, _ctx: &mut Context, _dst: u32, _list: u32, _index: u32) -> bool {
+                unreachable!("elem is not called in this test");
             }
         }
         let code = armed_with_bodies();

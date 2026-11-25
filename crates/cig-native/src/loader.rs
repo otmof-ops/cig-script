@@ -67,7 +67,7 @@ impl Stop {
 }
 
 /// The runtime's functions a body calls, through the context. Interface
-/// 2 has six.
+/// 2 has nine.
 ///
 /// Each field's offset in this table is part of the interface: a body
 /// loads a function pointer by its offset here and calls through it in
@@ -123,11 +123,52 @@ pub struct Helpers {
     /// register that holds a value that owns memory. It runs no
     /// instruction, as `copy` runs none.
     pub clear: unsafe extern "C" fn(ctx: *mut Context, reg: u32) -> u32,
+    /// Offset 48. `fields(ctx, reg)`: 1 when register `reg` holds a map
+    /// that has a shape, whose values native code may read and write
+    /// where they lie until its next call of a helper. `ctx.left` is
+    /// then the address of the map's first value, and `ctx.right` holds
+    /// the map's shape in its low half and, in its high half, how many
+    /// bytes lie from one value to the next. 0 otherwise (no map, a map
+    /// without a shape or without a value, one something else holds),
+    /// with nothing written. A map of a given shape has the same keys
+    /// in the same places as every other of it, so a field's place
+    /// found once ([`Context::sites`]) is its place in each.
+    pub fields: unsafe extern "C" fn(ctx: *mut Context, reg: u32) -> u32,
+    /// Offset 56. `quick(ctx, pc)`: run the one instruction at `pc`
+    /// where the frame stands, without the interpreter's loop, when it
+    /// is one the runtime can run that way with the operands it has: a
+    /// field or an element read or written, an upvalue read, a call of
+    /// a builtin that calls no script function, a string built, a list
+    /// or a map added to. Never one that jumps, counts a step or ends
+    /// the frame. Returns 1 when it ran: the bytecode goes on at the
+    /// next instruction (past the `nop`s that follow an index
+    /// instruction). 0, with nothing changed, when it did not: the body
+    /// has the interpreter run it ([`Helpers::again`]). 2 when the
+    /// instruction raised: the body returns [`Stop::Raised`]`(pc)`.
+    ///
+    /// Every register the instruction reads is read from the frame, so
+    /// the body writes there what it holds of them first. It is not a
+    /// guess that failed: the runtime counts none. The frame's address
+    /// and the steps left stand after it; what is in view stands when
+    /// the instruction only reads, or writes a value where one was, and
+    /// is no longer where machine code saw it when the instruction may
+    /// add to a list or a map or take from one.
+    pub quick: unsafe extern "C" fn(ctx: *mut Context, pc: u32) -> u32,
+    /// Offset 64. `elem(ctx, dst, list, index)`: register `dst` takes
+    /// the element of the list in register `list` at the int in
+    /// register `index`, whatever the element is. 1 when the runtime
+    /// did it; 0, with nothing changed, when it cannot (no list, no
+    /// int, no such element, a register that carries a cell). It is
+    /// what `for x in xs` needs of an item that owns memory: `iternext`
+    /// is the body's own instruction (it keeps the loop's place), so
+    /// the body reads an item that owns none where it lies and asks
+    /// for this one. It runs no instruction, as `copy` runs none.
+    pub elem: unsafe extern "C" fn(ctx: *mut Context, dst: u32, list: u32, index: u32) -> u32,
 }
 
 // The layout the body is compiled against.
 const _: () = {
-    assert!(core::mem::size_of::<Helpers>() == 48);
+    assert!(core::mem::size_of::<Helpers>() == 72);
     assert!(core::mem::align_of::<Helpers>() == core::mem::align_of::<usize>());
     assert!(core::mem::offset_of!(Helpers, run) == 0);
     assert!(core::mem::offset_of!(Helpers, list) == 8);
@@ -135,6 +176,9 @@ const _: () = {
     assert!(core::mem::offset_of!(Helpers, push) == 24);
     assert!(core::mem::offset_of!(Helpers, copy) == 32);
     assert!(core::mem::offset_of!(Helpers, clear) == 40);
+    assert!(core::mem::offset_of!(Helpers, fields) == 48);
+    assert!(core::mem::offset_of!(Helpers, quick) == 56);
+    assert!(core::mem::offset_of!(Helpers, elem) == 64);
 };
 
 /// What the helpers are on the runtime's side: safe code the crate's
@@ -176,6 +220,23 @@ pub trait Host {
     /// when it is done, `false` with nothing changed when the host
     /// cannot (the register carries a cell). It runs no instruction.
     fn clear(&mut self, ctx: &mut Context, reg: u32) -> bool;
+    /// Give native code a view on the values of register `reg`'s map,
+    /// when it holds one that has a shape and a value: set `ctx.left`
+    /// to the address of the first value and `ctx.right` to the shape
+    /// (low half) and the bytes from one value to the next (high half),
+    /// and return `true`. Return `false` with nothing written
+    /// otherwise.
+    fn fields(&mut self, ctx: &mut Context, reg: u32) -> bool;
+    /// Run the one instruction at `pc` without the interpreter's loop,
+    /// when the host can ([`Helpers::quick`]): 1 when it ran, 0 with
+    /// nothing changed when it did not, 2 when it raised (the error is
+    /// the host's to give when the body returns `Stop::Raised(pc)`).
+    fn quick(&mut self, ctx: &mut Context, pc: u32) -> u32;
+    /// Register `dst` takes the element of register `list`'s list at
+    /// register `index`'s int: `true` when it is done, `false` with
+    /// nothing changed when the host cannot. It runs no instruction,
+    /// and changes nothing but register `dst`.
+    fn elem(&mut self, ctx: &mut Context, dst: u32, list: u32, index: u32) -> bool;
 }
 
 /// Why there is no mapping, or no [`Code`].
@@ -467,6 +528,9 @@ impl Code {
             push: sys::host_push_c::<H>,
             copy: sys::host_copy_c::<H>,
             clear: sys::host_clear_c::<H>,
+            fields: sys::host_fields_c::<H>,
+            quick: sys::host_quick_c::<H>,
+            elem: sys::host_elem_c::<H>,
         };
         ctx.helpers = &helpers as *const Helpers;
         ctx.host = host as *mut H as *mut core::ffi::c_void;
@@ -680,6 +744,75 @@ mod sys {
             let host = unsafe { &mut *host_ptr };
             let cx = unsafe { &mut *ctx_ptr };
             host.clear(cx, reg)
+        }));
+        match result {
+            Ok(true) => 1,
+            Ok(false) => 0,
+            Err(payload) => {
+                store_panic(payload);
+                0
+            }
+        }
+    }
+
+    /// `extern "C"` glue for `Host::fields`. On panic, `0` with the
+    /// panic stashed.
+    pub(super) unsafe extern "C" fn host_fields_c<H: Host>(ctx: *mut Context, reg: u32) -> u32 {
+        // SAFETY: as in `host_run_c`.
+        let host_ptr = unsafe { (*ctx).host as *mut H };
+        let ctx_ptr = ctx;
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let host = unsafe { &mut *host_ptr };
+            let cx = unsafe { &mut *ctx_ptr };
+            host.fields(cx, reg)
+        }));
+        match result {
+            Ok(true) => 1,
+            Ok(false) => 0,
+            Err(payload) => {
+                store_panic(payload);
+                0
+            }
+        }
+    }
+
+    /// `extern "C"` glue for `Host::quick`. On panic, `0` with the
+    /// panic stashed.
+    pub(super) unsafe extern "C" fn host_quick_c<H: Host>(ctx: *mut Context, pc: u32) -> u32 {
+        // SAFETY: as in `host_run_c`.
+        let host_ptr = unsafe { (*ctx).host as *mut H };
+        let ctx_ptr = ctx;
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let host = unsafe { &mut *host_ptr };
+            let cx = unsafe { &mut *ctx_ptr };
+            host.quick(cx, pc)
+        }));
+        match result {
+            // What is none of the three answers is "it did not run".
+            Ok(done @ (1 | 2)) => done,
+            Ok(_) => 0,
+            Err(payload) => {
+                store_panic(payload);
+                0
+            }
+        }
+    }
+
+    /// `extern "C"` glue for `Host::elem`. On panic, `0` with the
+    /// panic stashed.
+    pub(super) unsafe extern "C" fn host_elem_c<H: Host>(
+        ctx: *mut Context,
+        dst: u32,
+        list: u32,
+        index: u32,
+    ) -> u32 {
+        // SAFETY: as in `host_run_c`.
+        let host_ptr = unsafe { (*ctx).host as *mut H };
+        let ctx_ptr = ctx;
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let host = unsafe { &mut *host_ptr };
+            let cx = unsafe { &mut *ctx_ptr };
+            host.elem(cx, dst, list, index)
         }));
         match result {
             Ok(true) => 1,
@@ -924,6 +1057,26 @@ mod sys {
 
     #[allow(clippy::extra_unused_type_parameters)]
     pub(super) unsafe extern "C" fn host_clear_c<H: Host>(_ctx: *mut Context, _reg: u32) -> u32 {
+        0
+    }
+
+    #[allow(clippy::extra_unused_type_parameters)]
+    pub(super) unsafe extern "C" fn host_fields_c<H: Host>(_ctx: *mut Context, _reg: u32) -> u32 {
+        0
+    }
+
+    #[allow(clippy::extra_unused_type_parameters)]
+    pub(super) unsafe extern "C" fn host_quick_c<H: Host>(_ctx: *mut Context, _pc: u32) -> u32 {
+        0
+    }
+
+    #[allow(clippy::extra_unused_type_parameters)]
+    pub(super) unsafe extern "C" fn host_elem_c<H: Host>(
+        _ctx: *mut Context,
+        _dst: u32,
+        _list: u32,
+        _index: u32,
+    ) -> u32 {
         0
     }
 }

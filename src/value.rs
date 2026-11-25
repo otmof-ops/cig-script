@@ -17,7 +17,7 @@ use std::fmt::Write as _;
 use std::rc::Rc;
 
 pub type List = Rc<RefCell<Vec<Value>>>;
-pub type Map = Rc<RefCell<IndexMap<String, Value>>>;
+pub type Map = Rc<RefCell<crate::shape::Entries>>;
 
 /// A runtime value.
 ///
@@ -175,7 +175,15 @@ impl Value {
         Value::List(Rc::new(RefCell::new(items)))
     }
 
+    /// A map of entries made elsewhere. An empty one is a new map, as a
+    /// script's `{}` is; any other has no shape
+    /// ([`crate::shape::Entries`]).
     pub fn map(entries: IndexMap<String, Value>) -> Value {
+        Value::Map(Rc::new(RefCell::new(entries.into())))
+    }
+
+    /// A map of entries that carry their shape.
+    pub fn record(entries: crate::shape::Entries) -> Value {
         Value::Map(Rc::new(RefCell::new(entries)))
     }
 

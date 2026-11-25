@@ -555,7 +555,7 @@ fn show(_: &mut Interp, a: &[Value], s: Span) -> Result<Value, Diagnostic> {
                 .collect(),
         ),
     );
-    Ok(Value::map(m))
+    Ok(Value::record(m))
 }
 
 /// One input as a script sees it: its kind and what it names (never a
