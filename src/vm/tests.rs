@@ -320,6 +320,66 @@ fn a_call_is_carried_through_under_the_body_that_makes_it() {
     assert_eq!((entered() - e, carried() - c), (7, 0));
 }
 
+// ----- the fast loop's words -----
+
+#[test]
+fn a_word_gives_the_fast_loop_the_operands_the_decoded_instruction_has() {
+    use super::{Operands, Word};
+    use cig_bytecode::opcode::Fmt;
+    // Every opcode, with operand bytes whose high bits and signs differ:
+    // what an arm reads of the word is what it would read of the decoded
+    // instruction, for the fields the opcode's format has.
+    let mut seen = 0;
+    for byte in 0..=255u8 {
+        let Some(op) = Op::from_byte(byte) else {
+            continue;
+        };
+        if op == Op::WIDE {
+            continue;
+        }
+        seen += 1;
+        for operands in [
+            0x00_0000u32,
+            0x01_0203,
+            0x7f_80ff,
+            0xff_7f80,
+            0xff_ffff,
+            0x80_ff7f,
+        ] {
+            let word = Instr {
+                raw: u32::from(byte) | (operands << 8),
+            };
+            let d = cig_bytecode::decode(&[word], 0).expect("decodes");
+            let w = Word::of(&d);
+            assert_eq!(w.op, op);
+            assert_eq!(Operands::a(w), Operands::a(&d), "{op:?} A");
+            assert_eq!(Operands::width(w), Operands::width(&d), "{op:?} width");
+            match d.fmt {
+                Fmt::ABC => {
+                    assert_eq!(Operands::b(w), Operands::b(&d), "{op:?} B");
+                    assert_eq!(Operands::c(w), Operands::c(&d), "{op:?} C");
+                    assert_eq!(Operands::sc(w), Operands::sc(&d), "{op:?} signed C");
+                }
+                Fmt::ABx => assert_eq!(Operands::bx(w), Operands::bx(&d), "{op:?} Bx"),
+                Fmt::AsBx => {
+                    assert_eq!(Operands::bx(w), Operands::bx(&d), "{op:?} Bx");
+                    assert_eq!(Operands::sbx(w), Operands::sbx(&d), "{op:?} sBx");
+                }
+            }
+        }
+    }
+    assert!(seen > 50, "{seen} opcodes");
+    // A two-word instruction has no word, at either of its pcs: the
+    // loop is handed its decoded form.
+    let pair = [wide_prefix(1, 0), abc(Op::MOV, 0, 1, 0), ret(0)];
+    let (_, code) = cig_bytecode::decode_table(&pair).expect("decodes");
+    let words = Word::table(&code);
+    assert_eq!(
+        words.iter().map(|w| w.op).collect::<Vec<_>>(),
+        vec![Op::WIDE, Op::WIDE, Op::RET]
+    );
+}
+
 // ----- a call and a return between two runs of the fast loop -----
 
 #[test]
@@ -7013,6 +7073,14 @@ fn same_value(a: &Value, b: &Value) -> bool {
     }
 }
 
+/// The value a register holds after the fast path stores `n` there.
+fn number(n: super::Num) -> Value {
+    match n {
+        super::Num::Int(i) => Value::Int(i),
+        super::Num::Float(x) => Value::Float(x),
+    }
+}
+
 #[test]
 fn the_fast_operators_give_binarys_value_or_leave_it_to_binary() {
     let values = [
@@ -7044,11 +7112,11 @@ fn the_fast_operators_give_binarys_value_or_leave_it_to_binary() {
         for r in &values {
             let numbers = l.as_f64().is_some() && r.as_f64().is_some();
             for (op, fast) in [
-                (BinOp::Add, num_add(l, r)),
-                (BinOp::Sub, num_sub(l, r)),
-                (BinOp::Mul, num_mul(l, r)),
-                (BinOp::Div, num_div(l, r)),
-                (BinOp::Rem, num_mod(l, r)),
+                (BinOp::Add, num_add(l, r).map(number)),
+                (BinOp::Sub, num_sub(l, r).map(number)),
+                (BinOp::Mul, num_mul(l, r).map(number)),
+                (BinOp::Div, num_div(l, r).map(number)),
+                (BinOp::Rem, num_mod(l, r).map(number)),
                 (BinOp::Eq, Some(Value::Bool(cmp_eq(l, r)))),
                 (BinOp::Ne, Some(Value::Bool(!cmp_eq(l, r)))),
                 (BinOp::Lt, cmp_lt(l, r).map(Value::Bool)),

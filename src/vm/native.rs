@@ -23,6 +23,7 @@
 //! given the calls left before the depth limit, and is entered only
 //! where the stack has room for that many ([`has_room`]).
 
+use super::Word;
 use crate::diagnostics::{internal, Diagnostic};
 use crate::interp::ops::{binary, negate, range_fits};
 use crate::interp::{depth_exceeded, Interp};
@@ -48,6 +49,13 @@ const MISS_WINDOW: u32 = 64;
 /// many steps of the run.
 const STEPS_A_MISS: u64 = 16;
 
+/// A function's instructions with none at a resume point of its body:
+/// the decoded code, and the words the fast loop reads, kept alike.
+pub(crate) struct Between {
+    pub(super) code: Vec<Option<DecodedInstr>>,
+    pub(super) words: Vec<Word>,
+}
+
 /// One function's body as the VM finds it: where it lies in [`Code`], the
 /// pc of each resume point, and (indexed by first-word pc) the resume
 /// index at that pc, or [`NO_RESUME`].
@@ -67,7 +75,7 @@ pub(crate) struct BodyEntry {
     /// before a resume point with no test of its own, and a function
     /// with a body runs the rest of its bytecode at the speed of one
     /// without. A resume point the VM gave up has its instruction back.
-    between: RefCell<Vec<Option<DecodedInstr>>>,
+    between: RefCell<Between>,
     /// For each resume index, the instruction `between` has none for.
     taken: Vec<Option<DecodedInstr>>,
     /// The guesses of this body that failed since `since`.
@@ -102,7 +110,10 @@ impl BodyEntry {
             code_index,
             pcs: pcs.to_vec(),
             resume_at,
-            between: RefCell::new(between),
+            between: RefCell::new(Between {
+                words: Word::table(&between),
+                code: between,
+            }),
             taken,
             misses: Cell::new(0),
             since: Cell::new(0),
@@ -114,7 +125,7 @@ impl BodyEntry {
     /// fast loop between two of them. `None` while a resume point is
     /// being given up, which no run of that loop overlaps.
     #[inline]
-    pub(crate) fn between(&self) -> Option<Ref<'_, Vec<Option<DecodedInstr>>>> {
+    pub(crate) fn between(&self) -> Option<Ref<'_, Between>> {
         self.between.try_borrow().ok()
     }
 
@@ -156,8 +167,12 @@ impl BodyEntry {
             self.taken.get(at as usize).copied().flatten(),
             self.between.try_borrow_mut(),
         ) {
-            if let Some(slot) = between.get_mut(pc as usize) {
+            let Between { code, words } = &mut *between;
+            if let (Some(slot), Some(word)) =
+                (code.get_mut(pc as usize), words.get_mut(pc as usize))
+            {
                 *slot = Some(instr);
+                *word = Word::of(&instr);
             }
         }
         true
@@ -730,7 +745,11 @@ mod tests {
         let b = entry();
         {
             let table = b.between().expect("nothing holds it");
-            let blank: Vec<usize> = (0..10).filter(|pc| table[*pc].is_none()).collect();
+            let blank: Vec<usize> = (0..10)
+                .filter(|pc| {
+                    table.code[*pc].is_none() && table.words[*pc].op == cig_bytecode::Op::WIDE
+                })
+                .collect();
             assert_eq!(
                 blank,
                 vec![0, 4, 7],
@@ -744,9 +763,15 @@ mod tests {
         }
         assert!(b.missed(1, u64::from(MISS_WINDOW)));
         let table = b.between().expect("nothing holds it");
-        let blank: Vec<usize> = (0..10).filter(|pc| table[*pc].is_none()).collect();
+        let blank: Vec<usize> = (0..10)
+            .filter(|pc| table.code[*pc].is_none() && table.words[*pc].op == cig_bytecode::Op::WIDE)
+            .collect();
         assert_eq!(blank, vec![0, 7]);
-        assert_eq!(table[4].map(|d| d.pc), Some(4));
+        assert_eq!(table.code[4].map(|d| d.pc), Some(4));
+        assert!(
+            table.words[4].op != cig_bytecode::Op::WIDE,
+            "and its word with it"
+        );
     }
 
     #[test]
