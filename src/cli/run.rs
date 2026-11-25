@@ -304,11 +304,16 @@ pub enum Engine {
 }
 
 /// Which engine a script's run asks for: `--engine`, `CIG_ENGINE`, or the
-/// config's `engine` (#254). A compiled program has no say here: its
+/// config's `engine` (#254, #259). A compiled program has no say here: its
 /// engine is its stage's ([`Engine`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub enum EngineArg {
-    /// Bytecode on the VM: the script is lowered once and its module kept
+    /// Bytecode on the VM when a module is kept for this script, the
+    /// tree-walker when not; a tree-walker run leaves the lowering to a
+    /// subprocess, so the next run on the VM starts with the module in
+    /// place. The default.
+    Auto,
+    /// Bytecode on the VM: the script is lowered now and its module kept
     /// in the tin. A script the lowering does not take runs on the
     /// tree-walker, and the run's record says why.
     Vm,
@@ -319,6 +324,7 @@ pub enum EngineArg {
 impl EngineArg {
     pub fn as_str(self) -> &'static str {
         match self {
+            EngineArg::Auto => "auto",
             EngineArg::Vm => "vm",
             EngineArg::Tree => "tree",
         }
@@ -326,9 +332,31 @@ impl EngineArg {
 
     fn named(s: &str) -> Option<EngineArg> {
         match s.trim() {
+            "auto" => Some(EngineArg::Auto),
             "vm" => Some(EngineArg::Vm),
             "tree" => Some(EngineArg::Tree),
             _ => None,
+        }
+    }
+}
+
+/// What the `auto_lower` config decides: `on` spawns a `__lower` child
+/// after the run; `off` does not (the tree-walker runs this script every
+/// time, until something else keeps a module); `wait` runs `cig __lower`
+/// as a child and waits for it, so a test is deterministic.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AutoLower {
+    On,
+    Off,
+    Wait,
+}
+
+impl AutoLower {
+    fn from_config(config: &Config) -> AutoLower {
+        match config.get("auto_lower").trim() {
+            "off" => AutoLower::Off,
+            "wait" => AutoLower::Wait,
+            _ => AutoLower::On,
         }
     }
 }
@@ -346,11 +374,60 @@ fn engine_asked(flag: Option<EngineArg>, config: &Config) -> Result<EngineArg, D
             return EngineArg::named(&v).ok_or_else(|| {
                 crate::diagnostics::usage(format!("CIG_ENGINE=`{v}` is not an engine"))
                     .code("E800")
-                    .with_hint("the engines are vm and tree; --engine chooses for one run")
+                    .with_hint("the engines are auto, vm and tree; --engine chooses for one run")
             });
         }
     }
-    Ok(EngineArg::named(&config.get("engine")).unwrap_or(EngineArg::Tree))
+    Ok(EngineArg::named(&config.get("engine")).unwrap_or(EngineArg::Auto))
+}
+
+/// A pure function of (engine the run asks for, whether a module is
+/// cached, whether a refusal is cached): what the run actually does, so
+/// every cell of `--engine`'s table can be unit-tested without starting
+/// cig at all.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChoiceOutcome {
+    /// Run this script on the VM, module from the cache.
+    VmCached,
+    /// Run on the VM, lowering now (the run keeps the module).
+    VmLoweringNow,
+    /// Run on the tree-walker, nothing to do afterwards.
+    TreeWalker,
+    /// Run on the tree-walker; a `__lower` subprocess spawns after the
+    /// run to keep the module for the next one.
+    TreeWalkerThenLower,
+    /// Run on the tree-walker, then lower in this process and wait
+    /// (`auto_lower = wait`, for deterministic tests).
+    TreeWalkerThenLowerWait,
+}
+
+/// The run's engine choice by the table of `--engine`'s three settings
+/// against what the cache says. A compiled program never reaches this:
+/// its engine is its stage's. `no_check` is read first: a script that is
+/// not checked runs as written, which only the tree-walker does, and the
+/// cache has nothing to add here.
+pub(crate) fn choose(
+    engine: EngineArg,
+    no_check: bool,
+    module_cached: bool,
+    refusal_cached: bool,
+    auto: AutoLower,
+) -> ChoiceOutcome {
+    if no_check {
+        return ChoiceOutcome::TreeWalker;
+    }
+    match engine {
+        EngineArg::Tree => ChoiceOutcome::TreeWalker,
+        EngineArg::Vm if module_cached => ChoiceOutcome::VmCached,
+        EngineArg::Vm => ChoiceOutcome::VmLoweringNow,
+        EngineArg::Auto if module_cached => ChoiceOutcome::VmCached,
+        EngineArg::Auto if refusal_cached => ChoiceOutcome::TreeWalker,
+        EngineArg::Auto => match auto {
+            AutoLower::Off => ChoiceOutcome::TreeWalker,
+            AutoLower::On => ChoiceOutcome::TreeWalkerThenLower,
+            AutoLower::Wait => ChoiceOutcome::TreeWalkerThenLowerWait,
+        },
+    }
 }
 
 /// What a run runs: a script's text, or a stage `b` program's loaded
@@ -518,26 +595,226 @@ struct Chosen {
     /// Where the VM's module came from: `cached` (the tin) or `lowered`
     /// (by this run).
     module: Option<&'static str>,
-    /// Asked for the VM, ran on the tree-walker: why.
+    /// Ran on the tree-walker: why. `asked_vm` says whether the user
+    /// asked for the VM or `auto` fell back from a cached refusal.
     why_tree: Option<String>,
 }
 
 impl Chosen {
     /// The record's `engine`: which engine ran, where its module came
-    /// from, and why the tree-walker ran a script that asked for the VM.
-    /// A compiled program's engine is its stage's and its module its own.
+    /// from, and why the tree-walker ran a script that asked for the VM
+    /// or that `auto` had a cached refusal for. A compiled program's
+    /// engine is its stage's and its module its own.
     fn note(&self, on_vm: bool, compiled: bool) -> Option<serde_json::Value> {
         let mut v = serde_json::json!({ "engine": if on_vm { "vm" } else { "tree" } });
         if !compiled {
             if let (true, Some(from)) = (on_vm, self.module) {
                 v["module"] = serde_json::json!(from);
             }
-            if let (false, true) = (on_vm, self.asked_vm) {
-                v["asked"] = serde_json::json!("vm");
-                v["why"] = serde_json::json!(self.why_tree.as_deref().unwrap_or("no module"));
+            if !on_vm {
+                if self.asked_vm {
+                    v["asked"] = serde_json::json!("vm");
+                    v["why"] = serde_json::json!(self.why_tree.as_deref().unwrap_or("no module"));
+                } else if let Some(why) = &self.why_tree {
+                    v["why"] = serde_json::json!(why);
+                }
             }
         }
         Some(v)
+    }
+}
+
+/// `cig __lower <script>` reaches the lowering through this: it reads
+/// the script, parses and checks it, and keeps the module (or a refusal)
+/// in `modcache` under the same key `cig run --engine vm` keyed it
+/// under. Nothing is burned, no run record is written, no ledger line is
+/// added. The script is read with [`read_capped`], not [`read_source`],
+/// so no diagnostic is printed and no doctor is run: nothing is written
+/// to a parent's stdio.
+///
+/// The marker is taken with `create_new` before anything else, so twenty
+/// first runs that spawn one of these at once keep one module and leave
+/// no leftover marker: the other nineteen find the marker there and
+/// exit. A lowering refusal is kept too so a later run under `auto`
+/// picks the tree-walker without starting another subprocess.
+///
+/// The exit code is always 0: a `__lower` whose work could not be done
+/// is a run that will meet the same the next time, and nothing reads
+/// this exit code anyway (the parent never waits for it under `on`, and
+/// only reads its status under `wait`, where failure to lower is
+/// correctly represented by an unchanged cache).
+pub fn internal_lower(file: &std::path::Path) -> i32 {
+    // A path that is not a regular file (a device, a pipe, a process
+    // substitution): keeping a module for its one-time read would give a
+    // later run the wrong module. Nothing to do. `fs::metadata` (not
+    // `symlink_metadata`) follows a link, so a script reached through
+    // `~/bin/x.cig` as a link still has its module made.
+    if !is_regular_file(file) {
+        return exit::OK;
+    }
+    let source = match read_capped(file) {
+        Ok(s) => s,
+        Err(_) => return exit::OK,
+    };
+    let sha = sha256(&source);
+    let key = crate::burn::modcache::key_for(&sha);
+    let Some(_lock) = crate::burn::modcache::claim_lowering(&key) else {
+        // Someone else has the marker: one lowering at a time per script.
+        return exit::OK;
+    };
+    // If a healthy module or a refusal for this build is already there
+    // (for example, a `--engine vm` run just before the spawn), do no
+    // work. A module whose body is damaged is detected by `vm::open`
+    // (the MAC covers the header, not the body): treat such an entry
+    // as absent so the fresh lowering below overwrites it.
+    match crate::burn::modcache::lookup(&key) {
+        Some(crate::burn::modcache::Hit::Refused { .. }) => return exit::OK,
+        Some(crate::burn::modcache::Hit::Module { module, .. }) => {
+            if crate::vm::open(module).is_ok() {
+                return exit::OK;
+            }
+            // The body does not open: the entry heals below.
+        }
+        None => {}
+    }
+    let program = match parse(&source) {
+        Ok(p) => p,
+        Err(_) => return exit::OK,
+    };
+    let rep = check::check(&program, &[]);
+    if !rep.ok() {
+        // A script that does not check is a run that will say so when the
+        // tree-walker tries it; nothing is cached.
+        return exit::OK;
+    }
+    // `warned` is set the same way `cig run` sets it: the check's own
+    // warnings and, when the pin lives in the script's own bytes, its
+    // warnings too. One function so the two paths cannot drift.
+    let warned = lowered_warned(file, &source, &program, &rep);
+    match crate::lower::module_loaded(&program, "") {
+        Ok((bytes, _loaded)) => {
+            let _ = crate::burn::modcache::store(&key, &bytes, warned);
+        }
+        Err(crate::lower::Failure::Refused(what)) => {
+            let _ = crate::burn::modcache::store_refusal(
+                &key,
+                &format!("the lowering does not take it yet: {what}"),
+            );
+        }
+        Err(crate::lower::Failure::Internal(e)) => {
+            let _ = crate::burn::modcache::store_refusal(
+                &key,
+                &format!("the lowering failed on it: {e}"),
+            );
+        }
+        Err(crate::lower::Failure::Crashed(e)) => {
+            // The crash hook has said what broke and where its report
+            // is. A crash becomes a refusal for this build: nothing on
+            // `auto` starts another child until the script or cig
+            // changes, so a reproducible panic does not cost a report
+            // on every run.
+            let _ = crate::burn::modcache::store_refusal(
+                &key,
+                &format!("the lowering crashed on it: {e}"),
+            );
+        }
+    }
+    exit::OK
+}
+
+/// Was this script's check noisy enough that a later run has something
+/// to say again? The script's own check warnings, and, when the pin is
+/// the script's own header line, its warnings too. Shared by `cig run
+/// --engine vm` and `cig __lower` so the two paths cannot drift (an
+/// in-script pin that warned had its warning said on run 1 and not on
+/// run 2 before this helper was pulled out).
+fn lowered_warned(
+    file: &std::path::Path,
+    source: &str,
+    program: &Program,
+    rep: &check::Report,
+) -> bool {
+    if !rep.warnings.is_empty() {
+        return true;
+    }
+    let pin = pin::pin_for(file, source).ok().flatten();
+    let pin_in_script = !matches!(
+        pin.as_ref().map(|p| &p.source),
+        Some(pin::Source::VersionFile(_))
+    );
+    let name = file.to_string_lossy().to_string();
+    let pinned = pin_warnings(program, pin.as_ref(), &name);
+    pin_in_script && !pinned.is_empty()
+}
+
+/// Configure `cmd` the way a `__lower` child is: three standard
+/// streams on the null device, and (on Unix) a process group of its
+/// own; on Windows the detached-process creation flags. Shared with
+/// a test that spawns a small shell command under the same settings to
+/// read them back.
+pub(crate) fn prepare_detached(cmd: &mut std::process::Command) {
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP, as `ashtray` uses.
+        cmd.creation_flags(0x0000_0008 | 0x0000_0200);
+    }
+}
+
+/// Build the `cig __lower <script>` command this cig would run, in
+/// the shape [`spawn_background_lower`] and [`lower_in_foreground`]
+/// spawn it. Every environment variable the parent is running under
+/// carries over, so `CIGSCRIPT_HOME`, `CIG_KEYS_DIR`, `CIG_SEAL_KEY`
+/// and the rest reach the child.
+pub(crate) fn lower_command(script: &std::path::Path) -> Option<std::process::Command> {
+    // `self_command` marks this as cig's call to itself, as
+    // `runs::budget_in_background` does for `__budget`.
+    let mut cmd = crate::program::self_command().ok()?;
+    cmd.arg("__lower").arg(script);
+    prepare_detached(&mut cmd);
+    Some(cmd)
+}
+
+/// Is `file` a regular file (links followed)? A device, a pipe, a
+/// process substitution or a missing path is not one. The parent asks
+/// before it starts a `__lower` child, and the child asks again before
+/// it reads: a script on `/dev/stdin` never gets a module made for its
+/// one-time read.
+fn is_regular_file(file: &std::path::Path) -> bool {
+    std::fs::metadata(file).is_ok_and(|m| m.file_type().is_file())
+}
+
+/// Start a `__lower` child in the background. The spawn is the last
+/// thing a run does before it exits (like `__budget`'s spawn in
+/// `runs::budget_in_background`), so between spawn and exit the child
+/// is the parent's; the kernel reparents it when the parent exits. A
+/// spawn that fails changes nothing about the run.
+fn spawn_background_lower(script: &std::path::Path) {
+    if !is_regular_file(script) {
+        return;
+    }
+    if let Some(mut cmd) = lower_command(script) {
+        let _ = cmd.spawn();
+    }
+}
+
+/// Run `cig __lower <script>` as a child, waited for and reaped: the
+/// deterministic form of the background spawn for a test under
+/// `auto_lower = wait`. The child is a separate process (as
+/// [`spawn_background_lower`] starts one), so it keys the script by the
+/// bytes it reads itself. The parent waits for its status rather than
+/// exiting, so no test leaves a child behind.
+fn lower_in_foreground(script: &std::path::Path) {
+    if let Some(mut cmd) = lower_command(script) {
+        let _ = cmd.status();
     }
 }
 
@@ -570,52 +847,133 @@ fn run_source_inner(
         pin.as_ref().map(|p| &p.source),
         Some(pin::Source::VersionFile(_))
     );
-    // The engine a script asks for (#254). `--no-check` runs a script as
-    // written, which only the tree-walker does.
+    // The engine a script asks for (#254, #259). `--no-check` runs a
+    // script as written, which only the tree-walker does, and `auto`
+    // picks between the two based on what the cache holds.
     let mut chosen = Chosen::default();
+    let mut engine_choice = EngineArg::Tree;
+    let auto_lower = AutoLower::from_config(&config);
     if let (None, Some(_)) = (compiled, source) {
         match engine_asked(args.engine, &config) {
-            Ok(EngineArg::Vm) if args.no_check => {
-                chosen.asked_vm = true;
-                chosen.why_tree = Some(
-                    "--no-check runs the script as written, which only the tree-walker does"
-                        .to_string(),
-                );
-            }
-            Ok(EngineArg::Vm) => chosen.asked_vm = true,
-            Ok(EngineArg::Tree) => {}
+            Ok(e) => engine_choice = e,
             Err(d) => {
                 report(ctx, &d, None, None);
                 return exit::USAGE;
             }
         }
+        if engine_choice == EngineArg::Vm {
+            if args.no_check {
+                chosen.asked_vm = true;
+                chosen.why_tree = Some(
+                    "--no-check runs the script as written, which only the tree-walker does"
+                        .to_string(),
+                );
+            } else {
+                chosen.asked_vm = true;
+            }
+        }
     }
-    let wants_module = chosen.asked_vm && chosen.why_tree.is_none();
     let mut module: Option<std::rc::Rc<crate::vm::Program>> = match script {
         Script::Module { module, .. } => Some(module.clone()),
         Script::Text(_) => None,
     };
-    // The script's module, when the tin holds one this machine made for
-    // this cig. With nothing to say again (no warnings when it was checked)
-    // the run starts from it; otherwise the script is checked first, so
-    // what it warns about is said as on every run, and the module is still
-    // not lowered again.
-    let key = match (&script_sha, wants_module) {
+    // The script's module or refusal, when the tin holds one this machine
+    // made for this cig. With nothing to say again (no warnings when it was
+    // checked) the run starts from the module; otherwise the script is
+    // checked first, so what it warns about is said as on every run.
+    // The cache is asked only when the plan may read it: neither
+    // `--no-check` (the tree-walker runs the script as written) nor
+    // `--engine tree` ever uses a kept module, and a compiled program
+    // (`compiled.is_some()`) sets the module already.
+    let key = match (
+        &script_sha,
+        !args.no_check && matches!(engine_choice, EngineArg::Auto | EngineArg::Vm),
+    ) {
         (Some(sha), true) => Some(modcache::key_for(sha)),
         _ => None,
     };
     let mut kept: Option<Vec<u8>> = None;
+    let mut cached_refusal: Option<String> = None;
+    let mut safe_to_use_cached: Option<Vec<u8>> = None;
     if let Some(key) = &key {
         let module_t = t.start();
-        if let Some(entry) = modcache::lookup(key) {
-            if entry.warned || !pin_in_script {
-                kept = Some(entry.module);
-            } else if let Ok(m) = open_module(entry.module, "the kept module") {
-                module = Some(m);
-                chosen.module = Some("cached");
+        match modcache::lookup(key) {
+            Some(modcache::Hit::Module { module: m, warned }) => {
+                if warned || !pin_in_script {
+                    kept = Some(m);
+                } else {
+                    // The kept bytes are safe to load without re-parsing
+                    // or re-checking; the open itself is timed outside
+                    // the `module` phase, as `compile-load`, so the
+                    // lookup's phase is only the lookup and its MAC.
+                    safe_to_use_cached = Some(m);
+                }
             }
+            Some(modcache::Hit::Refused { reason }) => {
+                cached_refusal = Some(reason);
+            }
+            None => {}
         }
         t.end("module", module_t);
+    }
+    // What auto picks on this run, and what to do afterwards. `choose` is
+    // the one authority: what runs and what the record says both follow
+    // its result, so a cached module cannot sneak through `--no-check`
+    // nor a cached refusal through `--engine vm`.
+    let initial_plan = choose(
+        engine_choice,
+        args.no_check,
+        kept.is_some() || safe_to_use_cached.is_some(),
+        cached_refusal.is_some(),
+        auto_lower,
+    );
+    // The kept bytes are opened only when the plan picked the VM from
+    // the cache; a tree-walker plan leaves them where they are. An open
+    // failure degrades the plan below: a damaged body gives
+    // `module = None` here, the plan falls back to what a missing
+    // module would have picked (lower now under `--engine vm`, tree +
+    // `__lower` under `--engine auto`), and the entry is overwritten
+    // (`vm` lowers inline; `auto` leaves it to the child, which skips
+    // the early-return when the lookup's module cannot be opened).
+    let mut open_failed_on_cached = false;
+    if matches!(initial_plan, ChoiceOutcome::VmCached) {
+        if let Some(bytes) = safe_to_use_cached.take() {
+            let load_t = t.start();
+            let opened = open_module(bytes, "the kept module");
+            t.end("compile-load", load_t);
+            match opened {
+                Ok(opened) => {
+                    module = Some(opened);
+                    chosen.module = Some("cached");
+                }
+                Err(_) => open_failed_on_cached = true,
+            }
+        }
+    }
+    // The run's plan after any open failure. Only `VmCached` can
+    // degrade: `VmLoweringNow`, `TreeWalker*` and `TreeWalker` leave no
+    // room for one.
+    let plan = if open_failed_on_cached && module.is_none() {
+        match engine_choice {
+            EngineArg::Vm => ChoiceOutcome::VmLoweringNow,
+            EngineArg::Auto => match auto_lower {
+                AutoLower::Off => ChoiceOutcome::TreeWalker,
+                AutoLower::On => ChoiceOutcome::TreeWalkerThenLower,
+                AutoLower::Wait => ChoiceOutcome::TreeWalkerThenLowerWait,
+            },
+            EngineArg::Tree => ChoiceOutcome::TreeWalker,
+        }
+    } else {
+        initial_plan
+    };
+    let wants_module = matches!(plan, ChoiceOutcome::VmCached | ChoiceOutcome::VmLoweringNow);
+    // Under `auto` a cached refusal means the tree-walker runs it and the
+    // record carries the reason even though the user did not ask for the
+    // VM: say it on the tree-walker side of the record so a reader of a
+    // run on `auto` knows why.
+    if let (EngineArg::Auto, Some(reason)) = (engine_choice, &cached_refusal) {
+        chosen.asked_vm = false; // The user asked for auto, not vm.
+        chosen.why_tree = Some(reason.clone());
     }
     // The script is parsed unless a module stands ready for it.
     let parsed = match (source, &module) {
@@ -642,9 +1000,9 @@ fn run_source_inner(
     if let (false, Some((program, source))) = (args.no_check, tree) {
         let check_t = t.start();
         let mut rep = check::check(program, &[]);
-        let pinned = pin_warnings(program, pin.as_ref(), &name);
-        warned = !rep.warnings.is_empty() || (pin_in_script && !pinned.is_empty());
-        rep.warnings.extend(pinned);
+        warned = lowered_warned(&args.file, source, program, &rep);
+        rep.warnings
+            .extend(pin_warnings(program, pin.as_ref(), &name));
         t.end("check", check_t);
         if !rep.ok() {
             if ctx.json {
@@ -682,22 +1040,39 @@ fn run_source_inner(
     // run's record says which engine ran and why. No script fails to run
     // because of the VM.
     if let (true, None, Some((program, _))) = (wants_module, &module, tree) {
-        let compile_t = t.start();
-        if let Some(m) = kept
-            .take()
-            .and_then(|b| open_module(b, "the kept module").ok())
-        {
-            module = Some(m);
-            chosen.module = Some("cached");
-        } else {
+        if let Some(bytes) = kept.take() {
+            // The lookup found a module the check meant to check again
+            // (warnings, or a version-file pin not in the script). The
+            // check has run by now; open the kept bytes, timed as
+            // `compile-load` only.
+            let load_t = t.start();
+            let opened = open_module(bytes, "the kept module");
+            t.end("compile-load", load_t);
+            if let Ok(m) = opened {
+                module = Some(m);
+                chosen.module = Some("cached");
+            }
+            // If the open failed (a damaged body): fall through to
+            // lower fresh, as a missing module would. The healing path
+            // is the same the vm engine took before `kept` was split
+            // from `safe_to_use_cached`.
+        }
+        if module.is_none() {
             // The module is named by what is in it, not by where the
             // script lies: the same script anywhere is the same module.
-            match crate::lower::module_loaded(program, "") {
+            // Each stage of the lowering is one phase under `--timings`
+            // (`compile-cir`, `compile-passes`, `compile-bytecode`,
+            // `compile-verify`, `compile-load`); `compile-keep` here
+            // times the store.
+            let timings = if t.active() { Some(t) } else { None };
+            match crate::lower::module_loaded_timed(program, "", timings) {
                 Ok((bytes, m)) => {
                     if let Some(key) = &key {
                         // A module that cannot be kept is lowered again
                         // next time; the run goes on either way.
+                        let keep_t = t.start();
                         let _ = modcache::store(key, &bytes, warned);
+                        t.end("compile-keep", keep_t);
                     }
                     // The module as the lowering loaded it to check it:
                     // the bytes are for the next run.
@@ -705,10 +1080,18 @@ fn run_source_inner(
                     chosen.module = Some("lowered");
                 }
                 Err(crate::lower::Failure::Refused(what)) => {
-                    chosen.why_tree = Some(format!("the lowering does not take it yet: {what}"));
+                    let reason = format!("the lowering does not take it yet: {what}");
+                    if let Some(key) = &key {
+                        let _ = modcache::store_refusal(key, &reason);
+                    }
+                    chosen.why_tree = Some(reason);
                 }
                 Err(crate::lower::Failure::Internal(e)) => {
-                    chosen.why_tree = Some(format!("the lowering failed on it: {e}"));
+                    let reason = format!("the lowering failed on it: {e}");
+                    if let Some(key) = &key {
+                        let _ = modcache::store_refusal(key, &reason);
+                    }
+                    chosen.why_tree = Some(reason);
                 }
                 Err(crate::lower::Failure::Crashed(e)) => {
                     // The crash hook has said what broke and where its
@@ -720,8 +1103,16 @@ fn run_source_inner(
                 }
             }
         }
-        t.end("compile", compile_t);
     }
+    // Under `--engine auto`, with no module and no refusal cached, the
+    // tree-walker runs it now and the lowering is left to a `__lower`
+    // subprocess (`on`), or waited for (`wait`), or skipped (`off`). The
+    // spawn itself happens after the real work; this marks it.
+    let after_lower = match plan {
+        ChoiceOutcome::TreeWalkerThenLower => Some(AutoLower::On),
+        ChoiceOutcome::TreeWalkerThenLowerWait => Some(AutoLower::Wait),
+        _ => None,
+    };
 
     // Everything between the check and the first line of the script: the
     // trial's plan comparison, the run's record and the kernel.
@@ -1160,6 +1551,16 @@ fn run_source_inner(
         }
     }
     t.end("burn", burn_t);
+    // Under `--engine auto` the lowering happens after the script's own
+    // work, so nothing it prints or burns waits on it. A spawn that fails
+    // changes nothing about the run (`on`); `wait` is the test form.
+    if let Some(kind) = after_lower {
+        match kind {
+            AutoLower::On => spawn_background_lower(&args.file),
+            AutoLower::Wait => lower_in_foreground(&args.file),
+            AutoLower::Off => {}
+        }
+    }
     code
 }
 
@@ -1644,5 +2045,198 @@ fn trial_before_run(
             eprintln!("{} {e}", ctx.red("error[E807 usage]:"));
             (Some(exit::USAGE), None, None)
         }
+    }
+}
+
+#[cfg(test)]
+mod engine_tests {
+    use super::*;
+
+    /// The choice table: for every cell of (engine asked, cache state,
+    /// auto_lower), what does the run do?
+    #[test]
+    fn choose_covers_every_cell_of_the_engine_table() {
+        // no_check: always the tree-walker, before the cache or
+        // auto_lower is read, whichever engine was asked for.
+        for engine in [EngineArg::Tree, EngineArg::Vm, EngineArg::Auto] {
+            for (cache_mod, cache_ref) in [(false, false), (true, false), (false, true)] {
+                for auto in [AutoLower::On, AutoLower::Off, AutoLower::Wait] {
+                    assert_eq!(
+                        choose(engine, true, cache_mod, cache_ref, auto),
+                        ChoiceOutcome::TreeWalker,
+                        "no_check keeps the tree-walker for {engine:?} / mod={cache_mod} ref={cache_ref} auto={auto:?}"
+                    );
+                }
+            }
+        }
+        // tree: always the tree-walker, whatever the cache says.
+        for (cache_mod, cache_ref) in [(false, false), (true, false), (false, true)] {
+            for auto in [AutoLower::On, AutoLower::Off, AutoLower::Wait] {
+                assert_eq!(
+                    choose(EngineArg::Tree, false, cache_mod, cache_ref, auto),
+                    ChoiceOutcome::TreeWalker
+                );
+            }
+        }
+        // vm: today's behaviour.
+        assert_eq!(
+            choose(EngineArg::Vm, false, false, false, AutoLower::On),
+            ChoiceOutcome::VmLoweringNow
+        );
+        assert_eq!(
+            choose(EngineArg::Vm, false, true, false, AutoLower::On),
+            ChoiceOutcome::VmCached
+        );
+        // A refusal cached: `vm` still lowers now (and finds the same
+        // refusal, which falls back to the tree-walker in the run path).
+        // The choose() table says "lower now"; the lowering call that
+        // follows reads the refusal path.
+        assert_eq!(
+            choose(EngineArg::Vm, false, false, true, AutoLower::On),
+            ChoiceOutcome::VmLoweringNow
+        );
+        // auto: cache first, then auto_lower.
+        assert_eq!(
+            choose(EngineArg::Auto, false, true, false, AutoLower::On),
+            ChoiceOutcome::VmCached
+        );
+        assert_eq!(
+            choose(EngineArg::Auto, false, false, true, AutoLower::On),
+            ChoiceOutcome::TreeWalker
+        );
+        assert_eq!(
+            choose(EngineArg::Auto, false, false, false, AutoLower::On),
+            ChoiceOutcome::TreeWalkerThenLower
+        );
+        assert_eq!(
+            choose(EngineArg::Auto, false, false, false, AutoLower::Off),
+            ChoiceOutcome::TreeWalker
+        );
+        assert_eq!(
+            choose(EngineArg::Auto, false, false, false, AutoLower::Wait),
+            ChoiceOutcome::TreeWalkerThenLowerWait
+        );
+    }
+
+    /// `lowered_warned` returns true for an in-script pin that warns
+    /// (a pin older than this cig that the script uses a feature past).
+    /// The check's own warnings would be its only source without the
+    /// pin walk, so a build sharing one function for both paths is the
+    /// only way the `__lower` child and the run path agree.
+    #[test]
+    fn lowered_warned_sees_an_in_script_pin_warning() {
+        use crate::check;
+        use crate::syntax::parse;
+        // A header pin on `cig 1.0`: a script that uses `finally` (a
+        // 1.1.0 addition, see `src/since.rs`'s table) warns under E309.
+        let src = "# cig 1.0\ntry { exhale 1 } finally { exhale 2 }\n";
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("p.cig");
+        std::fs::write(&path, src).unwrap();
+        let program = parse(src).unwrap();
+        let rep = check::check(&program, &[]);
+        // No check warning here (the use is valid in 1.25.0); the pin
+        // is what warns, and `lowered_warned` must pick it up.
+        assert!(rep.warnings.is_empty(), "the check itself says nothing");
+        let warned = lowered_warned(&path, src, &program, &rep);
+        assert!(
+            warned,
+            "a pin older than this cig that the script outgrows must set warned"
+        );
+    }
+
+    /// `lower_command` runs cig with `__lower <script>`, and
+    /// `prepare_detached` closes stdio and gives the child its own
+    /// process group. The first is read from the configured command
+    /// without starting it; the second runs a small `/bin/sh` command
+    /// under the same `prepare_detached` and reads `/proc/self/fd/*`
+    /// and the pgid back.
+    #[test]
+    fn lower_command_runs_cig_lower_with_the_script_path() {
+        let script = std::path::Path::new("/tmp/script-does-not-need-to-exist.cig");
+        let cmd = lower_command(script).expect("self_command is ok under tests");
+        let program = cmd.get_program().to_string_lossy().to_string();
+        assert!(!program.is_empty(), "program path is set");
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+        assert_eq!(args[0], "__lower");
+        assert_eq!(args[1], script.to_string_lossy());
+    }
+
+    /// `is_regular_file` follows symlinks (`fs::metadata`, not
+    /// `symlink_metadata`), so a script reached through `~/bin/x.cig`
+    /// as a link is lowered; a directory, a missing path, or anything
+    /// else that is not a regular file is refused.
+    #[test]
+    fn is_regular_file_follows_symlinks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("real.cig");
+        std::fs::write(&real, "exhale 1\n").unwrap();
+        assert!(is_regular_file(&real), "a real file is a regular file");
+        #[cfg(unix)]
+        {
+            let link = tmp.path().join("link.cig");
+            std::os::unix::fs::symlink(&real, &link).unwrap();
+            assert!(
+                is_regular_file(&link),
+                "a symlink to a file is a regular file"
+            );
+        }
+        assert!(
+            !is_regular_file(tmp.path()),
+            "a directory is not a regular file"
+        );
+        assert!(
+            !is_regular_file(&tmp.path().join("missing")),
+            "a missing path is not a regular file"
+        );
+    }
+
+    /// `prepare_detached` closes fd 0, 1 and 2 against /dev/null and
+    /// starts the child in its own process group. Spawn a small shell
+    /// under the same settings; the shell opens a new fd 3 to the
+    /// output file (so the readlink of /dev/null on fd 1 is still true
+    /// when it is read) and writes what its `/proc` fds point to and
+    /// its pgid there.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn prepare_detached_closes_stdio_and_starts_a_new_process_group() {
+        let tmp = tempfile::tempdir().unwrap();
+        let out_path = tmp.path().join("out");
+        // `readlink /proc/self/fd/N` reads readlink's own fd (opened
+        // with redirection by sh): use `$$` to read sh's. The pipe
+        // keeps the writer out of the way: `readlink` writes to its
+        // own stdout, captured by sh's `$()`, then written to fd 3.
+        let script = format!(
+            "exec 3>{out}\n\
+             echo $(readlink /proc/$$/fd/0) >&3\n\
+             echo $(readlink /proc/$$/fd/1) >&3\n\
+             echo $(readlink /proc/$$/fd/2) >&3\n\
+             ps -o pgid= -p $$ >&3\n",
+            out = out_path.display()
+        );
+        let mut cmd = std::process::Command::new("/bin/sh");
+        cmd.arg("-c").arg(&script);
+        prepare_detached(&mut cmd);
+        let status = cmd.status().expect("sh ran");
+        assert!(status.success(), "sh exited {status:?}");
+        let out = std::fs::read_to_string(&out_path).expect("output");
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 4, "four lines: {out}");
+        for (i, l) in lines.iter().take(3).enumerate() {
+            assert_eq!(l.trim(), "/dev/null", "fd {i} is not /dev/null: {l:?}");
+        }
+        // The last line is `ps`'s pgid, with leading whitespace. The
+        // parent's pgid (this test's own) must differ: `process_group(0)`
+        // puts the child in a new group of its own.
+        let child_pgid: i32 = lines[3].trim().parse().expect("pgid is a number");
+        // SAFETY: getpgrp is a safe, no-arg syscall.
+        let parent_pgid = unsafe { libc::getpgrp() };
+        assert_ne!(
+            child_pgid, parent_pgid,
+            "the child kept the parent's process group"
+        );
     }
 }

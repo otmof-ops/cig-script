@@ -117,6 +117,11 @@ impl Sandbox {
             .env("CIGSCRIPT_HOME", self.home())
             .env("NO_COLOR", "1")
             .env("CIG_SEAL_KEY", "file")
+            // The default is `--engine auto` since #259; with
+            // `CIG_AUTO_LOWER=off` auto never starts a `__lower`
+            // subprocess, so a test that reads the tin or waits on no
+            // child of its own does not need to.
+            .env("CIG_AUTO_LOWER", "off")
             // The tests that read or edit a run's journal by hand read it
             // plain; the ones about the compressed journal turn it back on.
             .env("CIG_JOURNAL_ZST", "off")
@@ -168,6 +173,7 @@ impl Sandbox {
             .env("HOME", self.path())
             .env("NO_COLOR", "1")
             .env("CIG_SEAL_KEY", "file")
+            .env("CIG_AUTO_LOWER", "off")
             // The tests that read or edit a run's journal by hand read it
             // plain; the ones about the compressed journal turn it back on.
             .env("CIG_JOURNAL_ZST", "off")
@@ -189,6 +195,7 @@ impl Sandbox {
             .env("CIGSCRIPT_HOME", self.home())
             .env("NO_COLOR", "1")
             .env("CIG_SEAL_KEY", "file")
+            .env("CIG_AUTO_LOWER", "off")
             // The tests that read or edit a run's journal by hand read it
             // plain; the ones about the compressed journal turn it back on.
             .env("CIG_JOURNAL_ZST", "off")
@@ -217,6 +224,7 @@ impl Sandbox {
             .env("CIGSCRIPT_HOME", self.home())
             .env("NO_COLOR", "1")
             .env("CIG_SEAL_KEY", "file")
+            .env("CIG_AUTO_LOWER", "off")
             // The tests that read or edit a run's journal by hand read it
             // plain; the ones about the compressed journal turn it back on.
             .env("CIG_JOURNAL_ZST", "off")
@@ -18590,18 +18598,42 @@ fn cig_run_writes_its_phases_when_asked_and_only_then() {
     };
     // The tree-walker: the script is read, checked, then run.
     in_order(&phases("tree"), &["lower", "check", "run", "burn"]);
-    // The VM, the first time: the tin is asked (`module`), then the script
-    // is read and checked as before, and lowered and kept (`compile`).
+    // The VM, the first time: the tin is asked (`module`), the script
+    // is read and checked, and each stage of the lowering is its own
+    // phase: CIR, the passes, bytecode, verifying and loading
+    // (`compile-load`), and keeping it in the tin (`compile-keep`).
     let first = phases("vm");
     in_order(
         &first,
-        &["module", "lower", "check", "compile", "run", "burn"],
+        &[
+            "module",
+            "lower",
+            "check",
+            "compile-cir",
+            "compile-passes",
+            "compile-bytecode",
+            "compile-verify",
+            "compile-load",
+            "compile-keep",
+            "run",
+            "burn",
+        ],
     );
     // And from then on the module is the tin's: nothing is read, checked
-    // or lowered.
+    // or lowered; only `compile-load` opens it. The `module` phase is
+    // the lookup and its MAC.
     let later = phases("vm");
-    in_order(&later, &["module", "run", "burn"]);
-    for gone in ["lower", "check", "compile"] {
+    in_order(&later, &["module", "compile-load", "run", "burn"]);
+    for gone in [
+        "lower",
+        "check",
+        "compile",
+        "compile-cir",
+        "compile-passes",
+        "compile-bytecode",
+        "compile-verify",
+        "compile-keep",
+    ] {
         assert!(!later.iter().any(|n| n == gone), "{gone} in {later:?}");
     }
     // A bad descriptor is a usage error, never a silent no-op.

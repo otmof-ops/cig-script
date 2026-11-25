@@ -396,6 +396,36 @@ project follows semantic versioning.
   on the VM takes 305.9 ms, 8.45 times the tree-walker's. The README's
   "How fast it is" quotes the release's figures now.
 
+- **`cig run --engine auto`, the new default: the VM when a module is
+  kept, the tree-walker otherwise, and the lowering for the next run
+  left to a child process.** `cig run` picks `auto` when no `--engine`,
+  no `CIG_ENGINE` and no `cig config engine` names another. On a first
+  run of a script the tree-walker runs it now, paying nothing for the
+  lowering, and a hidden `cig __lower <script>` child is left behind to
+  lower the script and keep the module under the same `modcache` key
+  `--engine vm` would have used. The next `cig run` finds the module
+  and starts on the VM. One lowering at a time per script: a marker
+  beside the modules, taken with `create_new` and stale after ten
+  minutes, keeps twenty first runs that start together from starting
+  twenty lowerings; `cig tin gc` removes stale markers and old
+  leftovers. A script the lowering refuses is remembered: the reason
+  is kept under the same key, so a later run on `auto` picks the
+  tree-walker without starting another lowering (the record's
+  `engine.why` carries the reason). A new `auto_lower` config key (and
+  `CIG_AUTO_LOWER`) turns the child off (`off`: nothing is spawned, no
+  module appears) or asks the run to wait for the lowering (`wait`:
+  run `cig __lower` as a child and wait for its status, so no test
+  sleeps on a background process). `cig run --timings` now splits
+  `compile` into each stage of the lowering: `compile-cir`,
+  `compile-passes`, `compile-bytecode`, `compile-verify`,
+  `compile-load`, `compile-keep`; a run from a kept module prints
+  `module`, then `compile-load`. `--engine vm` and `--engine tree`
+  mean what they meant; `--no-check` still runs the tree-walker,
+  before the cache is read at all; a compiled program is untouched.
+  The engine the run picked is recorded as before. The decision and
+  what was weighed are in `docs/decisions/0002-cig-run-on-the-vm.md`.
+  (#259, #254)
+
 ## 1.25.0 — 2026-11-23
 
 `cig run` can run a script on the bytecode VM. `cig run --engine vm` (or

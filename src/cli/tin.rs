@@ -454,7 +454,7 @@ pub fn tin_cmd(ctx: &Ctx, cmd: Option<TinCommand>) -> i32 {
             if ctx.json {
                 outln!(
                     "{}",
-                    serde_json::json!({"objects": u.objects, "bytes": u.stored, "stored": u.stored, "recipes": u.recipes, "logical": u.logical, "sealed": u.sealed, "sealed_bytes": u.sealed_bytes, "packs": u.packs, "packed": u.packed, "referenced": referenced, "dir": tin::dir(), "modules": modules.entries, "modules_bytes": modules.bytes})
+                    serde_json::json!({"objects": u.objects, "bytes": u.stored, "stored": u.stored, "recipes": u.recipes, "logical": u.logical, "sealed": u.sealed, "sealed_bytes": u.sealed_bytes, "packs": u.packs, "packed": u.packed, "referenced": referenced, "dir": tin::dir(), "modules": modules.modules, "modules_bytes": modules.bytes, "refusals": modules.refusals, "entries": modules.entries})
                 );
             } else {
                 outln!(
@@ -488,10 +488,19 @@ pub fn tin_cmd(ctx: &Ctx, cmd: Option<TinCommand>) -> i32 {
                 );
                 if modules.entries > 0 {
                     outln!(
-                        "{} lowered module{} ({} bytes), kept so a script is lowered once; each is safe to remove (cig tin gc drops another build's, and the ones not loaded for 30 days)",
-                        modules.entries,
-                        if modules.entries == 1 { "" } else { "s" },
-                        modules.bytes
+                        "{} lowered module{} ({} bytes){}, kept so a script is lowered once; each is safe to remove (cig tin gc drops another build's, and the ones not loaded for 30 days)",
+                        modules.modules,
+                        if modules.modules == 1 { "" } else { "s" },
+                        modules.bytes,
+                        if modules.refusals == 0 {
+                            String::new()
+                        } else {
+                            format!(
+                                " and {} refusal{} (scripts the lowering did not take)",
+                                modules.refusals,
+                                if modules.refusals == 1 { "" } else { "s" }
+                            )
+                        }
                     );
                 }
             }

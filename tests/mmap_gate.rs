@@ -79,6 +79,7 @@ fn map_calls(cig: &PathBuf, n: u64) -> usize {
         .env("XDG_STATE_HOME", dir.path().join("state"))
         .env("XDG_CACHE_HOME", dir.path().join("cache"))
         .env("CIG_SEAL_KEY", "file")
+        .env("CIG_AUTO_LOWER", "off")
         .env("CIG_DOCTOR", "0")
         .env("CIG_MAX_STEPS", "0")
         .env("NO_COLOR", "1")

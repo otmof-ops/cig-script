@@ -563,6 +563,440 @@ fn a_variable_that_names_no_engine_is_refused_before_anything_runs() {
     assert!(tin.engines().is_empty(), "and nothing was recorded");
 }
 
+/// #259: `--engine auto` runs the script on the tree-walker on its first
+/// run and leaves the lowering to a `__lower` subprocess that keeps the
+/// module for the next run; the second run then uses the VM. With
+/// `CIG_AUTO_LOWER=wait` the lowering runs as a child the parent waits
+/// for and reaps, so this test sleeps on nothing and leaves no process
+/// behind.
+#[test]
+fn auto_runs_on_the_tree_walker_now_and_on_the_vm_next() {
+    let script = root().join("bench/compute/hello.cig");
+    let tin = Tin::new();
+    let cwd = tempfile::tempdir().expect("tempdir");
+    fs::copy(&script, cwd.path().join("hello.cig")).expect("copy");
+    let base = |cmd: &mut Command| {
+        cmd.current_dir(cwd.path())
+            .env("HOME", cwd.path())
+            .env("CIGSCRIPT_HOME", tin.home())
+            .env("CIG_KEYS_DIR", tin.dir.path().join("keys"))
+            .env("XDG_CONFIG_HOME", tin.dir.path().join("config"))
+            .env("XDG_DATA_HOME", tin.dir.path().join("data"))
+            .env("XDG_STATE_HOME", tin.dir.path().join("state"))
+            .env("XDG_CACHE_HOME", tin.dir.path().join("cache"))
+            .env("CIG_SEAL_KEY", "file")
+            .env("CIG_DOCTOR", "0")
+            .env("NO_COLOR", "1")
+            .env("CIG_INTERNAL_TRACKER_DIR", tin.dir.path().join("tracker"))
+            .env(
+                "CIG_UPDATE_MANIFEST",
+                tin.dir.path().join("no-releases.json"),
+            )
+            .env_remove("CI")
+            .env_remove("CIG_ENGINE");
+    };
+    // The first run on auto: tree-walker runs it now, and the same
+    // process lowers the script for the next run (CIG_AUTO_LOWER=wait).
+    let mut first = Command::new(env!("CARGO_BIN_EXE_cig"));
+    base(&mut first);
+    let out = first
+        .args(["run", "--engine", "auto", "hello.cig"])
+        .env("CIG_AUTO_LOWER", "wait")
+        .output()
+        .expect("first run");
+    assert!(out.status.success(), "first run: {out:?}");
+    let engines = tin.engines();
+    assert_eq!(engines.len(), 1, "one run recorded");
+    assert_eq!(engines[0]["engine"], "tree", "first run on the tree-walker");
+    assert!(engines[0]["asked"].is_null(), "auto is not `asked`");
+    // The second run on auto finds the module and uses the VM.
+    let mut second = Command::new(env!("CARGO_BIN_EXE_cig"));
+    base(&mut second);
+    let out = second
+        .args(["run", "--engine", "auto", "hello.cig"])
+        .env("CIG_AUTO_LOWER", "wait")
+        .output()
+        .expect("second run");
+    assert!(out.status.success(), "second run: {out:?}");
+    let engines = tin.engines();
+    assert_eq!(engines.len(), 2, "two runs recorded");
+    assert_eq!(engines[1]["engine"], "vm", "second run on the vm");
+    assert_eq!(engines[1]["module"], "cached", "from the tin");
+}
+
+/// A script the lowering does not take (a name looked up at run time):
+/// the first run under `auto` keeps a refusal in the cache, and the
+/// second run reads it, runs on the tree-walker and never spawns another
+/// lowering. The record carries the reason.
+#[test]
+fn auto_remembers_a_refusal_and_does_not_retry_it() {
+    let script = root().join("tests/walker/resolve-shadow.cig");
+    assert!(script.exists(), "the corpus still has this script");
+    let tin = Tin::new();
+    let cwd = tempfile::tempdir().expect("tempdir");
+    let name = script.file_name().unwrap();
+    fs::copy(&script, cwd.path().join(name)).expect("copy");
+    let base = |cmd: &mut Command| {
+        cmd.current_dir(cwd.path())
+            .env("HOME", cwd.path())
+            .env("CIGSCRIPT_HOME", tin.home())
+            .env("CIG_KEYS_DIR", tin.dir.path().join("keys"))
+            .env("XDG_CONFIG_HOME", tin.dir.path().join("config"))
+            .env("XDG_DATA_HOME", tin.dir.path().join("data"))
+            .env("XDG_STATE_HOME", tin.dir.path().join("state"))
+            .env("XDG_CACHE_HOME", tin.dir.path().join("cache"))
+            .env("CIG_SEAL_KEY", "file")
+            .env("CIG_DOCTOR", "0")
+            .env("NO_COLOR", "1")
+            .env("CIG_INTERNAL_TRACKER_DIR", tin.dir.path().join("tracker"))
+            .env(
+                "CIG_UPDATE_MANIFEST",
+                tin.dir.path().join("no-releases.json"),
+            )
+            .env_remove("CI")
+            .env_remove("CIG_ENGINE")
+            .env("CIG_AUTO_LOWER", "wait");
+    };
+    let mut first = Command::new(env!("CARGO_BIN_EXE_cig"));
+    base(&mut first);
+    let _out = first
+        .args(["run", "--engine", "auto", name.to_str().unwrap()])
+        .output()
+        .expect("first");
+    let mut second = Command::new(env!("CARGO_BIN_EXE_cig"));
+    base(&mut second);
+    let _out = second
+        .args(["run", "--engine", "auto", name.to_str().unwrap()])
+        .output()
+        .expect("second");
+    let engines = tin.engines();
+    assert_eq!(engines.len(), 2);
+    assert_eq!(engines[0]["engine"], "tree", "first: tree");
+    assert_eq!(engines[1]["engine"], "tree", "second: still tree");
+    assert!(
+        engines[1]["why"]
+            .as_str()
+            .is_some_and(|w| w.contains("looked up as the script runs")
+                || w.contains("lowering does not take it yet")),
+        "the refusal is carried on the second run: {}",
+        engines[1]
+    );
+}
+
+/// The default path: `cig run` with no `--engine`, no `CIG_ENGINE` and
+/// no config picks `auto`. On a first run the record says `tree`; on a
+/// second it says `vm` and `module: cached`. This proves the default is
+/// `auto`, which no other test does (every other new test sets the
+/// engine).
+#[test]
+fn the_default_engine_is_auto() {
+    let script = root().join("bench/compute/hello.cig");
+    let tin = Tin::new();
+    let cwd = tempfile::tempdir().expect("tempdir");
+    fs::copy(&script, cwd.path().join("hello.cig")).expect("copy");
+    let base = |cmd: &mut Command| {
+        cmd.current_dir(cwd.path())
+            .env("HOME", cwd.path())
+            .env("CIGSCRIPT_HOME", tin.home())
+            .env("CIG_KEYS_DIR", tin.dir.path().join("keys"))
+            .env("XDG_CONFIG_HOME", tin.dir.path().join("config"))
+            .env("XDG_DATA_HOME", tin.dir.path().join("data"))
+            .env("XDG_STATE_HOME", tin.dir.path().join("state"))
+            .env("XDG_CACHE_HOME", tin.dir.path().join("cache"))
+            .env("CIG_SEAL_KEY", "file")
+            .env("CIG_DOCTOR", "0")
+            .env("NO_COLOR", "1")
+            .env("CIG_AUTO_LOWER", "wait")
+            .env("CIG_INTERNAL_TRACKER_DIR", tin.dir.path().join("tracker"))
+            .env(
+                "CIG_UPDATE_MANIFEST",
+                tin.dir.path().join("no-releases.json"),
+            )
+            .env_remove("CI")
+            .env_remove("CIG_ENGINE");
+    };
+    for _ in 0..2 {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_cig"));
+        base(&mut c);
+        let out = c.args(["run", "hello.cig"]).output().expect("run");
+        assert!(out.status.success(), "{out:?}");
+    }
+    let engines = tin.engines();
+    assert_eq!(engines.len(), 2, "two runs recorded");
+    assert_eq!(engines[0]["engine"], "tree", "first: tree (default auto)");
+    assert_eq!(engines[1]["engine"], "vm", "second: vm (default auto)");
+    assert_eq!(engines[1]["module"], "cached");
+}
+
+/// `--no-check` always runs the tree-walker, even when a module is
+/// kept for the script: `choose` is the authority, and the cache is
+/// not read under `--no-check`.
+#[test]
+fn no_check_runs_on_the_tree_walker_even_with_a_kept_module() {
+    let script = root().join("bench/compute/hello.cig");
+    let tin = Tin::new();
+    let cwd = tempfile::tempdir().expect("tempdir");
+    fs::copy(&script, cwd.path().join("hello.cig")).expect("copy");
+    let base = |cmd: &mut Command| {
+        cmd.current_dir(cwd.path())
+            .env("HOME", cwd.path())
+            .env("CIGSCRIPT_HOME", tin.home())
+            .env("CIG_KEYS_DIR", tin.dir.path().join("keys"))
+            .env("XDG_CONFIG_HOME", tin.dir.path().join("config"))
+            .env("XDG_DATA_HOME", tin.dir.path().join("data"))
+            .env("XDG_STATE_HOME", tin.dir.path().join("state"))
+            .env("XDG_CACHE_HOME", tin.dir.path().join("cache"))
+            .env("CIG_SEAL_KEY", "file")
+            .env("CIG_DOCTOR", "0")
+            .env("NO_COLOR", "1")
+            .env("CIG_AUTO_LOWER", "off")
+            .env("CIG_INTERNAL_TRACKER_DIR", tin.dir.path().join("tracker"))
+            .env(
+                "CIG_UPDATE_MANIFEST",
+                tin.dir.path().join("no-releases.json"),
+            )
+            .env_remove("CI")
+            .env_remove("CIG_ENGINE");
+    };
+    // Run once with `--engine vm` to keep a module.
+    let mut c = Command::new(env!("CARGO_BIN_EXE_cig"));
+    base(&mut c);
+    let out = c
+        .args(["run", "--engine", "vm", "hello.cig"])
+        .output()
+        .expect("warm");
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(tin.engines()[0]["engine"], "vm");
+    // Now run with `--no-check`: must run on the tree-walker.
+    let mut c = Command::new(env!("CARGO_BIN_EXE_cig"));
+    base(&mut c);
+    let out = c
+        .args(["run", "--engine", "vm", "--no-check", "hello.cig"])
+        .output()
+        .expect("no-check");
+    assert!(out.status.success(), "{out:?}");
+    let engines = tin.engines();
+    assert_eq!(engines.len(), 2);
+    assert_eq!(engines[1]["engine"], "tree", "no-check: tree");
+    assert_eq!(engines[1]["asked"], "vm");
+    assert!(
+        engines[1]["why"]
+            .as_str()
+            .is_some_and(|w| w.contains("--no-check")),
+        "{}",
+        engines[1]
+    );
+    // And under `--engine auto` with no_check, the record says tree.
+    let mut c = Command::new(env!("CARGO_BIN_EXE_cig"));
+    base(&mut c);
+    let out = c
+        .args(["run", "--engine", "auto", "--no-check", "hello.cig"])
+        .output()
+        .expect("auto no-check");
+    assert!(out.status.success(), "{out:?}");
+    let engines = tin.engines();
+    assert_eq!(engines[2]["engine"], "tree", "auto + no-check: tree");
+}
+
+/// A first run under `auto` prints the same thing, leaves the same
+/// files, and records the same journal as the tree-walker; the second
+/// run (on the VM) does too. This reuses the comparison the main
+/// `a_run_on_the_vm_matches_the_tree_walker_cold_and_warm` test does,
+/// against the `auto` engine.
+#[test]
+fn auto_matches_the_tree_walker_cold_and_warm() {
+    let script = root().join("bench/compute/hello.cig");
+    let name = "bench/compute/hello.cig".to_string();
+    let tree = run(&script, "0", "tree", false, &Tin::new());
+    let tin = Tin::new();
+    // The first run on `auto` runs the tree-walker and leaves the
+    // lowering to a child that `wait` runs to completion before the
+    // record is written.
+    let cold = run_auto(&script, "0", false, &tin);
+    // The second run on `auto` finds the module and uses the VM.
+    let warm = run_auto(&script, "0", false, &tin);
+    assert_eq!(tree, cold, "first: {}", first_difference(&tree, &cold));
+    assert_eq!(tree, warm, "second: {}", first_difference(&tree, &warm));
+    let engines = tin.engines();
+    assert_eq!(engines[0]["engine"], "tree", "{name}: first = tree");
+    assert_eq!(engines[1]["engine"], "vm", "{name}: second = vm");
+    assert_eq!(engines[1]["module"], "cached");
+}
+
+/// Two `__lower` of one script spawned together keep one module and
+/// leave no marker. Whichever gets the claim first keeps the module;
+/// the other sees it under `lookup` after its own `claim_lowering` (or
+/// is refused the claim outright) and exits.
+#[test]
+fn two_lowers_at_once_keep_one_module_and_leave_no_marker() {
+    let script = root().join("bench/compute/hello.cig");
+    let tin = Tin::new();
+    let cwd = tempfile::tempdir().expect("tempdir");
+    fs::copy(&script, cwd.path().join("hello.cig")).expect("copy");
+    let base = |cmd: &mut Command| {
+        cmd.current_dir(cwd.path())
+            .env("HOME", cwd.path())
+            .env("CIGSCRIPT_HOME", tin.home())
+            .env("CIG_KEYS_DIR", tin.dir.path().join("keys"))
+            .env("XDG_CONFIG_HOME", tin.dir.path().join("config"))
+            .env("XDG_DATA_HOME", tin.dir.path().join("data"))
+            .env("XDG_STATE_HOME", tin.dir.path().join("state"))
+            .env("XDG_CACHE_HOME", tin.dir.path().join("cache"))
+            .env("CIG_SEAL_KEY", "file")
+            .env("CIG_DOCTOR", "0")
+            .env("NO_COLOR", "1")
+            .env("CIG_INTERNAL_TRACKER_DIR", tin.dir.path().join("tracker"))
+            .env(
+                "CIG_UPDATE_MANIFEST",
+                tin.dir.path().join("no-releases.json"),
+            )
+            .env_remove("CI")
+            .env_remove("CIG_ENGINE");
+    };
+    let mut a = Command::new(env!("CARGO_BIN_EXE_cig"));
+    base(&mut a);
+    let child_a = a
+        .args(["__lower", "hello.cig"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("a");
+    let mut b = Command::new(env!("CARGO_BIN_EXE_cig"));
+    base(&mut b);
+    let child_b = b
+        .args(["__lower", "hello.cig"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("b");
+    for mut c in [child_a, child_b] {
+        c.wait().expect("wait");
+    }
+    let modules = tin.home().join("tin").join("modules");
+    let mut n_mods = 0;
+    let mut n_markers = 0;
+    if modules.exists() {
+        for shard in fs::read_dir(&modules).unwrap().flatten() {
+            if shard.file_type().unwrap().is_dir() {
+                for f in fs::read_dir(shard.path()).unwrap().flatten() {
+                    let name = f.file_name().to_string_lossy().to_string();
+                    if name.len() == 64 {
+                        n_mods += 1;
+                    } else if name.ends_with(".lowering") {
+                        n_markers += 1;
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(n_mods, 1, "one module kept");
+    assert_eq!(n_markers, 0, "no marker left behind");
+}
+
+/// Mirrors [`run`] for `--engine auto` with `CIG_AUTO_LOWER=wait` so
+/// the lowering finishes before the parent exits. No background work,
+/// no sleeps.
+fn run_auto(script: &Path, budget: &str, dry: bool, tin: &Tin) -> String {
+    let cwd = tempfile::tempdir().expect("tempdir");
+    let name = script.file_name().expect("name");
+    fs::copy(script, cwd.path().join(name)).expect("copy script");
+    let before: std::collections::BTreeSet<PathBuf> = fs::read_dir(tin.home().join("runs"))
+        .map(|d| d.filter_map(|e| e.ok().map(|e| e.path())).collect())
+        .unwrap_or_default();
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_cig"));
+    cmd.arg("run").arg("--engine").arg("auto");
+    if dry {
+        cmd.arg("--dry-run");
+    }
+    let mut child = cmd
+        .arg(name)
+        .current_dir(cwd.path())
+        .env("HOME", cwd.path())
+        .env("CIGSCRIPT_HOME", tin.home())
+        .env("CIG_KEYS_DIR", tin.dir.path().join("keys"))
+        .env("XDG_CONFIG_HOME", tin.dir.path().join("config"))
+        .env("XDG_DATA_HOME", tin.dir.path().join("data"))
+        .env("XDG_STATE_HOME", tin.dir.path().join("state"))
+        .env("XDG_CACHE_HOME", tin.dir.path().join("cache"))
+        .env("CIG_SEAL_KEY", "file")
+        .env("CIG_DOCTOR", "0")
+        .env("NO_COLOR", "1")
+        .env("CIG_AUTO_LOWER", "wait")
+        .env("CIG_MAX_STEPS", budget)
+        .env("CIG_INTERNAL_TRACKER_DIR", tin.dir.path().join("tracker"))
+        .env(
+            "CIG_UPDATE_MANIFEST",
+            tin.dir.path().join("no-releases.json"),
+        )
+        .env_remove("CI")
+        .env_remove("CIG_ENGINE")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("run cig");
+    let status = child
+        .wait_timeout(Duration::from_secs(120))
+        .expect("wait")
+        .expect("done");
+    let out = child.wait_with_output().expect("output");
+    let after: std::collections::BTreeSet<PathBuf> = fs::read_dir(tin.home().join("runs"))
+        .map(|d| d.filter_map(|e| e.ok().map(|e| e.path())).collect())
+        .unwrap_or_default();
+    let made: Vec<PathBuf> = after.difference(&before).cloned().collect();
+    format!(
+        "exit {}\n--- stdout\n{}--- stderr\n{}--- files\n{}\n--- recorded\n{}\n",
+        status.code().unwrap_or(-1),
+        normal(&String::from_utf8_lossy(&out.stdout), cwd.path()),
+        normal(&String::from_utf8_lossy(&out.stderr), cwd.path()),
+        files_in(cwd.path()),
+        recorded(&made, cwd.path())
+    )
+}
+
+/// `CIG_AUTO_LOWER=off` under `--engine auto`: no `__lower` is started,
+/// no module appears, and auto stays the tree-walker.
+#[test]
+fn auto_lower_off_starts_no_subprocess_and_keeps_no_module() {
+    let script = root().join("bench/compute/hello.cig");
+    let tin = Tin::new();
+    let cwd = tempfile::tempdir().expect("tempdir");
+    fs::copy(&script, cwd.path().join("hello.cig")).expect("copy");
+    let out = Command::new(env!("CARGO_BIN_EXE_cig"))
+        .args(["run", "--engine", "auto", "hello.cig"])
+        .current_dir(cwd.path())
+        .env("HOME", cwd.path())
+        .env("CIGSCRIPT_HOME", tin.home())
+        .env("CIG_KEYS_DIR", tin.dir.path().join("keys"))
+        .env("XDG_CONFIG_HOME", tin.dir.path().join("config"))
+        .env("XDG_DATA_HOME", tin.dir.path().join("data"))
+        .env("XDG_STATE_HOME", tin.dir.path().join("state"))
+        .env("XDG_CACHE_HOME", tin.dir.path().join("cache"))
+        .env("CIG_SEAL_KEY", "file")
+        .env("CIG_DOCTOR", "0")
+        .env("NO_COLOR", "1")
+        .env("CIG_AUTO_LOWER", "off")
+        .env("CIG_INTERNAL_TRACKER_DIR", tin.dir.path().join("tracker"))
+        .env(
+            "CIG_UPDATE_MANIFEST",
+            tin.dir.path().join("no-releases.json"),
+        )
+        .env_remove("CI")
+        .env_remove("CIG_ENGINE")
+        .output()
+        .expect("run");
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(tin.engines()[0]["engine"], "tree");
+    let modules = tin.home().join("tin").join("modules");
+    assert!(
+        !modules.exists() || fs::read_dir(&modules).map(|d| d.count()).unwrap_or(0) == 0,
+        "no module was kept under {}",
+        modules.display()
+    );
+}
+
 #[test]
 fn no_check_runs_on_the_tree_walker_and_the_record_says_why() {
     let tin = Tin::new();
@@ -598,4 +1032,157 @@ fn no_check_runs_on_the_tree_walker_and_the_record_says_why() {
         "{}",
         engines[0]
     );
+}
+
+/// A script reached through a symlink is lowered: the first run on
+/// `auto` records `tree`, and the second (after the `wait` child) uses
+/// the VM. The real script is in one folder, a link to it in another,
+/// and `cig run` is given the link.
+#[cfg(unix)]
+#[test]
+fn a_symlinked_script_is_lowered_for_the_next_run() {
+    let real = tempfile::tempdir().expect("real");
+    let link = tempfile::tempdir().expect("link");
+    let script = real.path().join("hello.cig");
+    std::fs::write(&script, "exhale \"hi\"\n").expect("write");
+    let via = link.path().join("via.cig");
+    std::os::unix::fs::symlink(&script, &via).expect("symlink");
+    let tin = Tin::new();
+    let base = |cmd: &mut Command| {
+        cmd.current_dir(link.path())
+            .env("HOME", link.path())
+            .env("CIGSCRIPT_HOME", tin.home())
+            .env("CIG_KEYS_DIR", tin.dir.path().join("keys"))
+            .env("XDG_CONFIG_HOME", tin.dir.path().join("config"))
+            .env("XDG_DATA_HOME", tin.dir.path().join("data"))
+            .env("XDG_STATE_HOME", tin.dir.path().join("state"))
+            .env("XDG_CACHE_HOME", tin.dir.path().join("cache"))
+            .env("CIG_SEAL_KEY", "file")
+            .env("CIG_DOCTOR", "0")
+            .env("NO_COLOR", "1")
+            .env("CIG_AUTO_LOWER", "wait")
+            .env("CIG_INTERNAL_TRACKER_DIR", tin.dir.path().join("tracker"))
+            .env(
+                "CIG_UPDATE_MANIFEST",
+                tin.dir.path().join("no-releases.json"),
+            )
+            .env_remove("CI")
+            .env_remove("CIG_ENGINE");
+    };
+    for _ in 0..2 {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_cig"));
+        base(&mut c);
+        let out = c
+            .args(["run", "--engine", "auto", "via.cig"])
+            .output()
+            .expect("run");
+        assert!(out.status.success(), "{out:?}");
+    }
+    let engines = tin.engines();
+    assert_eq!(engines.len(), 2);
+    assert_eq!(engines[0]["engine"], "tree");
+    assert_eq!(engines[1]["engine"], "vm", "symlinked script was lowered");
+}
+
+/// A kept module whose body is damaged (bytes past its header) opens
+/// no longer. Under `--engine vm` the run heals: it lowers fresh and
+/// writes a new entry. Under `--engine auto` the parent runs on the
+/// tree-walker and the `__lower` child (seeing the lookup's damaged
+/// module) heals the entry for the next run.
+#[test]
+fn a_damaged_kept_module_heals_on_the_next_run() {
+    let script = root().join("bench/compute/hello.cig");
+    let tin = Tin::new();
+    let cwd = tempfile::tempdir().expect("tempdir");
+    fs::copy(&script, cwd.path().join("hello.cig")).expect("copy");
+    let base = |cmd: &mut Command| {
+        cmd.current_dir(cwd.path())
+            .env("HOME", cwd.path())
+            .env("CIGSCRIPT_HOME", tin.home())
+            .env("CIG_KEYS_DIR", tin.dir.path().join("keys"))
+            .env("XDG_CONFIG_HOME", tin.dir.path().join("config"))
+            .env("XDG_DATA_HOME", tin.dir.path().join("data"))
+            .env("XDG_STATE_HOME", tin.dir.path().join("state"))
+            .env("XDG_CACHE_HOME", tin.dir.path().join("cache"))
+            .env("CIG_SEAL_KEY", "file")
+            .env("CIG_DOCTOR", "0")
+            .env("NO_COLOR", "1")
+            .env("CIG_AUTO_LOWER", "wait")
+            .env("CIG_INTERNAL_TRACKER_DIR", tin.dir.path().join("tracker"))
+            .env(
+                "CIG_UPDATE_MANIFEST",
+                tin.dir.path().join("no-releases.json"),
+            )
+            .env_remove("CI")
+            .env_remove("CIG_ENGINE");
+    };
+    // Warm: keep a module.
+    let mut warm = Command::new(env!("CARGO_BIN_EXE_cig"));
+    base(&mut warm);
+    let out = warm
+        .args(["run", "--engine", "vm", "hello.cig"])
+        .output()
+        .expect("warm");
+    assert!(out.status.success());
+    // Find and damage the body of the stored entry.
+    let modules = tin.home().join("tin").join("modules");
+    let mut entry = None;
+    for shard in fs::read_dir(&modules).unwrap().flatten() {
+        if shard.file_type().unwrap().is_dir() {
+            for f in fs::read_dir(shard.path()).unwrap().flatten() {
+                let name = f.file_name().to_string_lossy().to_string();
+                if name.len() == 64 {
+                    entry = Some(f.path());
+                }
+            }
+        }
+    }
+    let entry = entry.expect("one module was kept");
+    let mut bytes = fs::read(&entry).unwrap();
+    // The entry's header is 128 bytes, the module's own header follows
+    // the entry's for another 64 bytes; the body starts after that.
+    // Flip a byte deep in the body.
+    let at = bytes.len() - 1;
+    bytes[at] ^= 0x01;
+    fs::write(&entry, &bytes).expect("damage");
+    // Under `--engine vm` the run heals: it lowers fresh and keeps a
+    // new entry. The run itself succeeds.
+    let mut vm = Command::new(env!("CARGO_BIN_EXE_cig"));
+    base(&mut vm);
+    let out = vm
+        .args(["run", "--engine", "vm", "hello.cig"])
+        .output()
+        .expect("vm");
+    assert!(out.status.success(), "vm healed: {out:?}");
+    let engines = tin.engines();
+    // Three records: the warm, the vm-heal, and nothing else yet.
+    assert_eq!(engines.len(), 2);
+    assert_eq!(engines[1]["engine"], "vm");
+    assert_eq!(engines[1]["module"], "lowered", "vm healed and relowered");
+    // Damage again, then run on `--engine auto` with the child in
+    // `wait`: the parent uses the tree-walker (no VM open on a damaged
+    // module), and the child heals the entry.
+    let mut bytes = fs::read(&entry).unwrap();
+    let at = bytes.len() - 1;
+    bytes[at] ^= 0x01;
+    fs::write(&entry, &bytes).expect("damage again");
+    let mut au = Command::new(env!("CARGO_BIN_EXE_cig"));
+    base(&mut au);
+    let out = au
+        .args(["run", "--engine", "auto", "hello.cig"])
+        .output()
+        .expect("auto heal");
+    assert!(out.status.success());
+    // The next run on `auto` finds the healed module.
+    let mut next = Command::new(env!("CARGO_BIN_EXE_cig"));
+    base(&mut next);
+    let out = next
+        .args(["run", "--engine", "auto", "hello.cig"])
+        .output()
+        .expect("auto next");
+    assert!(out.status.success());
+    let engines = tin.engines();
+    assert_eq!(engines.len(), 4);
+    assert_eq!(engines[3]["engine"], "vm", "auto healed between runs");
+    assert_eq!(engines[3]["module"], "cached");
 }

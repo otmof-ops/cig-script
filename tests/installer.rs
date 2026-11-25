@@ -58,6 +58,7 @@ impl Sandbox {
             .env("PATH", path)
             .env("NO_COLOR", "1")
             .env("CIG_SEAL_KEY", "file")
+            .env("CIG_AUTO_LOWER", "off")
             .env("CIG_INTERNAL_NO_NS_PROBE", "1")
             .env("CIG_INTERNAL_TRACKER_DIR", self.path().join("tracker"))
             .env("CIG_UPDATE_MANIFEST", self.path().join("no-releases.json"))

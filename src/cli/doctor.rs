@@ -338,13 +338,19 @@ pub fn product_doctor(ctx: &Ctx, fix: bool) -> i32 {
         }
     );
     // The lowered modules `cig run` keeps in the tin (#254): what they are,
-    // their size, and that they are safe to remove.
+    // their size, and that they are safe to remove. Refusals (the lowering
+    // declined the script) are named apart.
     let modules = crate::burn::modcache::stats();
     if modules.entries > 0 {
         outln!(
-            "  modules       {} lowered ({}), kept so a script is lowered once; safe to remove (cig tin gc)",
-            modules.entries,
-            human_bytes(modules.bytes)
+            "  modules       {} lowered ({}){}, kept so a script is lowered once; safe to remove (cig tin gc)",
+            modules.modules,
+            human_bytes(modules.bytes),
+            if modules.refusals == 0 {
+                String::new()
+            } else {
+                format!(" and {} refusal(s) remembered", modules.refusals)
+            }
         );
     }
     // A cache that cannot be used fails no run, so nothing else says it.
@@ -1343,10 +1349,15 @@ fn json_findings(
             "modules",
             "ok",
             format!(
-                "{} lowered module{} in the tin ({})",
-                modules.entries,
-                if modules.entries == 1 { "" } else { "s" },
-                human_bytes(modules.bytes)
+                "{} lowered module{} in the tin ({}){}",
+                modules.modules,
+                if modules.modules == 1 { "" } else { "s" },
+                human_bytes(modules.bytes),
+                if modules.refusals == 0 {
+                    String::new()
+                } else {
+                    format!(" and {} refusal(s)", modules.refusals)
+                }
             ),
             "a script on the vm is lowered once and its module kept; each is safe to remove and is lowered again on its script's next run (cig tin gc drops another build's, and the ones not loaded for 30 days)",
             None,

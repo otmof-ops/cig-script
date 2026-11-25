@@ -348,10 +348,14 @@ pub fn dispatch(bin: &Path, args: &[std::ffi::OsString]) -> Result<i32, String> 
 /// `engine` says one was given) is taken out of the arguments: a cig from
 /// before the flag refuses it as unknown. The choice goes on as
 /// `CIG_ENGINE` instead, which such a cig ignores and a later one reads
-/// in the flag's place.
+/// in the flag's place. `auto` is omitted: it is the default a new cig
+/// picks for itself, and a cig from before `auto` existed refuses the
+/// value with E800. (The flag is still stripped, so a cig that knows
+/// `auto` as a config but not as an argument is covered.)
 pub fn dispatch_run(bin: &Path, engine: Option<&str>) -> Result<i32, String> {
     let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
     match engine {
+        Some("auto") => hand_over(bin, &without_engine(&args), None),
         Some(engine) => hand_over(bin, &without_engine(&args), Some(engine)),
         None => hand_over(bin, &args, None),
     }

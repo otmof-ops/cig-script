@@ -233,6 +233,12 @@ pub enum Command {
     /// One pass of the history budget (what a run starts in the background after it ends).
     #[command(hide = true, name = "__budget")]
     InternalBudget,
+    /// Lower a script to a module and keep it in the tin, so the next `cig run --engine auto` on the same script starts on the VM (what `--engine auto` leaves behind after a first run; cig-script#259).
+    #[command(hide = true, name = "__lower")]
+    InternalLower {
+        /// The script to lower.
+        file: PathBuf,
+    },
     /// Report a bug: a stub for `ciginstaller bug cig` (no run) or `ciginstaller bug --run <run> --part cig`; `--out FILE` is `ciginstaller report <run> --cig --out FILE`.
     Report {
         /// The run id, or a unique prefix of it; none starts the bug report with no run.
@@ -442,7 +448,7 @@ pub struct RunArgs {
     /// Pin this run when it ends, so keep_runs, keep_days and the history budget keep it (the run before a migration or a release).
     #[arg(long)]
     pub pin: bool,
-    /// Which engine runs the script: `vm` (bytecode, lowered once and kept in the tin) or `tree` (the tree-walker); also CIG_ENGINE, and `cig config engine` for a default.
+    /// Which engine runs the script: `auto` (the default: the VM when a module is kept for this script, else the tree-walker with the lowering left to a subprocess for the next run), `vm` (lowered now and kept, then on the VM), or `tree` (the tree-walker); also CIG_ENGINE, and `cig config engine` for a default.
     #[arg(long, value_enum, value_name = "ENGINE")]
     pub engine: Option<run::EngineArg>,
     /// Write where the time went (lower, check, run, burn) as JSON lines to descriptor FD, to CIG_TIMINGS_FD, or to stderr (`--timings`, `--timings=9`).
@@ -480,7 +486,7 @@ pub struct LightArgs {
     /// Run here without comparing plans with the last good version.
     #[arg(long)]
     pub no_trial: bool,
-    /// Which engine runs the script: `vm` or `tree` (see `cig run --help`).
+    /// Which engine runs the script: `auto`, `vm` or `tree` (see `cig run --help`).
     #[arg(long, value_enum, value_name = "ENGINE")]
     pub engine: Option<run::EngineArg>,
     /// Arguments passed to the script as `args`.
@@ -620,6 +626,7 @@ pub fn main() -> i32 {
         Command::Crash { .. }
             | Command::InternalCrash { .. }
             | Command::InternalBudget
+            | Command::InternalLower { .. }
             | Command::ReportBundle { queue: true, .. }
     );
     let code = dispatch(ctx, cli.command);
@@ -809,6 +816,7 @@ fn dispatch(ctx: Ctx, command: Command) -> i32 {
             runs::budget_pass();
             exit::OK
         }
+        Command::InternalLower { file } => run::internal_lower(&file),
         Command::Report { id, out, send } => report::report(&ctx, id.as_deref(), out, send),
         Command::ReportBundle { id, out, queue } => report::bundle_cmd(&ctx, &id, out, queue),
         Command::Update {

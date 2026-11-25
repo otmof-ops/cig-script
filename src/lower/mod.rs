@@ -124,13 +124,29 @@ pub fn module_loaded(
     program: &Program,
     file: &str,
 ) -> Result<(Vec<u8>, std::rc::Rc<crate::vm::Program>), Failure> {
+    module_loaded_timed(program, file, None)
+}
+
+/// [`module_loaded`], writing a phase line to `timings` for each stage of
+/// the lowering (`compile-cir`, `compile-passes`, `compile-bytecode`,
+/// `compile-verify`, `compile-load`). `cig run --timings` passes a
+/// [`Timings`] in; a caller that is not timing passes `None`. The
+/// `compile-keep` phase (storing the module in the tin) is timed by the
+/// caller, as it is the caller's step.
+///
+/// [`Timings`]: crate::timings::Timings
+pub fn module_loaded_timed(
+    program: &Program,
+    file: &str,
+    timings: Option<&crate::timings::Timings>,
+) -> Result<(Vec<u8>, std::rc::Rc<crate::vm::Program>), Failure> {
     guarded(|| {
         if std::env::var("CIG_INTERNAL_PANIC").as_deref() == Ok("lower") {
             // Test hook: a panic from inside the lowering, for the run
             // that must go on without it.
             panic!("deliberate test panic in the lowering (CIG_INTERNAL_PANIC=lower)");
         }
-        lowered_at(program, file, DEFAULT_LEVEL)
+        lowered_at_timed(program, file, DEFAULT_LEVEL, timings)
             .map(|l| (l.bytes, l.loaded))
             .map_err(Failure::from)
     })
@@ -161,72 +177,112 @@ struct Whole {
 }
 
 fn lowered_at(program: &Program, file: &str, opt: u8) -> Result<Whole, Stop> {
+    lowered_at_timed(program, file, opt, None)
+}
+
+/// [`lowered_at`] with each stage timed on `timings` (`compile-cir`,
+/// `compile-passes`, `compile-bytecode`, `compile-verify`, `compile-load`).
+/// With `timings = None` no clock is read that was not read before: every
+/// call to [`crate::timings::Timings::start`] returns `None` on a
+/// [`Timings::off`]-like sink.
+///
+/// [`Timings::off`]: crate::timings::Timings::off
+fn lowered_at_timed(
+    program: &Program,
+    file: &str,
+    opt: u8,
+    timings: Option<&crate::timings::Timings>,
+) -> Result<Whole, Stop> {
     use bc::{CompileError, Error};
     use cir::LowerError;
+    // One phase of a run of the lowering: open it at a start, close it
+    // at the end, write nothing when no [`Timings`] is handed in.
+    let open = || timings.and_then(|t| t.start());
+    let close = |name: &str, started: Option<std::time::Instant>| {
+        if let Some(t) = timings {
+            t.end(name, started);
+        }
+    };
+    let stop_of = |e: CompileError| -> Stop {
+        match e {
+            CompileError::Lower(LowerError::Diagnostic(d)) => Stop {
+                what: d.message,
+                span: d.span,
+                bug: false,
+            },
+            CompileError::Lower(LowerError::Internal(e)) => Stop {
+                what: format!("the lowering to IR failed ({e})"),
+                span: None,
+                bug: true,
+            },
+            CompileError::Lower(LowerError::Refused { what, span }) => Stop {
+                what,
+                span: Some(span),
+                bug: false,
+            },
+            CompileError::Verify(e) => Stop {
+                what: format!(
+                    "the IR broke a rule after {} ({})",
+                    e.pass,
+                    e.errors
+                        .iter()
+                        .map(|x| x.to_string())
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                ),
+                span: None,
+                bug: true,
+            },
+            CompileError::Bytecode(Error::Refused { construct, span }) => Stop {
+                what: format!("{construct} is not lowered to bytecode"),
+                span: Some(span),
+                bug: false,
+            },
+            CompileError::Bytecode(Error::Limit { what, span }) => Stop {
+                what,
+                span: Some(span),
+                bug: false,
+            },
+            CompileError::Bytecode(Error::Internal(e)) => Stop {
+                what: e,
+                span: None,
+                bug: true,
+            },
+        }
+    };
     let passes = cir::pass::level(opt);
-    // The steps of `bc::compile_program`, with the IR and the functions'
-    // ids kept.
-    let lowered = cir::lower_program(program, file)
-        .map_err(CompileError::Lower)
-        .and_then(|mut ir| {
-            cir::pass::run_passes(&mut ir, &passes).map_err(CompileError::Verify)?;
-            let (m, funcs) = bc::lower_indexed(&ir).map_err(CompileError::Bytecode)?;
-            Ok((ir, m, funcs))
-        });
-    let (ir, m, funcs) = lowered.map_err(|e| match e {
-        CompileError::Lower(LowerError::Diagnostic(d)) => Stop {
-            what: d.message,
-            span: d.span,
-            bug: false,
-        },
-        CompileError::Lower(LowerError::Internal(e)) => Stop {
-            what: format!("the lowering to IR failed ({e})"),
-            span: None,
-            bug: true,
-        },
-        CompileError::Lower(LowerError::Refused { what, span }) => Stop {
-            what,
-            span: Some(span),
-            bug: false,
-        },
-        CompileError::Verify(e) => Stop {
-            what: format!(
-                "the IR broke a rule after {} ({})",
-                e.pass,
-                e.errors
-                    .iter()
-                    .map(|x| x.to_string())
-                    .collect::<Vec<_>>()
-                    .join("; ")
-            ),
-            span: None,
-            bug: true,
-        },
-        CompileError::Bytecode(Error::Refused { construct, span }) => Stop {
-            what: format!("{construct} is not lowered to bytecode"),
-            span: Some(span),
-            bug: false,
-        },
-        CompileError::Bytecode(Error::Limit { what, span }) => Stop {
-            what,
-            span: Some(span),
-            bug: false,
-        },
-        CompileError::Bytecode(Error::Internal(e)) => Stop {
-            what: e,
-            span: None,
-            bug: true,
-        },
-    })?;
+    // CIR: the source tree to IR.
+    let cir_t = open();
+    let ir = cir::lower_program(program, file).map_err(CompileError::Lower);
+    close("compile-cir", cir_t);
+    let mut ir = ir.map_err(stop_of)?;
+    // Passes: the IR after the passes of the level.
+    let passes_t = open();
+    let ran = cir::pass::run_passes(&mut ir, &passes).map_err(CompileError::Verify);
+    close("compile-passes", passes_t);
+    ran.map_err(stop_of)?;
+    // Bytecode: IR to the bytes the VM reads.
+    let bc_t = open();
+    let bc_r = bc::lower_indexed(&ir).map_err(CompileError::Bytecode);
+    close("compile-bytecode", bc_t);
+    let (m, funcs) = bc_r.map_err(stop_of)?;
     if let Some(n) = not_built(&m.main) {
         return Err(n);
     }
-    let verified = cig_bytecode::verify_module(&m).map_err(|e| Stop {
+    // Verify: the bytes against the VM's rules.
+    let verify_t = open();
+    let verify_r = cig_bytecode::verify_module(&m);
+    close("compile-verify", verify_t);
+    let verified = verify_r.map_err(|e| Stop {
         what: format!("the bytecode does not verify: {e}"),
         span: None,
         bug: true,
     })?;
-    let loaded = crate::vm::load(verified).map_err(|d| Stop {
+    // Load: the Program for the VM, from the verified module.
+    let load_t = open();
+    let load_r = crate::vm::load(verified);
+    close("compile-load", load_t);
+    let loaded = load_r.map_err(|d| Stop {
         what: format!("this cig's VM does not load it: {}", d.message),
         span: d.span,
         bug: false,

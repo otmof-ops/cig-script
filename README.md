@@ -593,7 +593,7 @@ Add a row. The rules for reporting one are in
 
 | command | does |
 |---|---|
-| `cig run script.cig [-- args] [--pin] [--engine vm\|tree]` | check, then run; roll back on failure; `--pin` keeps the run whatever `--prune` says; `--engine` chooses what runs it (below) |
+| `cig run script.cig [-- args] [--pin] [--engine auto\|vm\|tree]` | check, then run; roll back on failure; `--pin` keeps the run whatever `--prune` says; `--engine` chooses what runs it (below) |
 | `cig run --dry-run script.cig` | run with every burn simulated; print the plan |
 | `cig check script.cig [--deny-warnings]` | parse and statically check without running |
 | `cig chains script.cig` / `cig light script.cig <chain>` | list chains; light one |
@@ -629,15 +629,21 @@ Add a row. The rules for reporting one are in
 
 `--max-steps N` (or `CIG_MAX_STEPS`) is the step budget: a loop that never
 ends is stopped with `E515` and its line; `0` disables it.
-`--engine vm|tree` (or `CIG_ENGINE`, or `cig config engine` for a default)
-chooses what runs a script: the tree-walker, or the bytecode VM. On the VM a
-script is lowered to bytecode once and its module kept in the tin, checked
-by a MAC under this machine's own key, which is kept in the keys directory;
-the next run starts from it. The two engines are held to each other:
-`tests/engines.rs` runs a corpus on both and compares what each run prints,
-how it ends, the files it leaves and its journal, and CI runs the rest of
-the suite a second time on the VM. A script the lowering does not take runs
-on the tree-walker, and `cig runs <id>` says which engine ran and why
+`--engine auto|vm|tree` (or `CIG_ENGINE`, or `cig config engine` for a
+default) chooses what runs a script. `auto` is the default: when a module
+is kept for this script the VM runs it; when no module is kept the
+tree-walker runs it now and a `__lower` subprocess is left behind to
+lower it for the next run (a config key, `auto_lower`, turns the
+child off, or asks the run to wait for the child's status: the latter
+for deterministic tests). `vm` lowers now and keeps the module; `tree`
+stays the tree-walker. On the VM a module is kept in the tin, checked
+by a MAC under this machine's own key in the keys directory, and the
+next run starts from it. The two engines are held to each other:
+`tests/engines.rs` runs a corpus on both and compares what each run
+prints, how it ends, the files it leaves and its journal, and CI runs
+the rest of the suite a second time on the VM. A script the lowering
+does not take runs on the tree-walker, and `cig runs <id>` says which
+engine ran and why
 ([decision 0002](docs/decisions/0002-cig-run-on-the-vm.md)).
 `--json` on any command gives machine-readable output (diagnostics follow
 [docs/diagnostic.schema.json](docs/diagnostic.schema.json)); `--plain` /
