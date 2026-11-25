@@ -83,6 +83,7 @@ use crate::interp::{
     arity_mismatch, burn_label, chain_step, error_value, exhale_part, make_chain, map_key,
     outside_burn, pack_root, set_field, set_index, Interp,
 };
+use crate::shape::{self, Entries};
 use crate::syntax::ast::BinOp;
 use crate::syntax::span::Span;
 use crate::value::{Builtin, FnBody, Function, Value};
@@ -303,6 +304,12 @@ struct Proto {
     /// receiver's type and the builtin method it resolved to
     /// ([`crate::stdlib::method_slot`]; 0 before the first call).
     hints: Vec<std::cell::Cell<u32>>,
+    /// Per pc, what a `getfield` or `setfield` there last found of a map
+    /// that has a shape: the shape in the high half, the field's place
+    /// in the low ([`shaped`]). True of every map of that shape for the
+    /// whole run, so it is never taken back; zero (no shape) until then.
+    /// Native code reads these cells where they lie.
+    sites: Vec<std::cell::Cell<u64>>,
     reg_count: usize,
     arity: usize,
     /// The decoded instruction at each first-word pc; `None` at the second
@@ -731,6 +738,10 @@ struct BodyHost<'a, 'i, 'p> {
     /// An error the VM raised inside `run`; `Code::enter` carries only
     /// `Stop::Raised(pc)` back, so the error travels through the host.
     raised: Option<Fault>,
+    /// The error was raised by `quick`, which takes nothing from the
+    /// context: the steps the body counted up to the instruction are
+    /// still in it when the body returns.
+    quick_raised: bool,
 }
 
 impl BodyHost<'_, '_, '_> {
@@ -812,7 +823,11 @@ impl BodyHost<'_, '_, '_> {
         if let Some(f) = self.m.frames.last_mut() {
             f.pc = d.pc as usize;
         }
-        if !self.m.call_here(self.program, self.proto, d, self.base)? {
+        // The ordinary call is made as the fast loop makes it; any
+        // other by the instruction's own code, with its errors.
+        let made =
+            self.proto.plain && quick_call(&mut *self.m, self.program, self.base, d).is_some();
+        if !made && !self.m.call_here(self.program, self.proto, d, self.base)? {
             // `run` looked before it asked: the register holds a
             // compiled function of this program.
             return Err(Box::new(
@@ -837,6 +852,224 @@ impl BodyHost<'_, '_, '_> {
             }
         }
         Ok(())
+    }
+}
+
+impl BodyHost<'_, '_, '_> {
+    /// Register `r` of the body's frame, to write.
+    #[inline(always)]
+    fn slot(&mut self, r: u8) -> Option<&mut Value> {
+        self.m.stack.get_mut(self.base.checked_add(usize::from(r))?)
+    }
+
+    /// Registers `dst` and `src` of the body's frame, the first to
+    /// write and the second to read. None when they are one register:
+    /// that is the fast path's own function's to run.
+    #[inline(always)]
+    fn two(&mut self, dst: u8, src: u8) -> Option<(&mut Value, &Value)> {
+        let d = self.base.checked_add(usize::from(dst))?;
+        let s = self.base.checked_add(usize::from(src))?;
+        match d.cmp(&s) {
+            std::cmp::Ordering::Less => {
+                let (low, high) = self.m.stack.split_at_mut_checked(s)?;
+                Some((low.get_mut(d)?, high.first()?))
+            }
+            std::cmp::Ordering::Greater => {
+                let (low, high) = self.m.stack.split_at_mut_checked(d)?;
+                Some((high.first_mut()?, low.get(s)?))
+            }
+            std::cmp::Ordering::Equal => None,
+        }
+    }
+
+    /// `getup A, B` and `cellget A, B`, as the fast path runs them.
+    #[inline(always)]
+    fn quick_upvalue(&mut self, w: Word) -> Option<()> {
+        let up = self.m.frames.last()?.up;
+        if up == NO_UPVALS {
+            return None;
+        }
+        let slot = self
+            .m
+            .stack
+            .get_mut(self.base.checked_add(usize::from(w.a))?)?;
+        let cell = self.m.upvals.get(up as usize)?.get(usize::from(w.b))?;
+        copy_into(slot, &*cell.try_borrow().ok()?);
+        Some(())
+    }
+
+    /// `getfield A, B, K`, as the fast path runs it.
+    #[inline(always)]
+    fn quick_getfield(&mut self, at: usize, w: Word) -> Option<()> {
+        let proto = self.proto;
+        let (slot, object) = self.two(w.a, w.b)?;
+        let Value::Map(map) = object else {
+            return None;
+        };
+        let map = map.try_borrow().ok()?;
+        let site = proto.sites.get(at)?;
+        let i = match shaped(&map, site) {
+            Some(i) => i,
+            None => {
+                let Value::Str(name) = proto.consts.get(usize::from(w.c))? else {
+                    return None;
+                };
+                let i = field_index(&map, name, proto.hints.get(at)?)?;
+                learn(&map, site, i);
+                i
+            }
+        };
+        copy_into(slot, map.get_index(i)?.1);
+        Some(())
+    }
+
+    /// `setfield A, K, C` for a field the map has, as the fast path
+    /// runs it.
+    #[inline(always)]
+    fn quick_setfield(&mut self, at: usize, w: Word) -> Option<()> {
+        let proto = self.proto;
+        let regs = self.m.stack.get(self.base..)?;
+        let Value::Map(map) = regs.get(usize::from(w.a))? else {
+            return None;
+        };
+        let value = regs.get(usize::from(w.c))?;
+        let mut map = map.try_borrow_mut().ok()?;
+        let site = proto.sites.get(at)?;
+        let i = match shaped(&map, site) {
+            Some(i) => i,
+            None => {
+                let Value::Str(name) = proto.consts.get(usize::from(w.b))? else {
+                    return None;
+                };
+                let i = field_index(&map, name, proto.hints.get(at)?)?;
+                learn(&map, site, i);
+                i
+            }
+        };
+        copy_into(map.get_index_mut(i)?.1, value);
+        Some(())
+    }
+
+    /// `getindex A, B, C` for a list and an int it has an element at,
+    /// as the fast path runs it.
+    #[inline(always)]
+    fn quick_getindex(&mut self, w: Word) -> Option<()> {
+        let Value::Int(i) = self.m.stack.get(self.base.checked_add(usize::from(w.c))?)? else {
+            return None;
+        };
+        let at = usize::try_from(*i).ok()?;
+        let (slot, object) = self.two(w.a, w.b)?;
+        let Value::List(list) = object else {
+            return None;
+        };
+        copy_into(slot, list.try_borrow().ok()?.get(at)?);
+        Some(())
+    }
+
+    /// `loadk A, Bx`, as the fast path runs it.
+    #[inline(always)]
+    fn quick_constant(&mut self, w: Word) -> Option<()> {
+        let proto = self.proto;
+        copy_into(self.slot(w.a)?, proto.consts.get(Operands::bx(w) as usize)?);
+        Some(())
+    }
+
+    /// [`Host::quick`] for an instruction of the fast path's second
+    /// tier alone (a builtin or a method called, a string built, a list
+    /// or a map made or added to): that tier's function, without the
+    /// first tier's in front of it.
+    fn quick_second(&mut self, at: usize) -> u32 {
+        let Some(Some(d)) = self.proto.code.get(at) else {
+            return 0;
+        };
+        let Some(regs) = self.m.stack.get_mut(self.base..) else {
+            return 0;
+        };
+        match fast_call(regs, self.m.interp, self.proto, d) {
+            Some(Ok(_)) => 1,
+            Some(Err(e)) => {
+                if let Some(frame) = self.m.frames.last_mut() {
+                    frame.pc = at;
+                }
+                self.raised = Some(e);
+                self.quick_raised = true;
+                2
+            }
+            None => 0,
+        }
+    }
+
+    /// [`Host::quick`] for every other instruction, and for the
+    /// uncommon cases of those above: the fast path's own function,
+    /// both its tiers. Out of line: its frame is large, and the arms
+    /// above must not pay for it.
+    #[inline(never)]
+    fn quick_rest(&mut self, at: usize) -> u32 {
+        let Some(Some(d)) = self.proto.code.get(at) else {
+            return 0;
+        };
+        if !quick_runs(d.op) {
+            return 0;
+        }
+        let Machine {
+            interp,
+            stack,
+            frames,
+            upvals,
+            ..
+        } = &mut *self.m;
+        let interp: &mut Interp = interp;
+        // The frame on top is the body's: a call it carried has
+        // returned by the time it asks for anything.
+        let Some(frame) = frames.last_mut() else {
+            return 0;
+        };
+        let ups: &[Cell] = if frame.up == NO_UPVALS {
+            &[]
+        } else {
+            upvals.get(frame.up as usize).map_or(&[], |u| u)
+        };
+        let Some(regs) = stack.get_mut(self.base..) else {
+            return 0;
+        };
+        match fast_one(regs, interp, frame, self.proto, d, ups) {
+            Some(Ok(_)) => 1,
+            Some(Err(e)) => {
+                // As the fast loop leaves it: the frame's pc is where
+                // the error is offered to the tries.
+                frame.pc = at;
+                self.raised = Some(e);
+                self.quick_raised = true;
+                2
+            }
+            None => 0,
+        }
+    }
+}
+
+/// `*slot = value.clone()`, with each kind's copy written straight into
+/// the slot: its tag and its payload, and for a value that owns memory
+/// its count taken first.
+///
+/// A copy made as a value and then moved in is built on the stack a
+/// field at a time and read back whole, sixteen bytes at once, and a
+/// processor cannot forward two narrow stores to one wide load: it
+/// waits for them to reach the cache, some fifteen cycles, at every
+/// copy. Written here in place there is no such load.
+#[inline(always)]
+fn copy_into(slot: &mut Value, value: &Value) {
+    match value {
+        Value::Null => overwrite(slot, Value::Null),
+        Value::Bool(b) => overwrite(slot, Value::Bool(*b)),
+        Value::Int(n) => overwrite(slot, Value::Int(*n)),
+        Value::Float(x) => overwrite(slot, Value::Float(*x)),
+        Value::Str(s) => overwrite(slot, Value::Str(Rc::clone(s))),
+        Value::List(l) => overwrite(slot, Value::List(Rc::clone(l))),
+        Value::Map(m) => overwrite(slot, Value::Map(Rc::clone(m))),
+        Value::Func(f) => overwrite(slot, Value::Func(Rc::clone(f))),
+        Value::Builtin(b) => overwrite(slot, Value::Builtin(Rc::clone(b))),
+        Value::Module(m) => overwrite(slot, Value::Module(Rc::clone(m))),
+        Value::Chain(c) => overwrite(slot, Value::Chain(Rc::clone(c))),
     }
 }
 
@@ -1056,6 +1289,142 @@ impl Host for BodyHost<'_, '_, '_> {
             None => false,
         }
     }
+
+    fn fields(&mut self, ctx: &mut NativeCtx, reg: u32) -> bool {
+        let i = self.base.saturating_add(reg as usize);
+        // Must carry no cell.
+        if let Some(Some(_)) = self.m.cells.get(i) {
+            return false;
+        }
+        let Some(Value::Map(map)) = self.m.stack.get(i) else {
+            return false;
+        };
+        // try_borrow_mut: refuse a map that is already borrowed.
+        let Ok(mut entries) = map.try_borrow_mut() else {
+            return false;
+        };
+        let shape = entries.shape();
+        if shape == shape::NONE {
+            return false;
+        }
+        // The values lie in one block, each entry after the last: the
+        // first one's address and the distance to the second place
+        // every one of them.
+        let mut values = entries.values_mut();
+        let Some(first) = values.next() else {
+            return false;
+        };
+        let first = first as *mut Value as u64;
+        let step = values.next().map_or(0, |second| {
+            (second as *mut Value as u64).wrapping_sub(first)
+        });
+        let Ok(step) = u32::try_from(step) else {
+            return false;
+        };
+        ctx.left = first;
+        ctx.right = u64::from(shape) | u64::from(step) << 32;
+        true
+    }
+
+    fn quick(&mut self, _ctx: &mut NativeCtx, pc: u32) -> u32 {
+        let at = pc as usize;
+        // The fast path's own code, on registers that carry no cell.
+        if !self.proto.plain {
+            return 0;
+        }
+        let Some(w) = self.proto.words.get(at).copied() else {
+            return 0;
+        };
+        // What a body asks for most, each in a few instructions of its
+        // own: the fast path's arm for it, without the loop's function
+        // around it (whose frame is the price of every arm it holds).
+        let done = match w.op {
+            Op::GETUP | Op::CELLGET => self.quick_upvalue(w),
+            Op::GETFIELD => self.quick_getfield(at, w),
+            Op::SETFIELD => self.quick_setfield(at, w),
+            Op::GETINDEX => self.quick_getindex(w),
+            Op::LOADK => self.quick_constant(w),
+            // What only the fast path's second tier runs goes straight
+            // to it.
+            Op::CALLB
+            | Op::CALLM
+            | Op::INTERP
+            | Op::NEWLIST
+            | Op::NEWMAP
+            | Op::APPENDLIST
+            | Op::INSERTMAP => return self.quick_second(at),
+            _ => return self.quick_rest(at),
+        };
+        match done {
+            Some(()) => 1,
+            // The arm's uncommon case may still be the fast path's.
+            None => self.quick_rest(at),
+        }
+    }
+
+    fn elem(&mut self, _ctx: &mut NativeCtx, dst: u32, list: u32, index: u32) -> bool {
+        let at = |r: u32| self.base.saturating_add(r as usize);
+        let (dst, list, index) = (at(dst), at(list), at(index));
+        if !self.proto.plain
+            && [dst, list, index]
+                .iter()
+                .any(|i| matches!(self.m.cells.get(*i), Some(Some(_))))
+        {
+            return false;
+        }
+        let (Some(Value::List(items)), Some(Value::Int(n))) =
+            (self.m.stack.get(list), self.m.stack.get(index))
+        else {
+            return false;
+        };
+        let Ok(n) = usize::try_from(*n) else {
+            return false;
+        };
+        let v = match items.try_borrow() {
+            Ok(elements) => match elements.get(n) {
+                Some(v) => v.clone(),
+                None => return false,
+            },
+            Err(_) => return false,
+        };
+        match self.m.stack.get_mut(dst) {
+            Some(slot) => {
+                *slot = v;
+                true
+            }
+            None => false,
+        }
+    }
+}
+
+/// Whether [`Host::quick`] may run an instruction of this kind: one the
+/// fast path runs that goes on at the next instruction and nowhere
+/// else, counts no step and ends no frame. What jumps, `steps` and the
+/// loops' own instructions change what the body itself keeps (its
+/// place in the bytecode, the steps left, the loop's registers), and
+/// are the body's or the interpreter's.
+fn quick_runs(op: Op) -> bool {
+    !matches!(
+        op,
+        Op::JMP
+            | Op::LOOP
+            | Op::EQJ
+            | Op::NEJ
+            | Op::LTJ
+            | Op::LEJ
+            | Op::TEST
+            | Op::TESTN
+            | Op::TESTSET
+            | Op::STEPS
+            | Op::FORPREP
+            | Op::FORLOOP
+            | Op::ITERPREP
+            | Op::ITERNEXT
+            | Op::CALL
+            | Op::TAILCALL
+            | Op::RET
+            | Op::WIDE
+    )
 }
 
 /// The names `loadg` may load: the interpreter's prelude (its global
@@ -1205,6 +1574,9 @@ fn build(
     Ok(Proto {
         plain,
         hints: (0..f.instrs.len())
+            .map(|_| std::cell::Cell::new(0))
+            .collect(),
+        sites: (0..f.instrs.len())
             .map(|_| std::cell::Cell::new(0))
             .collect(),
         reg_count: f.reg_count as usize,
@@ -1930,6 +2302,9 @@ impl Machine<'_, Bodied> {
         };
         let mut ctx = NativeCtx::new(budget, depth);
         ctx.frame = frame_ptr;
+        // A `Cell<u64>` is laid out as its `u64`: the cells are read
+        // where they lie, and they stay where they are for the run.
+        ctx.sites = proto.sites.as_ptr().cast::<u64>();
         ctx.nest = nest;
         let native = program.native().ok_or_else(|| {
             broken(
@@ -1938,7 +2313,7 @@ impl Machine<'_, Bodied> {
             )
         })?;
         // The host borrows this machine exclusively for the body's run.
-        let (stop, raised, last_given) = {
+        let (stop, raised, last_given, quick_raised) = {
             let mut host = BodyHost {
                 m: self,
                 program,
@@ -1949,16 +2324,21 @@ impl Machine<'_, Bodied> {
                 patient: native.patient(),
                 last_given: budget,
                 raised: None,
+                quick_raised: false,
             };
             let stop = native.enter_body(body, at, &mut ctx, &mut host);
-            (stop, host.raised, host.last_given)
+            (stop, host.raised, host.last_given, host.quick_raised)
         };
         // Count the steps the body took since the host last gave it a
         // budget (`last_given`): any earlier ones were counted when
-        // `run` was called. Not after `Raised`: `run` took the context's
-        // count and nesting when it was called, and what the interpreter
-        // counted and set since is its own (the context is stale).
-        if !matches!(stop, NativeStop::Raised(_)) {
+        // `run` was called. Not after `Raised` by `run` or `again`:
+        // each took the context's count and nesting when it was called,
+        // and what the interpreter counted and set since is its own
+        // (the context is stale). After `Raised` by `quick` they are
+        // counted: `quick` runs one instruction that counts no step and
+        // takes nothing from the context, so what the body counted up
+        // to that instruction is in it, as at any other return.
+        if !matches!(stop, NativeStop::Raised(_)) || quick_raised {
             let took = last_given.saturating_sub(ctx.steps_left);
             if took > 0 {
                 self.interp.steps = self.interp.steps.saturating_add(took.max(0) as u64);
@@ -2308,6 +2688,12 @@ impl<T: Tier> Machine<'_, T> {
                             self.run_fast_frames(program, proto, pc, base, floor)?;
                         pc = at;
                         if switched {
+                            // The callee a body's `run` was carrying
+                            // has returned: the frame on top is that
+                            // body's.
+                            if T::BODIED && self.frames.len() <= floor {
+                                return Ok(None);
+                            }
                             // Calls and returns went by in the loop: the
                             // frame on top is another, and carries the pc.
                             (pc, base, proto) = self.top(program)?;
@@ -2611,6 +2997,11 @@ impl<T: Tier> Machine<'_, T> {
                 return Ok((at, switched));
             };
             (pc, base, proto) = (top.pc, top.base, next);
+            // A return brought the stack down to the frame a body's
+            // `run` waits on: that frame is not this loop's.
+            if T::BODIED && self.frames.len() <= floor {
+                return Ok((pc, switched));
+            }
             // A function whose registers carry cells is the general
             // path's, and one with a body is entered by the driver.
             if !proto.plain || (T::BODIED && body_of_top(program, Some(top), proto).is_some()) {
@@ -3087,9 +3478,17 @@ impl<T: Tier> Machine<'_, T> {
                 let Value::Map(map) = self.get(base, d.a, span)? else {
                     return Err(misuse(d.op, "names a register that holds no map", span).into());
                 };
-                let key = map_key(self.get(base, d.b_u, span)?, span)?;
+                let key = self.get(base, d.b_u, span)?;
                 let v = self.get(base, d.c, span)?;
-                map.borrow_mut().insert(key, v);
+                match &key {
+                    Value::Str(k) if literal_key(proto, d, k) => {
+                        map.borrow_mut().add_field(k, v);
+                    }
+                    _ => {
+                        let key = map_key(key, span)?;
+                        map.borrow_mut().insert(key, v);
+                    }
+                }
             }
             Op::GETFIELD => {
                 let obj = self.get(base, d.b_u, span)?;
@@ -4294,9 +4693,10 @@ fn quick_call<'p, T: Tier>(
 /// result row written; the caller's function is returned.
 ///
 /// `None`, with nothing changed, for any other return: the run's first
-/// frame (it returns out of the VM), a frame a body's `run` waits on
-/// (`floor` and below are not this loop's), an open burn, a caller with
-/// cells.
+/// frame (it returns out of the VM), an open burn, a caller with cells.
+/// A return to the frame a body's `run` waits on (the last of the
+/// `floor` frames that are not this loop's) is made here too; the loop
+/// then stops, since that frame is the body's to go on in.
 #[inline(always)]
 fn quick_ret<'p, T: Tier>(
     m: &mut Machine<'_, T>,
@@ -4305,7 +4705,10 @@ fn quick_ret<'p, T: Tier>(
     d: &DecodedInstr,
 ) -> Option<&'p Proto> {
     let below = m.frames.len().checked_sub(2)?;
-    if below < floor {
+    // The frame returned to is this loop's, or the one a body's `run`
+    // waits on (the last of the frames that are not): never one below
+    // that.
+    if below.saturating_add(1) < floor {
         return None;
     }
     let f = *m.frames.last()?;
@@ -4980,24 +5383,39 @@ fn fast<R: FrameRegs + ?Sized, I: Operands>(
             let Value::Map(map) = regs.reg(d.b())? else {
                 return None;
             };
-            let Value::Str(name) = proto.consts.get(d.c() as usize)? else {
-                return None;
-            };
             let map = map.try_borrow().ok()?;
-            let i = field_index(&map, name, proto.hints.get(pc)?)?;
-            let v = map.get_index(i)?.1.clone();
+            let site = proto.sites.get(pc)?;
+            let v = match shaped(&map, site) {
+                Some(i) => map.get_index(i)?.1.clone(),
+                None => {
+                    let Value::Str(name) = proto.consts.get(d.c() as usize)? else {
+                        return None;
+                    };
+                    let i = field_index(&map, name, proto.hints.get(pc)?)?;
+                    learn(&map, site, i);
+                    map.get_index(i)?.1.clone()
+                }
+            };
             v
         }
         Op::SETFIELD => {
             let Value::Map(map) = regs.reg(d.a())? else {
                 return None;
             };
-            let Value::Str(name) = proto.consts.get(d.b() as usize)? else {
-                return None;
-            };
             let v = regs.reg(d.c())?.clone();
             let mut map = map.try_borrow_mut().ok()?;
-            let i = field_index(&map, name, proto.hints.get(pc)?)?;
+            let site = proto.sites.get(pc)?;
+            let i = match shaped(&map, site) {
+                Some(i) => i,
+                None => {
+                    let Value::Str(name) = proto.consts.get(d.b() as usize)? else {
+                        return None;
+                    };
+                    let i = field_index(&map, name, proto.hints.get(pc)?)?;
+                    learn(&map, site, i);
+                    i
+                }
+            };
             let old = std::mem::replace(map.get_index_mut(i)?.1, v);
             drop(map);
             drop(old);
@@ -5040,7 +5458,7 @@ fn fast_call<R: FrameRegs + ?Sized>(
 ) -> Option<Result<usize, Fault>> {
     let pc = d.pc as usize;
     let next = pc + d.width as usize;
-    let v = match d.op {
+    match d.op {
         Op::CALLB => {
             let b = *crate::stdlib::builtin_catalogue().get(d.b_u as usize)?;
             if b.calls_back {
@@ -5050,8 +5468,11 @@ fn fast_call<R: FrameRegs + ?Sized>(
             let args = regs.regs(d.a, (d.c as usize).saturating_add(1))?.get(1..)?;
             let span = span_of(proto, pc);
             match interp.call_builtin(b, args, span) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e.into())),
+                Ok(v) => {
+                    put_result(regs, d.a, v);
+                    Some(Ok(next))
+                }
+                Err(e) => Some(Err(e.into())),
             }
         }
         Op::CALLM => {
@@ -5078,31 +5499,48 @@ fn fast_call<R: FrameRegs + ?Sized>(
             }
             let span = span_of(proto, pc);
             match (b.func)(interp, argv, span) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e.or_at(span).into())),
+                Ok(v) => {
+                    put_result(regs, d.a, v);
+                    Some(Ok(next))
+                }
+                Err(e) => Some(Err(e.or_at(span).into())),
             }
         }
-        Op::INTERP => interpolate(regs.regs(d.b_u, (d.c as usize).saturating_add(1))?),
+        Op::INTERP => {
+            let made = interpolate(regs.regs(d.b_u, (d.c as usize).saturating_add(1))?);
+            put_result(regs, d.a, made);
+            Some(Ok(next))
+        }
         // String `+`: the operator's own result, made in one block.
         Op::ADD => {
             let (Value::Str(l), Value::Str(rv)) = (regs.reg(d.b_u)?, regs.reg(d.c)?) else {
                 return None;
             };
-            crate::value::build_str(|out| {
+            let made = crate::value::build_str(|out| {
                 out.reserve(l.len() + rv.len());
                 out.push_str(l);
                 out.push_str(rv);
-            })
+            });
+            put_result(regs, d.a, made);
+            Some(Ok(next))
         }
-        Op::NEWLIST => Value::list(Vec::with_capacity(d.b_u as usize)),
-        Op::NEWMAP => Value::map(IndexMap::with_capacity(d.b_u as usize)),
+        Op::NEWLIST => {
+            let made = Value::list(Vec::with_capacity(d.b_u as usize));
+            put_result(regs, d.a, made);
+            Some(Ok(next))
+        }
+        Op::NEWMAP => {
+            let made = Value::map(IndexMap::with_capacity(d.b_u as usize));
+            put_result(regs, d.a, made);
+            Some(Ok(next))
+        }
         Op::APPENDLIST => {
             let v = regs.reg(d.b_u)?.clone();
             let Value::List(list) = regs.reg(d.a)? else {
                 return None;
             };
             list.try_borrow_mut().ok()?.push(v);
-            return Some(Ok(next));
+            Some(Ok(next))
         }
         Op::INSERTMAP => {
             let Value::Str(key) = regs.reg(d.b_u)? else {
@@ -5112,9 +5550,32 @@ fn fast_call<R: FrameRegs + ?Sized>(
             let Value::Map(map) = regs.reg(d.a)? else {
                 return None;
             };
-            let old = map.try_borrow_mut().ok()?.insert(key.to_string(), v);
+            let mut map = map.try_borrow_mut().ok()?;
+            let old = if literal_key(proto, d, key) {
+                // A literal's key: the site keeps the shape the map had
+                // and the one this key made of it, and the next map of
+                // that shape (the literal's next map) takes the second
+                // without asking the tree. A map of the first shape
+                // holds its keys and no other, so the key is new to it.
+                let site = proto.sites.get(pc)?;
+                let (found, from) = (site.get(), map.shape());
+                if from != shape::NONE && (found >> 32) as u32 == from {
+                    map.add_known(key, v, found as u32);
+                    None
+                } else {
+                    let len = map.len();
+                    let old = map.add_field(key, v);
+                    if from != shape::NONE && map.shape() != shape::NONE && map.len() > len {
+                        site.set(u64::from(from) << 32 | u64::from(map.shape()));
+                    }
+                    old
+                }
+            } else {
+                map.insert(key.to_string(), v)
+            };
+            drop(map);
             drop(old);
-            return Some(Ok(next));
+            Some(Ok(next))
         }
         Op::SETINDEX => {
             let (Value::Map(map), Value::Str(key)) = (regs.reg(d.a)?, regs.reg(d.b_u)?) else {
@@ -5124,21 +5585,40 @@ fn fast_call<R: FrameRegs + ?Sized>(
             let mut map = map.try_borrow_mut().ok()?;
             // A key already there keeps its place (as `insert` does)
             // and needs no `String` made for it.
-            let old = match map.get_mut(&**key) {
+            let old = match map.get_mut(key) {
                 Some(slot) => Some(std::mem::replace(slot, v)),
                 None => map.insert(key.to_string(), v),
             };
             drop(map);
             drop(old);
-            return Some(Ok(past_nops(proto, next, 2)));
+            Some(Ok(past_nops(proto, next, 2)))
         }
-        _ => return None,
-    };
-    // The register exists: each arm above read it or its window.
-    if let Some(slot) = regs.reg_mut(d.a) {
-        overwrite(slot, v);
+        _ => None,
     }
-    Some(Ok(next))
+}
+
+/// `R(a) = v` for a value a function has just returned (a builtin's
+/// result, a string built, a list made). It is read out of the call's
+/// own result as its tag and its payload and stored as those: moved as
+/// a whole value it is read back sixteen bytes at once from where the
+/// function wrote it a field at a time, which a processor cannot
+/// forward, and every such instruction waits some fifteen cycles for
+/// the stores to reach the cache.
+#[inline(always)]
+fn put_result<R: FrameRegs + ?Sized>(regs: &mut R, a: u32, v: Value) {
+    let Some(slot) = regs.reg_mut(a) else {
+        return;
+    };
+    match v {
+        Value::Int(n) => overwrite(slot, Value::Int(n)),
+        Value::Float(x) => overwrite(slot, Value::Float(x)),
+        Value::Bool(b) => overwrite(slot, Value::Bool(b)),
+        Value::Null => overwrite(slot, Value::Null),
+        Value::Str(s) => overwrite(slot, Value::Str(s)),
+        Value::List(l) => overwrite(slot, Value::List(l)),
+        Value::Map(m) => overwrite(slot, Value::Map(m)),
+        other => overwrite(slot, other),
+    }
 }
 
 /// `*slot = v`, without the call that drops the old value when it owns
@@ -5338,6 +5818,46 @@ fn cmp_le(l: &Value, r: &Value) -> Option<bool> {
         (Value::Int(a), Value::Int(b)) => Some(a <= b),
         _ => order(l, r).map(std::cmp::Ordering::is_le),
     }
+}
+
+/// The place of a site's field in `map`, when the map has the shape the
+/// site last found the field in: maps of one shape have the same keys in
+/// the same places, so nothing of the key is looked at.
+#[inline(always)]
+fn shaped(map: &Entries, site: &std::cell::Cell<u64>) -> Option<usize> {
+    let found = site.get();
+    let shape = map.shape();
+    (shape != shape::NONE && (found >> 32) as u32 == shape).then_some(found as u32 as usize)
+}
+
+/// A site found its field at `index` of `map`: kept, when the map has a
+/// shape, for the next map of that shape.
+#[inline(always)]
+fn learn(map: &Entries, site: &std::cell::Cell<u64>, index: usize) {
+    if let (true, Ok(i)) = (map.shape() != shape::NONE, u32::try_from(index)) {
+        site.set(u64::from(map.shape()) << 32 | u64::from(i));
+    }
+}
+
+/// Whether the key an `insertmap` reads from its register is one the
+/// script wrote: the constant the `loadk` just before it put there, as
+/// a map literal is lowered. The register's string is held to the
+/// constant itself, so a jump that lands on the `insertmap` with
+/// another key in the register is not taken for it.
+#[inline(always)]
+fn literal_key(proto: &Proto, d: &DecodedInstr, key: &Rc<str>) -> bool {
+    let Some(w) = (d.pc as usize)
+        .checked_sub(1)
+        .and_then(|p| proto.words.get(p))
+    else {
+        return false;
+    };
+    w.op == Op::LOADK
+        && Operands::a(*w) == d.b_u
+        && matches!(
+            proto.consts.get(Operands::bx(*w) as usize),
+            Some(Value::Str(k)) if Rc::ptr_eq(k, key)
+        )
 }
 
 /// The position of `name` in `map`: the cached one when the key there is

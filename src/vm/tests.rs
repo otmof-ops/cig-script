@@ -320,6 +320,423 @@ fn a_call_is_carried_through_under_the_body_that_makes_it() {
     assert_eq!((entered() - e, carried() - c), (7, 0));
 }
 
+// ----- what machine code has the runtime do for it: elem, upval, fields -----
+
+/// `m`'s top level with the tests' body asking its host to run the
+/// instruction at `pc` the quick way and going on at `next` when it
+/// did: the run's result, and what the host answered.
+fn quickly(m: &Module, pc: u32, next: u32) -> (Result<Value, Diagnostic>, Option<u32>) {
+    super::native::QUICK.with(|q| q.set(None));
+    let r = asked(m, pc, super::native::Ask::Quick, next);
+    (r, super::native::QUICK.with(std::cell::Cell::take))
+}
+
+#[test]
+fn the_hosts_quick_runs_an_element_read_whatever_the_element_is() {
+    // `xs = [7, "a", [1]]; i = ..; return xs[i]`: the host runs the
+    // `getindex` in place of the interpreter's loop, whatever the
+    // element holds.
+    let listed = |i: i16, object_is_list: bool| {
+        let mut f = main_fn(
+            4,
+            vec![
+                abc(Op::NEWLIST, 0, 3, 0),
+                Instr::asbx(Op::LOADINT, 1, 7),
+                abc(Op::APPENDLIST, 0, 1, 0),
+                Instr::abx(Op::LOADK, 1, 0),
+                abc(Op::APPENDLIST, 0, 1, 0),
+                abc(Op::NEWLIST, 1, 1, 0),
+                Instr::asbx(Op::LOADINT, 2, 1),
+                abc(Op::APPENDLIST, 1, 2, 0),
+                abc(Op::APPENDLIST, 0, 1, 0),
+                Instr::asbx(Op::LOADINT, 1, i),
+                abc(Op::GETINDEX, 2, if object_is_list { 0 } else { 1 }, 1),
+                abc(Op::NOP, 0, 0, 0),
+                ret(2),
+            ],
+        );
+        f.constants = vec![Constant::Str("a".to_string())];
+        module(f)
+    };
+    for (i, want) in [(0, "7"), (1, "\"a\""), (2, "[1]")] {
+        let m = listed(i, true);
+        assert_eq!(exec(&m).expect("ran").repr(), want);
+        let (got, answer) = quickly(&m, 10, 12);
+        assert_eq!((got.expect("ran").repr().as_str(), answer), (want, Some(1)));
+    }
+    // An index from the end is the interpreter's to count: the host
+    // does nothing, and the instruction runs.
+    let m = listed(-1, true);
+    assert_eq!(exec(&m).expect("ran").repr(), "[1]");
+    let (got, answer) = quickly(&m, 10, 12);
+    assert_eq!(
+        (got.expect("ran").repr().as_str(), answer),
+        ("[1]", Some(0))
+    );
+    // No such element, and no list: not the host's either. The
+    // interpreter runs the instruction and raises what it raises.
+    for m in [listed(3, true), listed(0, false)] {
+        let want = err(&m);
+        let (got, answer) = quickly(&m, 10, 12);
+        let e = got.err().expect("raised");
+        assert_eq!((e.code, e.line, answer), (want.code, want.line, Some(0)));
+    }
+}
+
+#[test]
+fn the_hosts_elem_is_a_lists_element_at_an_int() {
+    use super::native::Ask;
+    // `xs = [7, "a"]; i = ..; x = null; return x`, with the host asked
+    // for `x = xs[i]` where the `loadnull` stands: what a loop over a
+    // list needs of an item that owns memory.
+    let module_at = |i: i16| {
+        let mut f = main_fn(
+            3,
+            vec![
+                abc(Op::NEWLIST, 0, 2, 0),
+                Instr::asbx(Op::LOADINT, 1, 7),
+                abc(Op::APPENDLIST, 0, 1, 0),
+                Instr::abx(Op::LOADK, 1, 0),
+                abc(Op::APPENDLIST, 0, 1, 0),
+                Instr::asbx(Op::LOADINT, 1, i),
+                abc(Op::LOADNULL, 2, 0, 0),
+                ret(2),
+            ],
+        );
+        f.constants = vec![Constant::Str("a".to_string())];
+        module(f)
+    };
+    for (i, want) in [(0, "7"), (1, "\"a\"")] {
+        let got = asked(&module_at(i), 6, Ask::Elem(2, 0, 1), 7).expect("ran");
+        assert_eq!(got.repr(), want);
+    }
+    // No such element, an index that is no int, and no list: the host
+    // does nothing, and the bytecode's own instruction runs.
+    for (i, list, index) in [(2, 0, 1), (-1, 0, 1), (0, 0, 0), (0, 1, 1)] {
+        let got = asked(&module_at(i), 6, Ask::Elem(2, list, index), 7).expect("ran");
+        assert_eq!(got.repr(), "null", "{i} {list} {index}");
+    }
+}
+
+#[test]
+fn the_hosts_quick_reads_an_upvalue_and_calls_a_builtin() {
+    // `keep(x)` makes a getter of `x` and calls it: the getter's body
+    // has the host run its `getup`.
+    let mut getter = child_fn("get", 0, 1, vec![abc(Op::GETUP, 0, 0, 0), ret(0)]);
+    getter.upvalues = vec![captures(UpvalKind::ParentLocal, 0)];
+    let mut keep = child_fn(
+        "keep",
+        1,
+        3,
+        vec![
+            abc(Op::CELLNEW, 0, 0, 0),
+            Instr::abx(Op::CLOSURE, 1, 0),
+            abc(Op::CALL, 1, 0, 0),
+            ret(1),
+        ],
+    );
+    keep.children = vec![getter];
+    let mut f = main_fn(
+        3,
+        vec![
+            Instr::abx(Op::CLOSURE, 0, 0),
+            Instr::asbx(Op::LOADINT, 1, 41),
+            abc(Op::CALL, 0, 1, 0),
+            ret(0),
+        ],
+    );
+    f.children = vec![keep];
+    let m = module(f);
+    assert_eq!(exec(&m).expect("ran").repr(), "41");
+    // In the getter alone (function 2): at its pc 0, going on at 1.
+    super::native::ASK_IN.with(|c| c.set(Some(2)));
+    let (got, answer) = quickly(&m, 0, 1);
+    super::native::ASK_IN.with(|c| c.set(None));
+    assert_eq!((got.expect("ran").repr().as_str(), answer), ("41", Some(1)));
+    // `len(xs)`, a builtin that calls no script function.
+    let len = catalogue_index("len") as u8;
+    let called = |with_a_list: bool| {
+        let mut code = vec![abc(Op::NEWLIST, 1, 0, 0)];
+        if !with_a_list {
+            code[0] = Instr::asbx(Op::LOADINT, 1, 3);
+        }
+        code.extend([abc(Op::CALLB, 0, len, 1), ret(0)]);
+        module(main_fn(2, code))
+    };
+    let m = called(true);
+    assert_eq!(exec(&m).expect("ran").repr(), "0");
+    let (got, answer) = quickly(&m, 1, 2);
+    assert_eq!((got.expect("ran").repr().as_str(), answer), ("0", Some(1)));
+    // The builtin's own error is raised at the call, as the fast loop
+    // raises it: the host says so, and the body returns it.
+    let m = called(false);
+    let want = err(&m);
+    let (got, answer) = quickly(&m, 1, 2);
+    let e = got.err().expect("raised");
+    assert_eq!(
+        (e.code, &e.message, e.line, answer),
+        (want.code, &want.message, want.line, Some(2))
+    );
+}
+
+#[test]
+fn steps_a_body_counted_before_quick_raised_are_the_runs() {
+    // `len(3)` raises. A body that had counted five steps of its own
+    // when it asked the runtime to run the call leaves them in the
+    // context, and the run has them: a step budget ends where it ends
+    // without a body.
+    let len = catalogue_index("len") as u8;
+    let m = module(main_fn(
+        2,
+        vec![
+            Instr::asbx(Op::LOADINT, 1, 3),
+            abc(Op::CALLB, 0, len, 1),
+            ret(0),
+        ],
+    ));
+    let steps_after = |taken: i64| {
+        super::native::ASK_STEPS.with(|c| c.set(taken));
+        super::native::ASK_AT.with(|c| c.set(Some((1, super::native::Ask::Quick, 2))));
+        let mut i = interp();
+        let before = i.steps;
+        let r = run(&mut i, &program_with_test_bodies(&m));
+        super::native::ASK_AT.with(|c| c.set(None));
+        super::native::ASK_STEPS.with(|c| c.set(0));
+        assert!(r.is_err(), "the call raises");
+        i.steps - before
+    };
+    assert_eq!(steps_after(0), 0);
+    assert_eq!(steps_after(5), 5);
+}
+
+#[test]
+fn the_hosts_quick_runs_nothing_that_jumps_counts_a_step_or_ends_a_frame() {
+    // A counted loop: its `steps`, its `forprep`, its `forloop`, its
+    // jump back and its `ret` are the body's or the interpreter's.
+    let m = for_module(1);
+    let p = program(&m);
+    let main = p.funcs.get(0).expect("loaded");
+    let mut asked_at = 0;
+    for d in main.code.iter().flatten() {
+        if super::quick_runs(d.op) {
+            continue;
+        }
+        asked_at += 1;
+        super::native::QUICK.with(|q| q.set(None));
+        super::native::ASK_AT.with(|c| c.set(Some((d.pc, super::native::Ask::Quick, d.pc))));
+        let got = vm_run_bare(
+            &program_with_test_bodies(&m),
+            vec![Value::Int(0), Value::Int(3)],
+        );
+        super::native::ASK_AT.with(|c| c.set(None));
+        got.1.expect("ran");
+        assert_eq!(got.0, "0\n1\n2\n", "asked at pc {}", d.pc);
+        assert_eq!(
+            super::native::QUICK.with(std::cell::Cell::take),
+            Some(0),
+            "{:?} at pc {}",
+            d.op,
+            d.pc
+        );
+    }
+    assert!(asked_at >= 2, "{asked_at}");
+}
+
+#[test]
+fn the_hosts_fields_gives_a_view_of_a_map_that_has_a_shape() {
+    use super::native::Ask;
+    use crate::shape::NONE;
+    // `m = {x: 1, y: 2}` as a literal is lowered, then `return m.y`.
+    let record = |keys: &[&str]| {
+        let mut code = vec![abc(Op::NEWMAP, 0, keys.len() as u8, 0)];
+        for (k, _) in keys.iter().enumerate() {
+            code.push(Instr::asbx(Op::LOADINT, 2, k as i16 + 1));
+            code.push(Instr::abx(Op::LOADK, 1, k as u16));
+            code.push(abc(Op::INSERTMAP, 0, 1, 2));
+        }
+        code.push(abc(Op::GETFIELD, 1, 0, keys.len() as u8 - 1));
+        code.push(ret(1));
+        let mut f = main_fn(3, code);
+        f.constants = keys.iter().map(|k| Constant::Str(k.to_string())).collect();
+        module(f)
+    };
+    let view_at = |m: &Module, pc: u32, reg: u32| {
+        super::native::VIEW.with(|v| v.set(None));
+        let r = asked(m, pc, Ask::Fields(reg), pc).expect("ran");
+        (
+            r.repr(),
+            super::native::VIEW
+                .with(std::cell::Cell::take)
+                .expect("asked"),
+        )
+    };
+    // Two values: the address of the first, the shape, and the bytes
+    // between one value and the next.
+    let m = record(&["x", "y"]);
+    let (out, view) = view_at(&m, 7, 0);
+    assert_eq!(out, "2");
+    let (left, right, _) = view.expect("a view");
+    assert_ne!(left, 0);
+    let (shape, step) = (right as u32, (right >> 32) as usize);
+    assert_ne!(shape, NONE);
+    assert!(step >= std::mem::size_of::<Value>(), "{step}");
+    // The same literal again: the same shape. Another: another.
+    let (_, again) = view_at(&m, 7, 0);
+    assert_eq!(again.expect("a view").1 as u32, shape);
+    let (_, other) = view_at(&record(&["y", "x"]), 7, 0);
+    assert_ne!(other.expect("a view").1 as u32, shape);
+    // One value: nothing lies after it.
+    let (out, one) = view_at(&record(&["x"]), 4, 0);
+    assert_eq!(out, "1");
+    assert_eq!(one.expect("a view").1 >> 32, 0);
+    // No view of what is no map, of a map with no value yet, and of a
+    // map that has no shape (its key was not one the script wrote).
+    assert_eq!(view_at(&m, 7, 2).1, None, "an int");
+    assert_eq!(view_at(&m, 1, 0).1, None, "an empty map");
+    let mut f = main_fn(
+        3,
+        vec![
+            abc(Op::NEWMAP, 0, 1, 0),
+            Instr::asbx(Op::LOADINT, 2, 1),
+            Instr::abx(Op::LOADK, 1, 0),
+            abc(Op::MOV, 1, 1, 0),
+            abc(Op::INSERTMAP, 0, 1, 2),
+            abc(Op::GETFIELD, 1, 0, 0),
+            ret(1),
+        ],
+    );
+    // A key no literal of this run wrote, so the tree leads nowhere
+    // under it.
+    f.constants = vec![Constant::Str("q".to_string())];
+    let unshaped = module(f);
+    let (out, none) = view_at(&unshaped, 5, 0);
+    assert_eq!((out.as_str(), none), ("1", None));
+    // The site cells native code reads are the function's own.
+    let p = program_with_test_bodies(&m);
+    super::native::VIEW.with(|v| v.set(None));
+    super::native::ASK_AT.with(|c| c.set(Some((7, Ask::Fields(0), 7))));
+    let r = run(&mut interp(), &p);
+    super::native::ASK_AT.with(|c| c.set(None));
+    assert_eq!(r.expect("ran").repr(), "2");
+    let (_, right, sites) = super::native::VIEW
+        .with(std::cell::Cell::take)
+        .expect("asked")
+        .expect("a view");
+    let main = p.funcs.get(0).expect("the top level ran");
+    assert_eq!(sites, main.sites.as_ptr() as usize);
+    // And after the run the `getfield`'s cell holds this shape and the
+    // field's place, 1.
+    assert_eq!(main.sites[7].get(), u64::from(right as u32) << 32 | 1);
+}
+
+// ----- shapes -----
+
+/// The names `src` leaves at its top level, run on the VM.
+fn globals_of(src: &str) -> IndexMap<String, Value> {
+    let ast = crate::syntax::parse(src).expect("parses");
+    let bytes = match crate::lower::module_bytes(&ast, "t.cig") {
+        Ok(b) => b,
+        Err(_) => panic!("{src}: does not lower"),
+    };
+    let p = match super::open(bytes) {
+        Ok(p) => p,
+        Err(e) => panic!("{src}: does not open: {}", e.message),
+    };
+    let mut i = interp();
+    i.out = Box::new(Buf::default());
+    match run(&mut i, &p) {
+        Ok(Value::Map(names)) => IndexMap::clone(&names.borrow()),
+        Ok(v) => panic!("{src}: the top level gave {}", v.repr()),
+        Err(e) => panic!("{src}: {} {}", e.code, e.message),
+    }
+}
+
+/// The shape of the map `name` holds among `globals`.
+fn shape_of(globals: &IndexMap<String, Value>, name: &str) -> u32 {
+    match globals.get(name) {
+        Some(Value::Map(m)) => m.borrow().shape(),
+        _ => panic!("{name} holds no map"),
+    }
+}
+
+#[test]
+fn maps_a_script_writes_with_the_same_keys_share_a_shape() {
+    use crate::shape::{EMPTY, NONE};
+    let g = globals_of(
+        "roll a = {x: 1, y: 2}\nroll b = {x: 3, y: 4}\nroll c = {y: 5, x: 6}\nroll d = {}\nroll e = {}\ne.x = 7\ne.y = 8\nroll f = {x: 1}\nf[\"y\"] = 2\nroll g = {}\ng[\"q\" + \"1\"] = 1\nroll h = {x: 1, y: 2}\nh.remove(\"x\")\nroll k = {x: 1, y: 2}\nk.x = 10\nk.y = k.x + 1\n",
+    );
+    let (a, b, c) = (shape_of(&g, "a"), shape_of(&g, "b"), shape_of(&g, "c"));
+    assert_ne!(a, NONE);
+    assert_eq!(a, b, "two literals with the same keys");
+    assert_ne!(c, NONE);
+    assert_ne!(a, c, "the same keys in another order");
+    assert_eq!(shape_of(&g, "d"), EMPTY);
+    // Fields added by name, one at a time, reach the literal's shape.
+    assert_eq!(shape_of(&g, "e"), a);
+    // A key the script computes follows where a literal went before...
+    assert_eq!(shape_of(&g, "f"), a);
+    // ...and makes no shape where none did.
+    assert_eq!(shape_of(&g, "g"), NONE);
+    // A key taken out: no shape.
+    assert_eq!(shape_of(&g, "h"), NONE);
+    // Values put where the keys are: the shape stays.
+    assert_eq!(shape_of(&g, "k"), a);
+}
+
+#[test]
+fn a_field_is_read_right_whatever_shape_its_map_has() {
+    // One site reads `.x` and `.y` of maps with the keys in two orders,
+    // of a map that lost a key, of one with a key more, of one built by
+    // computed keys and of one a builtin made: what a shape remembers of
+    // one must never be used for another.
+    let src = "pull sum(m) {\n  snuff m.x * 10 + m.y\n}\nroll a = {x: 1, y: 2}\nroll b = {y: 4, x: 3}\nroll c = {z: 0, x: 5, y: 6}\nc.remove(\"z\")\nroll d = {x: 7, y: 8, w: 0}\nroll e = {}\ne[\"y\"] = 10\ne[\"x\"] = 9\nroll f = json.parse(\"{\\\"y\\\": 12, \\\"x\\\": 11}\")\nroll t = 0\nfor round in 0..3 {\n  for m in [a, b, c, d, e, f, a, a, b] {\n    t = t * 7 % 1000003 + sum(m)\n  }\n}\nexhale t\nexhale sum(a), sum(b), sum(c), sum(d), sum(e), sum(f)\n";
+    let printed = script_agrees_under_bodies(src, 0);
+    assert!(printed.ends_with("12 34 56 78 100 122\n"), "{printed}");
+}
+
+#[test]
+fn a_field_is_written_right_whatever_shape_its_map_has() {
+    // One site writes `.y` of maps of two shapes and of none, and adds
+    // `.n` to maps that have it and maps that do not.
+    let src = "pull bump(m) {\n  m.y = m.y + 1\n  m.n = m.x\n}\nroll a = {x: 1, y: 2}\nroll b = {y: 4, x: 3}\nroll c = {x: 5, y: 6, n: 0}\nroll d = json.parse(\"{\\\"y\\\": 8, \\\"x\\\": 7}\")\nfor round in 0..3 {\n  for m in [a, b, c, d, a] {\n    bump(m)\n  }\n}\nexhale a\nexhale b\nexhale c\nexhale d\n";
+    let printed = script_agrees_under_bodies(src, 0);
+    assert_eq!(
+        printed,
+        "{x: 1, y: 8, n: 1}\n{y: 7, x: 3, n: 3}\n{x: 5, y: 9, n: 5}\n{y: 11, x: 7, n: 7}\n"
+    );
+}
+
+#[test]
+fn a_site_learns_the_place_of_its_field_in_a_shape() {
+    use crate::shape::NONE;
+    // `getfield` in `get` runs on maps of one shape: after the run the
+    // site holds that shape and the field's place.
+    let src = "pull get(m) {\n  snuff m.y\n}\nroll a = {x: 1, y: 2}\nroll t = 0\nfor i in 0..4 {\n  t += get({x: i, y: i * 2})\n}\n";
+    let ast = crate::syntax::parse(src).expect("parses");
+    let bytes = match crate::lower::module_bytes(&ast, "t.cig") {
+        Ok(b) => b,
+        Err(_) => panic!("does not lower"),
+    };
+    let p = match super::open(bytes) {
+        Ok(p) => p,
+        Err(e) => panic!("does not open: {}", e.message),
+    };
+    let shape = match run(&mut interp(), &p) {
+        Ok(Value::Map(names)) => shape_of(&IndexMap::clone(&names.borrow()), "a"),
+        _ => panic!("did not run"),
+    };
+    assert_ne!(shape, NONE);
+    let get = p.funcs.get(1).expect("the function ran");
+    let learned: Vec<u64> = get
+        .code
+        .iter()
+        .flatten()
+        .filter(|d| d.op == Op::GETFIELD)
+        .map(|d| get.sites[d.pc as usize].get())
+        .collect();
+    assert_eq!(learned, vec![u64::from(shape) << 32 | 1]);
+}
+
 // ----- the fast loop's words -----
 
 #[test]
@@ -6557,7 +6974,7 @@ fn same_calls_in_a_loop(call_src: &str, rs: Value, call: impl FnOnce(&mut Asm)) 
                 .iter()
                 .map(|x| match x {
                     Value::List(i) => Value::list(i.borrow().clone()),
-                    Value::Map(m) => Value::map(m.borrow().clone()),
+                    Value::Map(m) => Value::record(m.borrow().clone()),
                     other => other.clone(),
                 })
                 .collect(),

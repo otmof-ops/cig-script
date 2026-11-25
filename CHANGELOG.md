@@ -5,6 +5,49 @@ project follows semantic versioning.
 
 ## Unreleased
 
+- **Maps carry a shape, and a field is read with one compare.** A map
+  a script writes as a record (`{x: 1, y: 2}`, or fields assigned by
+  name one at a time) now has a shape beside its entries: a number
+  every map has which got the same keys in the same order. Maps of one
+  shape have the same keys in the same places, so a `getfield` or a
+  `setfield` that found its field in one reads the next at the same
+  place, with no hash and no key compared; a literal's keys take their
+  shapes from the instruction that last added them. Nothing a script
+  can see changes: the entries, their order, printing and equality are
+  what they were, and a map without a shape (its keys were computed, a
+  key was taken out, it has more than 32) is looked up as before. Only
+  a key the script writes makes a shape, so their number is bounded by
+  the script's text. Machine instructions at stage `b`, against the
+  runtime before: `nbody` 0.85, `richards` 0.88, a loop that makes a
+  record and reads it 0.92; a map used as a dictionary pays 1%
+  (`maps` 1.01).
+
+- **Native code reads a field where it lies, and asks the runtime for
+  one instruction** (cig-native, interface 2: the context's spare word
+  is `sites`, and three functions more, `fields`, `quick`, `elem`).
+  `fields(reg)` gives a body the address of a map's first value, the
+  bytes between two values and the map's shape; `ctx.sites` is the
+  address of the cells in which the runtime keeps, for each field
+  instruction, the shape it last found its field in and the field's
+  place. When the two shapes are the same, the body reads or writes
+  the value at that place. `quick(pc)` runs the one instruction at `pc`
+  where the frame stands, without the interpreter's loop: a field or
+  an element that owns memory, a map of another shape, an upvalue, a
+  string, a builtin that calls no function of the script. It is not a
+  guess that failed, and the runtime counts none; it answers 1 (ran), 0
+  (nothing changed) or 2 (raised). `elem(dst, list, index)` puts an
+  item that owns memory in its register for a `for x in xs`. A program
+  built before this runs as it did: it asks for none of them.
+
+- **A builtin's result is stored without a stall.** A value a builtin
+  or a method returned, a string an interpolation built and a list or
+  a map just made were moved to their register as one block: read back
+  sixteen bytes at once from where the function had written them a
+  field at a time, which a processor cannot forward, so each such
+  instruction waited some fifteen cycles for the stores to reach the
+  cache. The VM's second tier now reads the tag and the payload as they
+  were written.
+
 - **The VM's fast loop reads an instruction's own word.** The loop read
   each instruction from a decoded record of thirty-two bytes, made for
   the verifier and the general path, with every operand widened to four

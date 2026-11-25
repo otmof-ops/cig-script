@@ -736,8 +736,8 @@ fn m_merge(_: &mut Interp, a: &[Value], s: Span) -> Result<Value, Diagnostic> {
     for (k, v) in y.borrow().iter() {
         out.insert(k.clone(), v.clone());
     }
-    Ok(Value::map(out))
+    Ok(Value::record(out))
 }
 fn m_copy(_: &mut Interp, a: &[Value], s: Span) -> Result<Value, Diagnostic> {
-    Ok(Value::map(expect_map(a, 0, "copy", s)?.borrow().clone()))
+    Ok(Value::record(expect_map(a, 0, "copy", s)?.borrow().clone()))
 }

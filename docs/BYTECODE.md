@@ -910,6 +910,26 @@ open. A lowering writes to them.
   the run's first frame, a caller with cells, a frame native code is
   waiting on) is left unchanged for the general path, which makes it or
   raises its error where it always did.
+- **Shapes.** A map carries a shape beside its entries: a number that
+  every map has which got the same keys in the same order, by a literal
+  (`{x: 1, y: 2}`) or by fields assigned by name one at a time. Maps of
+  one shape have the same keys in the same places. A `getfield` or a
+  `setfield` keeps, for its pc, the shape of the last map it found its
+  field in and the field's place there; the next map of that shape is
+  read at that place, with no hash and no key compared. A map of
+  another shape, or of none, is looked up as before, by the key's last
+  place and then by its hash. An `insertmap` whose key is the constant
+  the `loadk` before it loaded (a literal's key) keeps the shape the
+  map had and the one the key made of it, so the next map the literal
+  makes takes its shapes without asking for them.
+
+  Only a key the script writes makes a shape. A key it computes
+  (`m[k] = v`, what `json.parse` reads) follows the shapes there are
+  and makes none, so the number of shapes is bounded by the script's
+  text, not by its data. A map of more than 32 keys has no shape, a key
+  taken out leaves none, and a run makes at most 65,536. A shape
+  changes nothing a script can see: the entries, their order, what
+  prints and what compares equal are what they were.
 - **Errors and handlers.** Each frame keeps the tries it has opened and
   not left, innermost last. `try.enter H` opens handler `H` in its body
   and records the frame's loop nesting; opening `H` again (a loop around

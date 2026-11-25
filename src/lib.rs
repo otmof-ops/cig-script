@@ -35,6 +35,7 @@ pub mod pass;
 pub mod pin;
 pub mod program;
 pub mod repro;
+pub mod shape;
 pub mod since;
 pub mod stdlib;
 pub mod syntax;

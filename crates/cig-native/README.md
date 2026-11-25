@@ -157,7 +157,7 @@ bits are a pc and whose bits 32 and up say what happened.
 | 56 | 8 | `host`: what the helpers find their host by; native code never reads it |
 | 64 | 4 | `nest`: for a body, the frame's loop nesting, as the last `steps` instruction set it |
 | 68 | 4 | zero |
-| 72 | 8 | zero |
+| 72 | 8 | `sites`: for a body, the address of the function's site cells, eight bytes for each pc of its code: what a field instruction at that pc last found in a map that has a shape, the shape in the high half and the field's place among the map's values in the low. Zero until the runtime found one there. Native code reads them; only the runtime writes them |
 
 One call of any function in a section through its **entry** uses at most
 `MAX_FRAME` (4,096) bytes of stack, so a caller that sets `depth_left`
@@ -167,7 +167,7 @@ where the stack has room for it.
 
 ## The helpers
 
-Interface 2 has six helper functions a body calls, through its
+Interface 2 has nine helper functions a body calls, through its
 `ctx.helpers`:
 
 | offset | signature | what |
@@ -178,6 +178,9 @@ Interface 2 has six helper functions a body calls, through its
 | 24 | `push(ctx, list, value, dst) -> u32` | `list.push(value)` for the list in register `list` and the value in register `value`, with the list put in register `dst`; 1 when done, 0 with nothing changed |
 | 32 | `copy(ctx, dst, src) -> u32` | register `dst` takes register `src`'s value, whatever either holds, as `mov` gives it; 1 when done, 0 with nothing changed |
 | 40 | `clear(ctx, reg) -> u32`    | register `reg` holds null, and what it held is freed; 1 when done, 0 with nothing changed |
+| 48 | `fields(ctx, reg) -> u32`   | 1 when register `reg` holds a map that has a shape, whose values native code may read and write where they lie, with `ctx.left` set to the address of the first and `ctx.right` to the shape (low half) and the bytes from one value to the next (high half); 0 otherwise |
+| 56 | `quick(ctx, pc) -> u32`     | runs the one instruction at `pc` where the frame stands, without the interpreter's loop, when it is one the runtime can run that way with the operands it has; 1 when it ran, 0 with nothing changed, 2 when it raised |
+| 64 | `elem(ctx, dst, list, index) -> u32` | register `dst` takes the element of the list in register `list` at the int in register `index`, whatever it holds; 1 when done, 0 with nothing changed |
 
 **`run` may carry a call.** Where the range holds a `call`, the runtime
 makes it and runs the callee to its return under the body (on frames
@@ -211,10 +214,50 @@ is in view. Each returns 0, having changed nothing, where the runtime
 cannot (a register that carries a cell, a list something is walking),
 and the body then has the interpreter run the instruction.
 
+**`fields` and the site cells make a field one compare and a load.** A
+map a script writes as a record has a **shape**: a number shared by
+every map that got the same keys in the same order. Maps of one shape
+have the same keys in the same places, so where a field lies in one is
+where it lies in each. The runtime keeps, for every field instruction,
+the shape of the last map it found the field in and the field's place
+there, in a cell native code can read (`ctx.sites`, one cell a pc).
+`fields` gives a body the address of a map's first value, how far each
+value is from the last, and the map's shape. When the shape is the one
+in the instruction's cell, the value is at the cell's place: the body
+reads or writes it there, with no key looked at. A map without a shape
+(its keys were computed, or one was taken out) gets no view, and a cell
+that names another shape does not match: both are `quick`'s.
+
+**`quick` is the runtime, for one instruction.** What has no machine
+code in the body, or met operands its machine code does not cover, is
+most often something the runtime can still run without its loop: a
+field or an element that owns memory, a field of a map of another
+shape, an upvalue, a string built, a builtin that calls no function of
+the script. `quick(ctx, pc)` runs that one instruction on the frame as
+it stands. The body writes what it holds in machine registers to the
+frame first, since the runtime reads the instruction's operands there.
+It never runs an instruction that jumps, counts a step or ends the
+frame. It is not a guess that failed, and the runtime counts none. 1
+says the instruction ran and the bytecode goes on at the next one; 0
+that nothing changed, and the body has the interpreter run it
+(`again`); 2 that it raised, and the body returns `Stop::Raised(pc)`.
+The frame's address and the steps left stand after it. What is in view
+stands when the instruction only reads, or writes a value where one
+was, but for a view of a register it wrote; after an instruction that
+may add to a list or a map or take from one (a call, an element or a
+key added, a store by an index) nothing is in view.
+
+**`elem` is for a loop's item.** `for x in xs` keeps its place in the
+loop's own registers, so `iternext` is the body's instruction, never
+`quick`'s. The body reads an item that owns no memory where it lies,
+and asks `elem` to put one that does in its register: it reads the
+list and the int from the frame and shares the element, as `copy`
+shares a value.
+
 A panic in a helper is caught in the crate's `extern "C"` glue, the
 body is told `Stop::Raised(from)` (from `run`), `Stop::Raised(pc)` (from
-`again`) or `0` (from `list`, `push`, `copy` and `clear`), and
-`Code::enter` resumes the panic once the body has returned.
+`again`) or `0` (from the others), and `Code::enter` resumes the panic
+once the body has returned.
 
 ## The loader, and who answers for what
 

@@ -1208,7 +1208,7 @@ fn e777(name: &str, why: &str) -> Diagnostic {
 /// `box: {network, allow_hosts, pidns, apply, contain, expect, quiet, watch,
 /// decoys, pass_reads}`.
 fn parse_box_spec(
-    m: &std::rc::Rc<std::cell::RefCell<IndexMap<String, Value>>>,
+    m: &crate::value::Map,
     name: &str,
     s: Span,
 ) -> Result<crate::burn::overlay::BoxSpec, Diagnostic> {
@@ -2934,7 +2934,7 @@ fn hop_run(
             let err = decode(name, "stderr", &raw.err, Encoding::Lossy, s)?;
             let value = result_map(raw.code, &out, &err, raw.duration_ms, false);
             let base = match &value {
-                Value::Map(m) => m.borrow().clone(),
+                Value::Map(m) => IndexMap::clone(&m.borrow()),
                 _ => IndexMap::new(),
             };
             if let Err(d) = enforce_contract(i, name, &hop_label(cmd, args), &raw, o, value, s) {
@@ -3536,7 +3536,7 @@ fn hop_value(raw: &Raw, out: &str, err: &str) -> Value {
                 .insert("layer".to_string(), Value::str(layer));
         }
         if let Some(j) = &raw.judged {
-            j.insert(&mut m.borrow_mut());
+            j.insert(m.borrow_mut().reshape());
         }
     }
     value
@@ -3872,7 +3872,7 @@ fn pipe(i: &mut Interp, a: &[Value], s: Span) -> Result<Value, Diagnostic> {
                 .collect(),
         ),
     );
-    Ok(Value::map(m))
+    Ok(Value::record(m))
 }
 
 fn which(i: &mut Interp, a: &[Value], s: Span) -> Result<Value, Diagnostic> {
