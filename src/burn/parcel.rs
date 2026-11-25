@@ -397,6 +397,17 @@ pub fn write_with(
         let mut tar = tar::Builder::new(enc);
         let mut manifest_json = serde_json::to_vec_pretty(&manifest)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        // What no cig would read back is not written.
+        if manifest_json.len() as u64 > MAX_MANIFEST {
+            let size = manifest_json.len() as u64;
+            if manifest.sealing_key.is_some() {
+                super::seal::wipe_bytes(&mut manifest_json);
+            }
+            return Err(io::Error::other(format!(
+                "the run has too many files for one parcel: {}",
+                manifest_too_large(size, MAX_MANIFEST)
+            )));
+        }
         let mut header = tar::Header::new_gnu();
         header.set_size(manifest_json.len() as u64);
         header.set_mode(0o600);
@@ -480,18 +491,46 @@ pub struct Imported {
     pub accepted_key_fingerprint: Option<String>,
 }
 
-/// Read the manifest alone, for `cig unparcel --show` and the messages.
-pub fn read_manifest(file: &Path) -> io::Result<Manifest> {
+/// The most a parcel's `manifest.json` may be: 64 MiB, the ceiling a
+/// script's source has. A manifest names every file of its parcel with
+/// a SHA-256, about 160 bytes a file, so this is a parcel of some
+/// 400,000 files. A parcel comes from another machine and gzip can turn
+/// a megabyte into a gigabyte, so the manifest is never read into
+/// memory without a bound; `cig parcel` refuses to write a larger one,
+/// so cig makes no parcel that it would refuse to read.
+pub const MAX_MANIFEST: u64 = 64 * 1024 * 1024;
+
+fn manifest_too_large(size: u64, max: u64) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("its manifest.json is {size} bytes, and a parcel's manifest is at most {max}"),
+    )
+}
+
+/// The bytes of a parcel's `manifest.json`, at most `max` of them: one
+/// that says it is larger is refused before a byte of it is read, and
+/// no more than it says is read either way. The caller wipes them (a
+/// `--with-key` parcel carries its sealing key in there).
+fn manifest_bytes(file: &Path, max: u64) -> io::Result<Vec<u8>> {
     let f = fs::File::open(file)?;
     let dec = flate2::read::GzDecoder::new(f);
     let mut archive = tar::Archive::new(dec);
     for entry in archive.entries()? {
         let mut entry = entry?;
         if entry.path()?.to_string_lossy() == "manifest.json" {
-            let mut text = String::new();
-            entry.read_to_string(&mut text)?;
-            return serde_json::from_str(&text)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e));
+            if entry.size() > max {
+                return Err(manifest_too_large(entry.size(), max));
+            }
+            let mut bytes = Vec::new();
+            entry
+                .by_ref()
+                .take(max.saturating_add(1))
+                .read_to_end(&mut bytes)?;
+            if bytes.len() as u64 > max {
+                super::seal::wipe_bytes(&mut bytes);
+                return Err(manifest_too_large(max.saturating_add(1), max));
+            }
+            return Ok(bytes);
         }
     }
     Err(io::Error::new(
@@ -500,26 +539,30 @@ pub fn read_manifest(file: &Path) -> io::Result<Manifest> {
     ))
 }
 
+/// Read the manifest alone, for `cig unparcel --show` and the messages.
+pub fn read_manifest(file: &Path) -> io::Result<Manifest> {
+    read_manifest_within(file, MAX_MANIFEST)
+}
+
+fn read_manifest_within(file: &Path, max: u64) -> io::Result<Manifest> {
+    let mut bytes = manifest_bytes(file, max)?;
+    let manifest =
+        serde_json::from_slice(&bytes).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e));
+    super::seal::wipe_bytes(&mut bytes);
+    manifest
+}
+
 /// The SHA-256 of a parcel's `manifest.json`, as its pass names it.
 pub fn manifest_sha256(file: &Path) -> io::Result<String> {
+    manifest_sha256_within(file, MAX_MANIFEST)
+}
+
+fn manifest_sha256_within(file: &Path, max: u64) -> io::Result<String> {
     use sha2::{Digest, Sha256};
-    let f = fs::File::open(file)?;
-    let dec = flate2::read::GzDecoder::new(f);
-    let mut archive = tar::Archive::new(dec);
-    for entry in archive.entries()? {
-        let mut entry = entry?;
-        if entry.path()?.to_string_lossy() == "manifest.json" {
-            let mut bytes = Vec::new();
-            entry.read_to_end(&mut bytes)?;
-            let digest = hex::encode(Sha256::digest(&bytes));
-            super::seal::wipe_bytes(&mut bytes);
-            return Ok(digest);
-        }
-    }
-    Err(io::Error::new(
-        io::ErrorKind::InvalidData,
-        "no manifest.json: not a parcel",
-    ))
+    let mut bytes = manifest_bytes(file, max)?;
+    let digest = hex::encode(Sha256::digest(&bytes));
+    super::seal::wipe_bytes(&mut bytes);
+    Ok(digest)
 }
 
 /// Why an import was refused: one line, with what to do.
@@ -593,6 +636,17 @@ fn import_inner(file: &Path, mapping: &Mapping, scratch: &Path) -> Result<Import
         entry
             .unpack_in(scratch)
             .map_err(|e| format!("{} is not a parcel this cig can read: {e}", file.display()))?;
+    }
+    // The manifest is read whole: one past the ceiling is refused by the
+    // size of the file that landed, whatever name its entry went by.
+    if let Ok(landed) = fs::metadata(scratch.join("manifest.json")) {
+        if landed.len() > MAX_MANIFEST {
+            return Err(format!(
+                "{} is not a parcel this cig can read: {}",
+                file.display(),
+                manifest_too_large(landed.len(), MAX_MANIFEST)
+            ));
+        }
     }
     let manifest_text = fs::read_to_string(scratch.join("manifest.json"))
         .map_err(|_| format!("{} has no manifest.json: not a parcel", file.display()))?;
@@ -1030,6 +1084,80 @@ pub fn remap(path: &Path, map: &[(PathBuf, PathBuf)]) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A parcel holding only a manifest, and that manifest's bytes.
+    fn parcel_of_a_manifest(dir: &Path) -> (PathBuf, Vec<u8>) {
+        let manifest = Manifest {
+            format: FORMAT,
+            cig: "0.0.0".to_string(),
+            run: "20260101-000000-abcdef".to_string(),
+            created: "2026-01-01T00:00:00Z".to_string(),
+            origin: Origin {
+                state_dir: PathBuf::from("/srv/state"),
+                cwd: "/srv/app".to_string(),
+                host: "elsewhere".to_string(),
+            },
+            roots: Vec::new(),
+            files: (0..40)
+                .map(|n| (format!("run/snapshots/{n:04}"), "0".repeat(64)))
+                .collect(),
+            sealed: SealedNote::default(),
+            git_blobs: 0,
+            prior: Vec::new(),
+            sealing_key: None,
+        };
+        let json = serde_json::to_vec_pretty(&manifest).expect("serializes");
+        let path = dir.join(format!("one.{EXT}"));
+        let enc = flate2::write::GzEncoder::new(
+            fs::File::create(&path).expect("created"),
+            flate2::Compression::default(),
+        );
+        let mut tar = tar::Builder::new(enc);
+        let mut header = tar::Header::new_gnu();
+        header.set_size(json.len() as u64);
+        header.set_mode(0o600);
+        header.set_mtime(0);
+        header.set_cksum();
+        tar.append_data(&mut header, "manifest.json", json.as_slice())
+            .expect("appended");
+        tar.into_inner()
+            .expect("the archive ends")
+            .finish()
+            .expect("the stream ends");
+        (path, json)
+    }
+
+    #[test]
+    fn a_manifest_is_read_up_to_the_ceiling_and_refused_past_it() {
+        use sha2::{Digest, Sha256};
+        let dir = tempfile::tempdir().expect("a scratch folder");
+        let (parcel, json) = parcel_of_a_manifest(dir.path());
+        let size = json.len() as u64;
+        // At the ceiling it is read, and its digest is its bytes'.
+        let m = read_manifest_within(&parcel, size).expect("read");
+        assert_eq!(
+            (m.run.as_str(), m.files.len()),
+            ("20260101-000000-abcdef", 40)
+        );
+        assert_eq!(
+            manifest_sha256_within(&parcel, size).expect("hashed"),
+            hex::encode(Sha256::digest(&json))
+        );
+        assert_eq!(read_manifest(&parcel).expect("read").files.len(), 40);
+        // A byte under it, both refuse, and say why.
+        for refused in [
+            read_manifest_within(&parcel, size - 1).map(|_| ()),
+            manifest_sha256_within(&parcel, size - 1).map(|_| ()),
+        ] {
+            let e = refused.expect_err("past the ceiling");
+            assert_eq!(e.kind(), io::ErrorKind::InvalidData);
+            assert!(
+                e.to_string()
+                    .contains(&format!("{size} bytes, and a parcel's manifest is at most")),
+                "{e}"
+            );
+        }
+    }
 
     #[test]
     fn roots_are_named_and_paths_remap_by_longest_prefix() {

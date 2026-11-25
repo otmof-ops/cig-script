@@ -200,7 +200,11 @@ rewritten, the chain is checked over the decompressed lines, so
 inside the stream breaks the chain. `cig unburn` makes a compressed journal
 plain again, appends its marks, and leaves it in the form the setting asks
 for. A `.zst` journal written by an earlier cig is read without the
-setting turned back on.
+setting turned back on. A compressed journal is never decompressed past
+one gibibyte: one that would come to more is refused (a run can arrive
+from another machine in a parcel, and a few kilobytes of zstd can stand
+for gigabytes), and a journal larger than that stays plain when its run
+ends, so cig writes none it would not read back.
 
 **The group sync, and the window it leaves.** The journal's write-ahead sync
 is per line, as always: an op's line is durable before the op runs. What
@@ -1331,7 +1335,10 @@ journal refers to, and nothing another run holds; `git/` with the bytes of
 every blob git held for the run, carried whole so the other machine needs
 no repository; and `manifest.json` naming each file's SHA-256, the cig
 that wrote it, the pack's roots (each with a name, its last component) and
-the working directory. `cig unparcel <file>` checks every file against the
+the working directory. The manifest is at most 64 MiB (a parcel of some
+400,000 files): `cig parcel` does not write a larger one, and a parcel
+whose manifest says it is larger is refused before a byte of it is read.
+`cig unparcel <file>` checks every file against the
 manifest before it writes anything, and a byte changed refuses the whole
 parcel (`E762`); every root must be mapped to a place here (`--root
 build=/srv/app/build`; `--show` lists them, `--cwd` sets the working
