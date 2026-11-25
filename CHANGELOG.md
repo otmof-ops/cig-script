@@ -5,6 +5,21 @@ project follows semantic versioning.
 
 ## Unreleased
 
+- **A loop's two step counts are one instruction in the VM's fast
+  loop.** Every turn of a loop starts with two `steps` in a row, the
+  loop's own and its first statement's. The fast loop of a function
+  without native code now reads them as one: its own table of the
+  function's instructions has, where a `steps` is followed by another
+  of the same nesting, a single word that counts both and goes on two
+  words further. A turn of an empty `for` runs 140 machine
+  instructions where it ran 175, in 19 cycles where it took 24. A
+  budget that would end inside a pair is left to the general path,
+  which runs the two one at a time, so a run stops on the line it
+  stopped on. Machine instructions at stage `b`, against the runtime
+  before: `loop` 0.87, `sieve` 0.93, `fannkuch` 0.95, `mandel` 0.96,
+  and no program more; cycles `loop` 0.90, `sieve` 0.96, `mandel`
+  0.97, `fannkuch` 0.97.
+
 - **A call between two bytecode functions asks nothing of the native
   code.** Each call the VM makes beside its fast loop asked the
   program's native code whether the callee had an entry, and in a

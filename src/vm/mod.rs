@@ -325,6 +325,11 @@ struct Proto {
     /// Each one-word instruction's word, by pc: what the fast loop
     /// reads ([`Word`]).
     words: Vec<Word>,
+    /// The same words with two `steps` in a row counted in one
+    /// ([`Word::paired`]): what the fast loop of a function without a
+    /// body reads. A loop's first statement makes such a pair at every
+    /// turn.
+    paired: Vec<Word>,
     /// The source position of each pc, from the line table.
     spans: Spans,
     consts: Vec<Value>,
@@ -346,6 +351,20 @@ impl Proto {
     fn lines(&self) -> Lines<'_> {
         Lines {
             words: &self.words,
+            code: &self.code,
+        }
+    }
+
+    /// The function's instructions as the fast loop of a function
+    /// without a body reads them: [`Proto::lines`] with each pair of
+    /// `steps` counted at its first. A loop that stops between two
+    /// instructions it is told of (a body's resume point, the end of a
+    /// range a body's `run` names) reads [`Proto::lines`], where every
+    /// instruction is one.
+    #[inline(always)]
+    fn paired_lines(&self) -> Lines<'_> {
+        Lines {
+            words: &self.paired,
             code: &self.code,
         }
     }
@@ -1640,6 +1659,7 @@ fn build(
         arity: f.arity as usize,
         spans: Spans::new(&f.span_base, &f.lines, f.instrs.len()),
         words: Word::table(&code),
+        paired: Word::paired(&code),
         code,
         consts: f.constants.iter().map(constant).collect(),
         children,
@@ -4917,10 +4937,21 @@ impl Word {
         c: 0,
     };
 
-    /// The word of a decoded instruction; none for a two-word one.
+    /// The word of a decoded instruction; none for a two-word one. A
+    /// `nop` has no operand here whatever its word holds: in these
+    /// words a `nop` with a count is the loop's own ([`Word::paired`]),
+    /// and never one a module wrote.
     fn of(d: &DecodedInstr) -> Word {
         if d.wide {
             return Word::NONE;
+        }
+        if d.op == Op::NOP {
+            return Word {
+                op: Op::NOP,
+                a: 0,
+                b: 0,
+                c: 0,
+            };
         }
         // `Bx` lies where `B` and `C` do: its low byte, then its high.
         let (b, c) = match d.fmt {
@@ -4940,6 +4971,44 @@ impl Word {
         code.iter()
             .map(|d| d.as_ref().map_or(Word::NONE, Word::of))
             .collect()
+    }
+
+    /// [`Word::table`] with two `steps` in a row counted in one: where
+    /// a `steps` is followed by another of the same loop nesting, the
+    /// first's place holds a `nop` with their nesting in `A` and the
+    /// steps of both in `Bx`, which the fast loop counts and then goes
+    /// on two words further. One instruction runs where there were
+    /// two, and a `steps` that stands alone is the instruction it was.
+    ///
+    /// The second keeps its own word: a jump that lands on it counts
+    /// what it counts. A pair whose steps would pass the run's budget
+    /// is not run by the fast path at all, as a single `steps` is not:
+    /// the general path runs the first from its decoded form, alone,
+    /// and stops where the tree-walker does. Two `steps` that count
+    /// nothing between them stay two (a count of none is a `nop`).
+    fn paired(code: &[Option<DecodedInstr>]) -> Vec<Word> {
+        let plain = Word::table(code);
+        let mut words = plain.clone();
+        for (pc, pair) in plain.windows(2).enumerate() {
+            let [first, second] = pair else { continue };
+            if first.op != Op::STEPS || second.op != Op::STEPS || first.a != second.a {
+                continue;
+            }
+            let both = Operands::bx(*first) + Operands::bx(*second);
+            let Ok(count @ 1..) = u16::try_from(both) else {
+                continue;
+            };
+            let [b, c] = count.to_le_bytes();
+            if let Some(word) = words.get_mut(pc) {
+                *word = Word {
+                    op: Op::NOP,
+                    a: first.a,
+                    b,
+                    c,
+                };
+            }
+        }
+        words
     }
 }
 
@@ -4970,6 +5039,13 @@ trait Operands: Copy {
     fn sc(self) -> i32;
     /// How many words the instruction is.
     fn width(self) -> usize;
+    /// Of a `nop`: the steps of the pair of `steps` it stands for in
+    /// the fast loop's own words ([`Word::paired`]), and none for a
+    /// `nop` of the function.
+    #[inline(always)]
+    fn pair(self) -> u64 {
+        0
+    }
 }
 
 impl Operands for Word {
@@ -5000,6 +5076,10 @@ impl Operands for Word {
     #[inline(always)]
     fn width(self) -> usize {
         1
+    }
+    #[inline(always)]
+    fn pair(self) -> u64 {
+        u64::from(self.bx())
     }
 }
 
@@ -5138,7 +5218,7 @@ fn fast_run<R: FrameRegs + ?Sized>(
     mut pc: usize,
     upvals: &[Cell],
 ) -> Stop {
-    let lines = proto.lines();
+    let lines = proto.paired_lines();
     loop {
         match fast_at(regs, interp, frame, proto, lines, pc, upvals) {
             Ok(Some(Ok(next))) => pc = next,
@@ -5297,7 +5377,20 @@ fn fast<R: FrameRegs + ?Sized, I: Operands>(
 ) -> Option<usize> {
     let next = pc + d.width();
     let v = match op {
-        Op::NOP => return Some(next),
+        Op::NOP => {
+            // A `nop` of the function, or in the fast loop's own words
+            // a pair of `steps` counted in one, two words long.
+            let n = d.pair();
+            if n == 0 {
+                return Some(next);
+            }
+            if interp.max_steps != 0 && interp.steps.saturating_add(n) > interp.max_steps {
+                return None;
+            }
+            nest_frame(&mut interp.loop_depth, frame, d.a());
+            interp.steps += n;
+            return Some(pc + 2);
+        }
         Op::MOV => regs.reg(d.b())?.clone(),
         Op::LOADK => proto.consts.get(d.bx() as usize)?.clone(),
         Op::LOADNULL => return put(regs, d.a(), Value::Null, next),
