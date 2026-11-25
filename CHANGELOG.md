@@ -5,6 +5,25 @@ project follows semantic versioning.
 
 ## Unreleased
 
+- **The benchmarks run again** ([the paper of
+  2026-11-26](docs/BENCHMARKS-2026-11-26.md), its samples under
+  `bench/results/2026-11-26/`): the same 25 programs, machine, core and
+  builds of the other languages as the paper of 2026-11-25, fifteen
+  hours on, with `cig run` on the VM by default, the VM's loop counting
+  a loop turn's steps in one instruction and running `for x in xs`
+  itself, and stage `c` freeing a loop's scratch registers once. The
+  README's stage `c` section holds the new figures. The run also found
+  three programs (`maps`, `strings`, `words`) that come out slower with
+  their native code than as bytecode, where in the run before they were
+  level; timed alone, two are 5% behind and `strings` is at the 3% line
+  (otmof-ops/cig-compile#117).
+
+- **`bench/compare` makes the "within 10%" keys only for the two pairs
+  they are about** (a script's first and second run on the default
+  against the tree-walker's). They were made for every pair, so the
+  stored numbers of every earlier run no longer matched what
+  `check.py` computes; they match again, for every results folder.
+
 - **The engines measured again on the new default, and `cig run` set
   against other languages.** Two documents, every figure in them made
   from the samples under `bench/results/2026-11-25-engines/` and made

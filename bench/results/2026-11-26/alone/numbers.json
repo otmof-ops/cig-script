@@ -1,0 +1,874 @@
+{
+ "anon.deltablue.stage-b": {
+  "text": "0.7",
+  "value": 644.0
+ },
+ "anon.deltablue.stage-c": {
+  "text": "0.7",
+  "value": 656.0
+ },
+ "anon.deltablue.stage-c-off": {
+  "text": "0.7",
+  "value": 644.0
+ },
+ "anon.json-deep.stage-b": {
+  "text": "1.4",
+  "value": 1374.0
+ },
+ "anon.json-deep.stage-c": {
+  "text": "1.4",
+  "value": 1378.0
+ },
+ "anon.json-deep.stage-c-off": {
+  "text": "1.4",
+  "value": 1378.0
+ },
+ "anon.maps.stage-b": {
+  "text": "1.7",
+  "value": 1612.0
+ },
+ "anon.maps.stage-c": {
+  "text": "2.2",
+  "value": 2130.0
+ },
+ "anon.maps.stage-c-off": {
+  "text": "2.2",
+  "value": 2128.0
+ },
+ "anon.strings.stage-b": {
+  "text": "1.9",
+  "value": 1864.0
+ },
+ "anon.strings.stage-c": {
+  "text": "2.2",
+  "value": 2190.0
+ },
+ "anon.strings.stage-c-off": {
+  "text": "2.2",
+  "value": 2192.0
+ },
+ "anon.words.stage-b": {
+  "text": "0.7",
+  "value": 726.0
+ },
+ "anon.words.stage-c": {
+  "text": "0.7",
+  "value": 732.0
+ },
+ "anon.words.stage-c-off": {
+  "text": "0.7",
+  "value": 732.0
+ },
+ "date.pass1": {
+  "text": "2026-11-25T20:12:16Z",
+  "value": "2026-11-25T20:12:16Z"
+ },
+ "date.pass2": {
+  "text": "2026-11-25T20:12:38Z",
+  "value": "2026-11-25T20:12:38Z"
+ },
+ "drift.pass1.stage-b": {
+  "text": "1.05",
+  "value": 1.0512367247168095
+ },
+ "drift.pass1.stage-c": {
+  "text": "1.03",
+  "value": 1.0349916893384667
+ },
+ "drift.pass1.stage-c-off": {
+  "text": "1.05",
+  "value": 1.0508176161789426
+ },
+ "drift.pass2.stage-b": {
+  "text": "1.00",
+  "value": 1.0014343057959434
+ },
+ "drift.pass2.stage-c": {
+  "text": "1.00",
+  "value": 0.9976379137980124
+ },
+ "drift.pass2.stage-c-off": {
+  "text": "0.99",
+  "value": 0.9894561163653653
+ },
+ "failed.pass1": {
+  "text": "0",
+  "value": 0
+ },
+ "failed.pass2": {
+  "text": "0",
+  "value": 0
+ },
+ "faster.compute.stage-c.stage-b": {
+  "text": "1",
+  "value": 1
+ },
+ "faster.compute.stage-c.stage-c-off": {
+  "text": "1",
+  "value": 1
+ },
+ "faster.native.stage-c.stage-b": {
+  "text": "1",
+  "value": 1
+ },
+ "floor.pass1": {
+  "text": "1.12",
+  "value": 1.116
+ },
+ "floor.pass2": {
+  "text": "1.01",
+  "value": 1.008
+ },
+ "geomean.compute.stage-c.stage-b": {
+  "text": "1.01",
+  "value": 1.0080027416625115
+ },
+ "geomean.compute.stage-c.stage-c-off": {
+  "text": "1.02",
+  "value": 1.0191533610953931
+ },
+ "geomean.native.stage-c.stage-b": {
+  "text": "1.01",
+  "value": 1.0077872302617412
+ },
+ "geomean.pass1.compute.stage-c.stage-b": {
+  "text": "1.01",
+  "value": 1.0100976185275115
+ },
+ "geomean.pass1.compute.stage-c.stage-c-off": {
+  "text": "1.01",
+  "value": 1.012901558513881
+ },
+ "geomean.pass1.native.stage-c.stage-b": {
+  "text": "1.01",
+  "value": 1.0124586391134718
+ },
+ "geomean.pass2.compute.stage-c.stage-b": {
+  "text": "1.01",
+  "value": 1.0086645432033745
+ },
+ "geomean.pass2.compute.stage-c.stage-c-off": {
+  "text": "1.03",
+  "value": 1.0262730827875564
+ },
+ "geomean.pass2.native.stage-c.stage-b": {
+  "text": "1.01",
+  "value": 1.0071948405081257
+ },
+ "highest.compute.stage-c.stage-b": {
+  "text": "words",
+  "value": 1.0495942290351667
+ },
+ "highest.compute.stage-c.stage-c-off": {
+  "text": "strings",
+  "value": 1.069491525423729
+ },
+ "highest.native.stage-c.stage-b": {
+  "text": "words",
+  "value": 1.0495942290351667
+ },
+ "history.first.pass1": {
+  "text": "6367",
+  "value": 6367
+ },
+ "history.first.pass2": {
+  "text": "9442",
+  "value": 9442
+ },
+ "history.last.pass1": {
+  "text": "9367",
+  "value": 9367
+ },
+ "history.last.pass2": {
+  "text": "12442",
+  "value": 12442
+ },
+ "inverse.compute.stage-c.stage-b": {
+  "text": "0.99",
+  "value": 0.9920607937540801
+ },
+ "inverse.compute.stage-c.stage-c-off": {
+  "text": "0.98",
+  "value": 0.9812065957621854
+ },
+ "inverse.native.stage-c.stage-b": {
+  "text": "0.99",
+  "value": 0.9922729421172376
+ },
+ "level.compute.stage-c.stage-b": {
+  "text": "2",
+  "value": 2
+ },
+ "level.compute.stage-c.stage-c-off": {
+  "text": "1",
+  "value": 1
+ },
+ "level.native.stage-c.stage-b": {
+  "text": "1",
+  "value": 1
+ },
+ "lowest.compute.stage-c.stage-b": {
+  "text": "deltablue",
+  "value": 0.9123033828916182
+ },
+ "lowest.compute.stage-c.stage-c-off": {
+  "text": "deltablue",
+  "value": 0.918637448470384
+ },
+ "lowest.native.stage-c.stage-b": {
+  "text": "deltablue",
+  "value": 0.9123033828916182
+ },
+ "median.deltablue.stage-b": {
+  "text": "2.3",
+  "value": 2.3205
+ },
+ "median.deltablue.stage-c": {
+  "text": "2.1",
+  "value": 2.117
+ },
+ "median.deltablue.stage-c-off": {
+  "text": "2.3",
+  "value": 2.3045
+ },
+ "median.json-deep.stage-b": {
+  "text": "2.8",
+  "value": 2.8200000000000003
+ },
+ "median.json-deep.stage-c": {
+  "text": "2.8",
+  "value": 2.845
+ },
+ "median.json-deep.stage-c-off": {
+  "text": "2.8",
+  "value": 2.838
+ },
+ "median.maps.stage-b": {
+  "text": "11.6",
+  "value": 11.5945
+ },
+ "median.maps.stage-c": {
+  "text": "12.1",
+  "value": 12.131
+ },
+ "median.maps.stage-c-off": {
+  "text": "11.6",
+  "value": 11.608
+ },
+ "median.pass1.deltablue.stage-b": {
+  "text": "2.3",
+  "value": 2.277
+ },
+ "median.pass1.deltablue.stage-c": {
+  "text": "2.1",
+  "value": 2.1
+ },
+ "median.pass1.deltablue.stage-c-off": {
+  "text": "2.3",
+  "value": 2.327
+ },
+ "median.pass1.json-deep.stage-b": {
+  "text": "2.8",
+  "value": 2.823
+ },
+ "median.pass1.json-deep.stage-c": {
+  "text": "2.8",
+  "value": 2.825
+ },
+ "median.pass1.json-deep.stage-c-off": {
+  "text": "2.9",
+  "value": 2.863
+ },
+ "median.pass1.maps.stage-b": {
+  "text": "11.5",
+  "value": 11.532
+ },
+ "median.pass1.maps.stage-c": {
+  "text": "12.1",
+  "value": 12.063
+ },
+ "median.pass1.maps.stage-c-off": {
+  "text": "11.6",
+  "value": 11.585
+ },
+ "median.pass1.strings.stage-b": {
+  "text": "6.4",
+  "value": 6.411
+ },
+ "median.pass1.strings.stage-c": {
+  "text": "6.6",
+  "value": 6.64
+ },
+ "median.pass1.strings.stage-c-off": {
+  "text": "6.2",
+  "value": 6.167
+ },
+ "median.pass1.words.stage-b": {
+  "text": "9.3",
+  "value": 9.337
+ },
+ "median.pass1.words.stage-c": {
+  "text": "9.8",
+  "value": 9.819
+ },
+ "median.pass1.words.stage-c-off": {
+  "text": "9.2",
+  "value": 9.194
+ },
+ "median.pass2.deltablue.stage-b": {
+  "text": "2.3",
+  "value": 2.349
+ },
+ "median.pass2.deltablue.stage-c": {
+  "text": "2.1",
+  "value": 2.149
+ },
+ "median.pass2.deltablue.stage-c-off": {
+  "text": "2.3",
+  "value": 2.286
+ },
+ "median.pass2.json-deep.stage-b": {
+  "text": "2.8",
+  "value": 2.815
+ },
+ "median.pass2.json-deep.stage-c": {
+  "text": "2.9",
+  "value": 2.856
+ },
+ "median.pass2.json-deep.stage-c-off": {
+  "text": "2.8",
+  "value": 2.801
+ },
+ "median.pass2.maps.stage-b": {
+  "text": "11.6",
+  "value": 11.632
+ },
+ "median.pass2.maps.stage-c": {
+  "text": "12.2",
+  "value": 12.181
+ },
+ "median.pass2.maps.stage-c-off": {
+  "text": "11.6",
+  "value": 11.635
+ },
+ "median.pass2.strings.stage-b": {
+  "text": "6.5",
+  "value": 6.462
+ },
+ "median.pass2.strings.stage-c": {
+  "text": "6.6",
+  "value": 6.625
+ },
+ "median.pass2.strings.stage-c-off": {
+  "text": "6.3",
+  "value": 6.251
+ },
+ "median.pass2.words.stage-b": {
+  "text": "9.5",
+  "value": 9.531
+ },
+ "median.pass2.words.stage-c": {
+  "text": "10.0",
+  "value": 9.986
+ },
+ "median.pass2.words.stage-c-off": {
+  "text": "9.3",
+  "value": 9.329
+ },
+ "median.strings.stage-b": {
+  "text": "6.4",
+  "value": 6.4350000000000005
+ },
+ "median.strings.stage-c": {
+  "text": "6.6",
+  "value": 6.625500000000001
+ },
+ "median.strings.stage-c-off": {
+  "text": "6.2",
+  "value": 6.195
+ },
+ "median.words.stage-b": {
+  "text": "9.4",
+  "value": 9.4265
+ },
+ "median.words.stage-c": {
+  "text": "9.9",
+  "value": 9.894
+ },
+ "median.words.stage-c-off": {
+  "text": "9.3",
+  "value": 9.262
+ },
+ "mhz.max.pass1": {
+  "text": "3548",
+  "value": 3548
+ },
+ "mhz.max.pass2": {
+  "text": "3554",
+  "value": 3554
+ },
+ "mhz.min.pass1": {
+  "text": "847",
+  "value": 847
+ },
+ "mhz.min.pass2": {
+  "text": "972",
+  "value": 972
+ },
+ "n.compute.stage-c.stage-b": {
+  "text": "5",
+  "value": 5
+ },
+ "n.compute.stage-c.stage-c-off": {
+  "text": "5",
+  "value": 5
+ },
+ "n.native.stage-c.stage-b": {
+  "text": "4",
+  "value": 4
+ },
+ "native.compiled.deltablue": {
+  "text": "0",
+  "value": 0
+ },
+ "native.compiled.json-deep": {
+  "text": "unknown",
+  "value": "unknown"
+ },
+ "native.compiled.maps": {
+  "text": "0",
+  "value": 0
+ },
+ "native.compiled.strings": {
+  "text": "0",
+  "value": 0
+ },
+ "native.compiled.words": {
+  "text": "0",
+  "value": 0
+ },
+ "native.left.deltablue": {
+  "text": "0",
+  "value": 0
+ },
+ "native.left.json-deep": {
+  "text": "unknown",
+  "value": "unknown"
+ },
+ "native.left.maps": {
+  "text": "0",
+  "value": 0
+ },
+ "native.left.strings": {
+  "text": "0",
+  "value": 0
+ },
+ "native.left.words": {
+  "text": "0",
+  "value": 0
+ },
+ "native.stage.deltablue": {
+  "text": "c",
+  "value": "c"
+ },
+ "native.stage.json-deep": {
+  "text": "b",
+  "value": "b"
+ },
+ "native.stage.maps": {
+  "text": "c",
+  "value": "c"
+ },
+ "native.stage.strings": {
+  "text": "c",
+  "value": "c"
+ },
+ "native.stage.words": {
+  "text": "c",
+  "value": "c"
+ },
+ "native.summary.deltablue": {
+  "text": "the top level",
+  "value": "the top level"
+ },
+ "native.summary.json-deep": {
+  "text": "none",
+  "value": "none"
+ },
+ "native.summary.maps": {
+  "text": "the top level",
+  "value": "the top level"
+ },
+ "native.summary.strings": {
+  "text": "the top level",
+  "value": "the top level"
+ },
+ "native.summary.words": {
+  "text": "the top level",
+  "value": "the top level"
+ },
+ "native.top.deltablue": {
+  "text": "yes",
+  "value": "yes"
+ },
+ "native.top.json-deep": {
+  "text": "unknown",
+  "value": "unknown"
+ },
+ "native.top.maps": {
+  "text": "yes",
+  "value": "yes"
+ },
+ "native.top.strings": {
+  "text": "yes",
+  "value": "yes"
+ },
+ "native.top.words": {
+  "text": "yes",
+  "value": "yes"
+ },
+ "native.total.deltablue": {
+  "text": "0",
+  "value": 0
+ },
+ "native.total.maps": {
+  "text": "0",
+  "value": 0
+ },
+ "native.total.strings": {
+  "text": "0",
+  "value": 0
+ },
+ "native.total.words": {
+  "text": "0",
+  "value": 0
+ },
+ "noisy.pass1.stage-b": {
+  "text": "5",
+  "value": 5
+ },
+ "noisy.pass1.stage-c": {
+  "text": "5",
+  "value": 5
+ },
+ "noisy.pass1.stage-c-off": {
+  "text": "5",
+  "value": 5
+ },
+ "noisy.pass2.stage-b": {
+  "text": "5",
+  "value": 5
+ },
+ "noisy.pass2.stage-c": {
+  "text": "5",
+  "value": 5
+ },
+ "noisy.pass2.stage-c-off": {
+  "text": "5",
+  "value": 5
+ },
+ "p10.deltablue.stage-b": {
+  "text": "2.0",
+  "value": 1.993
+ },
+ "p10.deltablue.stage-c": {
+  "text": "1.8",
+  "value": 1.81
+ },
+ "p10.deltablue.stage-c-off": {
+  "text": "2.0",
+  "value": 1.974
+ },
+ "p10.json-deep.stage-b": {
+  "text": "2.5",
+  "value": 2.499
+ },
+ "p10.json-deep.stage-c": {
+  "text": "2.5",
+  "value": 2.49
+ },
+ "p10.json-deep.stage-c-off": {
+  "text": "2.5",
+  "value": 2.459
+ },
+ "p10.maps.stage-b": {
+  "text": "11.2",
+  "value": 11.177
+ },
+ "p10.maps.stage-c": {
+  "text": "11.6",
+  "value": 11.623
+ },
+ "p10.maps.stage-c-off": {
+  "text": "11.2",
+  "value": 11.166
+ },
+ "p10.strings.stage-b": {
+  "text": "6.0",
+  "value": 6.041
+ },
+ "p10.strings.stage-c": {
+  "text": "6.2",
+  "value": 6.178
+ },
+ "p10.strings.stage-c-off": {
+  "text": "5.9",
+  "value": 5.857
+ },
+ "p10.words.stage-b": {
+  "text": "9.0",
+  "value": 9.034
+ },
+ "p10.words.stage-c": {
+  "text": "9.5",
+  "value": 9.464
+ },
+ "p10.words.stage-c-off": {
+  "text": "8.8",
+  "value": 8.84
+ },
+ "p90.deltablue.stage-b": {
+  "text": "3.0",
+  "value": 3.037
+ },
+ "p90.deltablue.stage-c": {
+  "text": "2.9",
+  "value": 2.895
+ },
+ "p90.deltablue.stage-c-off": {
+  "text": "2.9",
+  "value": 2.939
+ },
+ "p90.json-deep.stage-b": {
+  "text": "3.8",
+  "value": 3.838
+ },
+ "p90.json-deep.stage-c": {
+  "text": "3.6",
+  "value": 3.63
+ },
+ "p90.json-deep.stage-c-off": {
+  "text": "3.6",
+  "value": 3.643
+ },
+ "p90.maps.stage-b": {
+  "text": "13.2",
+  "value": 13.201
+ },
+ "p90.maps.stage-c": {
+  "text": "12.9",
+  "value": 12.947
+ },
+ "p90.maps.stage-c-off": {
+  "text": "13.0",
+  "value": 13.042
+ },
+ "p90.strings.stage-b": {
+  "text": "7.4",
+  "value": 7.369
+ },
+ "p90.strings.stage-c": {
+  "text": "7.7",
+  "value": 7.708
+ },
+ "p90.strings.stage-c-off": {
+  "text": "7.6",
+  "value": 7.599
+ },
+ "p90.words.stage-b": {
+  "text": "10.9",
+  "value": 10.917
+ },
+ "p90.words.stage-c": {
+  "text": "11.3",
+  "value": 11.257
+ },
+ "p90.words.stage-c-off": {
+  "text": "10.6",
+  "value": 10.574
+ },
+ "pairs.pass1": {
+  "text": "15",
+  "value": 15
+ },
+ "pairs.pass2": {
+  "text": "15",
+  "value": 15
+ },
+ "passes": {
+  "text": "2",
+  "value": 2
+ },
+ "peak.deltablue.stage-b": {
+  "text": "13.7",
+  "value": 13384.0
+ },
+ "peak.deltablue.stage-c": {
+  "text": "13.8",
+  "value": 13512.0
+ },
+ "peak.deltablue.stage-c-off": {
+  "text": "13.8",
+  "value": 13512.0
+ },
+ "peak.json-deep.stage-b": {
+  "text": "15.0",
+  "value": 14664.0
+ },
+ "peak.json-deep.stage-c": {
+  "text": "15.0",
+  "value": 14664.0
+ },
+ "peak.json-deep.stage-c-off": {
+  "text": "15.0",
+  "value": 14664.0
+ },
+ "peak.maps.stage-b": {
+  "text": "28.5",
+  "value": 27800.0
+ },
+ "peak.maps.stage-c": {
+  "text": "29.6",
+  "value": 28866.0
+ },
+ "peak.maps.stage-c-off": {
+  "text": "29.5",
+  "value": 28788.0
+ },
+ "peak.strings.stage-b": {
+  "text": "27.6",
+  "value": 26962.0
+ },
+ "peak.strings.stage-c": {
+  "text": "32.8",
+  "value": 32030.0
+ },
+ "peak.strings.stage-c-off": {
+  "text": "28.6",
+  "value": 27952.0
+ },
+ "peak.words.stage-b": {
+  "text": "27.6",
+  "value": 26922.0
+ },
+ "peak.words.stage-c": {
+  "text": "28.5",
+  "value": 27836.0
+ },
+ "peak.words.stage-c-off": {
+  "text": "28.5",
+  "value": 27844.0
+ },
+ "programs.compute": {
+  "text": "5",
+  "value": 5
+ },
+ "programs.native": {
+  "text": "4",
+  "value": 4
+ },
+ "programs.stage-b": {
+  "text": "5",
+  "value": 5
+ },
+ "programs.stage-c": {
+  "text": "5",
+  "value": 5
+ },
+ "programs.stage-c-off": {
+  "text": "5",
+  "value": 5
+ },
+ "programs.start": {
+  "text": "0",
+  "value": 0
+ },
+ "ratio.deltablue.stage-c.stage-b": {
+  "text": "0.91",
+  "value": 0.9123033828916182
+ },
+ "ratio.deltablue.stage-c.stage-c-off": {
+  "text": "0.92",
+  "value": 0.918637448470384
+ },
+ "ratio.json-deep.stage-c.stage-b": {
+  "text": "1.01",
+  "value": 1.0088652482269502
+ },
+ "ratio.json-deep.stage-c.stage-c-off": {
+  "text": "1.00",
+  "value": 1.0024665257223397
+ },
+ "ratio.maps.stage-c.stage-b": {
+  "text": "1.05",
+  "value": 1.0462719392815558
+ },
+ "ratio.maps.stage-c.stage-c-off": {
+  "text": "1.05",
+  "value": 1.0450551343900758
+ },
+ "ratio.strings.stage-c.stage-b": {
+  "text": "1.03",
+  "value": 1.0296037296037297
+ },
+ "ratio.strings.stage-c.stage-c-off": {
+  "text": "1.07",
+  "value": 1.069491525423729
+ },
+ "ratio.words.stage-c.stage-b": {
+  "text": "1.05",
+  "value": 1.0495942290351667
+ },
+ "ratio.words.stage-c.stage-c-off": {
+  "text": "1.07",
+  "value": 1.068235802202548
+ },
+ "repeat.pass2.stage-b": {
+  "text": "1.01",
+  "value": 1.0131690413474599
+ },
+ "repeat.pass2.stage-c": {
+  "text": "1.01",
+  "value": 1.011731608444241
+ },
+ "repeat.pass2.stage-c-off": {
+  "text": "1.00",
+  "value": 0.9985495480475959
+ },
+ "rounds.pass1": {
+  "text": "201",
+  "value": 201
+ },
+ "rounds.pass2": {
+  "text": "201",
+  "value": 201
+ },
+ "samples.pass1": {
+  "text": "3015",
+  "value": 3015
+ },
+ "samples.pass2": {
+  "text": "3015",
+  "value": 3015
+ },
+ "slower.compute.stage-c.stage-b": {
+  "text": "2",
+  "value": 2
+ },
+ "slower.compute.stage-c.stage-c-off": {
+  "text": "3",
+  "value": 3
+ },
+ "slower.native.stage-c.stage-b": {
+  "text": "2",
+  "value": 2
+ },
+ "temp.max.pass1": {
+  "text": "100",
+  "value": 100
+ },
+ "temp.max.pass2": {
+  "text": "101",
+  "value": 101
+ }
+}

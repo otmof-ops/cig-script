@@ -343,10 +343,11 @@ class Model:
                     # default is within 10% of the tree-walker's when the
                     # ratio does not exceed 1.10 (a faster first run passes;
                     # a slower one by more than 10% does not).
-                    is_within = 1 if r <= 1.10 else 0
-                    self.put("within10.%s.%s.%s" % (prog, a, b),
-                             "within 10%" if is_within else "past 10%",
-                             is_within)
+                    if (a, b) in (("cig-auto-cold", "cig-tree"), ("cig-auto-second", "cig-tree")):
+                        is_within = 1 if r <= 1.10 else 0
+                        self.put("within10.%s.%s.%s" % (prog, a, b),
+                                 "within 10%" if is_within else "past 10%",
+                                 is_within)
             sets = [("compute", self.compute), ("start", self.start)]
             if (a, b) == ("stage-c", "stage-b"):
                 sets.append(("native", self.native_set))

@@ -103,7 +103,7 @@ In what follows, `p` is a program, `s` a side, `k` a pass number from 1 (written
 | key | exists when | value | text |
 |---|---|---|---|
 | `ratio.p.A.B` | (p, A) and (p, B) both valid | the ratio | ratio |
-| `within10.p.A.B` | as `ratio.p.A.B` | `1` when `ratio.p.A.B <= 1.10`, else `0` (cig-script#259's gate on a first run: a slowdown of more than 10% fails, a faster first run passes) | the string `within 10%` for `1`, `past 10%` for `0` |
+| `within10.p.A.B` | as `ratio.p.A.B`, and only for (A, B) = (`cig-auto-cold`, `cig-tree`) and (`cig-auto-second`, `cig-tree`) | `1` when `ratio.p.A.B <= 1.10`, else `0` (cig-script#259's gate on a first run: a slowdown of more than 10% fails, a faster first run passes) | the string `within 10%` for `1`, `past 10%` for `0` |
 | `geomean.SET.A.B` | at least one program of SET has both pairs valid | the geometric mean of the ratios over those programs | ratio |
 | `inverse.SET.A.B` | as `geomean.SET.A.B` | `1 / geomean` | ratio |
 | `faster.SET.A.B`, `level.SET.A.B`, `slower.SET.A.B` | as `geomean.SET.A.B` | as section 4 | count |

@@ -36,6 +36,9 @@ ENGINES = ["cig-tree", "cig-vm", "cig-vm-cold"]
 # with the module kept (`cig-auto`), on a script's first run (`cig-auto-cold`)
 # and on its second (`cig-auto-second`).
 AUTO_ENGINES = ["cig-auto", "cig-auto-cold", "cig-auto-second"]
+# The pairs cig-script#259's gate is read on: a script's first and second run
+# on the default against the tree-walker's.
+WITHIN10 = [("cig-auto-cold", "cig-tree"), ("cig-auto-second", "cig-tree")]
 # The first-runs tables' columns: the tree-walker, a script's runs under the
 # default in the order they happen, then the VM asked for by name.
 FIRST_RUNS = ["cig-tree", "cig-auto-cold", "cig-auto-second", "cig-auto", "cig-vm-cold", "cig-vm"]
@@ -273,10 +276,13 @@ class Numbers:
                     # cig-script#259's gate: a first run on the default is within
                     # 10% of the tree-walker's when the ratio does not exceed
                     # 1.10. Faster than the tree-walker is "within 10%": the
-                    # gate is on the slowdown, not on either side of 1.
-                    is_within = 1 if r <= 1.10 else 0
-                    self.put("within10.%s.%s.%s" % (p, a, b), is_within,
-                             "within 10%" if is_within else "past 10%")
+                    # gate is on the slowdown, not on either side of 1. The key
+                    # is made for the pairs the gate is about and no other, so
+                    # a run without those sides has the keys it always had.
+                    if (a, b) in WITHIN10:
+                        is_within = 1 if r <= 1.10 else 0
+                        self.put("within10.%s.%s.%s" % (p, a, b), is_within,
+                                 "within 10%" if is_within else "past 10%")
             set_names = ["compute", "start"]
             if (a, b) == ("stage-c", "stage-b") and self.native_set:
                 set_names.append("native")
