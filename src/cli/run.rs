@@ -382,9 +382,9 @@ fn engine_asked(flag: Option<EngineArg>, config: &Config) -> Result<EngineArg, D
 }
 
 /// A pure function of (engine the run asks for, whether a module is
-/// cached, whether a refusal is cached): what the run actually does, so
-/// every cell of `--engine`'s table can be unit-tested without starting
-/// cig at all.
+/// cached, whether a refusal is cached, whether the script has been
+/// seen before): what the run actually does, so every cell of
+/// `--engine`'s table can be unit-tested without starting cig at all.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ChoiceOutcome {
     /// Run this script on the VM, module from the cache.
@@ -393,11 +393,14 @@ pub enum ChoiceOutcome {
     VmLoweringNow,
     /// Run on the tree-walker, nothing to do afterwards.
     TreeWalker,
+    /// Run on the tree-walker, and write a first-sighting mark beside
+    /// the modules. No child is started: the second sighting will.
+    TreeWalkerThenMarkSeen,
     /// Run on the tree-walker; a `__lower` subprocess spawns after the
     /// run to keep the module for the next one.
     TreeWalkerThenLower,
-    /// Run on the tree-walker, then lower in this process and wait
-    /// (`auto_lower = wait`, for deterministic tests).
+    /// Run on the tree-walker, then run `cig __lower` as a child and
+    /// wait for it (`auto_lower = wait`, for deterministic tests).
     TreeWalkerThenLowerWait,
 }
 
@@ -406,11 +409,16 @@ pub enum ChoiceOutcome {
 /// its engine is its stage's. `no_check` is read first: a script that is
 /// not checked runs as written, which only the tree-walker does, and the
 /// cache has nothing to add here.
+///
+/// Under `auto` with nothing kept for the script, the mark decides
+/// which run starts the lowering: a first sighting only writes the
+/// mark; the second sighting (the mark is there) starts the child.
 pub(crate) fn choose(
     engine: EngineArg,
     no_check: bool,
     module_cached: bool,
     refusal_cached: bool,
+    seen: bool,
     auto: AutoLower,
 ) -> ChoiceOutcome {
     if no_check {
@@ -422,10 +430,13 @@ pub(crate) fn choose(
         EngineArg::Vm => ChoiceOutcome::VmLoweringNow,
         EngineArg::Auto if module_cached => ChoiceOutcome::VmCached,
         EngineArg::Auto if refusal_cached => ChoiceOutcome::TreeWalker,
-        EngineArg::Auto => match auto {
-            AutoLower::Off => ChoiceOutcome::TreeWalker,
-            AutoLower::On => ChoiceOutcome::TreeWalkerThenLower,
-            AutoLower::Wait => ChoiceOutcome::TreeWalkerThenLowerWait,
+        EngineArg::Auto => match (auto, seen) {
+            (AutoLower::Off, _) => ChoiceOutcome::TreeWalker,
+            (AutoLower::On, false) | (AutoLower::Wait, false) => {
+                ChoiceOutcome::TreeWalkerThenMarkSeen
+            }
+            (AutoLower::On, true) => ChoiceOutcome::TreeWalkerThenLower,
+            (AutoLower::Wait, true) => ChoiceOutcome::TreeWalkerThenLowerWait,
         },
     }
 }
@@ -662,48 +673,63 @@ pub fn internal_lower(file: &std::path::Path) -> i32 {
         // Someone else has the marker: one lowering at a time per script.
         return exit::OK;
     };
+    keep_lowered(file, &source, &key);
+    // The first-sighting mark is spent by this attempt, whatever came of
+    // it. Where a module or a refusal is kept, the next run finds that
+    // under the same key and reads no mark. Where nothing could be kept
+    // (a tin with no room, say), the script is unseen again: its next
+    // run leaves a mark and the one after starts a lowering, so a tin
+    // that cannot keep a module does not have a process started for it
+    // on every run. The mark goes before the marker does (`_lock` is
+    // dropped after this), and after the entry is in place.
+    crate::burn::modcache::clear_seen(&key);
+    exit::OK
+}
+
+/// The work of `cig __lower` once it holds the marker for `key`: keep a
+/// module for the script, or the reason there is none.
+fn keep_lowered(file: &std::path::Path, source: &str, key: &crate::burn::modcache::Key) {
     // If a healthy module or a refusal for this build is already there
     // (for example, a `--engine vm` run just before the spawn), do no
     // work. A module whose body is damaged is detected by `vm::open`
-    // (the MAC covers the header, not the body): treat such an entry
-    // as absent so the fresh lowering below overwrites it.
-    match crate::burn::modcache::lookup(&key) {
-        Some(crate::burn::modcache::Hit::Refused { .. }) => return exit::OK,
+    // (the MAC covers the header, not the body): treat such an entry as
+    // absent so the fresh lowering below overwrites it.
+    match crate::burn::modcache::lookup(key) {
+        Some(crate::burn::modcache::Hit::Refused { .. }) => return,
         Some(crate::burn::modcache::Hit::Module { module, .. }) => {
             if crate::vm::open(module).is_ok() {
-                return exit::OK;
+                return;
             }
             // The body does not open: the entry heals below.
         }
         None => {}
     }
-    let program = match parse(&source) {
-        Ok(p) => p,
-        Err(_) => return exit::OK,
+    let Ok(program) = parse(source) else {
+        return;
     };
     let rep = check::check(&program, &[]);
     if !rep.ok() {
         // A script that does not check is a run that will say so when the
         // tree-walker tries it; nothing is cached.
-        return exit::OK;
+        return;
     }
     // `warned` is set the same way `cig run` sets it: the check's own
     // warnings and, when the pin lives in the script's own bytes, its
     // warnings too. One function so the two paths cannot drift.
-    let warned = lowered_warned(file, &source, &program, &rep);
+    let warned = lowered_warned(file, source, &program, &rep);
     match crate::lower::module_loaded(&program, "") {
         Ok((bytes, _loaded)) => {
-            let _ = crate::burn::modcache::store(&key, &bytes, warned);
+            let _ = crate::burn::modcache::store(key, &bytes, warned);
         }
         Err(crate::lower::Failure::Refused(what)) => {
             let _ = crate::burn::modcache::store_refusal(
-                &key,
+                key,
                 &format!("the lowering does not take it yet: {what}"),
             );
         }
         Err(crate::lower::Failure::Internal(e)) => {
             let _ = crate::burn::modcache::store_refusal(
-                &key,
+                key,
                 &format!("the lowering failed on it: {e}"),
             );
         }
@@ -714,12 +740,11 @@ pub fn internal_lower(file: &std::path::Path) -> i32 {
             // changes, so a reproducible panic does not cost a report
             // on every run.
             let _ = crate::burn::modcache::store_refusal(
-                &key,
+                key,
                 &format!("the lowering crashed on it: {e}"),
             );
         }
     }
-    exit::OK
 }
 
 /// Was this script's check noisy enough that a later run has something
@@ -811,8 +836,13 @@ fn spawn_background_lower(script: &std::path::Path) {
 /// `auto_lower = wait`. The child is a separate process (as
 /// [`spawn_background_lower`] starts one), so it keys the script by the
 /// bytes it reads itself. The parent waits for its status rather than
-/// exiting, so no test leaves a child behind.
+/// exiting, so no test leaves a child behind. `wait` refuses what `on`
+/// refuses: a script that is not a regular file (a pipe, a process
+/// substitution, `/dev/stdin`) starts no child.
 fn lower_in_foreground(script: &std::path::Path) {
+    if !is_regular_file(script) {
+        return;
+    }
     if let Some(mut cmd) = lower_command(script) {
         let _ = cmd.status();
     }
@@ -916,6 +946,19 @@ fn run_source_inner(
         }
         t.end("module", module_t);
     }
+    // The mark lives beside the modules under the same key; the first
+    // run of a script writes it, the second run reads it, and `__lower`
+    // clears it when it keeps a module or a refusal. Read it only where
+    // `choose` uses it: `auto`, no module, no refusal, and
+    // `auto_lower` not `off`. Every other cell is settled without the
+    // mark.
+    let module_cached_initially = kept.is_some() || safe_to_use_cached.is_some();
+    let want_seen = !args.no_check
+        && engine_choice == EngineArg::Auto
+        && !module_cached_initially
+        && cached_refusal.is_none()
+        && !matches!(auto_lower, AutoLower::Off);
+    let seen = want_seen && key.as_ref().is_some_and(modcache::is_seen);
     // What auto picks on this run, and what to do afterwards. `choose` is
     // the one authority: what runs and what the record says both follow
     // its result, so a cached module cannot sneak through `--no-check`
@@ -923,18 +966,17 @@ fn run_source_inner(
     let initial_plan = choose(
         engine_choice,
         args.no_check,
-        kept.is_some() || safe_to_use_cached.is_some(),
+        module_cached_initially,
         cached_refusal.is_some(),
+        seen,
         auto_lower,
     );
     // The kept bytes are opened only when the plan picked the VM from
     // the cache; a tree-walker plan leaves them where they are. An open
     // failure degrades the plan below: a damaged body gives
-    // `module = None` here, the plan falls back to what a missing
-    // module would have picked (lower now under `--engine vm`, tree +
-    // `__lower` under `--engine auto`), and the entry is overwritten
-    // (`vm` lowers inline; `auto` leaves it to the child, which skips
-    // the early-return when the lookup's module cannot be opened).
+    // `module = None` here, and the entry is overwritten (`vm` lowers
+    // inline; `auto` leaves it to the child, which skips the
+    // early-return when the lookup's module cannot be opened).
     let mut open_failed_on_cached = false;
     if matches!(initial_plan, ChoiceOutcome::VmCached) {
         if let Some(bytes) = safe_to_use_cached.take() {
@@ -950,19 +992,14 @@ fn run_source_inner(
             }
         }
     }
-    // The run's plan after any open failure. Only `VmCached` can
-    // degrade: `VmLoweringNow`, `TreeWalker*` and `TreeWalker` leave no
-    // room for one.
+    // The run's plan after any open failure: a second call to `choose`
+    // keeps it the one authority. A kept module whose body no longer
+    // opens is the script having been seen, by definition, so the heal
+    // path asks `choose` for "no module, no refusal, seen" and reads
+    // its answer (lower now under `vm`, or the `on`/`wait` child under
+    // `auto`, or the tree-walker under `off`).
     let plan = if open_failed_on_cached && module.is_none() {
-        match engine_choice {
-            EngineArg::Vm => ChoiceOutcome::VmLoweringNow,
-            EngineArg::Auto => match auto_lower {
-                AutoLower::Off => ChoiceOutcome::TreeWalker,
-                AutoLower::On => ChoiceOutcome::TreeWalkerThenLower,
-                AutoLower::Wait => ChoiceOutcome::TreeWalkerThenLowerWait,
-            },
-            EngineArg::Tree => ChoiceOutcome::TreeWalker,
-        }
+        choose(engine_choice, args.no_check, false, false, true, auto_lower)
     } else {
         initial_plan
     };
@@ -1069,9 +1106,14 @@ fn run_source_inner(
                 Ok((bytes, m)) => {
                     if let Some(key) = &key {
                         // A module that cannot be kept is lowered again
-                        // next time; the run goes on either way.
+                        // next time; the run goes on either way. A
+                        // mark an earlier `auto` run left under this
+                        // key is cleared: a module beside a mark is
+                        // the cleanup case the sweep handles.
                         let keep_t = t.start();
-                        let _ = modcache::store(key, &bytes, warned);
+                        if modcache::store(key, &bytes, warned).is_ok() {
+                            modcache::clear_seen(key);
+                        }
                         t.end("compile-keep", keep_t);
                     }
                     // The module as the lowering loaded it to check it:
@@ -1082,14 +1124,18 @@ fn run_source_inner(
                 Err(crate::lower::Failure::Refused(what)) => {
                     let reason = format!("the lowering does not take it yet: {what}");
                     if let Some(key) = &key {
-                        let _ = modcache::store_refusal(key, &reason);
+                        if modcache::store_refusal(key, &reason).is_ok() {
+                            modcache::clear_seen(key);
+                        }
                     }
                     chosen.why_tree = Some(reason);
                 }
                 Err(crate::lower::Failure::Internal(e)) => {
                     let reason = format!("the lowering failed on it: {e}");
                     if let Some(key) = &key {
-                        let _ = modcache::store_refusal(key, &reason);
+                        if modcache::store_refusal(key, &reason).is_ok() {
+                            modcache::clear_seen(key);
+                        }
                     }
                     chosen.why_tree = Some(reason);
                 }
@@ -1104,13 +1150,14 @@ fn run_source_inner(
             }
         }
     }
-    // Under `--engine auto`, with no module and no refusal cached, the
-    // tree-walker runs it now and the lowering is left to a `__lower`
-    // subprocess (`on`), or waited for (`wait`), or skipped (`off`). The
-    // spawn itself happens after the real work; this marks it.
-    let after_lower = match plan {
-        ChoiceOutcome::TreeWalkerThenLower => Some(AutoLower::On),
-        ChoiceOutcome::TreeWalkerThenLowerWait => Some(AutoLower::Wait),
+    // What `--engine auto` does after the real work: write the
+    // first-sighting mark (`TreeWalkerThenMarkSeen`), spawn a `__lower`
+    // child (`TreeWalkerThenLower`), or run the child and wait
+    // (`TreeWalkerThenLowerWait`). Nothing else leaves anything behind.
+    let after_work = match plan {
+        ChoiceOutcome::TreeWalkerThenMarkSeen => Some(AfterWork::MarkSeen),
+        ChoiceOutcome::TreeWalkerThenLower => Some(AfterWork::Spawn),
+        ChoiceOutcome::TreeWalkerThenLowerWait => Some(AfterWork::SpawnWait),
         _ => None,
     };
 
@@ -1551,17 +1598,40 @@ fn run_source_inner(
         }
     }
     t.end("burn", burn_t);
-    // Under `--engine auto` the lowering happens after the script's own
-    // work, so nothing it prints or burns waits on it. A spawn that fails
-    // changes nothing about the run (`on`); `wait` is the test form.
-    if let Some(kind) = after_lower {
-        match kind {
-            AutoLower::On => spawn_background_lower(&args.file),
-            AutoLower::Wait => lower_in_foreground(&args.file),
-            AutoLower::Off => {}
+    // Under `--engine auto` what is left behind happens after the
+    // script's own work, so nothing it prints or burns waits on it: a
+    // first sighting writes the mark, a second sighting starts (or
+    // waits for) the `__lower` child. A failure to write the mark or
+    // to spawn changes nothing about the run.
+    if let Some(step) = after_work {
+        match step {
+            AfterWork::MarkSeen => {
+                // A script that is not a regular file (a pipe, a
+                // process substitution, `/dev/stdin`) is not keyed by
+                // the bytes a later run will see, so a mark for it
+                // would linger: no mark for it, as no child either.
+                if let Some(key) = &key {
+                    if is_regular_file(&args.file) {
+                        let _ = modcache::mark_seen(key);
+                    }
+                }
+            }
+            AfterWork::Spawn => spawn_background_lower(&args.file),
+            AfterWork::SpawnWait => lower_in_foreground(&args.file),
         }
     }
     code
+}
+
+/// What `--engine auto` leaves behind after the script's own work.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AfterWork {
+    /// First sighting: write `<key>.seen` beside the modules.
+    MarkSeen,
+    /// Second sighting: start `cig __lower` in the background.
+    Spawn,
+    /// `auto_lower = wait`: run `cig __lower` as a child and wait.
+    SpawnWait,
 }
 
 /// Whose fault was it, and did cig keep its promises? A cough, a runtime
@@ -2053,68 +2123,107 @@ mod engine_tests {
     use super::*;
 
     /// The choice table: for every cell of (engine asked, cache state,
-    /// auto_lower), what does the run do?
+    /// auto_lower, seen), what does the run do?
     #[test]
     fn choose_covers_every_cell_of_the_engine_table() {
-        // no_check: always the tree-walker, before the cache or
-        // auto_lower is read, whichever engine was asked for.
+        // no_check: always the tree-walker, before the cache,
+        // auto_lower or the mark is read, whichever engine was asked
+        // for.
         for engine in [EngineArg::Tree, EngineArg::Vm, EngineArg::Auto] {
             for (cache_mod, cache_ref) in [(false, false), (true, false), (false, true)] {
                 for auto in [AutoLower::On, AutoLower::Off, AutoLower::Wait] {
-                    assert_eq!(
-                        choose(engine, true, cache_mod, cache_ref, auto),
-                        ChoiceOutcome::TreeWalker,
-                        "no_check keeps the tree-walker for {engine:?} / mod={cache_mod} ref={cache_ref} auto={auto:?}"
-                    );
+                    for seen in [false, true] {
+                        assert_eq!(
+                            choose(engine, true, cache_mod, cache_ref, seen, auto),
+                            ChoiceOutcome::TreeWalker,
+                            "no_check for {engine:?} / mod={cache_mod} ref={cache_ref} seen={seen} auto={auto:?}"
+                        );
+                    }
                 }
             }
         }
         // tree: always the tree-walker, whatever the cache says.
         for (cache_mod, cache_ref) in [(false, false), (true, false), (false, true)] {
             for auto in [AutoLower::On, AutoLower::Off, AutoLower::Wait] {
+                for seen in [false, true] {
+                    assert_eq!(
+                        choose(EngineArg::Tree, false, cache_mod, cache_ref, seen, auto),
+                        ChoiceOutcome::TreeWalker
+                    );
+                }
+            }
+        }
+        // vm: today's behavior; seen does not matter here.
+        for seen in [false, true] {
+            for auto in [AutoLower::On, AutoLower::Off, AutoLower::Wait] {
                 assert_eq!(
-                    choose(EngineArg::Tree, false, cache_mod, cache_ref, auto),
-                    ChoiceOutcome::TreeWalker
+                    choose(EngineArg::Vm, false, false, false, seen, auto),
+                    ChoiceOutcome::VmLoweringNow
+                );
+                assert_eq!(
+                    choose(EngineArg::Vm, false, true, false, seen, auto),
+                    ChoiceOutcome::VmCached
+                );
+                // A refusal cached: `vm` still lowers now (and finds
+                // the same refusal, which falls back to the
+                // tree-walker in the run path).
+                assert_eq!(
+                    choose(EngineArg::Vm, false, false, true, seen, auto),
+                    ChoiceOutcome::VmLoweringNow
                 );
             }
         }
-        // vm: today's behaviour.
+        // auto: cache first, then the mark, then auto_lower. A module
+        // or a refusal reads the same whether the mark is there.
+        for seen in [false, true] {
+            assert_eq!(
+                choose(EngineArg::Auto, false, true, false, seen, AutoLower::On),
+                ChoiceOutcome::VmCached
+            );
+            assert_eq!(
+                choose(EngineArg::Auto, false, false, true, seen, AutoLower::On),
+                ChoiceOutcome::TreeWalker
+            );
+        }
+        // First sighting: the tree-walker and the mark (on, wait).
+        // `off` leaves nothing, not even the mark.
         assert_eq!(
-            choose(EngineArg::Vm, false, false, false, AutoLower::On),
-            ChoiceOutcome::VmLoweringNow
+            choose(EngineArg::Auto, false, false, false, false, AutoLower::On),
+            ChoiceOutcome::TreeWalkerThenMarkSeen
         );
         assert_eq!(
-            choose(EngineArg::Vm, false, true, false, AutoLower::On),
-            ChoiceOutcome::VmCached
-        );
-        // A refusal cached: `vm` still lowers now (and finds the same
-        // refusal, which falls back to the tree-walker in the run path).
-        // The choose() table says "lower now"; the lowering call that
-        // follows reads the refusal path.
-        assert_eq!(
-            choose(EngineArg::Vm, false, false, true, AutoLower::On),
-            ChoiceOutcome::VmLoweringNow
-        );
-        // auto: cache first, then auto_lower.
-        assert_eq!(
-            choose(EngineArg::Auto, false, true, false, AutoLower::On),
-            ChoiceOutcome::VmCached
+            choose(EngineArg::Auto, false, false, false, false, AutoLower::Wait),
+            ChoiceOutcome::TreeWalkerThenMarkSeen
         );
         assert_eq!(
-            choose(EngineArg::Auto, false, false, true, AutoLower::On),
+            choose(EngineArg::Auto, false, false, false, false, AutoLower::Off),
             ChoiceOutcome::TreeWalker
         );
+        // Second sighting: the mark is there; the child is started
+        // (on) or waited for (wait). Off does nothing even seen. This
+        // is also the cell the heal path asks for: a kept module
+        // whose body no longer opens is the script having been seen,
+        // by definition, and `run_source_inner` re-calls `choose`
+        // with `seen = true` to get the heal plan.
         assert_eq!(
-            choose(EngineArg::Auto, false, false, false, AutoLower::On),
+            choose(EngineArg::Auto, false, false, false, true, AutoLower::On),
             ChoiceOutcome::TreeWalkerThenLower
         );
         assert_eq!(
-            choose(EngineArg::Auto, false, false, false, AutoLower::Off),
-            ChoiceOutcome::TreeWalker
+            choose(EngineArg::Auto, false, false, false, true, AutoLower::Wait),
+            ChoiceOutcome::TreeWalkerThenLowerWait
         );
         assert_eq!(
-            choose(EngineArg::Auto, false, false, false, AutoLower::Wait),
-            ChoiceOutcome::TreeWalkerThenLowerWait
+            choose(EngineArg::Auto, false, false, false, true, AutoLower::Off),
+            ChoiceOutcome::TreeWalker
+        );
+        // Heal path for `--engine vm`: a kept module that would not
+        // open is the same as not having one. `choose` with
+        // `seen = true` and no module gives `VmLoweringNow`, which is
+        // what the heal path reads.
+        assert_eq!(
+            choose(EngineArg::Vm, false, false, false, true, AutoLower::On),
+            ChoiceOutcome::VmLoweringNow
         );
     }
 

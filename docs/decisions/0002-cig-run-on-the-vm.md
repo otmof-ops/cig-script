@@ -221,20 +221,56 @@ default. The table:
 |---|---|---|
 | `tree` | the tree-walker | the tree-walker |
 | `vm` (unchanged) | the VM | lowered now, kept, run on the VM |
-| `auto` (new, the default) | the VM | the tree-walker runs it now, and a `__lower` subprocess left behind lowers the script and keeps the module for the next run |
+| `auto` (new, the default) | the VM | the tree-walker runs it, and the lowering is left to a `cig __lower` process that the script's second run starts |
 
-A first run on `auto` pays the tree-walker's start-up and nothing more.
+Under `auto` a script gets to the VM over three runs, and none of them
+waits for the lowering:
+
+| run of a script under `auto` | what runs it | what else happens |
+|---|---|---|
+| first (no module, not seen) | the tree-walker | an empty mark, `<key>.seen`, is left beside the modules; no process is started |
+| second (no module, seen) | the tree-walker | `cig __lower` is left behind; it lowers the script and keeps the module |
+| later (a module kept) | the VM | |
+| any (a refusal kept) | the tree-walker | nothing, as under `--engine vm` |
+
 M6 (warm starts, cig-script#279) measured cigo's script at 28 ms on the
 tree-walker every time and 308 ms on a first run on the VM, of which
 277 ms was the lowering; from a kept module the VM starts it in 9.2 ms.
 M1 (run times across 116 scripts) gave the shape of a cig script's work:
 the median script finishes in 1.0 ms on the VM, and 90% of them in under
-10 ms. The next run finds the module and starts on the VM. The two
-engines' behaviour is held to the tree-walker by the differential
-suites, which is unchanged.
+10 ms. The two engines' behavior is held to the tree-walker by the
+differential suites, which is unchanged.
 
-**The alternatives #259 lists, and why each was not taken.**
+**Why the second run and not the first.** As first built (#285), `auto`
+started `cig __lower` on a script's first run. Measured on `main` at
+`da5cd6f` (2026-11-25, a development machine, whole processes, the
+harness of the benchmark papers), that first run took about 1.1 times
+the tree-walker's time on `hello` and about 1.2 on the 500-line script
+with a CPU free for the process left behind, and about 1.5 and 1.8 with
+both held to one CPU. #259's bar is a first run within 10% of the
+tree-walker's. Three things are in those figures:
 
+- Starting a process costs a few tenths of a millisecond, which is a
+  good part of a run of two.
+- On one CPU the process left behind runs its lowering before the run
+  that started it has exited, and that run's exit waits behind it.
+- A script that is run once never gets any of it back: its module is
+  never loaded, a process was started for it, and the tin grew.
+
+So a first run only leaves a mark, and the process is started for a
+script that has come back. The second run still pays for starting it,
+and on one CPU still waits behind the lowering; it does so once for
+each text a script has had under one build of cig.
+
+**The alternatives, and why each was not taken.**
+
+- *Start the lowering on the first run.* What was built first; the
+  figures above.
+- *Have the process left behind wait for the run that started it to
+  exit before it lowers.* That takes out the one-CPU case and not the
+  start of the process, and a script that is run once still has a
+  process started for it. It can still be added to the second run,
+  where the one-CPU case remains.
 - *A cheaper lowering.* M6 says the lowering of the released build's
   500-line script is 4.0 ms. A linear cut of 50% in the lowering still
   leaves a 500-line first run at 2.5 ms (the tree-walker's start-up, as
@@ -242,25 +278,41 @@ suites, which is unchanged.
   and so far past the 10% bar. Faster lowering is still worth having;
   it cannot by itself pay for the first run.
 - *Lower in the same process after the script runs.* The 500-line
-  script's first run then takes 2.5 + 4.0 = 6.5 ms where the
-  tree-walker takes 2.5: a user-visible slowdown on the first run,
-  which fails #259's own bar. A child process is what git does for
-  `gc --auto` for the same reason.
+  script's run then takes 2.5 + 4.0 = 6.5 ms where the tree-walker
+  takes 2.5: a slowdown the user sees, which fails #259's own bar. A
+  child process is what git does for `gc --auto` for the same reason.
 - *Lower lazily per function.* The cost moves into the first call of
   each function; a script that calls many functions once still pays
   most of the lowering, and cold-start cases remain the ones this
   change is for. The alternative is left open for cig-cherry (#256).
 
+**The mark.** A file beside the modules, named `<key>.seen` under the
+key the script's module would have, made with `create_new` through the
+module cache's own way of making private files. It holds nothing and is
+not synced: a mark lost in a crash costs one more run on the
+tree-walker. Making it is the only thing a first run does that a run
+under `--engine tree` does not, and a mark that cannot be made changes
+nothing about the run. A script that is not a plain file (a pipe,
+`/dev/stdin`) gets no mark, as it gets no lowering. The mark is removed
+by the lowering attempt it leads to, whatever comes of that attempt: a
+tin that cannot keep a module then has a process started for a script
+on every second run of it, not on every run. `cig run --engine vm`
+removes it when it keeps an entry under the same key. `cig tin gc`
+removes a mark that is 30 days old (the age at which it removes a
+module nothing has loaded) and any mark beside a kept entry; nothing
+else does.
+
 **The left-behind process.** One spawn after the script's own work has
-ended, all three streams on the null device, in a process group of its
-own (`std::process::Command::process_group(0)` on Unix; the creation
-flags `std::os::windows::process::CommandExt` gives on Windows), never
-waited for. `forbid(unsafe_code)` stays: no `pre_exec`. A spawn that
-fails changes nothing about the run.
+ended, on the script's second run, all three streams on the null
+device, in a process group of its own
+(`std::process::Command::process_group(0)` on Unix; the creation flags
+`std::os::windows::process::CommandExt` gives on Windows), never waited
+for. `forbid(unsafe_code)` stays: no `pre_exec`. A spawn that fails
+changes nothing about the run.
 
 **The marker.** A file beside the modules, taken with `create_new`,
-removed when the lowering keeps a module or exits. Twenty first runs
-that start together keep one module and leave no leftover marker; a
+removed when the lowering keeps a module or exits. Twenty runs that
+start a lowering together keep one module and leave no leftover marker; a
 `__lower` that crashed or was killed leaves a marker that is treated
 as stale after ten minutes and taken over on the next run. `cig tin
 gc` removes markers older than an hour, as it does the leftovers of an
@@ -273,12 +325,14 @@ it and never spawns another lowering until the script or the build
 changes. A `cig tin gc` or a `cig tin clear` removes it; the next run
 on `auto` tries the lowering again.
 
-**The off switch.** `auto_lower` (and `CIG_AUTO_LOWER`) takes `on` (the
-default: spawn), `off` (never spawn; `auto` stays the tree-walker
-until something else keeps a module, such as a single `cig run
---engine vm`) and `wait` (run `cig __lower` as a child, waited for
-and reaped; for a deterministic test). No test sleeps on a background
-process.
+**The off switch.** `auto_lower` (and `CIG_AUTO_LOWER`) takes `on`
+(the default: the mark on a first run, the process on a second), `off`
+(neither; `auto` stays the tree-walker until something else keeps a
+module, such as a single `cig run --engine vm`) and `wait` (the mark on
+a first run; on a second, `cig __lower` run as a child, waited for and
+reaped; for a deterministic test). No test sleeps on a background
+process. A kept module that no longer opens counts as seen: the run
+that finds it starts the lowering at once and leaves no mark.
 
 **The record.** `engine` already carried which engine ran and, when a
 run asked for the VM but got the tree-walker, why. Under `auto` a run
