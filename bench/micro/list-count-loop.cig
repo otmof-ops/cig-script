@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# The loop list.count replaces: a counter over a list, as sieve.cig's
+# final count of `true` does. Paired with list-count-builtin.cig
+# (#255). Needs CIG_MAX_STEPS=0.
+stick n = 2000000
+roll is = [true].repeat(n + 1)
+is[0] = false
+is[1] = false
+roll c = 0
+for b in is {
+  if b {
+    c = c + 1
+  }
+}
+exhale c

@@ -5,6 +5,46 @@ project follows semantic versioning.
 
 ## Unreleased
 
+- **Six bulk built-ins: the loops scripts still write, done once in
+  Rust.** The paper of 2026-11-15 showed where cig gets its speed:
+  the built-ins written in Rust (`join`, `split`, `replace`, `find`,
+  `sort`), not the loops around them. These add the few that common
+  scripts and cigo's `orchestrate.cig` still write as loops, each a
+  whole loop done once:
+  - `xs.repeat(n)` on a list: a new list of `n` copies of `xs` end
+    to end (`[true].repeat(n + 1)`), one allocation of the right
+    size; a negative `n` is the message a string's `repeat` gives,
+    the value ceiling (E514) stops a request too big to build, and
+    the copies share what the elements share (a nested list is one
+    list in every copy, as it is after `xs + xs`);
+  - `xs.counts()` on a list: a map from each value to how many
+    times it appears, in first-seen order; an element is a key as
+    it would be for any map (a string, or an int as its digits, so
+    `"1"` and `1` are one key), and one that cannot be a key is the
+    existing type error for a map key;
+  - `m.inc(key)` and `m.inc(key, by)`: add 1 (or `by`) to an
+    entry, creating it at 0 first, in one lookup; the new value is
+    returned; the key is a string, as it is for `get` and `set`; an
+    entry that is not a number is a type error and stays as it was,
+    and an int that would overflow is the error `+` gives (E503);
+    `by` may be an int or a float;
+  - `xs.count(x)` on a list: how many elements equal `x`, by cig's
+    own equality;
+  - `s.count(sub)` on a string: how many times `sub` occurs
+    without overlap; an empty `sub` is 0;
+  - `xs.extend(ys)`: append every element of `ys` in place, sized
+    once; `xs.extend(xs)` works (the elements to append are
+    snapshotted first); the receiver is returned, as `push` does.
+
+  All six are pure, so they may be called anywhere a burn is not
+  needed, and they behave identically on both engines (the same Rust
+  code serves the tree-walker and the VM). The benchmark programs
+  are not rewritten to use them; instead `bench/micro/` has a pair
+  of programs (loop and built-in) for each, `bench/ref/idiom/` has
+  cig versions of `sieve` and `words` using them beside Python's and
+  JavaScript's idiomatic ones, and `bench/micro-builtins.sh` runs
+  the pairs. (#255)
+
 - **A loop's two step counts are one instruction in the VM's fast
   loop.** Every turn of a loop starts with two `steps` in a row, the
   loop's own and its first statement's. The fast loop of a function

@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# The word count of bench/compute/words.cig as cig can now be written: the words
+# tallied by list.counts, whose loop runs in Rust (#255). The top word is still
+# found by a loop because .sort_by calls back into the script.
+# ../../compute/words.cig is the statement-for-statement version this is measured
+# against.
+roll parts = []
+for i in 0..40000 {
+  parts.push("w${(i * 7919) % 997}")
+}
+stick text = parts.join(" ")
+roll counts = text.split(" ").counts()
+roll best = ""
+roll bestn = 0
+for w in counts.keys() {
+  if counts[w] > bestn or (counts[w] == bestn and w < best) {
+    best = w
+    bestn = counts[w]
+  }
+}
+exhale counts.len(), best, bestn

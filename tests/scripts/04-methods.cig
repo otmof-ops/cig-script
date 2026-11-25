@@ -17,3 +17,18 @@ exhale m, keys(m), values(m), entries(m)
 roll l2 = [1, 2, 3]
 l2.insert(0, 0)
 exhale l2.pop(), l2.remove(0), l2
+# Bulk built-ins (#255).
+exhale [true].repeat(4), [1, 2].repeat(3), "abababab".count("ab"), "aaaa".count("aa")
+exhale ["a", "b", "a", "a", "b", "c"].counts(), [1, 2, 1, 1, 2, 3].count(1)
+roll m2 = {}
+m2.inc("a")
+m2.inc("a", 2)
+m2.inc("b")
+exhale m2
+exhale m2.inc("a")
+exhale m2
+roll xs = [1, 2]
+xs.extend([3, 4])
+exhale xs
+xs.extend(xs)
+exhale xs

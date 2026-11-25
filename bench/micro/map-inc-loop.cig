@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# The three-step tally map.inc replaces: `has`, a read and a write for
+# every element. Paired with map-inc-builtin.cig (#255). Needs
+# CIG_MAX_STEPS=0.
+roll parts = []
+for i in 0..300000 {
+  parts.push("w${(i * 7919) % 997}")
+}
+roll counts = {}
+for w in parts {
+  if counts.has(w) {
+    counts[w] = counts[w] + 1
+  } else {
+    counts[w] = 1
+  }
+}
+exhale counts.len()

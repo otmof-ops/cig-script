@@ -320,6 +320,260 @@ mod tests {
         );
     }
 
+    /// The six bulk built-ins of #255. Every one pure, present on both
+    /// engines (same Rust code), and under the error rules their
+    /// siblings keep.
+    #[test]
+    fn list_repeat_builds_a_new_list_n_copies_long_and_refuses_a_negative_count_as_string_repeat_does(
+    ) {
+        let mut i = Interp::new(Kernel::ephemeral(Mode::Run));
+        let list = Value::list(vec![Value::Int(1), Value::Int(2)]);
+        let out = i
+            .call_method(&[list.clone(), Value::Int(3)], "repeat", Span::default())
+            .expect("repeat");
+        assert_eq!(out.repr(), "[1, 2, 1, 2, 1, 2]");
+        // Zero is a new, empty list.
+        let empty = i
+            .call_method(&[list.clone(), Value::Int(0)], "repeat", Span::default())
+            .expect("repeat 0");
+        assert_eq!(empty.repr(), "[]");
+        // A negative count is the same message the string's repeat gives.
+        let neg = i
+            .call_method(&[list, Value::Int(-1)], "repeat", Span::default())
+            .err()
+            .expect("negative");
+        assert_eq!(neg.message, "repeat: count cannot be negative");
+    }
+
+    #[test]
+    fn list_counts_tallies_each_value_in_first_seen_order_and_refuses_a_non_key_element() {
+        let mut i = Interp::new(Kernel::ephemeral(Mode::Run));
+        let list = Value::list(vec![
+            Value::str("a"),
+            Value::str("b"),
+            Value::str("a"),
+            Value::Int(1),
+            Value::str("a"),
+        ]);
+        let out = i
+            .call_method(&[list], "counts", Span::default())
+            .expect("counts");
+        assert_eq!(out.repr(), "{a: 3, b: 1, \"1\": 1}");
+        // A list with a non-string, non-int element is the existing
+        // type error for a map key.
+        let bad = Value::list(vec![Value::str("a"), Value::Bool(true)]);
+        let err = i
+            .call_method(&[bad], "counts", Span::default())
+            .err()
+            .expect("non-key");
+        assert_eq!(err.kind, crate::diagnostics::Kind::Type);
+        assert!(
+            err.message.contains("map keys must be strings"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn map_inc_adds_one_or_by_in_one_lookup_creating_the_entry_at_zero_first() {
+        let mut i = Interp::new(Kernel::ephemeral(Mode::Run));
+        let m = Value::map(IndexMap::new());
+        // A missing entry: the new value is 1 and the map carries it.
+        let one = i
+            .call_method(&[m.clone(), Value::str("a")], "inc", Span::default())
+            .expect("inc");
+        assert_eq!(one.repr(), "1");
+        // A second inc: the same key, the entry at 2 now.
+        let two = i
+            .call_method(
+                &[m.clone(), Value::str("a"), Value::Int(1)],
+                "inc",
+                Span::default(),
+            )
+            .expect("inc 2");
+        assert_eq!(two.repr(), "2");
+        // `by` of a float tips the entry to a float.
+        let two_half = i
+            .call_method(
+                &[m.clone(), Value::str("a"), Value::Float(0.5)],
+                "inc",
+                Span::default(),
+            )
+            .expect("inc float");
+        assert_eq!(two_half.repr(), "2.5");
+        assert_eq!(m.display(), "{a: 2.5}");
+        // Insertion order: a new key goes at the end.
+        i.call_method(
+            &[m.clone(), Value::str("b"), Value::Int(3)],
+            "inc",
+            Span::default(),
+        )
+        .expect("inc b");
+        assert_eq!(m.display(), "{a: 2.5, b: 3}");
+        // A non-number entry is a type error; the entry stays.
+        let m2 = {
+            let mut map = IndexMap::new();
+            map.insert("k".to_string(), Value::str("hello"));
+            Value::map(map)
+        };
+        let err = i
+            .call_method(&[m2.clone(), Value::str("k")], "inc", Span::default())
+            .err()
+            .expect("non-number");
+        assert_eq!(err.kind, crate::diagnostics::Kind::Type);
+        assert!(
+            err.message
+                .contains("the entry at \"k\" is string, not a number"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn the_bulk_built_ins_fail_as_their_siblings_do_at_their_edges() {
+        let mut i = Interp::new(Kernel::ephemeral(Mode::Run));
+        let mut call = |args: &[Value], name: &str| i.call_method(args, name, Span::default());
+        let list = |items: Vec<Value>| Value::list(items);
+        // `repeat`: an empty list or no copies is an empty list at once,
+        // whatever the count; a list too large to build is the ceiling's
+        // error before anything is built; the count is an int.
+        let empty = call(&[list(vec![]), Value::Int(i64::MAX)], "repeat").expect("empty");
+        assert_eq!(empty.repr(), "[]");
+        let huge = call(&[list(vec![Value::Int(1)]), Value::Int(i64::MAX)], "repeat")
+            .err()
+            .expect("past the ceiling");
+        assert_eq!(huge.code, "E514", "{}", huge.message);
+        assert!(call(&[list(vec![Value::Int(1)]), Value::str("2")], "repeat").is_err());
+        // A copy shares what its elements share: the inner list is one list.
+        let inner = list(vec![Value::Int(0)]);
+        let twice = call(&[list(vec![inner.clone()]), Value::Int(2)], "repeat").expect("repeat");
+        call(&[inner, Value::Int(9)], "push").expect("push");
+        assert_eq!(twice.repr(), "[[0, 9], [0, 9]]");
+        // `counts`: an int and the string of it are one key, as they are
+        // for any map; a float is no key.
+        let both = call(&[list(vec![Value::str("1"), Value::Int(1)])], "counts").expect("counts");
+        assert_eq!(both.repr(), "{\"1\": 2}");
+        assert!(call(&[list(vec![Value::Float(1.5)])], "counts").is_err());
+        assert_eq!(call(&[list(vec![])], "counts").expect("empty").repr(), "{}");
+        // `inc`: the key is a string and `by` a number, checked before
+        // anything is written; an int that would overflow is `+`'s error
+        // and leaves the entry as it was.
+        let m = Value::map(IndexMap::new());
+        let no_key = call(&[m.clone(), Value::Int(1)], "inc")
+            .err()
+            .expect("a string key");
+        assert_eq!(no_key.kind, crate::diagnostics::Kind::Type);
+        let bad_by = call(&[m.clone(), Value::str("a"), Value::str("x")], "inc")
+            .err()
+            .expect("a number");
+        assert_eq!(bad_by.code, "E402", "{}", bad_by.message);
+        assert_eq!(m.display(), "{}", "nothing was written");
+        call(&[m.clone(), Value::str("a"), Value::Int(i64::MAX)], "inc").expect("inc");
+        let over = call(&[m.clone(), Value::str("a"), Value::Int(1)], "inc")
+            .err()
+            .expect("overflow");
+        assert_eq!(over.code, "E503", "{}", over.message);
+        assert_eq!(m.display(), format!("{{a: {}}}", i64::MAX));
+        let half = call(&[m.clone(), Value::str("b"), Value::Float(0.5)], "inc").expect("inc");
+        assert_eq!(half.repr(), "0.5");
+        // `count`: equality is `==`'s, so a NaN equals nothing, and a
+        // list or a map is counted by what it holds.
+        let nan = Value::Float(f64::NAN);
+        assert_eq!(
+            call(&[list(vec![nan.clone()]), nan], "count")
+                .expect("count")
+                .repr(),
+            "0"
+        );
+        let pair = || list(vec![Value::Int(1), Value::Int(2)]);
+        assert_eq!(
+            call(&[list(vec![pair(), pair(), list(vec![])]), pair()], "count")
+                .expect("count")
+                .repr(),
+            "2"
+        );
+        // A string's `count` takes a string.
+        assert!(call(&[Value::str("aaa"), Value::Int(1)], "count").is_err());
+        // `extend` takes a list, and a list held under two names is one list.
+        assert!(call(&[list(vec![]), Value::str("ab")], "extend").is_err());
+        let xs = list(vec![Value::Int(1)]);
+        let alias = xs.clone();
+        call(&[xs.clone(), alias], "extend").expect("extend");
+        call(&[xs.clone(), list(vec![Value::Int(7)])], "extend").expect("extend");
+        assert_eq!(xs.repr(), "[1, 1, 7]");
+    }
+
+    #[test]
+    fn list_count_counts_by_equality_as_contains_does() {
+        let mut i = Interp::new(Kernel::ephemeral(Mode::Run));
+        let list = Value::list(vec![
+            Value::Int(1),
+            Value::Int(2),
+            Value::Int(1),
+            Value::Float(1.0), // equals 1
+            Value::str("1"),   // not equal
+        ]);
+        let out = i
+            .call_method(&[list.clone(), Value::Int(1)], "count", Span::default())
+            .expect("count");
+        assert_eq!(out.repr(), "3");
+        let none = i
+            .call_method(&[list, Value::Int(99)], "count", Span::default())
+            .expect("none");
+        assert_eq!(none.repr(), "0");
+    }
+
+    #[test]
+    fn string_count_counts_non_overlapping_matches_and_empty_sub_is_zero() {
+        let mut i = Interp::new(Kernel::ephemeral(Mode::Run));
+        let out = i
+            .call_method(
+                &[Value::str("abababab"), Value::str("ab")],
+                "count",
+                Span::default(),
+            )
+            .expect("count");
+        assert_eq!(out.repr(), "4");
+        // Non-overlapping: "aaaa".count("aa") = 2, not 3.
+        let ov = i
+            .call_method(
+                &[Value::str("aaaa"), Value::str("aa")],
+                "count",
+                Span::default(),
+            )
+            .expect("non-overlapping");
+        assert_eq!(ov.repr(), "2");
+        // Empty sub: documented as 0.
+        let empty = i
+            .call_method(
+                &[Value::str("abc"), Value::str("")],
+                "count",
+                Span::default(),
+            )
+            .expect("empty");
+        assert_eq!(empty.repr(), "0");
+    }
+
+    #[test]
+    fn list_extend_appends_in_place_and_works_on_itself() {
+        let mut i = Interp::new(Kernel::ephemeral(Mode::Run));
+        let xs = Value::list(vec![Value::Int(1), Value::Int(2)]);
+        let ys = Value::list(vec![Value::Int(3), Value::Int(4)]);
+        let returned = i
+            .call_method(&[xs.clone(), ys.clone()], "extend", Span::default())
+            .expect("extend");
+        // Returns the receiver (as `push` does).
+        assert_eq!(returned.repr(), "[1, 2, 3, 4]");
+        assert_eq!(xs.repr(), "[1, 2, 3, 4]");
+        // `ys` is untouched.
+        assert_eq!(ys.repr(), "[3, 4]");
+        // `xs.extend(xs)` doubles `xs` without panicking.
+        let xs2 = Value::list(vec![Value::Int(1), Value::Int(2), Value::Int(3)]);
+        i.call_method(&[xs2.clone(), xs2.clone()], "extend", Span::default())
+            .expect("self");
+        assert_eq!(xs2.repr(), "[1, 2, 3, 1, 2, 3]");
+    }
+
     #[test]
     fn join_writes_each_item_as_display_does() {
         let mut i = Interp::new(Kernel::ephemeral(Mode::Run));

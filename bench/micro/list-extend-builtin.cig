@@ -1,0 +1,10 @@
+# SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# list.extend (#255): append every element of ys to xs in place, sized
+# once. Paired with list-extend-loop.cig. Prints the same value.
+stick seed = [1, 2, 3, 4, 5, 6, 7, 8]
+roll acc = []
+for _ in 0..250000 {
+  acc.extend(seed)
+}
+exhale acc.len()

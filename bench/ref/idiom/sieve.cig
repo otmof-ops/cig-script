@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# The sieve of bench/compute/sieve.cig as cig can now be written: the flags made
+# by list.repeat and counted by list.count, both of which run in Rust (#255).
+# ../../compute/sieve.cig is the statement-for-statement version this is measured
+# against.
+stick n = 300000
+roll is = [true].repeat(n + 1)
+is[0] = false
+is[1] = false
+roll p = 2
+while p * p <= n {
+  if is[p] {
+    roll m = p * p
+    while m <= n {
+      is[m] = false
+      m += p
+    }
+  }
+  p += 1
+}
+exhale is.count(true)

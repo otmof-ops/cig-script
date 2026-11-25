@@ -1,0 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# list.repeat (#255): the same list as list-repeat-loop.cig, allocated
+# once at the right size. Prints the same value.
+stick n = 2000000
+roll is = [true].repeat(n + 1)
+exhale is.len()
