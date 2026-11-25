@@ -769,6 +769,14 @@ fn a_word_gives_the_fast_loop_the_operands_the_decoded_instruction_has() {
             let d = cig_bytecode::decode(&[word], 0).expect("decodes");
             let w = Word::of(&d);
             assert_eq!(w.op, op);
+            if op == Op::NOP {
+                // A `nop` reads nothing and its word holds nothing: a
+                // count in a `nop` is the fast loop's own pair of
+                // `steps`, never what a module wrote there.
+                assert_eq!((Operands::a(w), Operands::pair(w)), (0, 0));
+                assert_eq!(Operands::pair(&d), 0);
+                continue;
+            }
             assert_eq!(Operands::a(w), Operands::a(&d), "{op:?} A");
             assert_eq!(Operands::width(w), Operands::width(&d), "{op:?} width");
             match d.fmt {
@@ -795,6 +803,157 @@ fn a_word_gives_the_fast_loop_the_operands_the_decoded_instruction_has() {
         words.iter().map(|w| w.op).collect::<Vec<_>>(),
         vec![Op::WIDE, Op::WIDE, Op::RET]
     );
+}
+
+#[test]
+fn two_steps_in_a_row_are_counted_in_one_in_the_fast_loops_own_words() {
+    // What each word counts and how many words the loop goes on by:
+    // a `steps` its own, one word; a `nop` with a count a pair's, two.
+    fn read(words: &[Word]) -> Vec<Option<(u64, usize)>> {
+        words
+            .iter()
+            .map(|w| match w.op {
+                Op::STEPS => Some((u64::from(Operands::bx(*w)), 1)),
+                Op::NOP if Operands::pair(*w) != 0 => Some((Operands::pair(*w), 2)),
+                _ => None,
+            })
+            .collect()
+    }
+    let code = [
+        steps(1, 1),
+        steps(1, 1),
+        abc(Op::MOV, 0, 1, 0),
+        steps(0, 1),
+        steps(1, 1),
+        steps(2, 3),
+        steps(2, 4),
+        steps(2, 5),
+        steps(3, 0),
+        steps(3, 0),
+        // A `nop` a module wrote with something in its operands: it
+        // counts nothing, here or anywhere.
+        abc(Op::NOP, 7, 9, 1),
+        ret(0),
+    ];
+    let (_, code) = cig_bytecode::decode_table(&code).expect("decodes");
+    // The function's words: every `steps` counts its own.
+    assert_eq!(
+        read(&Word::table(&code)),
+        [
+            Some((1, 1)),
+            Some((1, 1)),
+            None,
+            Some((1, 1)),
+            Some((1, 1)),
+            Some((3, 1)),
+            Some((4, 1)),
+            Some((5, 1)),
+            Some((0, 1)),
+            Some((0, 1)),
+            None,
+            None
+        ]
+    );
+    // The fast loop's own: a `steps` followed by one of the same
+    // nesting is a pair, counted in one and two words long; the second
+    // keeps its word for a jump that lands on it. Two of different
+    // nestings are two instructions, and so are the last of a row and
+    // two that count nothing.
+    let paired = Word::paired(&code);
+    assert_eq!(
+        read(&paired),
+        [
+            Some((2, 2)),
+            Some((1, 1)),
+            None,
+            Some((1, 1)),
+            Some((1, 1)),
+            Some((7, 2)),
+            Some((9, 2)),
+            Some((5, 1)),
+            Some((0, 1)),
+            Some((0, 1)),
+            None,
+            None
+        ]
+    );
+    // The pair has its `steps`' nesting; the module's `nop` has no
+    // operand left in either table.
+    assert_eq!(
+        (Operands::a(paired[0]), Operands::a(paired[5])),
+        (1, 2),
+        "the nesting of a pair"
+    );
+    for words in [&paired, &Word::table(&code)] {
+        assert_eq!(words[10].op, Op::NOP);
+        assert_eq!((Operands::a(words[10]), Operands::pair(words[10])), (0, 0));
+    }
+    // The decoded instruction is the function's own: a `nop` of it is
+    // never a pair, whatever its word holds.
+    let nop = code[10].as_ref().expect("an instruction");
+    assert_eq!(Operands::pair(nop), 0);
+
+    // A pair whose steps do not fit a count stays two instructions.
+    let code = [steps(0, 0xffff), steps(0, 1), steps(0, 0xfffe), ret(0)];
+    let (_, code) = cig_bytecode::decode_table(&code).expect("decodes");
+    assert_eq!(
+        read(&Word::paired(&code)),
+        [
+            Some((0xffff, 1)),
+            Some((0xffff, 2)),
+            Some((0xfffe, 1)),
+            None
+        ]
+    );
+}
+
+#[test]
+fn a_pair_of_steps_ends_a_budget_where_two_steps_end_it() {
+    // A loop in a function: its first statement's `steps` follows the
+    // loop's own at every turn, and the fast loop counts the two at
+    // once. Under every budget from one step to past the run's end the
+    // run stops where the tree-walker stops, having printed what it
+    // printed: a pair that would pass the budget is left to the
+    // general path, which runs its two instructions one at a time.
+    let src = "pull sum(n) {\n  roll s = 0\n  for i in 0..n {\n    s = s + i\n    if s > 4 {\n      s = s - 1\n    }\n  }\n  roll k = 0\n  while k < 3 {\n    k = k + 1\n  }\n  snuff s + k\n}\nexhale sum(6)\nexhale sum(2)\n";
+    // The lowering does write the pairs this is about.
+    let ast = crate::syntax::parse(src).expect("parses");
+    let Ok(bytes) = crate::lower::module_bytes(&ast, "t.cig") else {
+        panic!("{src}: does not lower");
+    };
+    let Ok(p) = super::open(bytes) else {
+        panic!("{src}: does not open");
+    };
+    let mut i = interp();
+    i.out = Box::new(Buf::default());
+    run_script(&mut i, &p).expect("runs");
+    let pairs: usize = (0..p.heads.len())
+        .filter_map(|f| p.funcs.get(f))
+        .map(|proto| {
+            proto
+                .paired
+                .iter()
+                .filter(|w| w.op == Op::NOP && Operands::pair(**w) != 0)
+                .count()
+        })
+        .sum();
+    assert!(
+        pairs >= 2,
+        "{pairs} pairs of `steps` in the loaded functions"
+    );
+
+    let unbounded = walked(src, 0);
+    assert_eq!(unbounded.0, "15\n4\n");
+    let mut budget = 1;
+    loop {
+        script_agrees_under_bodies(src, budget);
+        if walked(src, budget) == unbounded {
+            break;
+        }
+        budget += 1;
+        assert!(budget < 2000, "the run does not end");
+    }
+    assert!(budget > 40, "the run ended under {budget} steps");
 }
 
 // ----- a call and a return between two runs of the fast loop -----
