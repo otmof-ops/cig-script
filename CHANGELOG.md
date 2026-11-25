@@ -5,6 +5,23 @@ project follows semantic versioning.
 
 ## Unreleased
 
+- **Under `auto`, a script is lowered after its second run, not its
+  first.** As it was merged (the entry about `auto` further down),
+  `auto` started `cig __lower` on a script's first run. Measured, that
+  first run was past #259's bar of 10% over the tree-walker's:
+  starting a process is a good part of a run of two milliseconds, on
+  one CPU the run's exit waits behind the lowering, and a script that
+  is run once never gets any of it back. Now a first run leaves an
+  empty mark beside the modules and starts nothing, the second run
+  leaves `cig __lower` behind, and the third is on the VM. The mark is
+  removed by the lowering it leads to, and by `cig tin gc` once it is
+  30 days old or sits beside a kept module; a script that is not a
+  plain file gets none. `auto_lower = off` leaves neither mark nor
+  process, and `wait` waits for the process on the second run.
+  `--engine vm`, `--engine tree`, `--no-check` and a compiled program
+  are as they were. `docs/decisions/0002-cig-run-on-the-vm.md` has the
+  figures and what else was weighed. (#259)
+
 - **Six bulk built-ins: the loops scripts still write, done once in
   Rust.** The paper of 2026-11-15 showed where cig gets its speed:
   the built-ins written in Rust (`join`, `split`, `replace`, `find`,

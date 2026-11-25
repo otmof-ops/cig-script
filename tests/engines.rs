@@ -565,12 +565,11 @@ fn a_variable_that_names_no_engine_is_refused_before_anything_runs() {
 
 /// #259: `--engine auto` runs the script on the tree-walker on its first
 /// run and leaves the lowering to a `__lower` subprocess that keeps the
-/// module for the next run; the second run then uses the VM. With
-/// `CIG_AUTO_LOWER=wait` the lowering runs as a child the parent waits
-/// for and reaps, so this test sleeps on nothing and leaves no process
-/// behind.
+/// module for the run after; the third run uses the VM. With
+/// `CIG_AUTO_LOWER=wait` the second run's child is waited for, so this
+/// test sleeps on nothing and leaves no process behind.
 #[test]
-fn auto_runs_on_the_tree_walker_now_and_on_the_vm_next() {
+fn auto_runs_on_the_tree_walker_twice_before_the_vm() {
     let script = root().join("bench/compute/hello.cig");
     let tin = Tin::new();
     let cwd = tempfile::tempdir().expect("tempdir");
@@ -595,33 +594,63 @@ fn auto_runs_on_the_tree_walker_now_and_on_the_vm_next() {
             .env_remove("CI")
             .env_remove("CIG_ENGINE");
     };
-    // The first run on auto: tree-walker runs it now, and the same
-    // process lowers the script for the next run (CIG_AUTO_LOWER=wait).
-    let mut first = Command::new(env!("CARGO_BIN_EXE_cig"));
-    base(&mut first);
-    let out = first
-        .args(["run", "--engine", "auto", "hello.cig"])
-        .env("CIG_AUTO_LOWER", "wait")
-        .output()
-        .expect("first run");
-    assert!(out.status.success(), "first run: {out:?}");
+    let run = |label: &str| {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_cig"));
+        base(&mut cmd);
+        let out = cmd
+            .args(["run", "--engine", "auto", "hello.cig"])
+            .env("CIG_AUTO_LOWER", "wait")
+            .output()
+            .unwrap_or_else(|e| panic!("{label}: {e}"));
+        assert!(out.status.success(), "{label}: {out:?}");
+    };
+    let modules = tin.home().join("tin").join("modules");
+    // First run: tree-walker, a mark is written, no module yet.
+    run("first");
     let engines = tin.engines();
-    assert_eq!(engines.len(), 1, "one run recorded");
-    assert_eq!(engines[0]["engine"], "tree", "first run on the tree-walker");
+    assert_eq!(engines.len(), 1);
+    assert_eq!(engines[0]["engine"], "tree", "first: tree");
     assert!(engines[0]["asked"].is_null(), "auto is not `asked`");
-    // The second run on auto finds the module and uses the VM.
-    let mut second = Command::new(env!("CARGO_BIN_EXE_cig"));
-    base(&mut second);
-    let out = second
-        .args(["run", "--engine", "auto", "hello.cig"])
-        .env("CIG_AUTO_LOWER", "wait")
-        .output()
-        .expect("second run");
-    assert!(out.status.success(), "second run: {out:?}");
+    let (modules_now, marks_now) = count_modules_and_marks(&modules);
+    assert_eq!(modules_now, 0, "no module after the first sighting");
+    assert_eq!(marks_now, 1, "the mark is written");
+    // Second run: tree-walker again, the child runs and keeps a
+    // module, and clears the mark.
+    run("second");
     let engines = tin.engines();
-    assert_eq!(engines.len(), 2, "two runs recorded");
-    assert_eq!(engines[1]["engine"], "vm", "second run on the vm");
-    assert_eq!(engines[1]["module"], "cached", "from the tin");
+    assert_eq!(engines.len(), 2);
+    assert_eq!(engines[1]["engine"], "tree", "second: still tree");
+    let (modules_now, marks_now) = count_modules_and_marks(&modules);
+    assert_eq!(modules_now, 1, "the second sighting keeps a module");
+    assert_eq!(marks_now, 0, "and clears the mark");
+    // Third run: the VM, module from the tin.
+    run("third");
+    let engines = tin.engines();
+    assert_eq!(engines.len(), 3);
+    assert_eq!(engines[2]["engine"], "vm");
+    assert_eq!(engines[2]["module"], "cached");
+}
+
+/// Count the modules and the first-sighting marks under the tin's
+/// modules folder, by filename.
+fn count_modules_and_marks(modules: &Path) -> (usize, usize) {
+    let mut n_mods = 0;
+    let mut n_marks = 0;
+    if modules.exists() {
+        for shard in fs::read_dir(modules).unwrap().flatten() {
+            if shard.file_type().unwrap().is_dir() {
+                for f in fs::read_dir(shard.path()).unwrap().flatten() {
+                    let name = f.file_name().to_string_lossy().to_string();
+                    if name.len() == 64 {
+                        n_mods += 1;
+                    } else if name.ends_with(".seen") {
+                        n_marks += 1;
+                    }
+                }
+            }
+        }
+    }
+    (n_mods, n_marks)
 }
 
 /// A script the lowering does not take (a name looked up at run time):
@@ -657,37 +686,37 @@ fn auto_remembers_a_refusal_and_does_not_retry_it() {
             .env_remove("CIG_ENGINE")
             .env("CIG_AUTO_LOWER", "wait");
     };
-    let mut first = Command::new(env!("CARGO_BIN_EXE_cig"));
-    base(&mut first);
-    let _out = first
-        .args(["run", "--engine", "auto", name.to_str().unwrap()])
-        .output()
-        .expect("first");
-    let mut second = Command::new(env!("CARGO_BIN_EXE_cig"));
-    base(&mut second);
-    let _out = second
-        .args(["run", "--engine", "auto", name.to_str().unwrap()])
-        .output()
-        .expect("second");
+    // Three runs: the first writes the mark, the second spawns the
+    // `wait` child which tries to lower and stores the refusal, the
+    // third reads the refusal at lookup time and the record carries
+    // its reason.
+    for _ in 0..3 {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_cig"));
+        base(&mut c);
+        let _out = c
+            .args(["run", "--engine", "auto", name.to_str().unwrap()])
+            .output()
+            .expect("run");
+    }
     let engines = tin.engines();
-    assert_eq!(engines.len(), 2);
+    assert_eq!(engines.len(), 3);
     assert_eq!(engines[0]["engine"], "tree", "first: tree");
     assert_eq!(engines[1]["engine"], "tree", "second: still tree");
+    assert_eq!(engines[2]["engine"], "tree", "third: still tree");
     assert!(
-        engines[1]["why"]
+        engines[2]["why"]
             .as_str()
             .is_some_and(|w| w.contains("looked up as the script runs")
                 || w.contains("lowering does not take it yet")),
-        "the refusal is carried on the second run: {}",
-        engines[1]
+        "the refusal is carried on the third run: {}",
+        engines[2]
     );
 }
 
 /// The default path: `cig run` with no `--engine`, no `CIG_ENGINE` and
-/// no config picks `auto`. On a first run the record says `tree`; on a
-/// second it says `vm` and `module: cached`. This proves the default is
-/// `auto`, which no other test does (every other new test sets the
-/// engine).
+/// no config picks `auto`. Three runs: tree, tree + child keeps the
+/// module, vm. This proves the default is `auto`, which no other test
+/// does (every other new test sets the engine).
 #[test]
 fn the_default_engine_is_auto() {
     let script = root().join("bench/compute/hello.cig");
@@ -715,17 +744,18 @@ fn the_default_engine_is_auto() {
             .env_remove("CI")
             .env_remove("CIG_ENGINE");
     };
-    for _ in 0..2 {
+    for _ in 0..3 {
         let mut c = Command::new(env!("CARGO_BIN_EXE_cig"));
         base(&mut c);
         let out = c.args(["run", "hello.cig"]).output().expect("run");
         assert!(out.status.success(), "{out:?}");
     }
     let engines = tin.engines();
-    assert_eq!(engines.len(), 2, "two runs recorded");
+    assert_eq!(engines.len(), 3, "three runs recorded");
     assert_eq!(engines[0]["engine"], "tree", "first: tree (default auto)");
-    assert_eq!(engines[1]["engine"], "vm", "second: vm (default auto)");
-    assert_eq!(engines[1]["module"], "cached");
+    assert_eq!(engines[1]["engine"], "tree", "second: still tree");
+    assert_eq!(engines[2]["engine"], "vm", "third: vm (default auto)");
+    assert_eq!(engines[2]["module"], "cached");
 }
 
 /// `--no-check` always runs the tree-walker, even when a module is
@@ -798,29 +828,29 @@ fn no_check_runs_on_the_tree_walker_even_with_a_kept_module() {
     assert_eq!(engines[2]["engine"], "tree", "auto + no-check: tree");
 }
 
-/// A first run under `auto` prints the same thing, leaves the same
-/// files, and records the same journal as the tree-walker; the second
-/// run (on the VM) does too. This reuses the comparison the main
+/// Three runs under `auto` print, record and leave behind the same
+/// thing as the tree-walker: a first sighting (tree + mark), a second
+/// sighting (tree + the `wait` child keeps the module) and a third
+/// (VM). This reuses the comparison the main
 /// `a_run_on_the_vm_matches_the_tree_walker_cold_and_warm` test does,
 /// against the `auto` engine.
 #[test]
-fn auto_matches_the_tree_walker_cold_and_warm() {
+fn auto_matches_the_tree_walker_through_three_runs() {
     let script = root().join("bench/compute/hello.cig");
     let name = "bench/compute/hello.cig".to_string();
     let tree = run(&script, "0", "tree", false, &Tin::new());
     let tin = Tin::new();
-    // The first run on `auto` runs the tree-walker and leaves the
-    // lowering to a child that `wait` runs to completion before the
-    // record is written.
-    let cold = run_auto(&script, "0", false, &tin);
-    // The second run on `auto` finds the module and uses the VM.
-    let warm = run_auto(&script, "0", false, &tin);
-    assert_eq!(tree, cold, "first: {}", first_difference(&tree, &cold));
-    assert_eq!(tree, warm, "second: {}", first_difference(&tree, &warm));
+    let first = run_auto(&script, "0", false, &tin);
+    let second = run_auto(&script, "0", false, &tin);
+    let third = run_auto(&script, "0", false, &tin);
+    assert_eq!(tree, first, "first: {}", first_difference(&tree, &first));
+    assert_eq!(tree, second, "second: {}", first_difference(&tree, &second));
+    assert_eq!(tree, third, "third: {}", first_difference(&tree, &third));
     let engines = tin.engines();
     assert_eq!(engines[0]["engine"], "tree", "{name}: first = tree");
-    assert_eq!(engines[1]["engine"], "vm", "{name}: second = vm");
-    assert_eq!(engines[1]["module"], "cached");
+    assert_eq!(engines[1]["engine"], "tree", "{name}: second = still tree");
+    assert_eq!(engines[2]["engine"], "vm", "{name}: third = vm");
+    assert_eq!(engines[2]["module"], "cached");
 }
 
 /// Two `__lower` of one script spawned together keep one module and
@@ -1034,10 +1064,11 @@ fn no_check_runs_on_the_tree_walker_and_the_record_says_why() {
     );
 }
 
-/// A script reached through a symlink is lowered: the first run on
-/// `auto` records `tree`, and the second (after the `wait` child) uses
-/// the VM. The real script is in one folder, a link to it in another,
-/// and `cig run` is given the link.
+/// A script reached through a symlink is lowered: the first two runs
+/// on `auto` record `tree` (the first writes the mark, the second
+/// keeps the module), and the third uses the VM. The real script is in
+/// one folder, a link to it in another, and `cig run` is given the
+/// link.
 #[cfg(unix)]
 #[test]
 fn a_symlinked_script_is_lowered_for_the_next_run() {
@@ -1069,7 +1100,7 @@ fn a_symlinked_script_is_lowered_for_the_next_run() {
             .env_remove("CI")
             .env_remove("CIG_ENGINE");
     };
-    for _ in 0..2 {
+    for _ in 0..3 {
         let mut c = Command::new(env!("CARGO_BIN_EXE_cig"));
         base(&mut c);
         let out = c
@@ -1079,9 +1110,10 @@ fn a_symlinked_script_is_lowered_for_the_next_run() {
         assert!(out.status.success(), "{out:?}");
     }
     let engines = tin.engines();
-    assert_eq!(engines.len(), 2);
+    assert_eq!(engines.len(), 3);
     assert_eq!(engines[0]["engine"], "tree");
-    assert_eq!(engines[1]["engine"], "vm", "symlinked script was lowered");
+    assert_eq!(engines[1]["engine"], "tree");
+    assert_eq!(engines[2]["engine"], "vm", "symlinked script was lowered");
 }
 
 /// A kept module whose body is damaged (bytes past its header) opens
@@ -1185,4 +1217,321 @@ fn a_damaged_kept_module_heals_on_the_next_run() {
     assert_eq!(engines.len(), 4);
     assert_eq!(engines[3]["engine"], "vm", "auto healed between runs");
     assert_eq!(engines[3]["module"], "cached");
+}
+
+/// Build the sandbox env a short engine test needs. Returns a closure
+/// that configures a `Command` the same way across tests.
+fn with_env<'a>(
+    cwd: &'a tempfile::TempDir,
+    tin: &'a Tin,
+    auto_lower: &'a str,
+) -> impl Fn(&mut Command) + 'a {
+    move |cmd: &mut Command| {
+        cmd.current_dir(cwd.path())
+            .env("HOME", cwd.path())
+            .env("CIGSCRIPT_HOME", tin.home())
+            .env("CIG_KEYS_DIR", tin.dir.path().join("keys"))
+            .env("XDG_CONFIG_HOME", tin.dir.path().join("config"))
+            .env("XDG_DATA_HOME", tin.dir.path().join("data"))
+            .env("XDG_STATE_HOME", tin.dir.path().join("state"))
+            .env("XDG_CACHE_HOME", tin.dir.path().join("cache"))
+            .env("CIG_SEAL_KEY", "file")
+            .env("CIG_DOCTOR", "0")
+            .env("NO_COLOR", "1")
+            .env("CIG_AUTO_LOWER", auto_lower)
+            .env("CIG_INTERNAL_TRACKER_DIR", tin.dir.path().join("tracker"))
+            .env(
+                "CIG_UPDATE_MANIFEST",
+                tin.dir.path().join("no-releases.json"),
+            )
+            .env_remove("CI")
+            .env_remove("CIG_ENGINE");
+    }
+}
+
+/// `--engine vm`, `--engine tree` and `--no-check` on a new home leave
+/// no mark: the mark belongs to `auto` alone. `--engine vm` after a
+/// first `auto` run leaves one module and no mark (the run clears
+/// what the first sighting wrote).
+#[test]
+fn other_engines_leave_no_mark_and_vm_clears_a_mark_auto_left() {
+    let script = root().join("bench/compute/hello.cig");
+    let modules_of = |tin: &Tin| tin.home().join("tin").join("modules");
+    for engine in ["vm", "tree"] {
+        let tin = Tin::new();
+        let cwd = tempfile::tempdir().unwrap();
+        fs::copy(&script, cwd.path().join("hello.cig")).unwrap();
+        let base = with_env(&cwd, &tin, "off");
+        let mut c = Command::new(env!("CARGO_BIN_EXE_cig"));
+        base(&mut c);
+        let out = c
+            .args(["run", "--engine", engine, "hello.cig"])
+            .output()
+            .expect("run");
+        assert!(out.status.success(), "{engine}: {out:?}");
+        let (_, marks) = count_modules_and_marks(&modules_of(&tin));
+        assert_eq!(marks, 0, "{engine} left a mark");
+    }
+    // --no-check (under vm, to hit the no_check branch) leaves no mark.
+    {
+        let tin = Tin::new();
+        let cwd = tempfile::tempdir().unwrap();
+        fs::copy(&script, cwd.path().join("hello.cig")).unwrap();
+        let base = with_env(&cwd, &tin, "off");
+        let mut c = Command::new(env!("CARGO_BIN_EXE_cig"));
+        base(&mut c);
+        let out = c
+            .args(["run", "--engine", "vm", "--no-check", "hello.cig"])
+            .output()
+            .expect("run");
+        assert!(out.status.success(), "{out:?}");
+        let (_, marks) = count_modules_and_marks(&modules_of(&tin));
+        assert_eq!(marks, 0, "--no-check left a mark");
+    }
+    // After a first `auto` run (a mark is written), `--engine vm`
+    // keeps a module and clears the mark.
+    let tin = Tin::new();
+    let cwd = tempfile::tempdir().unwrap();
+    fs::copy(&script, cwd.path().join("hello.cig")).unwrap();
+    let base = with_env(&cwd, &tin, "wait");
+    let mut a = Command::new(env!("CARGO_BIN_EXE_cig"));
+    base(&mut a);
+    assert!(a
+        .args(["run", "--engine", "auto", "hello.cig"])
+        .output()
+        .unwrap()
+        .status
+        .success());
+    let (mods, marks) = count_modules_and_marks(&modules_of(&tin));
+    assert_eq!((mods, marks), (0, 1), "after auto: one mark, no module");
+    let mut b = Command::new(env!("CARGO_BIN_EXE_cig"));
+    base(&mut b);
+    assert!(b
+        .args(["run", "--engine", "vm", "hello.cig"])
+        .output()
+        .unwrap()
+        .status
+        .success());
+    let (mods, marks) = count_modules_and_marks(&modules_of(&tin));
+    assert_eq!(
+        (mods, marks),
+        (1, 0),
+        "--engine vm kept a module and cleared the mark"
+    );
+}
+
+/// A script the lowering refuses leaves no mark once the refusal is
+/// kept: the child clears it as it stores the refusal.
+#[test]
+fn a_refusal_leaves_no_mark() {
+    let script = root().join("tests/walker/resolve-shadow.cig");
+    assert!(script.exists());
+    let tin = Tin::new();
+    let cwd = tempfile::tempdir().unwrap();
+    let name = script.file_name().unwrap();
+    fs::copy(&script, cwd.path().join(name)).unwrap();
+    let base = with_env(&cwd, &tin, "wait");
+    // Three runs: the second spawns the child that stores the refusal
+    // and clears the mark.
+    for _ in 0..3 {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_cig"));
+        base(&mut c);
+        c.args(["run", "--engine", "auto", name.to_str().unwrap()])
+            .output()
+            .expect("run");
+    }
+    let (_, marks) = count_modules_and_marks(&tin.home().join("tin").join("modules"));
+    assert_eq!(marks, 0, "the refusal cleared the mark");
+}
+
+/// An edited script is seen for the first time again: the key is over
+/// the bytes, so a run, an edit and a run keeps the first run's
+/// behavior for the second (tree-walker, no module, a mark under the
+/// new key).
+#[test]
+fn an_edited_script_is_seen_for_the_first_time_again() {
+    let tin = Tin::new();
+    let cwd = tempfile::tempdir().unwrap();
+    let script = cwd.path().join("s.cig");
+    fs::write(&script, "exhale \"hi\"\n").unwrap();
+    let base = with_env(&cwd, &tin, "wait");
+    let mut a = Command::new(env!("CARGO_BIN_EXE_cig"));
+    base(&mut a);
+    assert!(a
+        .args(["run", "--engine", "auto", "s.cig"])
+        .output()
+        .unwrap()
+        .status
+        .success());
+    let modules = tin.home().join("tin").join("modules");
+    let (mods, marks) = count_modules_and_marks(&modules);
+    assert_eq!((mods, marks), (0, 1), "first run: a mark, no module");
+    fs::write(&script, "exhale \"hi2\"\n").unwrap();
+    let mut b = Command::new(env!("CARGO_BIN_EXE_cig"));
+    base(&mut b);
+    assert!(b
+        .args(["run", "--engine", "auto", "s.cig"])
+        .output()
+        .unwrap()
+        .status
+        .success());
+    let (mods, marks) = count_modules_and_marks(&modules);
+    assert_eq!(
+        (mods, marks),
+        (0, 2),
+        "the edit keyed a new mark; the old one stays (another script's)"
+    );
+    let engines = tin.engines();
+    assert_eq!(engines[1]["engine"], "tree");
+}
+
+/// A mark that cannot be made (the modules folder is read-only) leaves
+/// the run's output, exit code and stderr as the tree-walker's.
+/// Skipped when running as root, which is not refused by `chmod`.
+#[cfg(unix)]
+#[test]
+fn a_run_whose_mark_cannot_be_made_still_runs_cleanly() {
+    use std::os::unix::fs::PermissionsExt;
+    // SAFETY: `geteuid` takes nothing and cannot fail.
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let script = root().join("bench/compute/hello.cig");
+    let tin = Tin::new();
+    let cwd = tempfile::tempdir().unwrap();
+    fs::copy(&script, cwd.path().join("hello.cig")).unwrap();
+    // Make the modules folder and strip write permission.
+    let modules = tin.home().join("tin").join("modules");
+    fs::create_dir_all(&modules).unwrap();
+    fs::set_permissions(&modules, fs::Permissions::from_mode(0o500)).unwrap();
+    let base = with_env(&cwd, &tin, "wait");
+    let auto_out = {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_cig"));
+        base(&mut c);
+        c.args(["run", "--engine", "auto", "hello.cig"])
+            .output()
+            .expect("auto")
+    };
+    let tree_tin = Tin::new();
+    let tree_out = {
+        let base2 = with_env(&cwd, &tree_tin, "off");
+        let mut c = Command::new(env!("CARGO_BIN_EXE_cig"));
+        base2(&mut c);
+        c.args(["run", "--engine", "tree", "hello.cig"])
+            .output()
+            .expect("tree")
+    };
+    // Restore permissions so TempDir can clean up.
+    fs::set_permissions(&modules, fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(auto_out.status.success(), "the run ran cleanly");
+    assert_eq!(auto_out.status.code(), tree_out.status.code());
+    assert_eq!(auto_out.stdout, tree_out.stdout);
+    // Nothing is said about the mark: what the run wrote to stderr is
+    // what the tree-walker's wrote, the run id and the folder apart.
+    assert_eq!(
+        normal(&String::from_utf8_lossy(&auto_out.stderr), cwd.path()),
+        normal(&String::from_utf8_lossy(&tree_out.stderr), cwd.path()),
+    );
+}
+
+/// A damaged kept module under `auto` is lowered again at once (the
+/// heal path), then runs on the VM. Unlike the existing
+/// `a_damaged_kept_module_heals_on_the_next_run`, this one asks the
+/// heal to come from `--engine auto`'s very first run after the
+/// damage, with no first-sighting mark involved (the module was there
+/// before).
+#[test]
+fn a_damaged_kept_module_under_auto_heals_at_once() {
+    let script = root().join("bench/compute/hello.cig");
+    let tin = Tin::new();
+    let cwd = tempfile::tempdir().unwrap();
+    fs::copy(&script, cwd.path().join("hello.cig")).unwrap();
+    let base = with_env(&cwd, &tin, "wait");
+    // Warm under `--engine vm` to keep a module (no mark).
+    let mut w = Command::new(env!("CARGO_BIN_EXE_cig"));
+    base(&mut w);
+    assert!(w
+        .args(["run", "--engine", "vm", "hello.cig"])
+        .output()
+        .unwrap()
+        .status
+        .success());
+    // Damage the body.
+    let modules = tin.home().join("tin").join("modules");
+    let mut entry = None;
+    for shard in fs::read_dir(&modules).unwrap().flatten() {
+        if shard.file_type().unwrap().is_dir() {
+            for f in fs::read_dir(shard.path()).unwrap().flatten() {
+                let n = f.file_name().to_string_lossy().to_string();
+                if n.len() == 64 {
+                    entry = Some(f.path());
+                }
+            }
+        }
+    }
+    let path = entry.expect("one module");
+    let mut bytes = fs::read(&path).unwrap();
+    let at = bytes.len() - 1;
+    bytes[at] ^= 0x01;
+    fs::write(&path, &bytes).unwrap();
+    // First run under `auto`: the heal path takes over, the `wait`
+    // child relowers, and the parent records tree.
+    let mut a = Command::new(env!("CARGO_BIN_EXE_cig"));
+    base(&mut a);
+    assert!(a
+        .args(["run", "--engine", "auto", "hello.cig"])
+        .output()
+        .unwrap()
+        .status
+        .success());
+    // Second run under `auto`: the VM, module from the tin.
+    let mut b = Command::new(env!("CARGO_BIN_EXE_cig"));
+    base(&mut b);
+    assert!(b
+        .args(["run", "--engine", "auto", "hello.cig"])
+        .output()
+        .unwrap()
+        .status
+        .success());
+    let engines = tin.engines();
+    assert_eq!(engines.len(), 3);
+    assert_eq!(engines[1]["engine"], "tree", "heal ran on tree");
+    assert_eq!(engines[2]["engine"], "vm", "then on the vm");
+    assert_eq!(engines[2]["module"], "cached");
+}
+
+/// A script given as `/dev/stdin` under `auto` runs on the tree-walker
+/// each time, leaves no mark, and keeps no module.
+#[cfg(unix)]
+#[test]
+fn a_dev_stdin_script_leaves_no_mark_and_no_module() {
+    let tin = Tin::new();
+    let cwd = tempfile::tempdir().unwrap();
+    let base = with_env(&cwd, &tin, "wait");
+    for _ in 0..2 {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_cig"));
+        base(&mut c);
+        // Feed the script on stdin.
+        let mut child = c
+            .args(["run", "--engine", "auto", "/dev/stdin"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn");
+        {
+            use std::io::Write;
+            let mut stdin = child.stdin.take().expect("stdin");
+            stdin.write_all(b"exhale \"hi\"\n").unwrap();
+        }
+        let out = child.wait_with_output().expect("wait");
+        assert!(out.status.success(), "{out:?}");
+    }
+    let modules = tin.home().join("tin").join("modules");
+    let (mods, marks) = count_modules_and_marks(&modules);
+    assert_eq!((mods, marks), (0, 0), "no mark, no module for /dev/stdin");
+    let engines = tin.engines();
+    assert_eq!(engines.len(), 2);
+    assert_eq!(engines[0]["engine"], "tree");
+    assert_eq!(engines[1]["engine"], "tree");
 }

@@ -87,6 +87,11 @@ const LOWERING_SUFFIX: &str = ".lowering";
 /// A marker older than this is treated as stale: a `__lower` that crashed,
 /// was killed, or was abandoned should not keep the cache quiet for ever.
 pub const LOWERING_STALE_AFTER: Duration = Duration::from_secs(10 * 60);
+/// The name of the mark `cig run --engine auto` writes at a script's first
+/// sighting. Its presence says the script has been seen before, so the
+/// next run on `auto` spawns the lowering instead of writing another
+/// mark. Holds nothing.
+const SEEN_SUFFIX: &str = ".seen";
 
 /// Where the entries live: `<state>/tin/modules`.
 pub fn root() -> PathBuf {
@@ -601,6 +606,54 @@ fn is_marker(path: &Path) -> bool {
         .is_some_and(|key| key.len() == 64 && key.bytes().all(|b| b.is_ascii_hexdigit()))
 }
 
+/// Where the first-sighting mark for `key` lives.
+fn seen_path_of(key: &Key) -> PathBuf {
+    let mut name = key.hex();
+    name.push_str(SEEN_SUFFIX);
+    root().join(&key.hex()[..2]).join(name)
+}
+
+/// A name the sweep knows: `<hex>.seen`.
+fn is_seen_mark(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .and_then(|n| n.strip_suffix(SEEN_SUFFIX))
+        .is_some_and(|key| key.len() == 64 && key.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
+/// Is the first-sighting mark for `key` on disk? The first run of a
+/// script on `auto` writes one; the second run reads it and spawns the
+/// `__lower` child; `__lower` removes it when it keeps a module (or a
+/// refusal). A mark lost to a crash costs one more tree-walker run, so
+/// nothing here is synced.
+pub fn is_seen(key: &Key) -> bool {
+    fs::symlink_metadata(seen_path_of(key)).is_ok_and(|m| m.file_type().is_file())
+}
+
+/// Write the first-sighting mark for `key`, atomically: if a mark is
+/// already there, this is a no-op success; a missing state folder or a
+/// shard that is not a folder of the cache's own is an error. The file
+/// holds nothing and is not synced.
+pub fn mark_seen(key: &Key) -> io::Result<()> {
+    let path = seen_path_of(key);
+    let shard = path.parent().ok_or_else(|| io::Error::other("no shard"))?;
+    private_dirs().recursive(true).create(super::tin::dir())?;
+    own_dir(&root())?;
+    own_dir(shard)?;
+    match private_file(&path) {
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+/// Remove the first-sighting mark for `key`, if there is one. `__lower`
+/// calls this after it keeps a module or a refusal: nothing is then
+/// left of the mark on disk. A missing mark is not an error.
+pub fn clear_seen(key: &Key) {
+    let _ = fs::remove_file(seen_path_of(key));
+}
+
 /// What the cache holds: how many modules and refusals, and their bytes
 /// on disk. `entries` counts every entry (modules and refusals), kept so
 /// a reader of the field across cig versions sees the same total; the
@@ -636,7 +689,7 @@ fn files() -> Vec<(PathBuf, fs::Metadata)> {
         };
         for f in inner.flatten() {
             let path = f.path();
-            if !(is_entry(&path) || is_leftover(&path) || is_marker(&path)) {
+            if !(is_entry(&path) || is_leftover(&path) || is_marker(&path) || is_seen_mark(&path)) {
                 continue;
             }
             if let Ok(meta) = fs::symlink_metadata(&path) {
@@ -716,11 +769,40 @@ fn made_by_this_build(path: &Path) -> bool {
 /// finished its work). Returns what was removed. Every entry is safe to
 /// remove: its script is lowered again on its next run.
 pub fn sweep() -> Stats {
+    // The entries already here, by hex name, so the mark pass knows
+    // which marks sit beside a kept module or refusal.
+    let have_entry: std::collections::HashSet<String> = files()
+        .iter()
+        .filter(|(p, _)| is_entry(p))
+        .filter_map(|(p, _)| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .map(|s| s.to_string())
+        })
+        .collect();
     remove_where(|path, meta| {
         if is_marker(path) || is_leftover(path) {
             // A marker or a write that never finished; a live one is
             // seconds old.
             return age(meta).is_some_and(|a| a > Duration::from_secs(3600));
+        }
+        if is_seen_mark(path) {
+            // A mark beside a kept entry means nothing (an overlap of
+            // a first run and a second: the child cleared the mark,
+            // the first run wrote one again); remove it whatever its
+            // age. Otherwise the mark is kept as long as an unloaded
+            // module would be: a script run once a month is seen
+            // once each month, and the lowering waits for the sighting
+            // after that.
+            let key = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .and_then(|n| n.strip_suffix(SEEN_SUFFIX))
+                .unwrap_or("");
+            if have_entry.contains(key) {
+                return true;
+            }
+            return age(meta).is_some_and(|a| a > KEEP);
         }
         if !is_entry(path) {
             return false;
@@ -1187,5 +1269,66 @@ mod tests {
         assert_eq!(removed, Stats::default());
         assert!(!path.exists(), "the stale marker was swept");
         drop(locked); // Already gone; drop is a no-op.
+    }
+
+    #[test]
+    fn a_seen_mark_is_made_and_removed() {
+        let _home = Home::new();
+        let key = key_for("aa");
+        assert!(!is_seen(&key));
+        mark_seen(&key).expect("mark");
+        assert!(is_seen(&key), "the mark is there");
+        // A second mark is a no-op; its presence does not become its
+        // absence.
+        mark_seen(&key).expect("idempotent");
+        assert!(is_seen(&key));
+        // Not counted as a module or a refusal.
+        assert_eq!(stats(), Stats::default());
+        clear_seen(&key);
+        assert!(!is_seen(&key));
+        clear_seen(&key); // no-op when nothing to clear
+    }
+
+    #[test]
+    fn the_sweep_drops_an_old_mark_and_keeps_a_fresh_one() {
+        let _home = Home::new();
+        let fresh = key_for("aa");
+        let old = key_for("ab");
+        mark_seen(&fresh).unwrap();
+        mark_seen(&old).unwrap();
+        set_age(&seen_path_of(&old), KEEP + Duration::from_secs(60));
+        let removed = sweep();
+        assert_eq!(removed, Stats::default(), "a mark is not an entry");
+        assert!(is_seen(&fresh), "a fresh mark stays");
+        assert!(!is_seen(&old), "an old mark is swept");
+    }
+
+    #[test]
+    fn the_sweep_removes_a_mark_beside_an_entry_whatever_its_age() {
+        let _home = Home::new();
+        let key = key_for("aa");
+        store(&key, &module(1), false).unwrap();
+        // Write a mark right beside the module. (In the real flow a
+        // first-run write that overlaps the second is what makes
+        // this; the sweep cleans it up.)
+        mark_seen(&key).unwrap();
+        assert!(is_seen(&key), "the mark is there");
+        // The mark is fresh; the sweep removes it anyway.
+        sweep();
+        assert!(!is_seen(&key), "a mark beside an entry is swept");
+        assert!(matches!(lookup(&key), Some(Hit::Module { .. })));
+    }
+
+    #[test]
+    fn a_seen_mark_is_not_a_module() {
+        let _home = Home::new();
+        let key = key_for("aa");
+        mark_seen(&key).unwrap();
+        // The lookup is for modules and refusals; a mark does not open.
+        assert!(lookup(&key).is_none());
+        // `--engine vm` with only a mark will still lower (the mark is
+        // not a module); the store overwrites nothing.
+        store(&key, &module(1), false).unwrap();
+        assert!(matches!(lookup(&key), Some(Hit::Module { .. })));
     }
 }

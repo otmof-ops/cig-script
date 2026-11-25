@@ -630,12 +630,15 @@ Add a row. The rules for reporting one are in
 `--max-steps N` (or `CIG_MAX_STEPS`) is the step budget: a loop that never
 ends is stopped with `E515` and its line; `0` disables it.
 `--engine auto|vm|tree` (or `CIG_ENGINE`, or `cig config engine` for a
-default) chooses what runs a script. `auto` is the default: when a module
-is kept for this script the VM runs it; when no module is kept the
-tree-walker runs it now and a `__lower` subprocess is left behind to
-lower it for the next run (a config key, `auto_lower`, turns the
-child off, or asks the run to wait for the child's status: the latter
-for deterministic tests). `vm` lowers now and keeps the module; `tree`
+default) chooses what runs a script. `auto` is the default: when a
+module is kept for this script the VM runs it, and until then the
+tree-walker does. A script's first run under `auto` leaves an empty
+mark in the tin and starts nothing; its second leaves a `cig __lower`
+process behind, which lowers the script and keeps the module; from its
+third run on, the VM runs it. A script that is run once is never
+lowered (a config key, `auto_lower`, turns the lowering off, or asks
+the run to wait for it: the latter for deterministic tests). `vm`
+lowers now and keeps the module; `tree`
 stays the tree-walker. On the VM a module is kept in the tin, checked
 by a MAC under this machine's own key in the keys directory, and the
 next run starts from it. The two engines are held to each other:
