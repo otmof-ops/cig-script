@@ -706,7 +706,15 @@ folders and says so once. The index is also kept **near its live view**:
 after each append the writer compares the file's size with its size at
 the last fresh write (one `stat`, the size kept in `runs-index.fresh`)
 and compacts past twice that plus 64 KiB, so an append costs the same at
-ten thousand live runs as at ten. A ledger append reads only the
+ten thousand live runs as at ten. **A start reads none of the index but
+its end (1.26.0):** the two things a start asks of it (which runs may
+still hold a boxed hop's layers, at every start, and a script's last
+good run, at `cig run`) are answered from a mark beside it
+(`runs-index.boxed`, `runs-index.good`: how far a scan had read, and
+what it had gathered) and the lines appended since, so starting a run
+costs the same at ten thousand past runs as at none. A mark is believed
+only for the file it was made from, and without one the index is read
+whole, once. A ledger append reads only the
 ledger's last two lines (the head and the subkey it chains on); the
 whole chain is verified where a verdict is read. `cig runs --prune`, `keep_runs`,
 `keep_days` and `history_budget` end with one compaction instead of N
