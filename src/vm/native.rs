@@ -189,6 +189,39 @@ impl BodyEntry {
     }
 }
 
+/// What a program's native code has for one of its functions: an
+/// entry, a body, both or neither ([`Native::has`]). One byte, which
+/// each loaded function carries, so that a call (it may run as native
+/// code) and a frame that comes on top (the driver may have a body to
+/// enter) read it of the function they hold already.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct Has(u8);
+
+impl Has {
+    /// Neither: the function is bytecode alone.
+    pub(super) const NEITHER: Has = Has(0);
+    /// Not known yet: the program was offered native code it has not
+    /// loaded. Taken to have both, so that whoever asks goes the exact
+    /// way, which loads the code; every function is told again then.
+    pub(super) const UNKNOWN: Has = Has(Has::ENTRY | Has::BODY);
+    const ENTRY: u8 = 1;
+    const BODY: u8 = 2;
+
+    /// The function has an entry: a call of it may run as native code
+    /// ([`Native::entry`] says whether one fits the arguments).
+    #[inline(always)]
+    pub(super) fn entry(self) -> bool {
+        self.0 & Has::ENTRY != 0
+    }
+
+    /// The function has a body in the section ([`Native::body_of`]
+    /// says whether it is one that can be entered).
+    #[inline(always)]
+    pub(super) fn body(self) -> bool {
+        self.0 & Has::BODY != 0
+    }
+}
+
 /// A program's native code, as the VM calls it.
 pub struct Native {
     /// The code mapped from the section, when there is one: entries
@@ -203,6 +236,12 @@ pub struct Native {
     /// For each function of the module, where its entries start in
     /// `rows` and how many it has: none, for most.
     of: Vec<(usize, usize)>,
+    /// For each function of the module, what the section has for it:
+    /// nothing, for most. Each loaded function is told its own
+    /// (`Program::stamp`), so the calls between two functions that are
+    /// bytecode alone cost a program with native code what they cost
+    /// one without.
+    has: Vec<Has>,
     /// For each function of the module, its body as the section gives
     /// it: its index in the mapped code and its resume points.
     raw: Vec<Option<(usize, Vec<u32>)>>,
@@ -263,11 +302,19 @@ impl Native {
             }
             rows.push((e.args, e.ret));
         }
+        let has = (0..funcs)
+            .map(|func| {
+                let entry = of.get(func).is_some_and(|&(_, count)| count != 0);
+                let body = raw.get(func).is_some_and(Option::is_some);
+                Has((if entry { Has::ENTRY } else { 0 }) | (if body { Has::BODY } else { 0 }))
+            })
+            .collect();
         Native {
             code,
             sites,
             rows,
             of,
+            has,
             raw,
             bodies,
             patient: false,
@@ -286,7 +333,17 @@ impl Native {
     /// is: nothing is read or verified earlier than without it.
     #[cfg(test)]
     pub(crate) fn for_tests_every_pc(funcs: usize) -> Native {
-        let raw = (0..funcs).map(|i| Some((i, Vec::new()))).collect();
+        Native::for_tests_every_pc_of(funcs, &(0..funcs).collect::<Vec<_>>())
+    }
+
+    /// [`Native::for_tests_every_pc`] with a body for the functions
+    /// `with` names and none for the others: a program whose native
+    /// code covers part of it, as most do.
+    #[cfg(test)]
+    pub(crate) fn for_tests_every_pc_of(funcs: usize, with: &[usize]) -> Native {
+        let raw = (0..funcs)
+            .map(|i| with.contains(&i).then(|| (i, Vec::new())))
+            .collect();
         let bodies = (0..funcs).map(|_| OnceCell::new()).collect();
         let mut native = Native::build(None, Vec::new(), Vec::new(), funcs, raw, bodies);
         native.every_pc = true;
@@ -442,11 +499,11 @@ impl Native {
         }
     }
 
-    /// Function `func` has an entry: a call of it may run as native
-    /// code ([`Native::entry`] says whether one fits the arguments).
+    /// What the section has for function `func`: neither an entry nor
+    /// a body, for most, and for one the module does not have.
     #[inline(always)]
-    pub(super) fn has_entry(&self, func: usize) -> bool {
-        self.of.get(func).is_some_and(|&(_, count)| count != 0)
+    pub(super) fn has(&self, func: usize) -> Has {
+        self.has.get(func).copied().unwrap_or(Has::NEITHER)
     }
 
     /// The entry of function `func` that takes the `n` arguments
@@ -770,6 +827,42 @@ mod tests {
         let words = vec![cig_bytecode::Instr::abc(cig_bytecode::Op::NOP, 0, 0, 0); 10];
         let (_, code) = cig_bytecode::decode_table(&words).expect("decodes");
         code
+    }
+
+    #[test]
+    fn one_load_says_what_the_section_has_for_a_function() {
+        // Five functions: 1 has two entries, 2 a body, 3 both, 0 and 4
+        // nothing.
+        let entry = |func, args: Vec<Ty>| cig_native::Entry {
+            func,
+            offset: 0,
+            args,
+            ret: Ty::Int,
+        };
+        let entries = vec![
+            entry(1, vec![Ty::Int]),
+            entry(1, vec![Ty::Float]),
+            entry(3, vec![Ty::Int]),
+        ];
+        let raw = vec![None, None, Some((0, vec![0])), Some((1, vec![0])), None];
+        let bodies = (0..5).map(|_| OnceCell::new()).collect();
+        let native = Native::build(None, Vec::new(), entries, 5, raw, bodies);
+        let entries: Vec<bool> = (0..6).map(|f| native.has(f).entry()).collect();
+        let bodied: Vec<bool> = (0..6).map(|f| native.has(f).body()).collect();
+        // The sixth is no function of the module: it has nothing.
+        assert_eq!(entries, [false, true, false, true, false, false]);
+        assert_eq!(bodied, [false, false, true, true, false, false]);
+        assert_eq!(native.with_bodies().collect::<Vec<_>>(), [2, 3]);
+        assert_eq!((native.len(), native.bodies()), (3, 2));
+
+        // The tests' own: a body for every function, no entry.
+        let every = Native::for_tests_every_pc(3);
+        assert!((0..3).all(|f| every.has(f).body() && !every.has(f).entry()));
+        assert_eq!(every.has(3), Has::NEITHER);
+
+        // Not known yet is taken to have both: the exact way is gone.
+        assert!(Has::UNKNOWN.entry() && Has::UNKNOWN.body());
+        assert!(!Has::NEITHER.entry() && !Has::NEITHER.body());
     }
 
     #[test]

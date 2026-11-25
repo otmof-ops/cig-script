@@ -5,6 +5,25 @@ project follows semantic versioning.
 
 ## Unreleased
 
+- **A call between two bytecode functions asks nothing of the native
+  code.** Each call the VM makes beside its fast loop asked the
+  program's native code whether the callee had an entry, and in a
+  program with native code each call and each return also asked
+  whether the function coming on top had a body: a walk through the
+  native code's tables, about 27 machine instructions a call in every
+  program and about 63 in a stage `c` one. Every loaded function now
+  carries one byte that says what the native code has for it (an
+  entry, a body, both or neither; both, until the code is loaded,
+  which sends the first call the exact way), and a call and a frame
+  switch read it of the function they hold already. Machine
+  instructions at stage `b`, against the runtime before: `fib` 0.94,
+  `trees` 0.96, `spectral` 0.96, `dispatch` 0.97, `closures` 0.97, and
+  no program more than 1.004. A benchmark run had shown `spectral`,
+  whose top level is native and whose three functions are bytecode, at
+  1.06 of its stage `b` program's time as a stage `c` program: it ran
+  5.6% more instructions than the stage `b` program and runs 0.7% more
+  now.
+
 - **Maps carry a shape, and a field is read with one compare.** A map
   a script writes as a record (`{x: 1, y: 2}`, or fields assigned by
   name one at a time) now has a shape beside its entries: a number
