@@ -102,7 +102,7 @@ mod native;
 #[cfg(test)]
 mod tests;
 
-use native::{has_body_room, BodyEntry};
+use native::{has_body_room, BodyEntry, Has};
 pub use native::{stack_starts_here, Native};
 
 use cig_native::{Context as NativeCtx, Host, Stop as NativeStop};
@@ -298,6 +298,13 @@ struct Proto {
     /// `cellnew`, the only instruction that gives a register one. Its
     /// registers are read and written without looking at `cells`.
     plain: bool,
+    /// What the program's native code has for this function: an entry,
+    /// a body, both or neither, and both while the program has native
+    /// code it has not loaded ([`Has::UNKNOWN`]). Kept as the code is
+    /// loaded ([`Program::stamp`]), so a call and a frame switch read
+    /// it here and ask the native code only about a function it has
+    /// something for.
+    native: std::cell::Cell<Has>,
     /// Per pc, the field cache of a `getfield` or `setfield` there: the
     /// position its key last had in the map, as the tree-walker keeps one
     /// per field expression. At a `callm`, the method cache: the
@@ -564,6 +571,38 @@ impl Program {
         // with a body before its first frame runs.
         self.has_bodies.set(source.bodies() > 0);
         self.native_source.set(Some(source));
+        self.stamp();
+    }
+
+    /// What the native code has for function `index`, as far as it is
+    /// known now: the loaded code's answer; neither, with no code to
+    /// load; not known, with code offered and not loaded yet.
+    fn has_now(&self, index: usize) -> Has {
+        match self.native.get() {
+            Some(Some(native)) => native.has(index),
+            Some(None) => Has::NEITHER,
+            None => {
+                let source = self.native_source.take();
+                let offered = source.is_some();
+                self.native_source.set(source);
+                match offered {
+                    true => Has::UNKNOWN,
+                    false => Has::NEITHER,
+                }
+            }
+        }
+    }
+
+    /// Tell every loaded function what the native code has for it
+    /// ([`Proto::native`]): when code is offered, and when it is
+    /// loaded. A function loaded later is told as it is loaded
+    /// ([`Program::ready`]).
+    fn stamp(&self) {
+        for (index, slot) in self.funcs.0.iter().enumerate() {
+            if let Some(proto) = slot.get() {
+                proto.native.set(self.has_now(index));
+            }
+        }
     }
 
     /// Load the offered native code now, as `CIG_VALIDATE=1` does before
@@ -584,6 +623,7 @@ impl Program {
         };
         // A second load finds it loaded, or finds no source.
         let _ = self.native.set(loaded.ok().flatten());
+        self.stamp();
         damaged
     }
 
@@ -645,14 +685,29 @@ impl Program {
             .native
             .set(Some(Native::for_tests_every_pc(self.heads.len())));
         self.has_bodies.set(true);
+        self.stamp();
+    }
+
+    /// For tests only: [`Program::attach_test_bodies_for_every_pc`]
+    /// for the functions `with` names alone. The others have no body:
+    /// the VM's own loop runs them, in a program that has bodies.
+    #[cfg(test)]
+    pub(crate) fn attach_test_bodies_to(&self, with: &[usize]) {
+        let _ = self
+            .native
+            .set(Some(Native::for_tests_every_pc_of(self.heads.len(), with)));
+        self.has_bodies.set(true);
+        self.stamp();
     }
 
     #[cold]
     #[inline(never)]
     fn first_native(&self) -> Option<&Native> {
-        self.native
-            .get_or_init(|| self.native_from_source().ok().flatten())
-            .as_ref()
+        let native = self
+            .native
+            .get_or_init(|| self.native_from_source().ok().flatten());
+        self.stamp();
+        native.as_ref()
     }
 
     /// Make function `index` ready to run: nothing when it is loaded; at
@@ -675,6 +730,7 @@ impl Program {
                 })?;
                 // `first_entry` enters no function, so the slot is still
                 // empty here.
+                proto.native.set(self.has_now(index));
                 let _ = slot.set(proto);
                 Ok(())
             }
@@ -1573,6 +1629,7 @@ fn build(
     }
     Ok(Proto {
         plain,
+        native: std::cell::Cell::new(Has::NEITHER),
         hints: (0..f.instrs.len())
             .map(|_| std::cell::Cell::new(0))
             .collect(),
@@ -3003,8 +3060,14 @@ impl<T: Tier> Machine<'_, T> {
                 return Ok((pc, switched));
             }
             // A function whose registers carry cells is the general
-            // path's, and one with a body is entered by the driver.
-            if !proto.plain || (T::BODIED && body_of_top(program, Some(top), proto).is_some()) {
+            // path's, and one with a body is entered by the driver. The
+            // function says itself whether the native code has one for
+            // it: most have none, and nothing more is asked of them.
+            if !proto.plain
+                || (T::BODIED
+                    && proto.native.get().body()
+                    && body_of_top(program, Some(top), proto).is_some())
+            {
                 return Ok((pc, switched));
             }
         }
@@ -4627,7 +4690,9 @@ fn compiled_parts(v: &Value, program: &Rc<Program>) -> Option<(usize, Option<Rc<
 /// call and the stack already holds the callee's registers. The
 /// callee's frame is on top then, at its first instruction, and the
 /// caller's says where it goes on and where the call is; the callee's
-/// function is returned.
+/// function is returned. The callee says itself whether the native
+/// code has an entry for it ([`Proto::native`]): one that has, or does
+/// not know yet, is the general path's, which loads the code.
 ///
 /// `None`, with nothing changed, for any other call: the general path
 /// makes it, or raises its error at the call.
@@ -4651,11 +4716,7 @@ fn quick_call<'p, T: Tier>(
         _ => return None,
     };
     let target = program.funcs.get(cf.index)?;
-    if n != target.arity
-        || program
-            .native()
-            .is_some_and(|code| code.has_entry(cf.index))
-    {
+    if n != target.arity || target.native.get().entry() {
         return None;
     }
     // The callee's registers past its arguments.

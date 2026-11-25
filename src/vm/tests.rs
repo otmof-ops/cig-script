@@ -867,6 +867,37 @@ fn a_recursion_makes_its_calls_beside_the_fast_loop_up_to_the_depth_the_general_
 }
 
 #[test]
+fn a_function_without_a_body_is_called_beside_the_fast_loop_in_a_program_that_has_bodies() {
+    // The top level alone has a body. Its one call is carried under
+    // it, and the thirty levels of the recursion below are calls from a
+    // function that is bytecode alone to itself: each of them, and each
+    // return, switches frames beside the fast loop, as in a program
+    // with no body at all, and no body is entered for any.
+    let m = recursion_module(false, 30);
+    super::stack_starts_here(2 << 20);
+    let p = program(&m);
+    p.attach_test_bodies_to(&[0]);
+    let (q, e, c) = (quick(), entered(), carried());
+    assert_eq!(run(&mut interp(), &p).expect("ran").repr(), "30");
+    let after = quick();
+    assert_eq!((entered() - e, carried() - c), (1, 1));
+    assert_eq!((after.0 - q.0, after.1 - q.1), (31, 31));
+    // The recursion's function alone has a body: the section says so
+    // of every frame of it that comes on top, and the driver enters
+    // the body, once a frame. The top level's call is made beside the
+    // fast loop and the thirty below it are carried under a body, each
+    // made the same way. The tests' body has `run` take its frame to
+    // the end, `ret` included, so no return is made beside the loop.
+    let p = program(&m);
+    p.attach_test_bodies_to(&[1]);
+    let (q, e, c) = (quick(), entered(), carried());
+    assert_eq!(run(&mut interp(), &p).expect("ran").repr(), "30");
+    let after = quick();
+    assert_eq!((entered() - e, carried() - c), (31, 30));
+    assert_eq!((after.0 - q.0, after.1 - q.1), (31, 0));
+}
+
+#[test]
 fn a_recursion_deeper_than_the_register_window_runs_the_same() {
     // Sixty frames of twelve registers each: past the registers the
     // fast loop holds from a frame's base, so the stack grows on the
