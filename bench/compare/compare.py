@@ -88,6 +88,10 @@ CIG_RUN_STDERR = r"(burned [0-9]+ ops? \([0-9]+ irreversible\), run [0-9]{8}T[0-
 CIG_DRY_STDERR = r"dry-run plan: 0 ops\nnothing was changed\n"
 MEMORY_READINGS = 3
 TIMEOUT_S = 600
+# A run on the default may leave a `cig __lower` behind. The harness waits for
+# it between runs: this is how long it waits before it gives up on one. The
+# wait is not part of any measured time.
+LOWERING_WAIT_S = 30.0
 
 PTRACE_TRACEME, PTRACE_CONT, PTRACE_SETOPTIONS = 0, 7, 0x4200
 PTRACE_O_TRACEEXIT, PTRACE_O_EXITKILL, PTRACE_EVENT_EXIT = 0x40, 0x100000, 6
@@ -158,6 +162,56 @@ def engines(cig):
     return b"--engine" in p.stdout
 
 
+def auto_engine(cig):
+    """Whether this cig's `--engine` takes `auto` (the default from cig-script#259).
+
+    The help's "Possible values:" lists them, one of them `- auto:`. An older
+    cig has `--engine` with only `vm` and `tree`; the three `auto` sides are
+    skipped there as `cig-tree`, `cig-vm` and `cig-vm-cold` are skipped on a
+    cig before they existed.
+    """
+    try:
+        p = subprocess.run([cig, "run", "--help"], stdout=subprocess.PIPE,
+                           stderr=subprocess.DEVNULL, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return b"--engine" in p.stdout and b"- auto:" in p.stdout
+
+
+def lowering_running(cig):
+    """Is anything of this cig still running? Between two runs nothing of it
+    should be, so anything that is, is a `cig __lower` a run on the default
+    left behind to lower a script. It is found by the program it runs
+    (`/proc/PID/exe`), not by its command line: a process in the middle of
+    `execve` has an empty command line for a moment, and it runs this same
+    program before and after. Where there is no `/proc`, no."""
+    want = os.path.realpath(cig)
+    try:
+        pids = [p for p in os.listdir("/proc") if p.isdigit()]
+    except OSError:
+        return False
+    for pid in pids:
+        try:
+            if os.readlink("/proc/%s/exe" % pid) == want:
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def wait_lowering(cig, timeout):
+    """Wait until nothing of this cig is running: `True` when nothing is,
+    `False` on timeout. The process a run leaves behind exists before that
+    run has exited, so looking once the run has been reaped cannot miss it.
+    The wait is not part of any time."""
+    deadline = time.monotonic() + timeout
+    while lowering_running(cig):
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.002)
+    return True
+
+
 def cig_home():
     """The home cig runs with: `CIGSCRIPT_HOME`, else its default."""
     return os.environ.get("CIGSCRIPT_HOME") or os.path.join(os.path.expanduser("~"), ".cigscript")
@@ -188,14 +242,22 @@ def build_spec(args):
 
     cig = find(args.cig, ["cig"])
     if cig:
+        # A cig whose default engine is `auto` runs a script on the tree-walker
+        # until a module is kept for it, and leaves a `cig __lower` behind
+        # after one of those runs. `cig run` is timed as it is from then on:
+        # each of these three is run once more before the rounds (`keep`) and
+        # the lowering waited for, so no timed run is a tree-walker run and
+        # none has a lowering running beside it.
+        kept = auto_engine(cig)
         side("cig", "cig", "`cig run`", version=[cig, "--version"], sha256=[cig],
-             stage=[script], run=[cig, "run", "{name}.cig"], env=CIG_ENV, stderr=CIG_RUN_STDERR)
+             stage=[script], run=[cig, "run", "{name}.cig"], env=CIG_ENV, stderr=CIG_RUN_STDERR,
+             keep=kept)
         side("cig-dry", "cig", "`cig run --dry-run`", version=[cig, "--version"],
              stage=[script], run=[cig, "run", "--dry-run", "{name}.cig"], env=CIG_ENV, skip=burns,
-             stderr=CIG_DRY_STDERR)
+             stderr=CIG_DRY_STDERR, keep=kept)
         side("cig-first", "cig", "`cig run`, in a new folder each time", version=[cig, "--version"],
              stage=[script], run=[cig, "run", "{name}.cig"], env=CIG_ENV, only=["hello"], fresh=True,
-             stderr=CIG_RUN_STDERR)
+             stderr=CIG_RUN_STDERR, keep=kept)
         # `cig run` under each engine (cig 1.25.0 on). On the VM a script is lowered
         # once and its module kept in the tin: `cig-vm` finds it there (the checked
         # run before the rounds put it there), `cig-vm-cold` never does (its tin's
@@ -212,6 +274,37 @@ def build_spec(args):
                      run=[cig, "run", "--engine", engine, "{name}.cig"],
                      env=dict(CIG_ENV, CIGSCRIPT_HOME=home), stderr=CIG_RUN_STDERR,
                      cold=os.path.join(home, "tin", "modules") if cold else None)
+        # `cig run` on the default (cig-script#259: `auto`, which runs a script
+        # on the VM once a module is kept for it, and until then on the
+        # tree-walker, with a `cig __lower` left behind after one of those
+        # runs to lower the script and keep the module: after a script's
+        # first run in a cig that lowers at the first sighting, after its
+        # second in one that lowers at the second). Three sides, each a bare
+        # `cig run {name}.cig` with a home of its own:
+        #   `cig-auto`         the module kept, so every timed run is on the VM;
+        #   `cig-auto-cold`    the modules folder removed before each run, so
+        #                      each is the first run of a script the tin has
+        #                      not seen;
+        #   `cig-auto-second`  the folder put back, before each run, as the
+        #                      script's first run left it (a copy kept from
+        #                      the checked run), so each is a script's second
+        #                      run, with no run of cig just before it.
+        # The start of `cig __lower` is inside the run that starts it; the
+        # lowering goes on after that run has exited and is not timed. After
+        # each run of the three the harness waits until no `cig __lower` is
+        # running, so no leftover lowering sits beside the next measurement.
+        if auto_engine(cig):
+            for name, label, cold, seen in (
+                    ("cig-auto", "`cig run` (default)", False, False),
+                    ("cig-auto-cold", "`cig run` (default), first run", True, False),
+                    ("cig-auto-second", "`cig run` (default), second run", True, True)):
+                home = cig_home() + "-" + name
+                modules = os.path.join(home, "tin", "modules")
+                side(name, "cig", label, version=[cig, "--version"], stage=[script],
+                     run=[cig, "run", "{name}.cig"],
+                     env=dict(CIG_ENV, CIGSCRIPT_HOME=home), stderr=CIG_RUN_STDERR,
+                     cold=modules if cold else None, wait_after=modules, seen=seen,
+                     keep=not cold)
     else:
         missing.append("cig")
     cigcompile = find(args.cigcompile, ["cigcompile"])
@@ -355,7 +448,7 @@ def wait_for(proc, timeout):
 class Run:
     """One (program, side) pair: the command, its environment and its folder."""
 
-    def __init__(self, side, prog, work, build, scratch, cpus=None):
+    def __init__(self, side, prog, work, build, scratch, cpus=None, warm=0.0):
         name = prog["name"]
         self.side = side
         self.program = name
@@ -378,18 +471,42 @@ class Run:
         self.capture = os.path.join(scratch, "%s.%s" % self.key)
         self.fresh = bool(side.get("fresh"))
         self.cold = side.get("cold")
+        # A `cig-auto` or `cig-auto-cold` run spawns `cig __lower` in the
+        # background; this is its tin's modules folder, so the harness can
+        # wait for the child to finish between runs.
+        self.wait_after = side.get("wait_after")
+        # `cig-auto-second`: a copy of the modules folder as the script's
+        # first run left it, put back before every timed run (`keep_seen`).
+        self.seen_copy = None
+        # `--warm`: milliseconds to keep the measured CPU busy before a timed run.
+        self.warm = warm
         self.where = self.home
         with open(prog["expect"], "rb") as f:
             self.expect = f.read()
 
     def ready(self):
         """The folder as the run should find it. Not timed. True when it changed the disk."""
-        if self.cold and os.path.isdir(self.cold):
-            # A cold run finds no module in its tin: it lowers its own.
+        if self.cold and (self.seen_copy or os.path.isdir(self.cold)):
+            # A cold run finds no module in its tin: it lowers its own. A
+            # second run finds what its first run left there, and no more.
             shutil.rmtree(self.cold, ignore_errors=True)
+            if self.seen_copy:
+                shutil.copytree(self.seen_copy, self.cold, symlinks=True)
             self.settle()
             return True
         return self.settle()
+
+    def keep_seen(self):
+        """Keep a copy of the modules folder as it is now, after the checked
+        run: what a script's first run on the default leaves in the tin.
+        `ready` puts it back before every timed run."""
+        copy = self.home + ".seen"
+        shutil.rmtree(copy, ignore_errors=True)
+        if os.path.isdir(self.cold):
+            shutil.copytree(self.cold, copy, symlinks=True)
+        else:
+            os.makedirs(copy)
+        self.seen_copy = copy
 
     def settle(self):
         """`ready`, for the folder itself."""
@@ -427,15 +544,20 @@ class Run:
         with open(out_path, "wb") as out, open(err_path, "wb") as err:
             if changed:
                 os.sync()
-            before = resource.getrusage(resource.RUSAGE_CHILDREN)
             pin = (lambda cpus=self.cpus: os.sched_setaffinity(0, cpus)) if self.cpus else None
-            start = time.perf_counter()
+            held = keep_busy(self.cpus, self.warm) if self.warm > 0 else None
             try:
-                proc = subprocess.Popen(self.cmd, cwd=self.where, env=self.env,
-                                        stdin=subprocess.DEVNULL, stdout=out, stderr=err,
-                                        preexec_fn=pin)
-            except OSError as e:
-                return 0.0, 127, b"", str(e).encode(), 0.0
+                before = resource.getrusage(resource.RUSAGE_CHILDREN)
+                start = time.perf_counter()
+                try:
+                    proc = subprocess.Popen(self.cmd, cwd=self.where, env=self.env,
+                                            stdin=subprocess.DEVNULL, stdout=out, stderr=err,
+                                            preexec_fn=pin)
+                except OSError as e:
+                    return 0.0, 127, b"", str(e).encode(), 0.0
+            finally:
+                # Whatever happened, this harness is not left on the one CPU.
+                let_go(held)
             code = wait_for(proc, TIMEOUT_S)
             ms = (time.perf_counter() - start) * 1000.0
             after = resource.getrusage(resource.RUSAGE_CHILDREN)
@@ -555,6 +677,52 @@ def cpu_mhz():
     return "%.0f" % (statistics.fmean(freqs) / 1000) if freqs else "unknown"
 
 
+# `--rest` and `--cool`: the most a rest after one run and a wait before one
+# round may take. A pass is not held up for long by either.
+REST_MAX_S = 2.0
+COOL_MAX_S = 60
+
+
+def keep_busy(cpus, ms):
+    """`--warm`: spin for `ms` milliseconds on the first of the measured CPUs
+    (on whatever CPU this is, where nothing is pinned) and stay there, so the
+    process started next begins on a core whose clock is up. Gives back the
+    affinity to put back once that process is started, or `None`. Not timed."""
+    held = None
+    if cpus and hasattr(os, "sched_setaffinity"):
+        try:
+            held = os.sched_getaffinity(0)
+            os.sched_setaffinity(0, {min(cpus)})
+        except OSError:
+            held = None
+    until = time.perf_counter() + ms / 1000.0
+    while time.perf_counter() < until:
+        pass
+    return held
+
+
+def let_go(held):
+    """Put this harness's own affinity back after `keep_busy`."""
+    if held is not None:
+        try:
+            os.sched_setaffinity(0, held)
+        except OSError:
+            pass
+
+
+def cool_down(below):
+    """Wait until the CPU package is below `below` degrees C, at most
+    COOL_MAX_S: `True` when it got there (or cannot be read). Not timed."""
+    deadline = time.monotonic() + COOL_MAX_S
+    while True:
+        got = package_temp()
+        if not got.lstrip("-").isdigit() or int(got) < below:
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.25)
+
+
 def package_temp():
     """The CPU package's temperature in degrees C, or `unknown`."""
     base = "/sys/class/thermal"
@@ -575,7 +743,8 @@ def history():
     one home, where sides keep homes of their own."""
     home = cig_home()
     most = 0
-    for h in [home] + [home + "-" + s for s in ("cig-tree", "cig-vm", "cig-vm-cold")]:
+    for h in [home] + [home + "-" + s for s in ("cig-tree", "cig-vm", "cig-vm-cold",
+                                                 "cig-auto", "cig-auto-cold", "cig-auto-second")]:
         try:
             most = max(most, len(os.listdir(os.path.join(h, "runs"))))
         except OSError:
@@ -646,7 +815,7 @@ def conditions(spec, out_dir, floor, cpus=None):
         f.write("\n".join(lines) + "\n")
 
 
-def measure_floor(work, build, scratch, cpus=None):
+def measure_floor(work, build, scratch, cpus=None, warm=0.0):
     """What starting, waiting for and reaping a process costs here: `true`, 50 times,
     run exactly as every side is (same CPU pinning if any)."""
     true = shutil.which("true")
@@ -655,7 +824,7 @@ def measure_floor(work, build, scratch, cpus=None):
     expect = os.path.join(work, "floor.expect")
     open(expect, "wb").close()
     run = Run({"name": "floor", "run": [true]}, {"name": "floor", "expect": expect},
-              work, build, scratch, cpus=cpus)
+              work, build, scratch, cpus=cpus, warm=warm)
     times = [run.once()[0] for _ in range(50)]
     return (statistics.median(times), min(times), max(times))
 
@@ -677,6 +846,17 @@ def main():
                     "for every `cigcompile build`); default: the cig named by --cig")
     ap.add_argument("--cpus", help="pin every measured process to this taskset-style CPU list "
                     "(for example `2` or `0-5`); builds are not pinned. Default: not pinned.")
+    ap.add_argument("--rest", type=float, default=0.0,
+                    help="after each timed run, rest for this many times the run's own time (at most "
+                    "%g s), so a short run is not timed on a core a long one has just heated. "
+                    "Default: 0, no rest." % REST_MAX_S)
+    ap.add_argument("--warm", type=float, default=0.0,
+                    help="before each timed run, keep the first measured CPU busy for this many "
+                    "milliseconds and start the run from there, so a run of a few milliseconds "
+                    "starts on a core whose clock is up. Default: 0, no warming.")
+    ap.add_argument("--cool", type=int, default=0,
+                    help="before each round, wait until the CPU package is below this many degrees C "
+                    "(at most %d s a round). Default: 0, no wait." % COOL_MAX_S)
     args = ap.parse_args()
     cpus = parse_cpus(args.cpus)
 
@@ -696,7 +876,7 @@ def main():
     rounds = int(spec["rounds"])
     with open(os.path.join(out_dir, "spec.json"), "w") as f:
         json.dump(spec, f, indent=1)
-    conditions(spec, out_dir, measure_floor(work, build, scratch, cpus=cpus), cpus=cpus)
+    conditions(spec, out_dir, measure_floor(work, build, scratch, cpus=cpus, warm=args.warm), cpus=cpus)
 
     samples = open(os.path.join(out_dir, "samples.tsv"), "w")
     checks = open(os.path.join(out_dir, "checks.tsv"), "w")
@@ -712,6 +892,11 @@ def main():
     native_tsv.write("program\tstage\tcompiled\tleft\ttop\n")
     native_written = 0
     failed = 0
+    # Times a `wait_lowering` call ran past LOWERING_WAIT_S without the child's
+    # module appearing. A pass has to see zero for its numbers to be read
+    # without reservation; the conditions file records the count.
+    lowering_timeouts = 0
+    hot_rounds = 0
     hashed = set()
 
     def record_input(kind, path):
@@ -739,7 +924,7 @@ def main():
                 continue
             if needs:
                 record_input("reference", needs.replace("{name}", name))
-            run = Run(side, prog, work, build, scratch, cpus=cpus)
+            run = Run(side, prog, work, build, scratch, cpus=cpus, warm=args.warm)
             creates = fill([side["creates"]], name, build)[0] if side.get("creates") else None
             if side.get("prepare") and not (creates and os.path.exists(creates)):
                 os.makedirs(run.where, exist_ok=True)
@@ -791,6 +976,23 @@ def main():
             if creates:
                 record_input("built", creates)
             _, code, got, said, _ = run.once()
+            # A checked run on the default may have left a `cig __lower`
+            # behind. Wait for it before the next pair's checked run goes
+            # on; the wait is not timed.
+            if (run.wait_after or side.get("keep")) and not wait_lowering(run.cmd[0], LOWERING_WAIT_S):
+                lowering_timeouts += 1
+            # `cig-auto-second`: the checked run was the script's first. What
+            # it left in the tin is kept, to be put back before each timed run.
+            if side.get("seen") and code == 0:
+                run.keep_seen()
+            # A side timed with its module kept. The default keeps one after
+            # a script's first run or after its second, by the cig; the
+            # checked run was its first, so it is run once more, not timed,
+            # and that lowering waited for. Every timed run is then on the VM.
+            if side.get("keep") and code == 0:
+                run.once()
+                if not wait_lowering(run.cmd[0], LOWERING_WAIT_S):
+                    lowering_timeouts += 1
             wrong = run.verdict(code, got, said)
             if wrong:
                 checks.write("%s\t%s\tWRONG\t%s\n" % (name, side["name"], wrong))
@@ -809,6 +1011,10 @@ def main():
     for r in range(rounds):
         order = live[:]
         rng.shuffle(order)
+        # A round starts on a core that has cooled, where that was asked for:
+        # the checked runs, or the round before, may have left it throttled.
+        if args.cool and not cool_down(args.cool):
+            hot_rounds += 1
         round_log.write("%d\t%s\t%s\t%s\t%s\n" % (r + 1, time.strftime("%H:%M:%S", time.gmtime()),
                                                   cpu_mhz(), package_temp(), history()))
         round_log.flush()
@@ -816,6 +1022,15 @@ def main():
             if run.key in wrong:
                 continue
             ms, code, got, said, cpu = run.once()
+            # Wait for a left-behind `cig __lower` to finish before the next
+            # pair's run starts on the same CPU. Not timed, so it does not
+            # affect this round's `ms`.
+            if (run.wait_after or run.side.get("keep")) and not wait_lowering(run.cmd[0], LOWERING_WAIT_S):
+                lowering_timeouts += 1
+            # Rest in proportion to what just ran (`--rest`), after any wait
+            # above: the lowering heats the core as a run does. Not timed.
+            if args.rest > 0:
+                time.sleep(min(args.rest * ms / 1000.0, REST_MAX_S))
             bad = run.verdict(code, got, said)
             if bad:
                 wrong.add(run.key)
@@ -834,6 +1049,10 @@ def main():
         rng.shuffle(order)
         for run in order:
             m = run.peak_memory()
+            # A reading on the default may leave a lowering behind as a timed
+            # run does; the next reading starts once it is done.
+            if run.wait_after or run.side.get("keep"):
+                wait_lowering(run.cmd[0], LOWERING_WAIT_S)
             if m:
                 readings += 1
                 memory.write("%s\t%s\t%d\t%d\t%d\t%d\n" % (run.key + (i + 1,) + m))
@@ -848,6 +1067,22 @@ def main():
             os.unlink(os.path.join(out_dir, "native.tsv"))
         except OSError:
             pass
+    # The `lowering_timeouts` line is written only when the pass had a side
+    # that spawns `cig __lower` (cig-auto or cig-auto-cold), so a pass on an
+    # older cig leaves conditions.txt the same as before.
+    if any(s.get("wait_after") or s.get("keep") for s in spec["sides"]):
+        with open(os.path.join(out_dir, "conditions.txt"), "a") as f:
+            f.write("lowering_timeouts\t%d\n" % lowering_timeouts)
+    # `rest`, `warm` and `cool` are written only when asked for, for the same reason.
+    if args.rest > 0 or args.cool or args.warm > 0:
+        with open(os.path.join(out_dir, "conditions.txt"), "a") as f:
+            if args.rest > 0:
+                f.write("rest\t%g\n" % args.rest)
+            if args.warm > 0:
+                f.write("warm\t%g\n" % args.warm)
+            if args.cool:
+                f.write("cool\t%d\n" % args.cool)
+                f.write("hot_rounds\t%d\n" % hot_rounds)
     shutil.rmtree(work, ignore_errors=True)
     shutil.rmtree(scratch, ignore_errors=True)
     if live and not readings:

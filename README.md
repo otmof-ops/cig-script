@@ -270,9 +270,13 @@ The rows: `cig run` is cig's interpreter; stage a and stage b are programs [cigc
 
 Whole processes, start-up included, on a 2018 laptop on battery. cig's times include a start-up cost that grows with its run history, which this run found ([#252](https://github.com/otmof-ops/cig-script/issues/252)).
 
-**`cig run` can use the VM too** (`cig run --engine vm`, `CIG_ENGINE=vm`, or `cig config engine vm`): a script is lowered to bytecode once and its module kept in the tin. Measured on another machine with cig 1.25.0 as released, so cig against itself only ([the run](docs/ENGINES-1.25.0.md)): with its module in the tin the VM takes 0.57 of the tree-walker's time over the 21 compute programs, faster on 19, level on 2 and slower on 0.
+**`cig run` runs on the VM by default** on `main` (in no release yet; cig 1.25.0 has the VM behind `cig run --engine vm`, [measured here](docs/ENGINES-1.25.0.md)). A script's first two runs take the tree-walker, the second leaves a `cig __lower` behind that lowers the script and keeps its module in the tin, and every later run takes the VM; `cig run --engine tree` is still there. Measured on another machine than the table above, a run of the source ([the run](docs/ENGINES-2026-11-25.md)): over the 21 compute programs the default takes 0.47 of the tree-walker's time, faster on 19, level on 2 and slower on 0; against `--engine vm` with the module kept, it takes 0.99 on the geometric mean. Against the other languages in the same rounds, cig's time over theirs at the geometric mean, and the programs it is faster on, level on and slower on:
 
-From its second run on, cigo's 20,664-line script starts in 10.6 ms on the VM where the tree-walker takes 36.2. The first run of a script pays for the lowering: 7.7 ms against 2.5 for a 500-line script ([measured here](docs/ENGINES-FIRST-RUNS-1.25.0.md)), which is why the tree-walker is still the default.
+| time ÷ theirs | Lua | LuaJIT `-joff` | LuaJIT | CPython | Node | Rust |
+|---|---:|---:|---:|---:|---:|---:|
+| `cig run` | 1.35 (4/0/14) | 1.55 (5/0/13) | 2.54 (3/0/15) | 0.63 (19/1/1) | 0.22 (18/1/1) | 6.45 (0/0/6) |
+
+A script gets onto the VM without a run that does the lowering itself ([measured here](docs/ENGINES-FIRST-RUNS-2026-11-25.md)). Its first run takes 0.96 of the tree-walker's time on `hello` and 0.97 on a 500-line script. Its second, which starts the lowering in a process of its own, takes 1.13 and 1.10 (1.35 and 1.77 where that process has to share one CPU with it). From its third run on, cigo's 20,992-line script starts in 10.5 ms where the tree-walker takes 30.5, and the 500-line script in 2.7 ms against 3.3.
 
 ### Stage c: native code for loops, lists and records (on `main`)
 

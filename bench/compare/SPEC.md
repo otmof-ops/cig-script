@@ -21,7 +21,11 @@ A run is one or more **passes**, given in order (`--pass DIR`, repeated): pass 1
 
 `condition(pass, KEY)` is the values of the **first** line of that pass's `conditions.txt` whose first field is `KEY` (a list of strings), or nothing.
 
-The `conditions.txt` lines this spec reads: `date_utc`, `cpu`, `cores`, `max_mhz`, `kernel`, `driver`, `governor`, `epp`, `no_turbo`, `profile`, `transparent_hugepages`, `mains`, `load_average`, `temp_c`, `history`, `harness`, `rounds`, `seed`, `cpus`, `floor_ms` (each `KEY<TAB>VALUE...`); `side<TAB>NAME<TAB>LABEL<TAB>VERSION`; and `sha256<TAB>SIDE<TAB>FILE<TAB>HEX`.
+The `conditions.txt` lines this spec reads: `date_utc`, `cpu`, `cores`, `max_mhz`, `kernel`, `driver`, `governor`, `epp`, `no_turbo`, `profile`, `transparent_hugepages`, `mains`, `load_average`, `temp_c`, `history`, `harness`, `rounds`, `seed`, `cpus`, `floor_ms`, `rest`, `warm`, `cool`, `hot_rounds`, `lowering_timeouts` (each `KEY<TAB>VALUE...`); `side<TAB>NAME<TAB>LABEL<TAB>VERSION`; and `sha256<TAB>SIDE<TAB>FILE<TAB>HEX`.
+
+A pass whose cig takes `cig run` on the default (cig-script#259's `auto` setting) also writes a `lowering_timeouts<TAB>N` line, N a non-negative integer: the number of times the harness's wait for a left-behind `cig __lower` ran past its own bound with that process still running. A pass without a side that spawns `__lower` writes no such line. The number names a condition of the pass, not a measurement: it is shown in the conditions table when present.
+
+A pass made with `--rest R` also writes `rest<TAB>R`: after each timed run the harness rested for R times the run's own time (at most two seconds). A pass made with `--cool C` writes `cool<TAB>C` and `hot_rounds<TAB>N`: each round waited until the CPU package was below C degrees, for at most a minute, and N rounds began without it having got there. A pass made with `--warm W` writes `warm<TAB>W`: before each timed run (and each run of the process floor) the harness kept the first of the measured CPUs busy for W milliseconds and started the run from that CPU. A pass made without them writes none of the four lines. They are conditions of the pass, not measurements.
 
 `cpus` names a condition of the pass, not a number. Its one value is either `(not pinned)` (the whole literal, with parentheses and a space, when `compare.py` was not given `--cpus`) or a `taskset -c`-style list of CPU indices (the canonical form `A`, `A-B` or ranges and lone values joined by commas, lowest first: for example `2`, `0-5`, `0-3,8`). When pinned, every measured process of the pass (every timed run of every side in every round, the floor measurement included, builds excepted) was started with its own CPU affinity set to that list before `exec`, with `os.sched_setaffinity(0, cpus)` in the child. A pass is pinned or not; a pass does not mix the two.
 
@@ -41,8 +45,9 @@ Named groups of sides (each in this order):
 - `LANGUAGES` = `lua`, `luajit-off`, `luajit`, `python`, `node`, `rust`
 - `IDIOMS` = `python-idiom` (its base is `python`), `node-idiom` (base `node`), `rust-idiom` (base `rust`)
 - `ENGINES` = `cig-tree`, `cig-vm`, `cig-vm-cold`: `cig run` under each engine, with the script's module in the tin and with nothing in the tin
+- `AUTO_ENGINES` = `cig-auto`, `cig-auto-cold`, `cig-auto-second`: `cig run SCRIPT.cig` on the default (cig-script#259's `auto`), with no `--engine` and no `CIG_ENGINE`, at three points of a script's life. The default runs a script on the VM once a module is kept for it, and until then on the tree-walker, with a `cig __lower` left behind after one of those runs to lower the script and keep the module: after a script's first run in a cig that lowers at the first sighting, after its second in one that lowers at the second. `cig-auto` is timed with the module kept: after the checked run the script is run once more, not timed, and its lowering waited for, so by either rule every timed run is on the VM. `cig-auto-cold` has the tin's modules folder removed before every timed run, so each is the first run of a script the tin has not seen. `cig-auto-second` has the folder put back, before every timed run, as the script's first run left it (the harness keeps a copy of it from the checked run, which is that first run): each timed run is then a script's second, and no run of cig comes just before it, which would leave it a warm start no other side has. The start of `cig __lower` is inside the timed run that starts it; the lowering itself goes on after that `cig` has exited and is not timed. After every run of the three the harness waits until nothing of the cig being measured is running (it reads which program each process runs, `/proc/PID/exe`: a process in the middle of `execve` has no command line for a moment), and that wait is not part of any time. On such a cig the sides `cig`, `cig-dry` and `cig-first` are bare `cig run`s on the default too: each is run once more after its checked run, not timed, and the lowering waited for, so `cig run` is timed as it is once a script's module is kept.
 - `MAIN` = `cig`, `stage-b`, `stage-c`, then `LANGUAGES`
-- `ALL` = `CIG_SIDES`, then `stage-c-off`, then `cig-first`, then `ENGINES`, then `LANGUAGES`, then the three of `IDIOMS`
+- `ALL` = `CIG_SIDES`, then `stage-c-off`, then `cig-first`, then `ENGINES`, then `AUTO_ENGINES`, then `LANGUAGES`, then the three of `IDIOMS`
 
 `stage-c` and `stage-c-dry` go in each group right after their stage `b` twin, so the order stays `stage-b, stage-c` and `stage-b-dry, stage-c-dry`. `stage-c-off` has no twin: it is a side of `ALL` only, right after `stage-c-dry`, and is not in `MAIN` or `CIG_SIDES`. A `stage-c` run is a program `cigcompile build --stage c` built; a `stage-c-dry` run is the same program with `--dry-run`; a `stage-c-off` run is the **same stage `c` program as `stage-c`** started with `CIG_NATIVE=0` in its environment, so it runs its bytecode and never loads its native code. A build at `--stage c` whose script has no function that compiles to native code exits 0 and comes out as a stage `b` program with a note; the program is still timed on the `stage-c` (and `stage-c-dry` and `stage-c-off`) sides, which is what a person asking for stage `c` gets.
 
@@ -98,6 +103,7 @@ In what follows, `p` is a program, `s` a side, `k` a pass number from 1 (written
 | key | exists when | value | text |
 |---|---|---|---|
 | `ratio.p.A.B` | (p, A) and (p, B) both valid | the ratio | ratio |
+| `within10.p.A.B` | as `ratio.p.A.B` | `1` when `ratio.p.A.B <= 1.10`, else `0` (cig-script#259's gate on a first run: a slowdown of more than 10% fails, a faster first run passes) | the string `within 10%` for `1`, `past 10%` for `0` |
 | `geomean.SET.A.B` | at least one program of SET has both pairs valid | the geometric mean of the ratios over those programs | ratio |
 | `inverse.SET.A.B` | as `geomean.SET.A.B` | `1 / geomean` | ratio |
 | `faster.SET.A.B`, `level.SET.A.B`, `slower.SET.A.B` | as `geomean.SET.A.B` | as section 4 | count |
@@ -113,7 +119,8 @@ In what follows, `p` is a program, `s` a side, `k` a pass number from 1 (written
 4. (`stage-b`, `python-idiom`), (`stage-c`, `python-idiom`), (`stage-b`, `node-idiom`), (`stage-c`, `node-idiom`), (`stage-b`, `rust-idiom`), (`stage-c`, `rust-idiom`);
 5. (`cig-vm`, `cig-tree`), (`cig-vm-cold`, `cig-tree`), (`cig-vm`, `stage-b`), (`cig-vm`, `stage-c`);
 6. (`cig-vm`, B) for each B in `LANGUAGES`;
-7. (`stage-c`, `stage-c-off`).
+7. (`stage-c`, `stage-c-off`);
+8. (`cig-auto`, `cig-tree`), (`cig-auto-cold`, `cig-tree`), (`cig-auto`, `cig-vm`), (`cig-auto-second`, `cig-tree`).
 
 For SET = `native` (the native set of section 4), `geomean.native.A.B` and its companions exist only for (A, B) = (`stage-c`, `stage-b`): they are the geometric mean and the faster/level/slower counts of the ratios `median(p, stage-c) / median(p, stage-b)` over the native set's programs where both pairs are valid.
 
@@ -177,6 +184,9 @@ A cell that names a key is that key's text, or `–` when the key does not exist
 | `cig-tree` | `` `cig run --engine tree` `` |
 | `cig-vm` | `` `cig run --engine vm` `` |
 | `cig-vm-cold` | `` `cig run --engine vm`, empty tin `` |
+| `cig-auto` | `` `cig run` (default) `` |
+| `cig-auto-cold` | `` `cig run` (default), first run `` |
+| `cig-auto-second` | `` `cig run` (default), second run `` |
 | `stage-a` | stage a |
 | `stage-a-dry` | stage a, `` `--dry-run` `` |
 | `stage-b` | stage b |
@@ -194,7 +204,7 @@ A cell that names a key is that key's text, or `–` when the key does not exist
 | `node-idiom` | Node, idiomatic |
 | `rust-idiom` | Rust, idiomatic |
 
-In plain characters: `cig`'s label is backtick, `cig run`, backtick; `cig-dry`'s is backtick, `cig run --dry-run`, backtick; `cig-first`'s is backtick, `cig run`, backtick, `, new folder`; `cig-tree`'s is backtick, `cig run --engine tree`, backtick; `cig-vm`'s is backtick, `cig run --engine vm`, backtick; `cig-vm-cold`'s is backtick, `cig run --engine vm`, backtick, `, empty tin`; `stage-a-dry`'s is `stage a, ` then backtick, `--dry-run`, backtick (and `stage-b-dry`'s and `stage-c-dry`'s the same with `b` and `c`); `stage-c-off`'s is `stage c, ` then backtick, `CIG_NATIVE=0`, backtick; `luajit-off`'s is `LuaJIT ` then backtick, `-joff`, backtick.
+In plain characters: `cig`'s label is backtick, `cig run`, backtick; `cig-dry`'s is backtick, `cig run --dry-run`, backtick; `cig-first`'s is backtick, `cig run`, backtick, `, new folder`; `cig-tree`'s is backtick, `cig run --engine tree`, backtick; `cig-vm`'s is backtick, `cig run --engine vm`, backtick; `cig-vm-cold`'s is backtick, `cig run --engine vm`, backtick, `, empty tin`; `cig-auto`'s is backtick, `cig run`, backtick, ` (default)`; `cig-auto-cold`'s is backtick, `cig run`, backtick, ` (default), first run`; `cig-auto-second`'s is backtick, `cig run`, backtick, ` (default), second run`; `stage-a-dry`'s is `stage a, ` then backtick, `--dry-run`, backtick (and `stage-b-dry`'s and `stage-c-dry`'s the same with `b` and `c`); `stage-c-off`'s is `stage c, ` then backtick, `CIG_NATIVE=0`, backtick; `luajit-off`'s is `LuaJIT ` then backtick, `-joff`, backtick.
 
 | name | header | rows (in order) | cells |
 |---|---|---|---|
@@ -213,6 +223,9 @@ In plain characters: `cig`'s label is backtick, `cig run`, backtick; `cig-dry`'s
 | `moved` | `program`, `side`, then for each pass k: `pass k, ms`. **Two text columns.** | for each program p in order, for each side s in `ALL` where (p, s) is valid and the largest of its `median_k` over the passes divided by the smallest is above `1.10` | `` `p` ``, the label of s, then `median.passK.p.s` for each pass k |
 | `stability` | `side`, `programs`, then for each pass k from 2: `pass k ÷ pass 1`; then for each pass k: `last third ÷ first third, pass k`; then for each pass k: `CV over 5%, pass k` | for each side s in `ALL` where `programs.s` exists | the label of s, `programs.s`, then `repeat.passK.s` for each k from 2, `drift.passK.s` for each k, `noisy.passK.s` for each k |
 | `engines` | `program`, then the labels of `cig-tree`, `cig-vm`, `cig-vm-cold`, then `vm ÷ tree`, then `vm, empty tin ÷ tree` | each program | `median.p.cig-tree`, `median.p.cig-vm`, `median.p.cig-vm-cold`, `ratio.p.cig-vm.cig-tree`, `ratio.p.cig-vm-cold.cig-tree` |
+| `engines-auto` | `program`, then the labels of `cig-tree`, `cig-vm`, `cig-auto`, `cig-vm-cold`, then `vm ÷ tree`, then `auto ÷ tree`, then `vm, empty tin ÷ tree` | each program | `median.p.cig-tree`, `median.p.cig-vm`, `median.p.cig-auto`, `median.p.cig-vm-cold`, `ratio.p.cig-vm.cig-tree`, `ratio.p.cig-auto.cig-tree`, `ratio.p.cig-vm-cold.cig-tree` |
+| `engines-first` | `program`, then the labels of `cig-tree`, `cig-auto-cold`, `cig-auto-second`, `cig-auto`, `cig-vm-cold`, `cig-vm` | each program | `median.p.S` for each of those sides, in that order |
+| `engines-first-ratios` | `program`, then the labels of `cig-auto-cold`, `cig-auto-second`, `cig-auto`, `cig-vm-cold`, `cig-vm` | each program | `ratio.p.S.cig-tree` for each of those sides, in that order |
 | `conditions` | (an empty string), then `pass k` for each pass. **Every column is text**, so no row is left out. | see below | see below |
 
 **`conditions`, its rows in order.** First, for each (KEY, label) below, a row: the label, then for each pass the shown value of `condition(pass, KEY)[0]`, or `–` when the pass has no such line; the row is kept only when at least one pass has that line:
@@ -239,6 +252,11 @@ In plain characters: `cig`'s label is backtick, `cig run`, backtick; `cig-dry`'s
 | `seed` | `seed of the rounds' order` | as written |
 | `cpus` | `pinned to CPUs` | as written |
 | `floor_ms` | `` `true`, median ms `` | as written |
+| `rest` | `rest after each run, times the run's length` | as written |
+| `warm` | `CPU kept busy before each run, ms` | as written |
+| `cool` | `a round waits for the package to be below, °C` | as written |
+| `hot_rounds` | `rounds begun without it` | as written |
+| `lowering_timeouts` | `waits for a left-behind lowering that gave up` | as written |
 
 Then four rows, each the label then, for each pass k, the text of a key (or `–`): `cig's run records at the last round` (`history.last.passK`); `mean clock at a round's start, lowest, MHz` (`mhz.min.passK`); `mean clock at a round's start, highest, MHz` (`mhz.max.passK`); `package °C at a round's start, highest` (`temp.max.passK`).
 
