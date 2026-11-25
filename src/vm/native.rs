@@ -46,7 +46,8 @@ pub(crate) const NO_RESUME: u32 = u32::MAX;
 const MISS_WINDOW: u32 = 64;
 
 /// A body's guesses fail too often when more than one fails in this
-/// many steps of the run.
+/// many steps of its own: the steps its machine code counted, which is
+/// the work the body did in place of the interpreter.
 const STEPS_A_MISS: u64 = 16;
 
 /// A function's instructions with none at a resume point of its body:
@@ -78,10 +79,14 @@ pub(crate) struct BodyEntry {
     between: RefCell<Between>,
     /// For each resume index, the instruction `between` has none for.
     taken: Vec<Option<DecodedInstr>>,
-    /// The guesses of this body that failed since `since`.
+    /// The guesses of this body that failed since `misses` was last
+    /// zero.
     misses: Cell<u32>,
-    /// The run's count of steps when `misses` was last zero.
-    since: Cell<u64>,
+    /// The steps this body's machine code has counted since then: its
+    /// own work, which its failed guesses are set against. Not the
+    /// run's steps: what the rest of a program does says nothing about
+    /// whether this body pays for itself.
+    own: Cell<u64>,
     /// How many words the function's code has: where the tests'
     /// plain-Rust body runs to.
     #[cfg_attr(not(test), allow(dead_code))]
@@ -116,7 +121,7 @@ impl BodyEntry {
             }),
             taken,
             misses: Cell::new(0),
-            since: Cell::new(0),
+            own: Cell::new(0),
             code_len: u32::try_from(code_len).ok()?,
         })
     }
@@ -129,29 +134,43 @@ impl BodyEntry {
         self.between.try_borrow().ok()
     }
 
+    /// Count `steps` this body's machine code took from the budget:
+    /// the work its failed guesses are set against ([`Self::missed`]).
+    /// The VM calls it wherever it takes a body's count of steps into
+    /// the run's.
+    #[inline]
+    pub(crate) fn counted(&self, steps: u64) {
+        self.own.set(self.own.get().saturating_add(steps));
+    }
+
     /// Count a guess that failed in native code entered at resume index
     /// `at` (an inline form met operands it does not cover, and the
-    /// interpreter ran the instruction), with `steps` the steps the run
-    /// has counted so far. `true` when this body's guesses fail too
-    /// often for its machine code to be worth entering there: more than
-    /// one in [`STEPS_A_MISS`] steps, over the last [`MISS_WINDOW`] of
-    /// them. The resume point is then one no longer, and the caller
-    /// gives the frame back to the bytecode.
+    /// interpreter ran the instruction). `true` when this body's
+    /// guesses fail too often for its machine code to be worth entering
+    /// there: more than one in [`STEPS_A_MISS`] steps of its own, over
+    /// the last [`MISS_WINDOW`] failures. The resume point is then one
+    /// no longer, and the caller gives the frame back to the bytecode.
     ///
     /// What a failed guess costs is a call into the runtime where the
     /// interpreter would have run the instruction in a few nanoseconds;
     /// a loop that fails one every time round is slower compiled than
     /// not. So the loss is bounded: at most [`MISS_WINDOW`] such calls
     /// at that rate, twice over, before the bytecode has the loop back.
-    pub(crate) fn missed(&self, at: u32, steps: u64) -> bool {
+    ///
+    /// The steps are the body's own ([`Self::counted`]), never the
+    /// run's. Set against the run's, a body that failed at every entry
+    /// kept its place in any program that did other work between two
+    /// entries: the rest of the run supplied steps faster than the body
+    /// could fail.
+    pub(crate) fn missed(&self, at: u32) -> bool {
         let n = self.misses.get().saturating_add(1);
         if n < MISS_WINDOW {
             self.misses.set(n);
             return false;
         }
         self.misses.set(0);
-        let since = self.since.replace(steps);
-        if steps.saturating_sub(since) >= u64::from(MISS_WINDOW).saturating_mul(STEPS_A_MISS) {
+        let own = self.own.replace(0);
+        if own >= u64::from(MISS_WINDOW).saturating_mul(STEPS_A_MISS) {
             return false;
         }
         let pc = self.pcs.get(at as usize).copied();
@@ -868,13 +887,16 @@ mod tests {
     #[test]
     fn a_body_whose_guesses_keep_failing_loses_the_resume_point_it_was_entered_at() {
         let b = entry();
-        // One short of the window: nothing is decided.
+        // One short of the window, a step of its own for each: nothing
+        // is decided.
         for n in 0..MISS_WINDOW - 1 {
-            assert!(!b.missed(1, u64::from(n)), "miss {n}");
+            b.counted(1);
+            assert!(!b.missed(1), "miss {n}");
         }
         assert_eq!(b.at(4), Some(1));
         // The window's last, with a step a miss: given up.
-        assert!(b.missed(1, u64::from(MISS_WINDOW)));
+        b.counted(1);
+        assert!(b.missed(1));
         assert_eq!(b.at(4), None, "the resume point is one no longer");
         assert_eq!((b.at(0), b.at(7)), (Some(0), Some(2)), "the others stay");
     }
@@ -897,10 +919,10 @@ mod tests {
         }
         // The resume point at pc 4 is given up: its instruction is back,
         // and the loop runs through it.
-        for n in 0..MISS_WINDOW - 1 {
-            assert!(!b.missed(1, u64::from(n)));
+        for _ in 0..MISS_WINDOW - 1 {
+            assert!(!b.missed(1));
         }
-        assert!(b.missed(1, u64::from(MISS_WINDOW)));
+        assert!(b.missed(1));
         let table = b.between().expect("nothing holds it");
         let blank: Vec<usize> = (0..10)
             .filter(|pc| table.code[*pc].is_none() && table.words[*pc].op == cig_bytecode::Op::WIDE)
@@ -927,25 +949,53 @@ mod tests {
     #[test]
     fn a_body_whose_guesses_fail_now_and_then_is_kept() {
         let b = entry();
-        // A miss every STEPS_A_MISS steps, for ten windows: never given
-        // up, and the count starts again each time.
-        let mut steps = 0;
+        // A miss every STEPS_A_MISS steps of its own, for ten windows:
+        // never given up, and the count starts again each time.
         for n in 0..u64::from(MISS_WINDOW) * 10 {
-            steps += STEPS_A_MISS;
-            assert!(!b.missed(2, steps), "miss {n} at step {steps}");
+            b.counted(STEPS_A_MISS);
+            assert!(!b.missed(2), "miss {n}");
         }
         assert_eq!(b.at(7), Some(2));
         // Then one a step: the next full window gives it up.
         let mut gave_up = false;
         for _ in 0..MISS_WINDOW * 2 {
-            steps += 1;
-            if b.missed(2, steps) {
+            b.counted(1);
+            if b.missed(2) {
                 gave_up = true;
                 break;
             }
         }
         assert!(gave_up);
         assert_eq!(b.at(7), None);
+    }
+
+    #[test]
+    fn a_bodys_failures_are_set_against_its_own_steps_not_the_runs() {
+        // A body entered now and then by a program that does other
+        // work: two steps of its own and a failed guess at each entry,
+        // whatever the rest of the run counts meanwhile. Its own rate is
+        // one failure in two steps, and the first window gives it up.
+        let b = entry();
+        for n in 0..MISS_WINDOW - 1 {
+            b.counted(2);
+            assert!(!b.missed(0), "miss {n}");
+        }
+        b.counted(2);
+        assert!(b.missed(0), "the window's last");
+        assert_eq!(b.at(0), None);
+        // A window starts from nothing: the steps of the one before it
+        // are not carried over to excuse the next.
+        let b = entry();
+        b.counted(u64::from(MISS_WINDOW) * STEPS_A_MISS);
+        for _ in 0..MISS_WINDOW {
+            assert!(!b.missed(1), "a window with enough work of its own");
+        }
+        let mut gave_up = false;
+        for _ in 0..MISS_WINDOW {
+            gave_up = b.missed(1);
+        }
+        assert!(gave_up, "and the next, with none");
+        assert_eq!(b.at(4), None);
     }
 
     const SIZE: usize = 64 << 20;

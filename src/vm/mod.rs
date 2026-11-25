@@ -829,6 +829,9 @@ impl BodyHost<'_, '_, '_> {
         let took = self.last_given.saturating_sub(ctx.steps_left);
         if took > 0 {
             self.m.interp.steps = self.m.interp.steps.saturating_add(took.max(0) as u64);
+            // The body's own work, which its failed guesses are set
+            // against.
+            self.body.counted(took.max(0) as u64);
         }
         self.last_given = ctx.steps_left;
         self.m.set_nest(ctx.nest);
@@ -1258,8 +1261,10 @@ impl Host for BodyHost<'_, '_, '_> {
             return NativeStop::At(pc);
         }
         if !self.patient {
+            // The steps the body counted up to this instruction are its
+            // own before the failure is set against them.
             self.absorb_ctx(ctx);
-            if self.body.missed(self.at, self.m.interp.steps) {
+            if self.body.missed(self.at) {
                 // The guesses of this body keep failing: the bytecode
                 // has the frame back, and the body is not entered at
                 // that resume point again.
@@ -2419,6 +2424,7 @@ impl Machine<'_, Bodied> {
             let took = last_given.saturating_sub(ctx.steps_left);
             if took > 0 {
                 self.interp.steps = self.interp.steps.saturating_add(took.max(0) as u64);
+                body.counted(took.max(0) as u64);
             }
             self.set_nest(ctx.nest);
         }

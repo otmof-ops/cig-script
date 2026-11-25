@@ -254,6 +254,51 @@ fn a_body_whose_guesses_keep_failing_is_given_up_and_the_bytecode_runs_the_rest(
 }
 
 #[test]
+fn a_body_is_given_up_on_its_own_steps_whatever_the_rest_of_the_run_counts() {
+    // The same loop, each turn counting 64 steps of the run: three
+    // failed guesses a turn, and none of those steps the body's own
+    // (the interpreter runs the instruction that counts them). Against
+    // the run's steps that is a failure in 21 and looks worth keeping;
+    // against its own the body does nothing but fail, and each resume
+    // point is given up after one window.
+    let mut f = main_fn(
+        7,
+        vec![
+            abc(Op::MOV, 2, 0, 0),
+            abc(Op::MOV, 3, 1, 0),
+            Instr::abx(Op::LOADK, 4, 0),
+            steps(1, 0),
+            Instr::asbx(Op::FORPREP, 2, 3),  // pc 4 -> 8
+            steps(1, 64),                    // pc 5: one item
+            abc(Op::EXHALE, 5, 1, 0),        // pc 6
+            Instr::asbx(Op::FORLOOP, 2, -3), // pc 7 -> 5
+            steps(0, 0),                     // pc 8
+            ret(5),
+        ],
+    );
+    f.arity = 2;
+    f.constants = vec![Constant::Int(1)];
+    let m = module(f);
+    let want: String = (0..500).map(|n| format!("{n}\n")).collect();
+    super::native::THROUGH_AGAIN.with(|c| c.set(true));
+    super::native::IMPATIENT.with(|c| c.set(true));
+    let before = entered();
+    let (out, r) = vm_run_bare(
+        &program_with_test_bodies(&m),
+        vec![Value::Int(0), Value::Int(500)],
+    );
+    super::native::IMPATIENT.with(|c| c.set(false));
+    super::native::THROUGH_AGAIN.with(|c| c.set(false));
+    r.expect("ran");
+    assert_eq!(out, want);
+    let impatient = entered() - before;
+    assert!(
+        (64..=64 * 3 + 16).contains(&impatient),
+        "entered {impatient} bodies"
+    );
+}
+
+#[test]
 fn a_body_is_not_entered_where_the_stack_has_no_room_and_the_bytecode_runs() {
     let m = for_module(1);
     let run_it = |p: &Rc<Program>| vm_run_bare(p, vec![Value::Int(0), Value::Int(3)]);

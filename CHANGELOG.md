@@ -20,6 +20,41 @@ project follows semantic versioning.
   and no program more; cycles `loop` 0.90, `sieve` 0.96, `mandel`
   0.97, `fannkuch` 0.97.
 
+- **A function's native code is given up on its own steps, not the
+  run's.** A body whose guesses keep failing is given up at the resume
+  point it was entered at: more than one failure in 16 steps, over 64
+  failures. The steps were the whole run's, so the rest of a program
+  supplied them faster than one body could fail, and the rule protected
+  only a program that is one hot loop. Measured on 2026-11-25 over 111
+  programs built with the compiler's own choice of bodies (121 bodies):
+  two reached the rule's first look, one function of cigo's script
+  that failed a guess at every one of 200 entries in one command and
+  at every one of 123 in another, and both kept their place; no resume
+  point was given up anywhere. The steps are now the ones the body's own machine code
+  counted, which is the work it did in place of the interpreter. A
+  program that is one loop behaves as before, and no body of the 25
+  benchmark programs fails often enough to be looked at (33 failed
+  guesses in 20,026 entries, 30 the most in one body). Nothing a script
+  can observe changes.
+
+- **Nothing compressed is read into memory without a ceiling.** Two
+  readers had none. A run's compressed journal (`journal.jsonl.zst`)
+  was decompressed whole, however large it came out, and a run can
+  arrive from another machine in a parcel: a few kilobytes of zstd can
+  stand for gigabytes. It is now never decompressed past one gibibyte,
+  the ceiling the tin already gave an object that does not say how
+  large it is; one that would come to more is refused, a journal
+  larger than that is left plain when its run ends, and making a
+  compressed journal plain again streams it to the file where it held
+  it whole. A parcel's `manifest.json` was read whole from the gzip
+  stream by `cig unparcel --show`, by the check of a parcel's pass and
+  by the import; it is now read under a ceiling of 64 MiB (a parcel of
+  some 400,000 files), one that says it is larger is refused before a
+  byte of it is read, and `cig parcel` refuses to write one, so cig
+  makes no parcel or journal that it would refuse to read back.
+  Unpacking a parcel's files to disk is bounded by the disk, as it
+  was: a refused or failed import removes what it unpacked.
+
 - **A call between two bytecode functions asks nothing of the native
   code.** Each call the VM makes beside its fast loop asked the
   program's native code whether the callee had an entry, and in a
