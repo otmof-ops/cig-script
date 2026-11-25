@@ -5,6 +5,24 @@ project follows semantic versioning.
 
 ## Unreleased
 
+- **A call and a return are cheaper on the VM.** `call` of a script's
+  function and `ret` are not instructions the VM's fast loop runs, and
+  each used to leave the loop for the general path's frame switch and
+  start it again: about 540 machine instructions a call and return,
+  half of what a recursive function's run cost. Both now switch frames
+  beside the loop wherever nothing about them needs more (the callee is
+  a loaded function of the script taking these arguments, the depth and
+  the stack have room for it; the return closes no burn and goes back
+  to a function without cells), and the loop goes on in the frame on
+  top. Every other call and return takes the general path as before,
+  so a wrong count of arguments, the depth limit and the stack's
+  ceiling are raised where they were, by the code that raised them.
+  Machine instructions executed at stage `b`, against the runtime
+  before: `fib` 0.84, `trees` 0.90, `spectral` 0.91, `dispatch` 0.91,
+  `closures` 0.94; a program that makes few calls runs the instructions
+  it ran (a plain loop 1.000). The fast loop itself is not touched: the
+  new code stands around it.
+
 - **Native code asks the runtime for what owns memory** (cig-native,
   interface 2, three functions more: `push`, `copy`, `clear`). A body
   copies a number over a number itself; a string, a list, a map or a

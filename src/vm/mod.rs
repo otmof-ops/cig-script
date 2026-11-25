@@ -2281,7 +2281,22 @@ impl<T: Tier> Machine<'_, T> {
             }
             if proto.plain {
                 match body {
-                    None => pc = self.run_fast(proto, pc, base)?,
+                    None => {
+                        let (at, switched) =
+                            self.run_fast_frames(program, proto, pc, base, floor)?;
+                        pc = at;
+                        if switched {
+                            // Calls and returns went by in the loop: the
+                            // frame on top is another, and carries the pc.
+                            (pc, base, proto) = self.top(program)?;
+                            if T::BODIED {
+                                body = body_of_top(program, self.frames.last(), proto);
+                                if body.is_some() {
+                                    continue;
+                                }
+                            }
+                        }
+                    }
                     // A function with a body: the same loop, which stops
                     // before the next resume point as well. The
                     // instruction at `pc` runs first, whatever `pc` is:
@@ -2493,6 +2508,91 @@ impl<T: Tier> Machine<'_, T> {
                     frame.pc = at;
                     return Err(e);
                 }
+            }
+        }
+    }
+
+    /// [`Machine::run_fast`] across calls and returns. A `call` of a
+    /// function of this program and a `ret` to one are the two
+    /// instructions a script runs most that the fast loop leaves, and
+    /// each used to cost the loop, the driver's general path and the
+    /// loop again. Here both switch frames with no more than that takes
+    /// ([`quick_call`], [`quick_ret`]) and the fast loop is started
+    /// again on the frame that is on top then, when it is this loop's
+    /// to run: a function with no cell and no body.
+    ///
+    /// Anything else about a call or a return is left where it was,
+    /// unchanged, for the general path, which does it or raises its
+    /// error: a function not loaded yet, a wrong count of arguments, the
+    /// depth or the stack at its limit, a native entry, a burn to close,
+    /// a caller whose registers carry cells, the run's first frame, and
+    /// a frame a body's `run` waits on (`floor` and the frames below it
+    /// are not this loop's).
+    ///
+    /// The fast loop itself is not touched: it is the function it was,
+    /// instruction for instruction, and this one stands around it. The
+    /// second value says a frame was switched: the frame on top is not
+    /// the one the loop was started on, and the pc is written in it.
+    #[inline(never)]
+    fn run_fast_frames<'p>(
+        &mut self,
+        program: &'p Rc<Program>,
+        mut proto: &'p Proto,
+        mut pc: usize,
+        mut base: usize,
+        floor: usize,
+    ) -> Result<(usize, bool), Fault> {
+        let mut switched = false;
+        loop {
+            let at = self.run_fast(proto, pc, base)?;
+            #[cfg(test)]
+            if QUICK_OFF.with(std::cell::Cell::get) {
+                return Ok((at, switched));
+            }
+            // What the fast loop left: a call or a return that switches
+            // frames here, or an instruction of the general path.
+            let on_top = match proto.code.get(at) {
+                Some(Some(d)) if d.op == Op::CALL => {
+                    #[cfg(feature = "bench-stats")]
+                    let timer = stats::start(d.op);
+                    let callee = quick_call(self, program, base, d);
+                    #[cfg(feature = "bench-stats")]
+                    if callee.is_some() {
+                        stats::stop(timer);
+                    }
+                    callee
+                }
+                Some(Some(d)) if d.op == Op::RET => {
+                    #[cfg(feature = "bench-stats")]
+                    let timer = stats::start(d.op);
+                    let caller = quick_ret(self, program, floor, d);
+                    #[cfg(feature = "bench-stats")]
+                    if caller.is_some() {
+                        stats::stop(timer);
+                    }
+                    caller
+                }
+                _ => None,
+            };
+            let Some(next) = on_top else {
+                if switched {
+                    if let Some(f) = self.frames.last_mut() {
+                        f.pc = at;
+                    }
+                }
+                return Ok((at, switched));
+            };
+            // The frame on top now: the callee's, at its first
+            // instruction, or the caller's, after its call.
+            switched = true;
+            let Some(top) = self.frames.last() else {
+                return Ok((at, switched));
+            };
+            (pc, base, proto) = (top.pc, top.base, next);
+            // A function whose registers carry cells is the general
+            // path's, and one with a body is entered by the driver.
+            if !proto.plain || (T::BODIED && body_of_top(program, Some(top), proto).is_some()) {
+                return Ok((pc, switched));
             }
         }
     }
@@ -4097,6 +4197,145 @@ fn compiled_parts(v: &Value, program: &Rc<Program>) -> Option<(usize, Option<Rc<
         cf.index,
         (!cf.upvals.is_empty()).then(|| Rc::clone(&cf.upvals)),
     ))
+}
+
+/// `call A, B, C` between two runs of the fast loop, from a frame whose
+/// registers carry no cell: what [`Machine::call_here`] does when `R(A)`
+/// holds a function of this program that is loaded, takes these `B`
+/// arguments and has no native entry, the depth has room for one more
+/// call and the stack already holds the callee's registers. The
+/// callee's frame is on top then, at its first instruction, and the
+/// caller's says where it goes on and where the call is; the callee's
+/// function is returned.
+///
+/// `None`, with nothing changed, for any other call: the general path
+/// makes it, or raises its error at the call.
+#[inline(always)]
+fn quick_call<'p, T: Tier>(
+    m: &mut Machine<'_, T>,
+    program: &'p Rc<Program>,
+    base: usize,
+    d: &DecodedInstr,
+) -> Option<&'p Proto> {
+    let at = base.checked_add(d.a as usize)?;
+    let n = d.b_u as usize;
+    let (below, above) = m
+        .stack
+        .split_at_mut_checked(at.checked_add(1)?.checked_add(n)?)?;
+    let Value::Func(f) = below.get(at)? else {
+        return None;
+    };
+    let cf = match &f.body {
+        FnBody::Compiled(cf) if Rc::ptr_eq(&cf.program, program) => cf,
+        _ => return None,
+    };
+    let target = program.funcs.get(cf.index)?;
+    if n != target.arity
+        || program
+            .native()
+            .is_some_and(|code| code.has_entry(cf.index))
+    {
+        return None;
+    }
+    // The callee's registers past its arguments.
+    let rest = above.get_mut(..target.reg_count.checked_sub(n)?)?;
+    let caller = m.frames.last_mut()?;
+    if !m.interp.try_enter_call() {
+        return None;
+    }
+    // The call is made from here on: nothing below fails.
+    for slot in rest {
+        overwrite(slot, Value::Null);
+    }
+    let up = if cf.upvals.is_empty() {
+        NO_UPVALS
+    } else {
+        m.upvals.push(Rc::clone(&cf.upvals));
+        (m.upvals.len() - 1) as u32
+    };
+    let pc = d.pc as usize;
+    caller.pc = pc + d.width as usize;
+    caller.site = pc;
+    let (tries, burns) = (m.tries.len(), m.burns.len());
+    m.frames
+        .push(Frame::new(cf.index, at + 1, d.c, up, tries, burns));
+    #[cfg(test)]
+    QUICK_CALLS.with(|n| n.set(n.get() + 1));
+    Some(target)
+}
+
+/// `ret A` between two runs of the fast loop, from a frame whose
+/// registers carry no cell: what [`Machine::ret_here`] does when the
+/// frame has no burn to close and returns to a frame of this loop whose
+/// registers carry no cell either (the result is written to a register,
+/// never to a cell). The caller's frame is on top then, with its call's
+/// result row written; the caller's function is returned.
+///
+/// `None`, with nothing changed, for any other return: the run's first
+/// frame (it returns out of the VM), a frame a body's `run` waits on
+/// (`floor` and below are not this loop's), an open burn, a caller with
+/// cells.
+#[inline(always)]
+fn quick_ret<'p, T: Tier>(
+    m: &mut Machine<'_, T>,
+    program: &'p Rc<Program>,
+    floor: usize,
+    d: &DecodedInstr,
+) -> Option<&'p Proto> {
+    let below = m.frames.len().checked_sub(2)?;
+    if below < floor {
+        return None;
+    }
+    let f = *m.frames.last()?;
+    if m.burns.len() > f.burns as usize {
+        return None;
+    }
+    let caller = program.funcs.get(m.frames.get(below)?.func)?;
+    if !caller.plain {
+        return None;
+    }
+    // The call's result row, `R(A..=A+C)` of the caller: `R(A)` is the
+    // register just below the frame that ends.
+    let row = f.base.checked_sub(1)?;
+    let (kept, ended) = m.stack.split_at_mut_checked(f.base)?;
+    let result = kept.get_mut(row)?;
+    ended.get(..f.extra as usize)?;
+    // The frame ends here, and no register of it is read again before a
+    // write: the value is moved out, not copied.
+    let v = std::mem::replace(ended.get_mut(d.a as usize)?, Value::Null);
+    // The return is made from here on: nothing below fails.
+    m.frames.pop();
+    if m.tries.len() > f.tries as usize {
+        m.tries.truncate(f.tries as usize);
+    }
+    if f.up != NO_UPVALS {
+        m.upvals.truncate(f.up as usize);
+    }
+    let held = f.nest.saturating_add(f.held_nest);
+    if held != 0 {
+        m.interp.loop_depth = m.interp.loop_depth.saturating_sub(held);
+    }
+    m.interp.leave_calls(f.held_calls);
+    *result = v;
+    for slot in ended.iter_mut().take(f.extra as usize) {
+        overwrite(slot, Value::Null);
+    }
+    #[cfg(test)]
+    QUICK_RETURNS.with(|n| n.set(n.get() + 1));
+    Some(caller)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Calls this thread's machines made between two runs of the fast
+    /// loop ([`quick_call`]).
+    pub(crate) static QUICK_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Returns this thread's machines made between two runs of the fast
+    /// loop ([`quick_ret`]).
+    pub(crate) static QUICK_RETURNS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Every call and return is left to the general path, as all were
+    /// before the fast loop had its own.
+    pub(crate) static QUICK_OFF: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// The callee as a compiled function of this program, when it is one.

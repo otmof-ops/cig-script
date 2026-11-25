@@ -403,6 +403,13 @@ impl Native {
         }
     }
 
+    /// Function `func` has an entry: a call of it may run as native
+    /// code ([`Native::entry`] says whether one fits the arguments).
+    #[inline(always)]
+    pub(super) fn has_entry(&self, func: usize) -> bool {
+        self.of.get(func).is_some_and(|&(_, count)| count != 0)
+    }
+
     /// The entry of function `func` that takes the `n` arguments
     /// `slot(k, ty)` gives a slot for (`None` when argument `k` is not a
     /// `ty`): its index, its result type and the arguments' slots.

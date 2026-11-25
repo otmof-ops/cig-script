@@ -139,7 +139,28 @@ fn exec(m: &Module) -> Result<Value, Diagnostic> {
     for d in driven(m, |p| run(&mut interp(), p)) {
         assert_results_agree(&bare, &d);
     }
+    // And with every call and return made by the general path.
+    let general = no_quick(|| run(&mut interp(), &program(m)));
+    assert_results_agree(&bare, &general);
     bare
+}
+
+/// `f` with every call and return left to the general path: none is
+/// made between two runs of the fast loop.
+fn no_quick<T>(f: impl FnOnce() -> T) -> T {
+    super::QUICK_OFF.with(|c| c.set(true));
+    let out = f();
+    super::QUICK_OFF.with(|c| c.set(false));
+    out
+}
+
+/// How many calls and returns this thread's machines made between two
+/// runs of the fast loop so far.
+fn quick() -> (u64, u64) {
+    (
+        super::QUICK_CALLS.with(std::cell::Cell::get),
+        super::QUICK_RETURNS.with(std::cell::Cell::get),
+    )
 }
 
 fn exec_with(m: &Module, args: Vec<Value>) -> Result<Value, Diagnostic> {
@@ -148,10 +169,19 @@ fn exec_with(m: &Module, args: Vec<Value>) -> Result<Value, Diagnostic> {
     let theirs = driven(m, |p| {
         run_function(&mut interp(), p, 0, args.iter().map(fresh).collect())
     });
+    let general = no_quick(|| {
+        run_function(
+            &mut interp(),
+            &program(m),
+            0,
+            args.iter().map(fresh).collect(),
+        )
+    });
     let bare = run_function(&mut interp(), &program(m), 0, args);
     for d in &theirs {
         assert_results_agree(&bare, d);
     }
+    assert_results_agree(&bare, &general);
     bare
 }
 
@@ -290,6 +320,95 @@ fn a_call_is_carried_through_under_the_body_that_makes_it() {
     assert_eq!((entered() - e, carried() - c), (7, 0));
 }
 
+// ----- a call and a return between two runs of the fast loop -----
+
+#[test]
+fn a_call_and_a_return_between_functions_without_cells_stay_out_of_the_general_path() {
+    // Three calls of `f` from a top level that makes no cell: each call
+    // and each return switches frames beside the fast loop. The return
+    // of the top level itself leaves the VM, which is the general
+    // path's.
+    let mut f = main_fn(
+        3,
+        vec![
+            Instr::abx(Op::CLOSURE, 0, 0),
+            abc(Op::MOV, 1, 0, 0),
+            Instr::asbx(Op::LOADINT, 2, 5),
+            abc(Op::CALL, 1, 1, 0),
+            abc(Op::MOV, 1, 0, 0),
+            Instr::asbx(Op::LOADINT, 2, 6),
+            abc(Op::CALL, 1, 1, 0),
+            abc(Op::MOV, 1, 0, 0),
+            Instr::asbx(Op::LOADINT, 2, 7),
+            abc(Op::CALL, 1, 1, 0),
+            ret(1),
+        ],
+    );
+    f.children = vec![child_fn("f", 1, 1, vec![ret(0)])];
+    let m = module(f);
+    let before = quick();
+    assert_eq!(run(&mut interp(), &program(&m)).expect("ran").repr(), "7");
+    let after = quick();
+    assert_eq!((after.0 - before.0, after.1 - before.1), (3, 3));
+    // Left to the general path, the run is the same and none is counted.
+    let before = quick();
+    let r = no_quick(|| run(&mut interp(), &program(&m)));
+    assert_eq!(r.expect("ran").repr(), "7");
+    assert_eq!(quick(), before);
+}
+
+#[test]
+fn a_recursion_makes_its_calls_beside_the_fast_loop_up_to_the_depth_the_general_path_refuses() {
+    // Thirty levels down and back: every call and every return but the
+    // top level's own.
+    let before = quick();
+    assert_eq!(
+        run(&mut interp(), &program(&recursion_module(false, 30)))
+            .expect("ran")
+            .repr(),
+        "30"
+    );
+    let after = quick();
+    assert_eq!((after.0 - before.0, after.1 - before.1), (31, 31));
+    // Past the depth: the call the limit refuses is the general path's,
+    // which raises what it always raised, where it raised it, and every
+    // call counted is given back.
+    let m = recursion_module(false, 5000);
+    let before = quick();
+    let mut i = interp();
+    let e = run(&mut i, &program(&m)).err().expect("E506");
+    assert_eq!(i.call_depth_for_tests(), 0);
+    assert!(quick().0 - before.0 >= 3999, "{:?}", quick());
+    let mut i = interp();
+    let general = no_quick(|| run(&mut i, &program(&m))).err().expect("E506");
+    assert_eq!(i.call_depth_for_tests(), 0);
+    assert_eq!(
+        (e.code, &e.message, e.line, e.col),
+        (general.code, &general.message, general.line, general.col)
+    );
+    assert_eq!(e.code, "E506");
+}
+
+#[test]
+fn a_recursion_deeper_than_the_register_window_runs_the_same() {
+    // Sixty frames of twelve registers each: past the registers the
+    // fast loop holds from a frame's base, so the stack grows on the
+    // way down, and a callee's registers are not always there yet when
+    // its call is reached (the general path grows the stack and makes
+    // that call).
+    let src = "pull deep(n) {\n  if n == 0 {\n    snuff 0\n  }\n  stick a = n + 1\n  stick b = a + n\n  stick c = b + a\n  stick d = c - n\n  stick e = d + 2\n  stick f = e + a\n  stick g = f - b\n  stick h = g + c\n  snuff deep(n - 1) + (a + b + c + d + e + f + g + h) % 7\n}\nexhale deep(60)\npull wide(a, b, c, d) {\n  if a == 0 {\n    snuff b + c + d\n  }\n  snuff wide(a - 1, b + 1, c + 2, d + 3)\n}\nexhale wide(50, 0, 0, 0)\n";
+    // The tree-walker the runs are held to nests a good many of its own
+    // frames a call, more than a test's thread has stack for at this
+    // depth in a build that optimises nothing.
+    let printed = std::thread::Builder::new()
+        .stack_size(64 << 20)
+        .spawn(move || script_agrees_under_bodies(src, 0))
+        .expect("a thread")
+        .join()
+        .expect("the runs agree");
+    assert_eq!(printed, "182\n300\n");
+}
+
 #[test]
 fn a_call_is_not_carried_where_the_stack_has_no_room() {
     let m = recursion_module(false, 30);
@@ -352,6 +471,11 @@ fn script_agrees_under_bodies(src: &str, budget: u64) -> String {
         Err(e) => panic!("{src}: does not open: {}", e.message),
     };
     assert_eq!(run_one(&open(&bytes)), want, "{src}: with no body");
+    assert_eq!(
+        no_quick(|| run_one(&open(&bytes))),
+        want,
+        "{src}: with no body, every call and return on the general path"
+    );
     for style in STYLES {
         let got = in_style(style, || {
             super::stack_starts_here(2 << 20);
