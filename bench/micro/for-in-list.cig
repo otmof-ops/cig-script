@@ -1,0 +1,12 @@
+# SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# A nested `for v in xs` over an eight-item list, run 250,000 times. A
+# turn of the inner loop is what `ITERNEXT` on the fast path costs.
+roll seed = [0, 1, 2, 3, 4, 5, 6, 7]
+roll n = 0
+for i in 0..250000 {
+  for v in seed {
+    n = n + v
+  }
+}
+exhale n

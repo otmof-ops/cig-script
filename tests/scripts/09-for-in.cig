@@ -1,0 +1,103 @@
+# SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# A loop walks its list as it was when the loop began.
+roll xs = [1, 2, 3]
+roll seen = []
+for x in xs {
+  seen.push(x)
+  xs.push(x * 10)
+}
+exhale seen, xs
+roll ys = [1, 2, 3, 4]
+roll got = []
+for y in ys {
+  got.push(y)
+  if ys.len() > 1 {
+    ys.pop()
+  }
+  ys[0] = 99
+}
+exhale got, ys
+# The same list, one loop inside the other.
+roll pairs = []
+stick ab = ["a", "b", "c"]
+for p in ab {
+  for q in ab {
+    if q == "b" {
+      continue
+    }
+    if p == "c" {
+      break
+    }
+    pairs.push("${p}${q}")
+  }
+}
+exhale pairs
+# Nothing to walk, and what a loop leaves behind.
+roll turns = 0
+for nothing in [] {
+  turns += 1
+}
+exhale turns
+roll last = null
+for v in [[1], [2, 3], {k: 4}] {
+  last = v
+}
+exhale last
+# A map's keys, a string's characters, and a list built in the loop's head.
+roll keys = []
+stick m = {one: 1, two: 2, three: 3}
+for k in m {
+  keys.push("${k}=${m[k]}")
+  m["four"] = 4
+}
+exhale keys, m.len()
+roll chars = []
+for ch in "héllo" {
+  chars.push(ch)
+}
+exhale chars
+roll sum = 0
+for n in [1, 2, 3].map(pack(x) => x * x) {
+  sum += n
+}
+exhale sum
+# A loop variable a closure keeps, and one that holds a list each turn.
+roll keep = []
+for word in ["x", "y"] {
+  keep.push(pack() => word + "!")
+}
+exhale keep[0](), keep[1]()
+roll widths = []
+for row in [[1, 2], [3], []] {
+  roll w = 0
+  for cell in row {
+    w += 1
+  }
+  widths.push(w)
+}
+exhale widths
+# A loop in a function that a loop calls.
+pull total(items) {
+  roll t = 0
+  for it in items {
+    if it < 0 {
+      snuff -1
+    }
+    t += it
+  }
+  snuff t
+}
+roll totals = []
+for group in [[1, 2, 3], [4, -5, 6], []] {
+  totals.push(total(group))
+}
+exhale totals
+# What cannot be walked is an error at the loop.
+try {
+  for z in 5 {
+    exhale z
+  }
+} ashtray e {
+  exhale e.kind, e.line
+}

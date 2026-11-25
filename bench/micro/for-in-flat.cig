@@ -1,0 +1,14 @@
+# SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# One long `for v in xs` over a list of two million items. Entering and
+# leaving the loop is amortised across every turn, so a turn here is the
+# steady-state cost of `ITERNEXT` on the fast path.
+roll big = []
+for i in 0..2000000 {
+  big.push(i)
+}
+roll n = 0
+for v in big {
+  n = n + v
+}
+exhale n

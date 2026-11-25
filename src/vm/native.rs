@@ -581,11 +581,11 @@ impl Native {
                 args.len()
             )));
         };
-        let before = interp.steps;
+        let before = interp.steps();
         // One step for each mark native code passed.
         let took = u64::try_from(budget.saturating_sub(ctx.steps_left)).unwrap_or(0);
         if status == 0 {
-            interp.steps = interp.steps.saturating_add(took);
+            interp.add_steps(took);
             // It passed no more marks than the budget had steps for, and
             // gave none back.
             if ctx.steps_left < 0 || ctx.steps_left > budget {
@@ -597,7 +597,7 @@ impl Native {
             return Ok(value(ret, slot));
         }
         let Some(site) = self.sites.get(ctx.site as usize) else {
-            interp.steps = interp.steps.saturating_add(took);
+            interp.add_steps(took);
             return Err(internal(format!(
                 "native code left with status {status} at site {}, which the program does not have",
                 ctx.site
@@ -612,7 +612,7 @@ impl Native {
             .at(span)
         };
         if u8::try_from(status).ok().and_then(Exit::from_u8) != Some(site.kind) {
-            interp.steps = interp.steps.saturating_add(took);
+            interp.add_steps(took);
             return Err(wrong("that is not the site's kind"));
         }
         if site.kind == Exit::Budget {
@@ -620,7 +620,7 @@ impl Native {
             // took it below zero: with -1, having passed every mark the
             // budget had steps for and the one that spent it.
             if ctx.steps_left != -1 {
-                interp.steps = interp.steps.saturating_add(took);
+                interp.add_steps(took);
                 return Err(wrong("and not with the budget one step overspent"));
             }
             // Every mark but that last is counted here. The last is the
@@ -628,7 +628,7 @@ impl Native {
             // words it by whether a loop is running: one of the VM's
             // frames' (the interpreter's count), the mark's own, or one
             // of a native caller's on the way out (the flag).
-            interp.steps = before.saturating_add(u64::try_from(budget).unwrap_or(0));
+            interp.set_steps(before.saturating_add(u64::try_from(budget).unwrap_or(0)));
             let in_loop = site.in_loop || ctx.flags & 1 != 0;
             if in_loop {
                 interp.loop_depth = interp.loop_depth.saturating_add(1);
@@ -641,7 +641,7 @@ impl Native {
                 .err()
                 .unwrap_or_else(|| wrong("and the step budget is not spent")));
         }
-        interp.steps = interp.steps.saturating_add(took);
+        interp.add_steps(took);
         let raised = match site.kind {
             Exit::Operator => match bin_op(site.op) {
                 Some(op) => binary(
@@ -666,9 +666,9 @@ impl Native {
 /// when there is no budget or more is left than a count holds. `Native`
 /// gives this to an entry at a call and to a body at [`enter_body`].
 pub(crate) fn budget_for(interp: &Interp) -> i64 {
-    match interp.max_steps {
+    match interp.max_steps() {
         0 => i64::MAX,
-        max => i64::try_from(max.saturating_sub(interp.steps)).unwrap_or(i64::MAX),
+        max => i64::try_from(max.saturating_sub(interp.steps())).unwrap_or(i64::MAX),
     }
 }
 

@@ -828,7 +828,7 @@ impl BodyHost<'_, '_, '_> {
     fn absorb_ctx(&mut self, ctx: &NativeCtx) {
         let took = self.last_given.saturating_sub(ctx.steps_left);
         if took > 0 {
-            self.m.interp.steps = self.m.interp.steps.saturating_add(took.max(0) as u64);
+            self.m.interp.add_steps(took.max(0) as u64);
             // The body's own work, which its failed guesses are set
             // against.
             self.body.counted(took.max(0) as u64);
@@ -1696,7 +1696,10 @@ fn row_span(base: &SpanBase, row: &LineEntry) -> Span {
 
 /// Run a loaded module's top level and return what it returns.
 pub fn run(interp: &mut Interp, program: &Rc<Program>) -> Result<Value, Diagnostic> {
-    run_function(interp, program, 0, Vec::new())
+    interp.debug_check_left();
+    let out = run_function(interp, program, 0, Vec::new());
+    interp.debug_check_left();
+    out
 }
 
 /// Run a loaded module as a script, as [`Interp::run_program`] runs a
@@ -2423,7 +2426,7 @@ impl Machine<'_, Bodied> {
         if !matches!(stop, NativeStop::Raised(_)) || quick_raised {
             let took = last_given.saturating_sub(ctx.steps_left);
             if took > 0 {
-                self.interp.steps = self.interp.steps.saturating_add(took.max(0) as u64);
+                self.interp.add_steps(took.max(0) as u64);
                 body.counted(took.max(0) as u64);
             }
             self.set_nest(ctx.nest);
@@ -3272,13 +3275,14 @@ impl<T: Tier> Machine<'_, T> {
 
             // ----- the step budget ------------------------------------------------
             Op::STEPS => {
+                self.interp.debug_check_left();
                 self.set_nest(d.a);
                 // The charge in one add when the budget holds all of it;
                 // otherwise step by step, so E515 is `tick`'s own.
                 let n = u64::from(d.b_u);
                 let i = &mut *self.interp;
-                if i.max_steps == 0 || i.steps.saturating_add(n) <= i.max_steps {
-                    i.steps += n;
+                if i.max_steps() == 0 || i.steps().saturating_add(n) <= i.max_steps() {
+                    i.add_steps(n);
                 } else {
                     for _ in 0..d.b_u {
                         self.interp.tick(span)?;
@@ -5390,11 +5394,16 @@ fn fast<R: FrameRegs + ?Sized, I: Operands>(
             if n == 0 {
                 return Some(next);
             }
-            if interp.max_steps != 0 && interp.steps.saturating_add(n) > interp.max_steps {
+            // The countdown: one compare, one branch, one subtraction.
+            // The count is derived from `base - left`, so advancing by
+            // `n` is `left -= n`. A count past the stop (`left < n`)
+            // takes the general path; so does the no-budget case once
+            // in 2^64 steps, where `tick` resets `left`.
+            if interp.left < n {
                 return None;
             }
+            interp.left -= n;
             nest_frame(&mut interp.loop_depth, frame, d.a());
-            interp.steps += n;
             return Some(pc + 2);
         }
         Op::MOV => regs.reg(d.b())?.clone(),
@@ -5496,11 +5505,11 @@ fn fast<R: FrameRegs + ?Sized, I: Operands>(
         }
         Op::STEPS => {
             let n = u64::from(d.bx());
-            if interp.max_steps != 0 && interp.steps.saturating_add(n) > interp.max_steps {
+            if interp.left < n {
                 return None;
             }
+            interp.left -= n;
             nest_frame(&mut interp.loop_depth, frame, d.a());
-            interp.steps += n;
             return Some(next);
         }
         Op::FORLOOP => {
@@ -5601,10 +5610,10 @@ fn fast<R: FrameRegs + ?Sized, I: Operands>(
 }
 
 /// The fast loop's second tier, for a frame whose registers carry no
-/// cell: the calls of builtins that cannot call back into the VM
-/// (`callb`, and `callm` on a site whose cache holds the receiver's
-/// type), `interp`, string `+`, and the list and map builders and
-/// stores. `None` when `d` is not one of them or not its common case,
+/// cell: `iterprep` on a list and `iternext`, the calls of builtins
+/// that cannot call back into the VM (`callb`, and `callm` on a site
+/// whose cache holds the receiver's type), `interp`, string `+`, and
+/// the list and map builders and stores. `None` when `d` is not one of them or not its common case,
 /// having changed nothing, so the general path runs it from the start; a
 /// builtin's error comes back as the general path raises it. A builtin
 /// that cannot call back runs no script code, so it neither reads nor
@@ -5619,6 +5628,13 @@ fn fast_call<R: FrameRegs + ?Sized>(
     let pc = d.pc as usize;
     let next = pc + d.width as usize;
     match d.op {
+        // `for x in xs`. In this tier and not the first, whose dispatch
+        // every instruction passes through: counted, two more cases
+        // there cost `mandel` and `loop` 4% of their machine
+        // instructions, and neither has such a loop. Their work is out
+        // of line so this function's own frame stays what it was.
+        Op::ITERPREP => fast_iterprep(regs, d.a, next).map(Ok),
+        Op::ITERNEXT => fast_iternext(regs, d.a, fast_jump(pc, d.b_s)?, next).map(Ok),
         Op::CALLB => {
             let b = *crate::stdlib::builtin_catalogue().get(d.b_u as usize)?;
             if b.calls_back {
@@ -5778,6 +5794,61 @@ fn put_result<R: FrameRegs + ?Sized>(regs: &mut R, a: u32, v: Value) {
         Value::List(l) => overwrite(slot, Value::List(l)),
         Value::Map(m) => overwrite(slot, Value::Map(m)),
         other => overwrite(slot, other),
+    }
+}
+
+/// `iterprep` for the fast loop, where the source is a list: the loop
+/// walks a snapshot of the list, which is what `Interp::iterate` gives
+/// for one (a clone of its items, and nothing else: no check, no step,
+/// no error). A map, a string or anything else returns `None` before
+/// anything is written, and the general path runs the instruction.
+#[inline(never)]
+fn fast_iterprep<R: FrameRegs + ?Sized>(regs: &mut R, a: u32, next: usize) -> Option<usize> {
+    let items: Vec<Value> = {
+        let Value::List(src) = regs.reg(a)? else {
+            return None;
+        };
+        src.try_borrow().ok()?.clone()
+    };
+    // Both registers are there before either is written.
+    regs.reg(a + 1)?;
+    regs.reg(a + 2)?;
+    overwrite(regs.reg_mut(a + 1)?, Value::list(items));
+    overwrite(regs.reg_mut(a + 2)?, Value::Int(0));
+    Some(next)
+}
+
+/// `iternext` for the fast loop, with the window as `iterprep` leaves
+/// it: a list in `R(A+1)`, an int in `R(A+2)`. The list's `Rc` is not
+/// cloned; the element is read under a shared borrow. Past the end (or
+/// at a negative index) it goes on at `target`, the general path's "no
+/// item". Any other window returns `None` with nothing written.
+#[inline(never)]
+fn fast_iternext<R: FrameRegs + ?Sized>(
+    regs: &mut R,
+    a: u32,
+    target: usize,
+    next: usize,
+) -> Option<usize> {
+    let at = match regs.reg(a + 2)? {
+        Value::Int(n) => *n,
+        _ => return None,
+    };
+    let got: Option<Value> = {
+        let Value::List(items) = regs.reg(a + 1)? else {
+            return None;
+        };
+        let held = items.try_borrow().ok()?;
+        usize::try_from(at).ok().and_then(|i| held.get(i).cloned())
+    };
+    regs.reg(a + 3)?;
+    match got {
+        Some(item) => {
+            overwrite(regs.reg_mut(a + 2)?, Value::Int(at.saturating_add(1)));
+            overwrite(regs.reg_mut(a + 3)?, item);
+            Some(next)
+        }
+        None => Some(target),
     }
 }
 

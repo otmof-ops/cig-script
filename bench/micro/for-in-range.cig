@@ -1,0 +1,11 @@
+# SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-script)
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# The counted loop: `for v in 0..8`, run 250,000 times. A turn of the
+# inner loop is what `FORLOOP` on the fast path costs.
+roll n = 0
+for i in 0..250000 {
+  for v in 0..8 {
+    n = n + v
+  }
+}
+exhale n
