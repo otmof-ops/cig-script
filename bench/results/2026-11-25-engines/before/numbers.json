@@ -1103,59 +1103,11 @@
   "text": "past 10%",
   "value": 0
  },
- "within10.hello.cig-auto.cig-tree": {
-  "text": "within 10%",
-  "value": 1
- },
- "within10.hello.cig-auto.cig-vm": {
-  "text": "within 10%",
-  "value": 1
- },
- "within10.hello.cig-vm-cold.cig-tree": {
-  "text": "within 10%",
-  "value": 1
- },
- "within10.hello.cig-vm.cig-tree": {
-  "text": "within 10%",
-  "value": 1
- },
  "within10.lines-500.cig-auto-cold.cig-tree": {
   "text": "past 10%",
   "value": 0
  },
- "within10.lines-500.cig-auto.cig-tree": {
-  "text": "within 10%",
-  "value": 1
- },
- "within10.lines-500.cig-auto.cig-vm": {
-  "text": "within 10%",
-  "value": 1
- },
- "within10.lines-500.cig-vm-cold.cig-tree": {
-  "text": "past 10%",
-  "value": 0
- },
- "within10.lines-500.cig-vm.cig-tree": {
-  "text": "within 10%",
-  "value": 1
- },
  "within10.orchestrate.cig-auto-cold.cig-tree": {
-  "text": "within 10%",
-  "value": 1
- },
- "within10.orchestrate.cig-auto.cig-tree": {
-  "text": "within 10%",
-  "value": 1
- },
- "within10.orchestrate.cig-auto.cig-vm": {
-  "text": "within 10%",
-  "value": 1
- },
- "within10.orchestrate.cig-vm-cold.cig-tree": {
-  "text": "past 10%",
-  "value": 0
- },
- "within10.orchestrate.cig-vm.cig-tree": {
   "text": "within 10%",
   "value": 1
  }

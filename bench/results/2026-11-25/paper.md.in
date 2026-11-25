@@ -9,6 +9,8 @@ The 25 programs of [`bench/compute`](../bench/compute/), each written in CigScri
 
 **This is a run of cig's source, not of a release.** None of it is in a release yet, so cig is built here from commit `ed7ad3a` and cigcompile from commit `b0a287b`, cig as its release workflow builds it for Linux (`cargo build --release --target x86_64-unknown-linux-musl`). It is the machine of the run of 2026-11-24, on the same core, with the same harness, the same programs and the same builds of Lua, LuaJIT, CPython, Node and Rust, so [one section](#since-the-last-paper) sets the two runs side by side. Within this one, every side ran in the same rounds.
 
+> **Fifteen hours later** the same machine ran the set again, with `cig run` on the VM by default, the VM's loop counting a loop turn's steps in one instruction and running a loop over a list, and stage `c` freeing a loop's scratch registers once: [the paper of 2026-11-26](BENCHMARKS-2026-11-26.md), which sets the two runs side by side.
+
 Every number of the comparison is made from the samples in [`bench/results/2026-11-25/`](../bench/results/2026-11-25/) by [`bench/compare/report.py`](../bench/compare/report.py), and made again by [`bench/compare/check.py`](../bench/compare/check.py), a second program written from the [specification](../bench/compare/SPEC.md) alone; the two agree on every one.
 
 ## In short
